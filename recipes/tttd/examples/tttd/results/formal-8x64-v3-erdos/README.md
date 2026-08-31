@@ -54,5 +54,3 @@ estimate variance across seeds.
 ## Stored files
 
 - `summary.csv` contains the result and W&B run ID.
-- `best_solution_history.csv` contains the 25 committed points shown in the
-  figure.
