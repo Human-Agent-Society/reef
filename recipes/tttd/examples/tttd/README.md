@@ -277,43 +277,76 @@ same Erdős task. The verifier minimizes this bound. Search outcomes depend on
 sampling, so the two numbers describe separate trajectories with different
 rollout counts.
 
-## Formal circle-packing results
+## Formal 8x64 results
 
-The Packing 26 and Packing 32 runs each completed 50 steps with the bundled
-harness and task judges. They used `Qwen/Qwen3-8B` with thinking enabled on two
-NVIDIA B200 GPUs. Every step contained eight groups of 64 rollouts, and Reef
-trained a rank-32 LoRA adapter after receiving the complete grid.
+The three trajectories used `Qwen/Qwen3-8B` with thinking enabled on two NVIDIA
+B200 GPUs. Each search step contained eight groups of 64 rollouts, followed by
+one rank-32 LoRA update. Each task has one trajectory, so these results do not
+estimate variance across seeds.
 
-| Task | Completed | Certified sum of radii | TTT-Discover reported | Target |
-| --- | ---: | ---: | ---: | ---: |
-| Packing 26 | 50/50 | `2.6359830849177777` | `2.635983` | `2.636` |
-| Packing 32 | 50/50 | `2.9395727712074926` | `2.939572` | `2.940` |
+### Erdős minimum overlap
 
-These results match the published TTT-Discover values at six decimal places.
-The targets come from the task instructions and do not establish global
-optima.
+| Steps shown | Certified result | TTT-Discover | Target |
+| ---: | ---: | ---: | ---: |
+| 25 | `0.38094` | `0.38093` | `0.38080` |
+
+The certified result is the `C₅` upper bound, so lower values are better. The
+curve uses the first 25 committed archive states.
+
+![Best certified Erdős solution found by iteration](results/formal-8x64-v3-erdos/best_solution_history.png)
+
+[Erdős result details](results/formal-8x64-v3-erdos/README.md)
+
+### Packing 26
+
+| Steps shown | Certified result | TTT-Discover | Target |
+| ---: | ---: | ---: | ---: |
+| 50 | `2.635983` | `2.635983` | `2.636` |
+
+The certified result is the verified sum of radii, so higher values are better.
+
+![Best certified Packing 26 solution found by iteration](results/formal-8x64-v3-packing/packing26/best_solution_history.png)
+
+[Packing 26 result details](results/formal-8x64-v3-packing/packing26/README.md)
+
+### Packing 32
+
+| Steps shown | Certified result | TTT-Discover | Target |
+| ---: | ---: | ---: | ---: |
+| 50 | `2.939573` | `2.939572` | `2.940` |
+
+The certified result is the verified sum of radii. It differs from the value
+reported by TTT-Discover by less than `8e-7`.
+
+![Best certified Packing 32 solution found by iteration](results/formal-8x64-v3-packing/packing32/best_solution_history.png)
+
+[Packing 32 result details](results/formal-8x64-v3-packing/packing32/README.md)
+
+### Circle-packing configurations and training metrics
+
+The final programs were executed again before their configurations were
+plotted. The replay checked the circle count, finite values, square boundaries,
+and pairwise non-overlap.
 
 ![Verified circle-packing configurations](results/formal-8x64-v3-packing/packing_configurations.png)
 
-W&B recorded 50 committed rows for each task. The mean rollout reward reached
-its maximum at step 18 for Packing 26 and step 17 for Packing 32. Both search
-archives contained their reported six-decimal result by step 20. Sampled-policy
-KL increased later in both trajectories. The plot reports grid-level training
-metrics, so it should be read separately from the best certified program stored
-in each search archive.
+W&B recorded 50 committed rows for each packing task. The mean rollout reward
+reached its maximum at step 18 for Packing 26 and step 17 for Packing 32. The
+best archived Packing 26 result was found at iteration 13. Packing 32 reached
+`2.9395727712072386` at iteration 18 and its final value at iteration 24. The
+last change was about `2.5e-13`. Sampled-policy KL increased from about `0.0006`
+at step 20 to `0.0491` for Packing 26 and `0.0430` for Packing 32 at step 50.
 
-New runs also record the full grid's minimum, maximum, mean, population standard
-deviation, zero-reward fraction, and constant-group filtering counts under the
-`tttd` W&B namespace. Each `tttd_step_committed` harness event includes the
-archive size and its best reward. These fields were added after the two formal
-runs, so they are not present in the stored history below.
+![W&B metrics from the two packing runs](results/formal-8x64-v3-packing/wandb_training_metrics.png)
 
-![W&B metrics from the two formal runs](results/formal-8x64-v3-packing/wandb_training_metrics.png)
+New runs also record the grid reward distribution and constant-group filtering
+counts under the `tttd` W&B namespace. Each `tttd_step_committed` event includes
+the archive size and best reward. These fields were added after the two formal
+packing runs and are not present in their stored W&B history.
 
-The [result directory](results/formal-8x64-v3-packing/README.md) contains the
-numeric W&B history, generated programs, certified milestone summaries,
-coordinates, provenance hashes, and plotting scripts. Each task has one formal
-trajectory, so the stored results do not estimate variance across seeds.
+The [circle-packing overview](results/formal-8x64-v3-packing/README.md) contains
+the combined W&B history, verified configurations, generated programs,
+milestone summaries, and provenance records.
 
 ## Attribution and license
 
