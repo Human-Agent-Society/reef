@@ -239,10 +239,10 @@ Milestones, each independently shippable:
 
 - **The client contract.** Two headers, one report route, receipts. Agents
   integrated today keep working unmodified; tags are optional.
-- **The evolution boundary.** This RFC moves *method* code, not *run state*.
+- **The evolution scope.** This RFC moves *method* code, not *run state*.
   A grader's session table is derived bookkeeping over Reef-served traffic,
   which is why it belongs on Reef's store. The
-  `evolution boundary <evolution-boundary.rst>`__ is about harness-owned search
+  `evolution scope <evolution-scope.rst>`__ is about harness-owned search
   state, and is untouched.
 - **Recipe authorship.** Third-party methods still need only a recipe class
   and a config entry. Method packages are how cookbook methods are held to

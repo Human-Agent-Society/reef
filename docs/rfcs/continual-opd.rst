@@ -97,13 +97,12 @@ Continual OPD on Reef: framework
 |                 |                |                       | in git history)   |
 +-----------------+----------------+-----------------------+-------------------+
 | L2              | GLM/Kimi →     | Project both          | L1 + an alignment |
-| cross-tokenizer | Qwen           | tokenizers'           | library           |
-| OPD             |                | boundaries onto the   |                   |
-|                 |                | byte stream, cut      |                   |
-|                 |                | chunks at common      |                   |
-|                 |                | boundaries, compare   |                   |
-|                 |                | summed log-probs per  |                   |
-|                 |                | chunk                 |                   |
+| cross-tokenizer | Qwen           | tokenizers' token     | library           |
+| OPD             |                | spans onto the byte   |                   |
+|                 |                | stream, cut chunks at |                   |
+|                 |                | shared byte offsets,  |                   |
+|                 |                | compare summed        |                   |
+|                 |                | log-probs per chunk   |                   |
 |                 |                | (tokenizer-invariant, |                   |
 |                 |                | no vocab mapping      |                   |
 |                 |                | needed)               |                   |

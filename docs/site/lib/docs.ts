@@ -373,7 +373,7 @@ function compileRst(content: string, sourcePath: string) {
     },
   });
   // `.. diagram::` is the escape hatch for genuinely spatial figures: the body
-  // is hand-built HTML over the fig-node/fig-boundary/fig-edge primitives in
+  // is hand-built HTML over the fig-node/fig-group/fig-edge primitives in
   // globals.css, passed through inside the shared figure chrome.
   compiler.useDirectiveGenerator({
     directives: ["diagram"],

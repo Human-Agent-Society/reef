@@ -787,9 +787,21 @@ html[data-theme="dark"] {
 .fig-node .fig-node-caption { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .fig-node.fig-emphasis { border-color: var(--diagram-emphasis-border); background: var(--diagram-emphasis); color: var(--diagram-emphasis-text); }
 .fig-node.fig-emphasis .fig-node-caption { color: color-mix(in srgb, var(--diagram-emphasis-text) 78%, transparent); }
-.fig-boundary { position: relative; display: flex; align-items: center; gap: 12px; padding: 34px 16px 16px; border: 1px dashed color-mix(in srgb, var(--diagram-emphasis-border) 65%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
-.fig-boundary-label { position: absolute; top: 10px; left: 16px; right: 16px; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fig-group { position: relative; display: flex; align-items: center; gap: 12px; padding: 34px 16px 16px; border: 1px dashed color-mix(in srgb, var(--diagram-emphasis-border) 65%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.fig-group-label { position: absolute; top: 10px; left: 16px; right: 16px; color: var(--muted); font-size: 13px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fig-edge { display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 13px; line-height: 1.4; text-align: center; }
+
+/* Package ownership map: scope first, then the responsibility of shared code. */
+.ownership-map { display: grid; gap: 14px; }
+.ownership-step-label { color: var(--foreground); font-size: 14px; font-weight: 600; line-height: 1.4; }
+.ownership-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.ownership-continue { gap: 3px; }
+.ownership-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.ownership-group { min-width: 0; padding: 12px; border: 1px dashed color-mix(in srgb, var(--diagram-emphasis-border) 65%, var(--border)); border-radius: 12px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
+.ownership-group-title { margin-bottom: 10px; color: var(--muted); font-size: 13px; font-weight: 600; line-height: 1.4; }
+.ownership-packages { display: grid; gap: 8px; }
+.ownership-map .fig-node { padding: 10px 12px; }
+.ownership-map .fig-node code { padding: 0; border: 0; background: transparent; color: inherit; font-size: 13px; }
 
 /* Reference rows: keys are deep-linkable scan lines, not headings or tables. */
 .markdown-body .config-card { margin: 24px 0 32px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); box-shadow: var(--shadow-sm); font-size: 14px; line-height: 1.6; }
@@ -822,13 +834,14 @@ html[data-theme="dark"] {
 .steps > ol > li:last-child::after { display: none; }
 
 @media (max-width: 720px) {
-  .fig-flow-track, .fig-lane, .fig-boundary { flex-direction: column; align-items: stretch; }
-  .fig-boundary { padding-top: 16px; }
-  .fig-boundary-label { position: static; white-space: normal; text-align: center; }
-  .fig-flow-track .fig-arrow-next, .fig-lane .fig-arrow-next, .fig-boundary .fig-arrow-next,
-  .fig-lane .fig-arrow-back, .fig-boundary .fig-arrow-back { transform: rotate(90deg); }
+  .fig-flow-track, .fig-lane, .fig-group { flex-direction: column; align-items: stretch; }
+  .fig-group { padding-top: 16px; }
+  .fig-group-label { position: static; white-space: normal; text-align: center; }
+  .fig-flow-track .fig-arrow-next, .fig-lane .fig-arrow-next, .fig-group .fig-arrow-next,
+  .fig-lane .fig-arrow-back, .fig-group .fig-arrow-back { transform: rotate(90deg); }
   .fig-flow-loop { text-align: center; }
   .config-row { grid-template-columns: 1fr; }
+  .ownership-scope, .ownership-groups { grid-template-columns: 1fr; }
 }
 
 /* Home: information sections added alongside the path cards — a two-up grid,
