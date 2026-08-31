@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
 from reef.core import AgentRecord, RequestType
+from reef.harness_evolve.processor import HarnessEvolveProcessor
 from reef.train.types import ProcessorContext, TraceBatch
 
 

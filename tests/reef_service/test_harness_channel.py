@@ -21,13 +21,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import HARNESS_VERSION_SIDECAR, ReefClient
 
 import reef.harness.adapters
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError, load_descriptor
 from reef.harness.episode import EpisodeResult
 from reef.harness.render import render_composition
+from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import Recipe, RecipeRegistry
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend

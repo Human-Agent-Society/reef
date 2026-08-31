@@ -51,7 +51,7 @@ modules implement each step.
 |---|---|---|
 | 1&nbsp;·&nbsp;Serve | Forward a request to the model provider and store the interaction. | [`service/`](reef/service) implements HTTP routes, authentication, and streaming. [`runtime/`](reef/runtime) connects Reef to the model provider. |
 | 2&nbsp;·&nbsp;Observe | Associate each report with the stored interactions referenced by its receipts. | [`core/`](reef/core) defines the stored record types. [`dispatcher.py`](reef/dispatcher.py) sends each record to its scenario. |
-| 3&nbsp;·&nbsp;Grow | Build a batch from eligible records and use it to update model weights or harness files. | [`sao/`](recipes/sao), [`tttd/`](recipes/tttd), [`openclawrl/`](recipes/openclawrl), [`harness_evolve/`](recipes/harness_evolve) are the learning methods, one package each; [`infra/recipe/`](reef/recipe) is the contract they implement and [`infra/train/`](reef/train) prepares batches and runs training jobs. |
+| 3&nbsp;·&nbsp;Grow | Build a batch from eligible records and use it to update model weights or harness files. | [`sao/`](recipes/sao), [`tttd/`](recipes/tttd), [`openclawrl/`](recipes/openclawrl), [`harness_evolve/`](reef/harness_evolve) are the learning methods, one package each; [`infra/recipe/`](reef/recipe) is the contract they implement and [`infra/train/`](reef/train) prepares batches and runs training jobs. |
 | 4&nbsp;·&nbsp;Commit | Gate the candidate against your tasks, then record an accepted update as a new version and make it available for serving. | [`train/evaluation/`](reef/train/evaluation) evaluates each candidate and decides whether to accept it. [`artifact/`](reef/artifact) stores the Git-backed version history. [`surface/`](reef/surface) delivers each artifact to the serving runtime or harness client. |
 
 
@@ -201,7 +201,7 @@ and do not ship in the Reef wheel.
 | A stream of tasks scored by tests or a verifier | SAO, `sao` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
 | Agent traffic with useful next-state signals and no explicit reports | OpenClaw-RL, `openclawrl` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
 | Repeated, scored attempts at one problem | TTT-Discover, `tttd` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
-| Scored agent interactions used to improve prompts, rules, skills, or configuration | Harness evolution, `harness_evolve` | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](recipes/harness_evolve/examples/harness_evolve/README.md) |
+| Scored agent interactions used to improve prompts, rules, skills, or configuration | Harness evolution, `harness_evolve` | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
 
 
 ## How is Reef different?

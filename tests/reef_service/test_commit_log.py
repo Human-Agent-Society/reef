@@ -761,7 +761,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return create_harness_surface()
 
     def build(self, scenario, records, *, algorithm_state=None) -> Trainer:
-        from recipes.harness_evolve.processor import HarnessEvolveProcessor
+        from reef.harness_evolve.processor import HarnessEvolveProcessor
 
         training_backend = HarnessEvolveBackend(
             descriptor=get_adapter("pi"),

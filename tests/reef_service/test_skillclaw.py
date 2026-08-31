@@ -1,4 +1,4 @@
-"""Guarantees of the recipes/harness_evolve/examples/skillclaw method package, hermetic: the
+"""Guarantees of the recipes/skillclaw method package, hermetic: the
 night's LLM is stubbed, probe episodes run a fake pi binary, docker tasks are
 faked, and the driver's dry run replays traffic through the real embedded
 service so the recorded requests carry the served pool's catalog."""
@@ -16,9 +16,9 @@ from typing import Any
 import pytest
 import yaml
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
 from reef.core import AgentRecord, RequestType
 from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness_evolve.processor import HarnessEvolveProcessor
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -27,7 +27,7 @@ from reef.train.harness_backend import Mutation
 from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.types import ProcessorContext, TraceSample
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "harness_evolve" / "examples" / "skillclaw"
+EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "skillclaw"
 
 # A pi stand-in for the probe episodes: it writes the session file the
 # runner reads back as the trajectory and answers nothing, so probes dead

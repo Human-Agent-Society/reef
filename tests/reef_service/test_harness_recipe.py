@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 import reef.train.harness_backend as reef_harness_backend
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -19,6 +18,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import RecipeRegistry, recipe_class_for
 from reef.records import RecordStore
@@ -148,7 +148,7 @@ def run_backend_step(
 
 
 def test_recipe_resolves_by_dotted_reference() -> None:
-    assert recipe_class_for("recipes.harness_evolve.recipe:HarnessEvolveRecipe") is HarnessEvolveRecipe
+    assert recipe_class_for("reef.harness_evolve.recipe:HarnessEvolveRecipe") is HarnessEvolveRecipe
     assert recipe_class_for("harness_evolve") is None
 
 

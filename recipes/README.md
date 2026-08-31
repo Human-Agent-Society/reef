@@ -62,7 +62,7 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-[Harness-Evolve](harness_evolve/examples/harness_evolve/README.md) runs SkillClaw-style skill
+[Harness-Evolve quickstart](../tutorials/harness_evolve/README.md) runs the smallest skill
 evolution on the harness evolution mechanism: the served model proposes one
 skill mutation over its own failing traffic, gated real episodes on three
 exact-answer coding tasks decide it, and the winning composition publishes
@@ -70,7 +70,7 @@ for client pull via `GET /reef/harness`. Setup here is just
 `pip install reef-client`: the loop drives `reef_client` directly,
 no Harbor task or tide.
 
-[SkillClaw](harness_evolve/examples/skillclaw/README.md) rebuilds the SkillClaw
+[SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
 sealed night (one decision per skill group plus the no-skill bucket) mapped
 to one composite mutation sequence, `selection: always` publishes every

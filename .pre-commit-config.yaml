@@ -13,7 +13,7 @@ ci:
 # no copy of it.
 exclude: |
   (?x)^recipes/(
-    harness_evolve/examples/skillclaw/harbor/(environment/workspace/|tests/grade\.py)
+    skillclaw/harbor/(environment/workspace/|tests/grade\.py)
     |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
     |tttd/examples/tttd/results/.*/best_solution\.py
   )

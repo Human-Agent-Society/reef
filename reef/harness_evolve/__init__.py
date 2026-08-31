@@ -10,7 +10,7 @@ surface's training runtime, ``reef.train.harness_backend`` — shared
 machinery, the counterpart of ``reef.train.slime_backend`` for weights.
 """
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
-from recipes.harness_evolve.recipe import HarnessEvolveRecipe
+from reef.harness_evolve.processor import HarnessEvolveProcessor
+from reef.harness_evolve.recipe import HarnessEvolveRecipe
 
 __all__ = ["HarnessEvolveProcessor", "HarnessEvolveRecipe"]

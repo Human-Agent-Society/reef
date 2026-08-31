@@ -51,13 +51,16 @@ import pytest
 pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-EXAMPLES_DIR = REPO_ROOT / "recipes"
+CONFIG_ROOTS = (REPO_ROOT / "recipes", REPO_ROOT / "tutorials")
 SLIME_DRIVER_MODULE = "reef.train.slime_backend.reef_adapters.driver"
 
 
+def _iter_config_files() -> list[Path]:
+    return [path for root in CONFIG_ROOTS if root.is_dir() for path in root.rglob("*.yaml")]
+
+
 def _discover_training_configs() -> list[Path]:
-    candidates = EXAMPLES_DIR.rglob("*.yaml")
-    return sorted(path for path in candidates if SLIME_DRIVER_MODULE in path.read_text())
+    return sorted(path for path in _iter_config_files() if SLIME_DRIVER_MODULE in path.read_text())
 
 
 TRAINING_CONFIGS = _discover_training_configs()
@@ -65,7 +68,7 @@ TRAINING_CONFIGS = _discover_training_configs()
 
 def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
-    for path in EXAMPLES_DIR.rglob("*.yaml"):
+    for path in _iter_config_files():
         text = path.read_text()
         if "\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text):
             deployments.append(path)
@@ -325,7 +328,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
-        "recipes/harness_evolve/examples/harness_evolve/serve.yaml",
+        "tutorials/harness_evolve/serve.yaml",
         "recipes/sao/examples/sao/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
     }
@@ -411,7 +414,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
 @pytest.mark.unit
 def test_sao_config_uses_the_hook_based_contract() -> None:
-    config_path = EXAMPLES_DIR / "sao" / "examples" / "sao" / "serve.yaml"
+    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "sao" / "serve.yaml"
     args, spec, options, _ = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)

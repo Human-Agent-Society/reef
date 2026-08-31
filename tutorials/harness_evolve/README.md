@@ -1,6 +1,8 @@
-# Harness evolution: SkillClaw-style skill evolution
+# Harness evolution quickstart
 
-This example runs a real method on the harness evolution mechanism. SkillClaw is the method: learn a skill from failures. Harness evolution is the mechanism: the agent harness configuration is a composition tree of nodes, a proposal is one gated tree mutation, and a winning mutation publishes as a versioned artifact any client can pull. Skills are just one node kind (`skills/<name>/SKILL.md` in the rendered tree).
+This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a composition tree of nodes, a proposal is one gated tree mutation, and a winning mutation publishes as a versioned artifact any client can pull. The proposer is the served model itself: it reads the current skill nodes and its own failing requests and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
+
+The pinned paper reproduction built on this mechanism lives at `recipes/skillclaw/`.
 
 The proposer is the served model itself: it reads the current skill nodes and its own failing requests and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
 

@@ -16,12 +16,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.version_check import version_check_entry
+from reef.harness_evolve.processor import HarnessEvolveProcessor
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field

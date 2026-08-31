@@ -1,4 +1,4 @@
-"""Guarantees of the recipes/harness_evolve/examples/harness_evolve cookbook example, hermetic: the
+"""Guarantees of the tutorials/harness_evolve cookbook example, hermetic: the
 model binding is stubbed, episodes never run, and the boot test drives the
 same serve.yaml materialization run.sh performs."""
 
@@ -13,9 +13,9 @@ from types import ModuleType
 import pytest
 import yaml
 
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBindingError
+from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import load_recipe_config
 from reef.records import RecordStore
 from reef.service.deploy.config import load_config
@@ -24,7 +24,7 @@ from reef.train.harness_backend import Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "harness_evolve" / "examples" / "harness_evolve"
+EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "harness_evolve"
 
 #: The composition the proposer sees: the starter skill, as (kind, config)
 #: pairs exactly like the backend passes. No provider node: the model binding
