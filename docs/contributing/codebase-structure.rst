@@ -13,31 +13,53 @@ packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
 preparer, and, for weight methods, the ``slime/`` subpackage only the training
 plane imports. Nothing under ``reef/`` imports a method package.
 
-The packages form layers. A layer imports only the layers beneath it, so
-a change that needs to reach upward is in the wrong package:
+Reef is organized around an application kernel and three capability domains,
+not a strict stack of top-level packages. The arrows below show the primary
+composition and use paths; they are not an exhaustive Python import graph:
 
 .. code:: mermaid
 
-   %%{init: {"flowchart": {"curve": "linear", "wrappingWidth": 480, "rankSpacing": 34}}}%%
+   %%{init: {"flowchart": {"curve": "linear", "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 42}}}%%
    flowchart TD
-       accTitle: Dependency direction between package layers
-       Methods("<b>METHOD PACKAGES</b> &nbsp; outside <code>reef/</code><br/><code>sao</code> · <code>tttd</code> · <code>openclawrl</code> · <code>harness_evolve</code>")
+       accTitle: Reef application kernel, capability domains, and adapters
 
-       subgraph Reef["reef/"]
-           direction TB
-           Orchestration("<b>ORCHESTRATION</b><br/><code>service</code> · <code>scenario</code>")
-           Contracts("<b>CONTRACTS</b><br/><code>recipe</code> · <code>runtime</code> · <code>harness</code>")
-           Engines("<b>ENGINES &amp; STORAGE</b><br/><code>train</code> · <code>surface</code> · <code>artifact</code>")
-           Core(["<b>CORE</b><br/><code>core</code>"])
+       Methods("<b>METHOD PLUG-INS</b><br/><code>recipes/*</code>")
+       Entry("<b>ENTRYPOINTS</b><br/>HTTP · CLI")
+       Policy("<b>POLICY</b><br/><code>reef/recipe</code>")
+       Service("<b>DELIVERY &amp; COMPOSITION</b><br/><code>reef/service</code>")
+       Kernel(["<b>APPLICATION KERNEL</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
 
-           Orchestration --> Contracts --> Engines --> Core
+       subgraph Domains["CAPABILITY DOMAINS"]
+           direction LR
+           Serving("<b>SERVING</b><br/><code>runtime</code> · <code>surface</code>")
+           Evolution("<b>EVOLUTION</b><br/><code>train</code> · <code>harness</code>")
+           State("<b>STATE</b><br/><code>artifact</code> · <code>records</code>")
        end
 
-       Methods --> Orchestration
+       subgraph Adapters["CONCRETE ADAPTERS"]
+           direction LR
+           ServingAdapters[["runtime adapters<br/>surface implementations"]]
+           EvolutionAdapters[["training backends<br/>harness adapters"]]
+           StateAdapters[["Git/LFS repositories<br/>SQLite"]]
+       end
 
-Two edges skip a layer and are allowed: a method package binds ``reef/train``
-machinery directly, and ``reef/service`` imports ``reef/artifact`` to stream
-artifact bytes. Everything else follows the arrows.
+       Observability(["<b>CROSS-CUTTING</b><br/><code>reef/observability</code>"])
+       Core(["<b>SHARED KERNEL</b><br/><code>reef/core</code>"])
+
+       Methods --> Policy --> Kernel
+       Entry --> Service --> Kernel
+       Kernel --> Serving & Evolution & State
+       Serving --> ServingAdapters
+       Evolution --> EvolutionAdapters
+       State --> StateAdapters
+       Kernel -. telemetry .-> Observability
+       ServingAdapters & EvolutionAdapters & StateAdapters --> Core
+
+Method packages provide policy through ``reef/recipe`` and may bind
+``reef/train`` machinery directly. HTTP and CLI entrypoints compose Reef
+through ``reef/service``; the transport-free dispatcher and scenario aggregate
+coordinate serving, evolution, and state. ``reef/service`` also imports
+``reef/artifact`` directly to stream artifact bytes.
 
 Concrete integrations may depend on shared contracts; shared contracts never
 import a concrete integration.
