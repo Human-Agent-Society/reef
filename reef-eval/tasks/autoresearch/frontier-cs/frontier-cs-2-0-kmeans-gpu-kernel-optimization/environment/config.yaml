@@ -1,0 +1,71 @@
+tag: systems
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "GPU K-Means kernel optimization. The agent patches the kmeanslib package; the judge offloads timing to a Modal GPU, comparing the patched kmeans against a frozen naive baseline on hidden (N, D, K) workloads with an inertia (clustering-quality) gate."
+  apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  judge_apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  judge_pip_packages:
+    - modal
+  docker:
+    # Experimental local images. Build with docker/build_images.sh before a local
+    # Harbor trial. Both are light (ubuntu + modal + git); torch/triton/flashlib
+    # run on the Modal GPU image defined in flash_gpu.py. The agent image bakes
+    # /app/kmeanslib (git) + /opt/kmeans_ref + /opt/flash_gpu.py; the judge image
+    # additionally bakes /opt/kmeanslib-clean.
+    image: frontiercs/kmeans-gpu-kernel-optimization-agent:experimental-v0.4.0
+    judge_image: frontiercs/kmeans-gpu-kernel-optimization-judge:experimental-v0.4.0
+environment:
+  cpus: 4
+  memory_mb: 8192
+  storage_mb: 16384
+  build_timeout_seconds: 3600
+evaluation:
+  # --- primitive wiring (consumed by the generic evaluator + flash_gpu) ---
+  primitive: kmeans
+  pkg: kmeanslib
+  ref_module: refkmeans
+  clean_source: /opt/kmeanslib-clean
+  baseline_source: /opt/kmeans_ref
+  # --- Modal GPU ---
+  gpu: "H100"                                        # Modal GPU spec (H100 / A100 / L40S)
+  cuda_image: "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+  pip: ["torch", "numpy"]
+  app_name: "kmeans-kernel-opt-eval"
+  modal_timeout_seconds: 1800
+  # --- timing + quality gate ---
+  warmup_iters: 2
+  timed_iters: 1                 # one timed run per workload; the timed unit is the judge-owned loop of max_iters `step` calls
+  inertia_tolerance: 0.05        # clustering gate: inertia of the agent's RETURNED (labels, centroids) <= (1+tol) x the baseline's. Catches fake/garbage labels and badly-placed centroids. Inertia is dominated by within-cluster noise, so it is deliberately backed up by label_mismatch_tolerance below.
+  label_mismatch_tolerance: 0.002  # assignment gate: fraction of points whose returned label is not the exact (fp32) nearest centroid of the centroids that step was handed. Inertia barely moves when ~1% of points are misassigned (~+0.1%), so this is what actually rejects approximate distances -- e.g. assigning on only the leading feature dims. Set above the bf16-vs-fp32 tie rate the honest reference shows.
+  speedup_target: 20.0           # score cap = 2x the FUSED best-known geomean (9.97x on H100, all 6 pass). The vendored flashlib reference.patch runs assign and update as two separate kernels (two passes over x) and only reaches 7.92x (scores ~69/100); a kernel that fuses assign+scatter-update into one pass over x -- which is exactly what this task asks for -- reaches 9.97x (~77/100), and you must be 2x faster than THAT to max out. Calibrating on the unfused reference alone made the cap too easy (a merely-fused solution scored 94).
+                                 # High-K (K=512-2048, arithmetic intensity >= H100 bf16 roofline knee ~295 FLOP/byte) keeps the assign GEMM compute-bound: ~138 TFLOPS geomean (14% of bf16 peak) vs ~40 TFLOPS on the old low-K workloads.
+  base_seed: 20260701
+  agent_workload_count: 6            # agent's submission feedback covers ALL graded workloads (no blind pass-3/fail-6 cliff); params are agent-visible anyway
+  expose_per_workload_metrics: true  # show per-workload pass/fail so the agent can fix the specific workload it regresses on
+  # The agent provides one Lloyd `step(x, centroids)`; the JUDGE owns the loop and
+  # calls it exactly max_iters times (=2). The agent cannot skip iterations, change
+  # the data/init, or fake the count -- it can only make a single step faster
+  # (e.g. fuse assign+update). Data is bf16 (locked in gen) so precision is not a
+  # lever; planted well-separated blobs. max_iters=2 (not 1) is enough to be a real
+  # loop while too few for a converged step to become a redundant no-op.
+  workloads:
+    - {id: w0, N: 200000,  D: 64,  K: 512,  max_iters: 2}
+    - {id: w1, N: 300000,  D: 128, K: 1024, max_iters: 2}
+    - {id: w2, N: 500000,  D: 128, K: 1024, max_iters: 2}
+    - {id: w3, N: 150000,  D: 512, K: 512,  max_iters: 2}
+    - {id: w4, N: 1000000, D: 64,  K: 1024, max_iters: 2}
+    - {id: w5, N: 300000,  D: 256, K: 2048, max_iters: 2}
+submission:
+  kind: file
+  path: /app/solution.patch

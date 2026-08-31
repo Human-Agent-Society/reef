@@ -1,0 +1,131 @@
+{
+  "solve_sh_scores": 0.75,
+  "cases": [
+    {
+      "solution": {
+        "circles": [
+          [
+            0.25,
+            0.25,
+            0.25
+          ],
+          [
+            0.75,
+            0.25,
+            0.25
+          ],
+          [
+            0.25,
+            0.75,
+            0.25
+          ]
+        ]
+      },
+      "reward": 0.75,
+      "why": "the reference solution scores exactly this"
+    },
+    {
+      "solution": {
+        "circles": [
+          [
+            0.4,
+            0.5,
+            0.2
+          ],
+          [
+            0.75,
+            0.5,
+            0.2
+          ],
+          [
+            0.5,
+            0.1,
+            0.05
+          ]
+        ]
+      },
+      "reward": 0.0,
+      "why": "overlapping circles must be rejected"
+    },
+    {
+      "solution": {
+        "circles": [
+          [
+            0.3,
+            0.5,
+            0.2
+          ],
+          [
+            0.7,
+            0.5,
+            0.200000005
+          ],
+          [
+            0.5,
+            0.1,
+            0.05
+          ]
+        ]
+      },
+      "reward": 0.0,
+      "why": "an overlap within float epsilon is still an overlap"
+    },
+    {
+      "solution": {
+        "circles": [
+          [
+            0.5,
+            0.5,
+            0.51
+          ],
+          [
+            0.1,
+            0.1,
+            0.05
+          ],
+          [
+            0.9,
+            0.9,
+            0.02
+          ]
+        ]
+      },
+      "reward": 0.0,
+      "why": "out-of-bounds values must be rejected"
+    },
+    {
+      "solution": {
+        "circles": [
+          [
+            0.5,
+            0.5,
+            0.4
+          ]
+        ]
+      },
+      "reward": 0.0,
+      "why": "the wrong number of circles must be rejected"
+    },
+    {
+      "solution": {
+        "circles": [
+          [
+            0.4,
+            0.5,
+            0.0
+          ]
+        ],
+        "claimed_score": 999.0
+      },
+      "reward": 0.0,
+      "why": "a self-reported score must be ignored"
+    },
+    {
+      "solution": {
+        "nonsense": true
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ]
+}

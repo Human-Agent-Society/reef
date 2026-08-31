@@ -1,0 +1,10 @@
+type: interactive
+
+interactor: interactor.cc
+
+time: 4s
+memory: 256m
+
+subtasks:
+  - score: 100
+    n_cases: 10

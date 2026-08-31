@@ -1,0 +1,185 @@
+```markdown
+# Prime Resonance Retuning
+
+## Problem
+
+Yash has built a **prime resonance network** on a rooted tree.
+
+The network has `n` nodes, rooted at node `1`.  
+Each node `i` stores a non-negative integer `a_i`. A modulus `m` is also given.
+
+For every node, only its value modulo `m` matters. Let
+
+- `P = { p | p is prime and 2 <= p < m }`
+
+be the set of prime residues of interest.
+
+You may install **retuners** on some nodes.  
+A retuner placed on node `v` with shift `d` adds `d` (modulo `m`) to **every node in the subtree of `v`**.
+
+If a node `u` has several retuners on its ancestors, their shifts add up modulo `m`.
+
+There are `t` observatories. Observatory `j` watches the subtree of node `s_j` and has importance weight `w_j`.
+
+After all chosen retuners are applied, observatory `j` gains credit for every prime residue `p in P` that appears at least once among the final values of nodes in the subtree of `s_j`.
+
+Your task is to choose where to place retuners and what shifts to use.
+
+---
+
+More formally:
+
+- Let `x_v` be the chosen shift at node `v`:
+  - `x_v = 0` means no retuner is installed at `v`
+  - `x_v in {1,2,...,m-1}` means a retuner with shift `x_v` is installed
+- At most `k` nodes may have `x_v != 0`
+- Final residue of node `u` is
+
+  `r_u = (a_u + sum of x_v over all ancestors v of u, including u) mod m`
+
+- For observatory `j`, let
+
+  `C_j = number of primes p in P such that there exists a node u in subtree(s_j) with r_u = p`
+
+- Its penalty is
+
+  `penalty_j = w_j * (|P| - C_j)`
+
+- Installing a retuner at node `v` costs `c_v`
+
+Your goal is to **minimize total penalty + total retuner cost**.
+
+## Input
+
+The input contains one test instance.
+
+- First line: four integers `n`, `m`, `t`, `k`
+  - `n` = number of nodes
+  - `m` = modulus
+  - `t` = number of observatories
+  - `k` = maximum number of retuners you may install
+- Second line: `n` integers `a_1, a_2, ..., a_n`
+- Third line: `n` integers `c_1, c_2, ..., c_n`
+- Next `n-1` lines: edges of the tree, each containing two integers `u`, `v`
+- Next `t` lines: observatories, each containing two integers `s_j`, `w_j`
+
+The tree is rooted at node `1`.
+
+## Output
+
+Output a feasible retuner placement.
+
+- First line: integer `q` — the number of installed retuners
+- Next `q` lines: two integers `v` and `d`
+  - `v` = node index
+  - `d` = shift, with `1 <= d < m`
+
+### Feasibility requirements
+
+Your output is feasible iff all of the following hold:
+
+- `0 <= q <= k`
+- all chosen nodes `v` are distinct
+- each shift satisfies `1 <= d < m`
+
+If the output is infeasible, the score for the test is `0`.
+
+## Objective
+
+Let `S` be the set of chosen retuners.
+
+The objective value is
+
+`F = sum over observatories j of [ w_j * (|P| - C_j) ] + sum over (v,d) in S of c_v`
+
+where `C_j` is the number of distinct prime residues from `P` appearing in the final residues of the subtree of `s_j`.
+
+You must **minimize `F`**.
+
+## Scoring
+
+For each test case, define the **baseline solution** as:
+
+- install no retuners
+
+Let its objective value be `F_base`.
+
+Your score for the test is:
+
+- if `F_base = 0`:
+  - score = `1,000,000` if `F = 0`
+  - score = `0` otherwise
+- else:
+
+  `score = floor(1,000,000 * max(0, (F_base - F) / F_base))`
+
+So:
+
+- matching the baseline gets score `0`
+- improving on the baseline gives a positive score
+- reaching objective `0` gets score `1,000,000`
+
+The final score is the average of test-case scores, rounded down to the nearest integer.
+
+## Constraints
+
+- `1 <= n <= 100000`
+- `3 <= m <= 1000`
+- `1 <= t <= 100000`
+- `0 <= a_i <= 10^9`
+- `1 <= c_i <= 10^9`
+- `1 <= w_j <= 10^9`
+- `1 <= k <= n`
+
+## Constraints
+- Time limit: 5 seconds
+- Memory limit: 512 MB
+
+## Example
+
+### Input
+```text
+5 10 3 3
+0 1 4 6 9
+5 2 2 1 1
+1 2
+1 3
+3 4
+3 5
+1 4
+3 3
+4 2
+```
+
+### Output
+```text
+1
+3 3
+```
+
+### Explanation
+
+Here `m = 10`, so the prime residues are `{2, 3, 5, 7}`.
+
+The single retuner `(3, 3)` adds `3` modulo `10` to nodes `3, 4, 5`.
+
+Final residues become:
+
+- node 1: `0`
+- node 2: `1`
+- node 3: `7`
+- node 4: `9`
+- node 5: `2`
+
+Observatory penalties:
+
+- subtree `1` contains prime residues `{2, 7}` → misses 2 primes → penalty `4 * 2 = 8`
+- subtree `3` contains prime residues `{2, 7}` → misses 2 primes → penalty `3 * 2 = 6`
+- subtree `4` contains no prime residue → misses 4 primes → penalty `2 * 4 = 8`
+
+Retuner cost: `c_3 = 2`
+
+So the objective is `F = 8 + 6 + 8 + 2 = 24`.
+
+With no retuners, the objective is `F_base = 36`, so this output improves over baseline.
+```

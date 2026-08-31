@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 300" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #DCE9EC; }
+    .m { fill: #8AA2AA; } .a { fill: #45B2C6; } .c { fill: #E57560; }
+    .lab { font-size: 15px; font-weight: 600; } .sm { font-size: 13px; }
+    .draw { stroke: #DCE9EC; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-f { stroke: #5F777E; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-a { stroke: #45B2C6; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-c { stroke: #E57560; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .dash { stroke-dasharray: 4 5; }
+  </style>
+  <defs>
+    <marker id="m-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#DCE9EC"/>
+    </marker>
+    <marker id="m-acc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#45B2C6"/>
+    </marker>
+    <marker id="m-cor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#E57560"/>
+    </marker>
+  </defs>
+
+  <!-- ============ everything on one axis: y = 110 ============ -->
+
+  <!-- agent -->
+  <path d="M 130 110 A 20 20 0 1 1 110 90" class="draw-c" marker-end="url(#m-cor)"/>
+  <text x="110" y="178" text-anchor="middle" class="lab">agent</text>
+  <text x="110" y="200" text-anchor="middle" class="sm m">searches however it likes,</text>
+  <text x="110" y="218" text-anchor="middle" class="sm m">submits what's worth scoring</text>
+
+  <!-- submissions out (above axis), scores back (below axis) -->
+  <path d="M 152 98 H 304" class="draw-c" marker-end="url(#m-cor)"/>
+  <text x="228" y="84" text-anchor="middle" class="sm c">submit (limited)</text>
+  <path d="M 304 122 H 152" class="draw-f dash" marker-end="url(#m-ink)"/>
+  <text x="228" y="144" text-anchor="middle" class="sm m">score</text>
+
+  <!-- judge -->
+  <circle cx="356" cy="110" r="38" class="draw-a"/>
+  <path d="M 338 110 l 13 14 l 24 -30" class="draw-a"/>
+  <text x="356" y="178" text-anchor="middle" class="lab">judge</text>
+  <text x="356" y="200" text-anchor="middle" class="sm m">all scoring lives here;</text>
+  <text x="356" y="218" text-anchor="middle" class="sm m">it scores every submission</text>
+
+  <!-- judge -> final judge -->
+  <path d="M 398 110 H 510" class="draw-a" marker-end="url(#m-acc)"/>
+  <text x="454" y="96" text-anchor="middle" class="sm m">best, once</text>
+
+  <!-- final judge -->
+  <circle cx="546" cy="110" r="28" class="draw-a"/>
+  <path d="M 538 104 h 16 v 12 h -16 z M 541 104 v -5 a 5 5 0 0 1 10 0 v 5" class="draw-a"/>
+  <text x="546" y="178" text-anchor="middle" class="lab">final judge</text>
+  <text x="546" y="200" text-anchor="middle" class="sm m">optional · hidden tests</text>
+  <text x="546" y="218" text-anchor="middle" class="sm m">runs once, then locks</text>
+
+  <!-- final judge -> table -->
+  <path d="M 578 110 H 648" class="draw-a" marker-end="url(#m-acc)"/>
+  <text x="613" y="96" text-anchor="middle" class="sm a">reward</text>
+
+  <!-- one table: the bold row sits on the axis, where the arrow points -->
+  <text x="666" y="66" class="lab">one table, every run</text>
+  <circle cx="672" cy="88" r="3" fill="#5F777E"/>
+  <line x1="686" y1="88" x2="790" y2="88" class="draw-f"/>
+  <circle cx="672" cy="110" r="3.5" fill="#45B2C6"/>
+  <line x1="686" y1="110" x2="806" y2="110" class="draw-a" stroke-width="3"/>
+  <text x="818" y="114" class="sm a">final reward</text>
+  <circle cx="672" cy="132" r="3" fill="#5F777E"/>
+  <line x1="686" y1="132" x2="798" y2="132" class="draw-f"/>
+  <circle cx="672" cy="154" r="3" fill="#5F777E"/>
+  <line x1="686" y1="154" x2="784" y2="154" class="draw-f"/>
+  <text x="818" y="146" class="sm m">every submission</text>
+  <text x="666" y="200" class="sm m">accumulates across runs;</text>
+  <text x="666" y="218" class="sm m">curves are queries</text>
+
+  <!-- the submission log, under the judge -->
+  <path d="M 300 246 V 288 H 414" class="draw-f"/>
+  <polyline points="306,282 330,282 330,270 356,270 356,262 382,262 382,254 406,254" class="draw-a"/>
+  <circle cx="406" cy="254" r="4" fill="#45B2C6"/>
+  <text x="430" y="272" class="sm a">score over time, every point judged</text>
+</svg>

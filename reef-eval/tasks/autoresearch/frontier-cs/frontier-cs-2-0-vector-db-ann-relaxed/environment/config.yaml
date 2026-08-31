@@ -1,0 +1,45 @@
+tag: systems
+runtime:
+  language: rust
+  timeout_seconds: 10800
+  environment: "Rust project; hidden ANN benchmark; Python/NumPy judge"
+  apt_packages:
+    - build-essential
+    - cargo
+    - git
+    - rustc
+  judge_apt_packages:
+    - build-essential
+    - cargo
+    - rustc
+    - python3-pip
+    - python3-numpy
+  judge_pip_packages:
+    - faiss-cpu
+  docker:
+    image: ubuntu:24.04
+environment:
+  # If these resource limits change, also update the resource budget text in
+  # readme and harbor/app/README.md so agents can design parallel algorithms
+  # for the actual CPU and memory budget.
+  cpus: 8
+  memory_mb: 16384
+  storage_mb: 8192
+  build_timeout_seconds: 3600
+evaluation:
+  # The judge drives the search service with this many concurrent workers.
+  # Keep this aligned with the CPU budget unless the task is intentionally
+  # changed into a higher-concurrency service benchmark.
+  query_concurrency: 8
+  queries_per_worker: 64
+  # Weight applied to load/index-build time when computing effective QPS.
+  # This relaxed variant rewards stronger indexes by penalizing build time
+  # 10x less than the standard Vector DB ANN task.
+  load_penalty_weight: 0.001
+submission:
+  kind: directory
+  path: /app
+  exclude:
+    - target
+    - .git
+    - .frontier-cs

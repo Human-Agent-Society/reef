@@ -1,0 +1,145 @@
+```markdown
+# Manhattan Compass Prospecting (Optimization)
+
+## Problem
+There are **N** distinct pinholes on the 2D plane. The *i*-th pinhole is at integer coordinates \((x_i, y_i)\) and has a nonnegative integer value \(w_i\).
+
+You operate a peculiar instrument, the **Manhattan Compass**, which always touches **exactly two distinct pinholes** at a time. The two legs are indistinguishable: the state “touching \((p,q)\)” is the same as “touching \((q,p)\)”.
+
+Let the Manhattan distance be:
+\[
+d(i,j) = |x_i-x_j| + |y_i-y_j|.
+\]
+
+### Allowed move
+Suppose the compass currently touches pinholes \(\{p,q\}\) with \(p \neq q\).
+
+You may perform one move to change the state to \(\{p,r\}\) **(keeping \(p\) fixed and moving the other leg)** if and only if:
+- \(r \neq p\), and
+- \(d(p,q) = d(p,r)\).
+
+Similarly, you may move to \(\{q,r\}\) if \(d(p,q)=d(q,r)\).
+
+### Collecting value and paying cost
+- You **collect** the value \(w_i\) of a pinhole \(i\) the **first time** it is touched by either leg at any time (including initially).
+- Each move has a fixed **time cost** \(c\) (given in input).
+- You are allowed to make at most **L** moves.
+
+You start with the compass touching pinholes \(\{a,b\}\).
+
+Your task is to output **any valid sequence of moves** (possibly empty) to **maximize profit**.
+
+---
+
+## Input
+```
+N L a b c
+x_1 y_1 w_1
+x_2 y_2 w_2
+:
+x_N y_N w_N
+```
+
+### Constraints
+- \(2 \le N \le 200000\)
+- \(0 \le L \le 200000\)
+- \(1 \le a < b \le N\)
+- \(1 \le x_i, y_i \le 10^9\)
+- \(0 \le w_i \le 10^6\)
+- \(0 \le c \le 10^6\)
+- All \((x_i,y_i)\) are distinct.
+
+---
+
+## Output
+Output a move sequence in the following format:
+```
+S
+u_1 v_1
+u_2 v_2
+:
+u_S v_S
+```
+where:
+- \(S\) is the number of moves, and must satisfy \(0 \le S \le L\).
+- Each line \(u_t, v_t\) denotes the **unordered** pair of pinholes touched **after** the \(t\)-th move.
+- Feasibility requirements:
+  - \(1 \le u_t, v_t \le N\), \(u_t \ne v_t\).
+  - Let the initial state be \(\{u_0,v_0\}=\{a,b\}\).
+  - For each \(t \ge 1\), the transition from \(\{u_{t-1},v_{t-1}\}\) to \(\{u_t,v_t\}\) must be achievable by **one allowed move** (i.e., the two pairs share exactly one pinhole, and the Manhattan distances from the shared pinhole to the moved endpoints are equal as defined above).
+
+If the output violates any feasibility rule, the submission is invalid for that test case.
+
+---
+
+## Objective
+For a feasible output, define:
+- \(T\) = the set of pinholes that appear in any touched pair, i.e.
+  \[
+  T = \{a,b\} \cup \bigcup_{t=1}^{S} \{u_t, v_t\}.
+  \]
+- Collected value:
+  \[
+  V = \sum_{i \in T} w_i.
+  \]
+- Profit:
+  \[
+  P = V - c \cdot S.
+  \]
+
+**Maximize** \(P\).
+
+---
+
+## Scoring
+This is an optimization problem with continuous scoring.
+
+For each test case, the judge computes:
+- Your profit \(P\).
+- A deterministic internal reference profit \(P_0\), computed by the judge from the same test case.
+
+The per-test score ratio is:
+\[
+\text{ratio} =
+\begin{cases}
+0 & \text{if } P \le 0 \\
+\mathrm{clamp}\left(\dfrac{P - P_0}{P},\, 0,\, 1\right) & \text{otherwise}
+\end{cases}
+\]
+where \(\mathrm{clamp}(x,0,1)=\min(1,\max(0,x))\).
+
+The final score is the sum of per-test ratios, scaled to the total points configured for this problem.
+
+---
+
+## Constraints
+- Time limit: 2 seconds
+- Memory limit: 1024 MB
+
+---
+
+## Example
+### Sample input
+```
+6 5 1 2 3
+1 1 10
+4 1 8
+7 1 7
+4 4 100
+1 4 6
+7 4 6
+```
+
+### Sample output
+```
+3
+1 3
+3 6
+6 4
+```
+
+### Explanation (high level)
+- Start touching \(\{1,2\}\); collected so far: \(w_1+w_2=18\).
+- Each printed pair must be reachable by one allowed move (equal-distance rule around the shared pinhole).
+- The judge computes the set of touched pinholes \(T\), sums their values to get \(V\), subtracts \(c \cdot S\) to get profit \(P\), then compares \(P\) against the judge's deterministic reference profit \(P_0\) using the normalized ratio above.
+```

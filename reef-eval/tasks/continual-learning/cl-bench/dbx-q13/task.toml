@@ -1,0 +1,20 @@
+version = "1.0"
+
+[metadata]
+benchmark = "cl-bench"
+domain = "database_exploration"
+question_id = 13
+position = 12
+post_drift = false
+license_note = "CL-Bench (pgasawa/continual-learning-bench), Apache-2.0"
+
+[verifier]
+timeout_sec = 300.0
+
+[agent]
+timeout_sec = 900.0
+network_mode = "allowlist"
+allowed_hosts = ["judge"]
+
+[environment]
+build_timeout_sec = 1800.0

@@ -1,0 +1,30 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/zig-port/."]
+
+[task]
+name = "edgebench/git_rewrite_in_zig"
+description = "Git Rewrite In Zig"
+
+[metadata]
+benchmark = "edgebench"
+category = "Systems & Software Engineering"
+judge_parser = "pytest_v"
+score_direction = "maximize"
+rescale_kind = "linear"
+rescale_lower = 0.0
+rescale_upper = 1.0
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 7200.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

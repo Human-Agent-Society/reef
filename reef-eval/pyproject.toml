@@ -1,0 +1,82 @@
+[project]
+name = "reef-eval"
+version = "0.1.0"
+description = "Evaluation infrastructure for self-evolving agents on the Harbor task standard: autoresearch and task streams, tamper-proof scoring, budgets on four axes, and resumable sweeps."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+keywords = ["evaluation", "benchmarks", "agents", "self-evolving", "continual-learning", "autoresearch", "harbor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pandas>=2.0",
+]
+
+[project.scripts]
+reef-eval = "reef_eval.cli:main"
+
+[project.urls]
+Repository = "https://github.com/Human-Agent-Society/reef/tree/main/reef-eval"
+Issues = "https://github.com/Human-Agent-Society/reef/issues"
+
+[project.optional-dependencies]
+# The Harbor executor. Kept optional so the core (store, metrics, fakes)
+# works without Harbor's heavy dependency tree.
+harbor = ["harbor==0.20.0"]
+# Lint + test tools. ruff is pinned so local and CI format identically:
+# ruff 0.16+ formats Python code blocks inside Markdown, which means an
+# unpinned ruff can make CI fail overnight on a release we didn't opt into.
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pyyaml>=6",
+    "ruff==0.16.3",
+    "mypy==2.3.1",
+    "pandas-stubs",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["reef_eval"]
+
+[tool.hatch.build.targets.sdist]
+# The package ships code only; benchmark tasks download on first use.
+include = ["/reef_eval", "/README.md", "/LICENSE"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+files = ["reef_eval"]
+ignore_missing_imports = true  # harbor is optional; pandas via pandas-stubs
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+# Vendored and generated task directories hold third-party code. The
+# `<benchmark>/*/**` form excludes the task folders while still linting the
+# first-party fetch and convert scripts that sit beside them.
+extend-exclude = [
+    "tests/fixtures",
+    "tasks/autoresearch/frontier-cs/*/**",
+    "tasks/continual-learning/cl-bench/*/**",
+    "tasks/continual-learning/swebench-verified/*/**",
+    "tasks/continual-learning/terminal-bench/*/**",
+    "tasks/autoresearch/edgebench/*/instruction.md",
+    "tasks/autoresearch/edgebench/*/tests",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

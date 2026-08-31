@@ -1,0 +1,7 @@
+tag: geometry
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "Python 3.11; no external packages required"
+  docker:
+    image: ubuntu:24.04

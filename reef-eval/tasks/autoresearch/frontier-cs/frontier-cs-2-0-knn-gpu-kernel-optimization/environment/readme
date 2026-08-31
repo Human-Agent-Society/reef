@@ -1,0 +1,131 @@
+# GPU Brute-Force k-NN Kernel Optimization
+
+## Problem
+
+You are given a small GPU brute-force k-nearest-neighbor library, `knnlib`, in
+the Harbor workspace at `/app/knnlib`. Its public entry point is:
+
+```python
+knnlib.knn(queries, database, k) -> (distances, indices)
+```
+
+`queries` is a `(Q, D)` **bfloat16** CUDA tensor of query points, `database` is an
+`(M, D)` **bfloat16** CUDA tensor of database points to search, and `k` is the
+number of nearest neighbors to return per query. The inputs are bfloat16 by
+design — treat it as the fixed working precision; upcasting to fp32/TF32 buys no
+accuracy over bf16 tensor cores here (only latency), so precision is not a tuning
+knob. The function returns `distances`, a `(Q, k)` float32 tensor of the
+**squared-L2** distances to the `k` nearest database points (ascending, nearest
+first), and `indices`, a `(Q, k)` int64 tensor of the corresponding database row
+indices. The shipped implementation is a straightforward, correct PyTorch version.
+
+Your goal is to make `knnlib.knn` **as fast as possible** on the GPU while
+returning the same nearest neighbors. You may rewrite the internals of the
+package however you like and add new modules (including Triton kernels) under
+`knnlib/`. The public function signature and return contract above must not
+change, and every result must remain a deterministic function of its inputs.
+
+## Workload
+
+The graded workloads are a family of held-out dense search problems that vary
+`(Q, M, D, k)`, spanning both wide-feature (large `D`) and many-neighbor (large
+`k`) regimes. All use squared-L2 distance and float32 data. The points are real
+image-descriptor vectors, not synthetic noise: expect clustered, non-uniform
+data rather than i.i.d. gaussians.
+
+Every timed iteration draws a **fresh random `Q` queries and a fresh random `M`
+database rows**, so neither the query set nor the `database` tensor repeats
+across calls. Building an index or precomputing norms once and caching them for
+reuse on a later call therefore buys nothing — each call sees a database it has
+never seen. Optimize the per-call search itself.
+
+The public self-test now runs the **exact graded workloads** — the same shapes,
+thresholds, seeds, and timing the judge uses to score you — so there are no
+separate hidden shapes to guess at. Treat this as a general dense brute-force
+k-NN kernel; the workloads are just where it is measured.
+
+## Iterate on a GPU
+
+The agent workspace has no GPU. Use the public test to check your current code's correctness and speed on
+a GPU through Modal (needs `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in your
+environment):
+
+```bash
+bash /app/public_test.sh
+```
+
+It runs the **identical evaluation the judge uses to grade you** and reports, per
+graded workload, whether your result passes the quality gate, your speedup over
+the baseline, the geometric-mean speedup, and your **predicted final score**
+(0-100). Any workload that fails its gate makes the submission score 0.
+
+## Submission
+
+The submitted artifact is a patch over the `knnlib` package:
+
+```text
+/app/solution.patch
+```
+
+After editing `/app/knnlib`, generate and submit:
+
+```bash
+bash /app/make_submission.sh
+bash /app/submit.sh
+```
+
+Submissions are asynchronous; submit early and keep iterating. The judge applies
+your patch to a clean copy of `knnlib` and times it against the original
+baseline on a GPU, on the same seeded queries and database.
+
+## Correctness
+
+Correctness is a gate. On every timed iteration the judge scores your neighbours
+by **ball-recall**: each returned index counts if the exact (fp32) squared-L2
+distance from its query to that database row lies within the true k-nearest-
+neighbour ball (the distance to the k-th true neighbour). This is tie-robust —
+bf16 distances tie heavily near rank k, so which of several equidistant points
+you return does not matter, but returning a genuinely farther point does. Your
+ball-recall must stay at or above a high threshold. Because the inputs are bf16,
+an honest bf16 kernel clears it comfortably; a search that drops below bf16
+precision (e.g. fp8) returns farther points and fails. Crashes, non-finite
+output, wrong shapes/dtypes, and timeouts are penalized before speed is
+considered.
+
+## Scoring
+
+Valid submissions are scored by speedup relative to the baseline on the same
+hardware and workloads. For each workload:
+
+```text
+speedup = baseline_time / your_time
+```
+
+The objective is the geometric mean of per-workload speedups, so broad speedups
+are preferred over a single large outlier. A result no faster than the baseline
+earns 0; regressions earn 0. The raw geometric-mean speedup is reported in the
+evaluator metrics.
+
+## Patch Policy
+
+The evaluator validates the patch before running it. Only Python files under the
+package may change:
+
+```text
+knnlib/**
+```
+
+New Python modules inside `knnlib/` are allowed. Patches may not: modify
+anything outside `knnlib/`; import or call an external optimized ML/kernel
+library (write the kernels yourself); read or write environment variables, spawn
+processes, or access the network; or otherwise tamper with the measurement
+framework. The timing harness measures your code on freshly generated data every
+iteration and re-verifies quality each time, so caching results across calls does
+not help.
+
+## Resource Budget
+
+```text
+GPU: single Modal GPU (H100 reference; the Triton paths also run on L40S / A100)
+Agent container: CPU-only (GPU work is offloaded to Modal)
+```

@@ -1,0 +1,88 @@
+{
+  "dataset": "iccad2015",
+  "benchmark": "superblue1",
+  "benchmark_path": "/app/input/benchmarks/iccad2015/superblue1",
+  "placer": "mgo",
+  "metric": "mp_hpwl",
+  "objective": "minimize",
+  "dim": 1024,
+  "node_cnt": 512,
+  "net_cnt": 325,
+  "canvas_width": 8543.16,
+  "canvas_height": 3131.01,
+  "canvas_lx": 0.0,
+  "canvas_ly": 0.0,
+  "n_grid_x": 224,
+  "n_grid_y": 224,
+  "bounds_kind": "mgo_repeated_grid",
+  "max_candidates_per_submission": 1,
+  "baseline_hpwl": 69600.0,
+  "files": [
+    "superblue1.def",
+    "superblue1.iccad2015",
+    "superblue1.lef",
+    "superblue1.sdc",
+    "superblue1.v",
+    "superblue1_Early.lib",
+    "superblue1_Late.lib"
+  ],
+  "submission_path": "/app/solution.json",
+  "coordinate_format": "placement[0:node_cnt] are x-grid coordinates; placement[node_cnt:2*node_cnt] are y-grid coordinates",
+  "macro_selection": {
+    "source_files": [
+      "superblue1.def",
+      "superblue1.lef"
+    ],
+    "selected_nodes": "largest DEF components by LEF width*height area",
+    "count": 512,
+    "order": "descending width*height area; ties keep DEF component order"
+  },
+  "net_selection": {
+    "source_file": "superblue1.v",
+    "count": 325,
+    "rules": [
+      "scan Verilog wire declarations to collect valid net names",
+      "scan instance connections after the Start cells marker",
+      "keep only instance pins whose instance name is one of the 512 selected macros",
+      "use LEF pin rectangle centers as lower-left based pin offsets",
+      "convert kept pin offsets to center-relative offsets by subtracting half of that selected macro's width and height",
+      "discard nets with fewer than two selected macros",
+      "preserve the remaining net order from superblue1.v"
+    ],
+    "degree_histogram": {
+      "2": 225,
+      "3": 47,
+      "4": 18,
+      "5": 28,
+      "6": 2,
+      "9": 2,
+      "13": 3
+    }
+  },
+  "mgo_decode": {
+    "grid": [224, 224],
+    "grid_cell_size": {
+      "width": 38.13910714285714,
+      "height": 13.977723214285716
+    },
+    "def_to_grid_hint": "Visible DEF coordinates are database-unit component positions. The evaluator rescales DEF positions by the FE_CORE_BOX dimensions and DIEAREA before comparing to the MGO canvas. To convert a scaled macro bottom-left coordinate to a requested MGO grid coordinate, use x_grid=(x-canvas_lx)/grid_cell_width and y_grid=(y-canvas_ly)/grid_cell_height.",
+    "coordinate_bounds": {
+      "x": [0, 224],
+      "y": [0, 224]
+    },
+    "coordinate_semantics": "desired MGO grid coordinates; evaluator floors floating coordinates before grid lookup and may move macros during legality repair",
+    "legalizer_rank": {
+      "rank_key": "area_sum",
+      "definition": "For each selected net, net area is the sum of width*height over macros on that net. For each macro, area_sum is the sum of net areas over selected nets containing that macro. Macros are greedily legalized in descending area_sum order; ties keep macro order."
+    },
+    "decode_summary": [
+      "candidate[0:512] and candidate[512:1024] are floored to requested grid ids",
+      "scaled macro size is ceil(width/grid_cell_width), ceil(height/grid_cell_height)",
+      "for each macro in legalizer_rank order, all grid cells that would overlap already placed macros or exceed the legal grid are masked out",
+      "among legal cells, the evaluator minimizes incremental HPWL to nets that already have placed macros, using pin offsets from superblue1.lef and superblue1.v",
+      "ties in incremental HPWL are broken by the L1 physical distance from the requested floored grid coordinate",
+      "the final macro bottom-left position is grid_id_x*grid_cell_width, grid_id_y*grid_cell_height in the evaluator's canvas-local coordinate system"
+    ],
+    "hpwl_summary": "After legalization, MP-HPWL is the sum over the 325 selected nets of (max pin x - min pin x) + (max pin y - min pin y), where pin x/y is macro bottom-left plus half macro size plus the center-relative pin offset."
+  }
+}

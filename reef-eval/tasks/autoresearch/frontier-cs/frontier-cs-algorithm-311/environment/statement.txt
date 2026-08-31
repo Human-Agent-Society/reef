@@ -1,0 +1,190 @@
+```markdown
+# Resonant Bay Layout
+
+## Problem
+
+A research lab wants to place `n` oscillators on a long straight rail with numbered bays `0, 1, ..., m-1`.
+
+Oscillator `i` has an intrinsic phase ratio `p_i / q_i`. Some pairs of oscillators are connected by coupling channels. If oscillators `u` and `v` are placed `d = |x_u - x_v|` bays apart, then channel `(u, v)` produces energy
+
+\[
+E_{u,v}(d)
+=
+w_{u,v}
+\cdot
+\left|\sin\left(\pi \frac{p_u}{q_u} d\right)\right|
+\cdot
+\left|\sin\left(\pi \frac{p_v}{q_v} d\right)\right|.
+\]
+
+You must assign every oscillator to a **distinct integer bay**. Your goal is to maximize the total produced energy over all channels.
+
+This is an **optimization challenge**: any feasible output is accepted, and better layouts receive better scores.
+
+## Input
+
+The first line contains an integer `t` — the number of test cases.
+
+For each test case:
+
+- The first line contains three integers `n`, `m`, and `r`:
+  - `n` — number of oscillators
+  - `m` — number of bays
+  - `r` — number of coupling channels
+- The next `n` lines each contain two integers `p_i` and `q_i`.
+- The next `r` lines each contain three integers `u`, `v`, and `w` describing a channel between oscillators `u` and `v` with weight `w`.
+
+Oscillators are numbered from `1` to `n`.
+
+There are no self-loops and no repeated channels.
+
+## Output
+
+For each test case, output one line containing `n` integers:
+
+\[
+x_1, x_2, \dots, x_n
+\]
+
+where `x_i` is the bay chosen for oscillator `i`.
+
+A solution is **feasible** for a test case if and only if:
+
+- `0 <= x_i < m` for all `i`
+- all `x_i` are pairwise distinct
+
+If a test case output is infeasible, its objective value is defined as `0`.
+
+## Objective
+
+For a feasible layout, let
+
+\[
+d_{u,v} = |x_u - x_v|.
+\]
+
+The total energy is
+
+\[
+F
+=
+\sum_{(u,v)\in \text{channels}}
+w_{u,v}
+\cdot
+\left|\sin\left(\pi \frac{p_u}{q_u} d_{u,v}\right)\right|
+\cdot
+\left|\sin\left(\pi \frac{p_v}{q_v} d_{u,v}\right)\right|.
+\]
+
+You must **maximize** `F`.
+
+### Judge computation details
+
+For each factor, the judge may reduce the angle using periodicity before evaluating sine:
+
+\[
+\sin\left(\pi \frac{p_i}{q_i} d\right)
+=
+\sin\left(\pi \frac{(p_i d \bmod 2q_i)}{q_i}\right).
+\]
+
+This is mathematically equivalent and avoids large angles.
+
+## Scoring
+
+For each test case, a deterministic **baseline layout** is defined as follows:
+
+1. Compute the weighted degree of each oscillator:
+   \[
+   \deg(i) = \sum_{(i,j)\in \text{channels}} w_{i,j}.
+   \]
+2. Sort oscillators by decreasing `deg(i)`, breaking ties by smaller index.
+3. Define baseline bays:
+   - if `n = 1`, the only bay is `0`
+   - otherwise, for `k = 0, 1, ..., n-1`:
+     \[
+     b_k = \left\lfloor \frac{k(m-1)}{n-1} \right\rfloor
+     \]
+4. Assign the `k`-th oscillator in the sorted order to bay `b_k`.
+
+Let `B` be the objective value of this baseline layout, and let `F` be the objective value of your output.
+
+The score for that test case is
+
+\[
+S
+=
+10^6
+\cdot
+\operatorname{clamp}\left(
+\frac{F+1}{B+1},
+0,
+2
+\right),
+\]
+
+where
+
+\[
+\operatorname{clamp}(x,0,2)=
+\begin{cases}
+0 & x<0\\
+x & 0\le x\le 2\\
+2 & x>2
+\end{cases}
+\]
+
+The score of an input file is the arithmetic mean of its test case scores.
+
+Higher is better.
+
+## Constraints
+
+- `1 <= t <= 20`
+- `2 <= n <= 400`
+- `n <= m <= 10^9`
+- `1 <= r <= min(30000, n(n-1)/2)`
+- `1 <= p_i, q_i <= 10^9`
+- `1 <= w <= 10^6`
+
+Across one input file:
+
+- `sum(n) <= 4000`
+- `sum(r) <= 120000`
+
+- Time limit: 8 seconds
+- Memory limit: 512 MB
+
+## Example
+
+### Input
+```text
+1
+4 7 4
+1 2
+1 3
+2 5
+1 4
+1 2 10
+1 3 7
+2 4 8
+3 4 6
+```
+
+### Output
+```text
+0 3 5 1
+```
+
+### Explanation
+This places the 4 oscillators in distinct bays:
+
+- oscillator 1 at bay 0
+- oscillator 2 at bay 3
+- oscillator 3 at bay 5
+- oscillator 4 at bay 1
+
+For each channel, the judge computes the bay distance, evaluates the two sine factors, multiplies by the channel weight, and sums the results.
+
+The baseline layout is built from weighted-degree order and evenly spaced bays. Your score depends continuously on how your total energy compares to that baseline.
+```

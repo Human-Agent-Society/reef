@@ -1,0 +1,1 @@
+Read `README.md` in the workspace, then complete as many Coq proof targets as possible. Submit for judge feedback.

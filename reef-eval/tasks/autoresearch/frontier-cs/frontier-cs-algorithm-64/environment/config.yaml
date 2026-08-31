@@ -1,0 +1,9 @@
+type: default
+# The time limit is now 1 second.
+time: 10s # Let asymtotics beat constant factor and heuristic BS
+memory: 1024m # 1GB should be enough for checkpointing backtrack 
+# A custom checker is required for the special scoring.
+checker: chk.cc
+subtasks:
+  - score: 100
+    n_cases: 20

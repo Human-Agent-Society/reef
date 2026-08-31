@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.triangulation_coloring_optimization:d3af8893fa81
+WORKDIR /home/workspace/triangulation_coloring

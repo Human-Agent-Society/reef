@@ -1,0 +1,184 @@
+```markdown
+# Rope Network for Xiaotu (Optimization)
+
+## Problem
+Xiaotu is training for sprints inside a **convex polygon** playground with \(n\) vertices \((0 \ldots n-1)\) listed in counterclockwise order.
+
+The organizer will install **exactly \(K\)** “safety ropes”. Each rope is a straight segment connecting two polygon vertices (an edge or a diagonal). Because the polygon is convex, every such segment lies fully inside the playground.
+
+When Xiaotu is at a position \(p\) (uniformly random inside the polygon), he runs straight to the **nearest rope** (Euclidean distance to the segment). Your task is to choose which \(K\) ropes to install (from a given candidate list) to **minimize the expected running distance**.
+
+This is an open-ended optimization task: many different valid outputs exist, and they get different scores.
+
+---
+
+## Input
+```
+n m K S seed
+x0 y0
+x1 y1
+...
+x(n-1) y(n-1)
+a0 b0
+a1 b1
+...
+a(m-1) b(m-1)
+```
+
+- \(n\): number of polygon vertices.
+- \(m\): number of candidate ropes.
+- \(K\): number of ropes you must select.
+- \(S\): number of evaluation sample points used by the judge.
+- `seed`: 64-bit unsigned integer used to deterministically generate the \(S\) sample points.
+
+Vertices:
+- Each of the next \(n\) lines gives integer coordinates \((x_i, y_i)\).
+
+Candidates:
+- Each of the next \(m\) lines gives two integers \((a_j, b_j)\) with \(0 \le a_j < b_j < n\), specifying a candidate rope between vertices \(a_j\) and \(b_j\).
+
+### Guarantees
+- The polygon is strictly convex.
+- No three vertices are collinear.
+- Vertices are given counterclockwise.
+- \(1 \le K \le m\).
+
+---
+
+## Output
+Output exactly \(K\) **distinct** integers:
+```
+id1 id2 ... idK
+```
+where each `id` is in \([0, m-1]\), identifying selected candidate ropes.
+
+### Feasibility rules
+A submission is **feasible** iff:
+- Exactly \(K\) integers are printed.
+- All are distinct.
+- All are in \([0, m-1]\).
+
+Infeasible outputs receive a score of `0` (see **Scoring**).
+
+---
+
+## Objective
+Let the selected rope set be \(R\) (size \(K\)).
+
+The judge deterministically generates \(S\) points \(p_0, \dots, p_{S-1}\) **uniformly at random in the polygon** (but using the fixed `seed`, so it is deterministic).
+
+For each point \(p\), define its cost:
+\[
+d(p, R) = \min_{(u,v)\in R} \mathrm{dist}(p, \overline{uv})
+\]
+where \(\mathrm{dist}(p, \overline{uv})\) is the Euclidean distance from point \(p\) to the **segment** from vertex \(u\) to vertex \(v\).
+
+For a feasible output, your objective value is the mean distance:
+\[
+\mathrm{OBJ} = \frac{1}{S}\sum_{t=0}^{S-1} d(p_t, R)
+\]
+You must **minimize** `OBJ`.
+
+---
+
+## Deterministic sampling (used by the judge)
+Because the polygon is convex, the judge triangulates it as a fan from vertex 0:
+\[
+T_i = (0, i, i+1), \quad i=1 \ldots n-2
+\]
+Let \(A_i\) be the (positive) area of triangle \(T_i\), and \(A=\sum A_i\).
+
+### PRNG
+The judge uses this 64-bit xorshift* generator:
+
+- State is `uint64 x`, initialized to `seed`.
+- Each call:
+  - `x ^= x >> 12; x ^= x << 25; x ^= x >> 27;`
+  - return `x * 2685821657736338717ULL`.
+
+To get a uniform real in \([0,1)\), the judge uses:
+\[
+U = \frac{\text{next\_uint64()}}{2^{64}}
+\]
+
+### Sampling one point
+For each sample \(t\):
+1. Draw \(r = U_1 \cdot A\). Choose the smallest \(i\) with \(\sum_{j=1}^{i} A_j > r\).
+2. In triangle \((a,b,c) = (v_0, v_i, v_{i+1})\), draw \(u=U_2, v=U_3\), then set:
+   - \(s=\sqrt{u}\)
+   - \(\alpha = 1-s,\ \beta = s(1-v),\ \gamma = sv\)
+   - \(p = \alpha a + \beta b + \gamma c\)
+
+This produces points uniform over the polygon.
+
+---
+
+## Scoring
+This is a **minimization** problem.
+
+For each test case, the judge computes:
+- `OBJ_you`: your objective value.
+- `OBJ_base`: the objective value of a deterministic internal reference solution computed from that test case.
+
+### Per-test score
+Let:
+- \(B = \mathrm{OBJ\_base}\)
+- \(Y = \mathrm{OBJ\_you}\)
+
+If your output is infeasible, then `score_test = 0`.
+
+Otherwise, the score for that test is:
+\[
+\mathrm{score\_test} = \mathrm{clamp}\left(\frac{B - Y}{\max(B, 10^{-30})},\ 0,\ 1\right)
+\]
+
+This means:
+- matching the baseline gets score `0`
+- improving on the baseline gives a score in `(0, 1]`
+- doing worse than the baseline is clamped to `0`
+
+### Final score
+The checker emits one per-test ratio in `[0, 1]` for each hidden test case.
+The final score is the sum of these per-test ratios, scaled to the total points configured for this problem.
+
+---
+
+## Constraints
+- Time limit: 2 seconds
+- Memory limit: 256 MB
+
+Hidden tests satisfy:
+- \(3 \le n \le 100{,}000\)
+- \(1 \le m \le 200{,}000\)
+- \(1 \le K \le 50\)
+- \(5{,}000 \le S \le 50{,}000\)
+- \(-10^9 \le x_i,y_i \le 10^9\)
+
+---
+
+## Example
+### Sample input
+```
+5 7 2 5000 1234567
+0 0
+10 0
+12 6
+6 12
+-2 7
+0 1
+1 2
+2 3
+3 4
+0 2
+1 3
+0 3
+```
+
+### Sample output
+```
+4 5
+```
+
+### Explanation (high level)
+You chose candidate ropes #4 \((0,2)\) and #5 \((1,3)\). The judge generates 5000 deterministic uniform sample points inside the polygon (using seed 1234567), computes for each point the distance to the nearer of these two segments, averages those distances to get `OBJ_you`, then compares that objective against the judge's deterministic reference objective to compute the normalized score.
+```

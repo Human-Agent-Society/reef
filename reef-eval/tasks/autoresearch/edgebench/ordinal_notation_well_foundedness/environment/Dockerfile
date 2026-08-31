@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.ordinal_notation_well_foundedness:690c1a245369
+WORKDIR /home/workspace/ordinal_notation_wf

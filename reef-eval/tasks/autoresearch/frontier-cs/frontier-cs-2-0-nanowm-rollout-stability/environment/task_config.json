@@ -1,0 +1,62 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 43200,
+    "environment": "Python-only patch against a clean NanoWM checkout (Nano World Models, arXiv:2605.23993); Modal GPU runs a NanoWM-L/2 CSGO long-horizon rollout (the exact length and scored tail are fixed by the judge and not disclosed); minimize long-horizon drift (tail-frame LPIPS) at iso-wall-clock",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/nanowm-rollout-stability-agent:experimental-v0",
+      "judge_image": "frontiercs/nanowm-rollout-stability-judge:experimental-v0"
+    }
+  },
+  "environment": {
+    "cpus": 8,
+    "memory_mb": 32768,
+    "storage_mb": 32768,
+    "build_timeout_seconds": 5400
+  },
+  "evaluation": {
+    "model": "nanowm_l2_csgo",
+    "dataset": "game/csgo",
+    "gpu": "H100",
+    "rollout_length": 80,
+    "history_length": 4,
+    "num_steps": 50,
+    "scheduling": "sequential",
+    "history_stab": 0.02,
+    "drift_tail_start": 60,
+    "rollout_length_min": 64,
+    "rollout_length_max": 72,
+    "tail_frames": 20,
+    "wallclock_tolerance": 0.1,
+    "quick_clips": 8,
+    "final_clips": 22,
+    "batch_size": 2,
+    "chunk_size": 4,
+    "baseline_cache": "/opt/nanowm/baseline/stability_baseline.json"
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch",
+    "max_queue_size": 2
+  }
+}

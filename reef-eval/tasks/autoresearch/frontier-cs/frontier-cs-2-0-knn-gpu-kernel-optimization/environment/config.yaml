@@ -1,0 +1,73 @@
+tag: systems
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "GPU brute-force k-NN kernel optimization. The agent patches the knnlib package; the judge offloads timing to a Modal GPU, comparing the patched nearest-neighbor search against a frozen naive baseline on hidden (Q, M, D, k) workloads with a recall@k (retrieval-quality) gate."
+  apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  judge_apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  judge_pip_packages:
+    - modal
+  docker:
+    # Experimental local images. Build with docker/build_images.sh before a local
+    # Harbor trial. Both are light (ubuntu + modal + git); torch/triton/flashlib
+    # run on the Modal GPU image defined in flash_gpu.py. The agent image bakes
+    # /app/knnlib (git) + /opt/knn_ref + /opt/flash_gpu.py; the judge image
+    # additionally bakes /opt/knnlib-clean.
+    image: frontiercs/knn-gpu-kernel-optimization-agent:experimental-v0.6.0
+    judge_image: frontiercs/knn-gpu-kernel-optimization-judge:experimental-v0.6.0
+environment:
+  cpus: 4
+  memory_mb: 8192
+  storage_mb: 16384
+  build_timeout_seconds: 3600
+evaluation:
+  # --- primitive wiring (consumed by the generic evaluator + flash_gpu) ---
+  primitive: knn
+  pkg: knnlib
+  ref_module: refknn
+  clean_source: /opt/knnlib-clean
+  baseline_source: /opt/knn_ref
+  # --- Modal GPU ---
+  gpu: "H100"
+  cuda_image: "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+  pip: ["torch", "numpy", "h5py"]   # match the original (validated) knn image; torch brings its matched triton. h5py loads SIFT/GIST HDF5
+  app_name: "knn-kernel-opt-eval"
+  dataset_volume: "flashlib-ann-datasets"   # Modal Volume holding sift.hdf5 / gist.hdf5 (ann-benchmarks); mounted read-only at /data
+  modal_timeout_seconds: 3600    # exact brute-force over a 1M-row real database is heavier than the synthetic shapes; give margin
+  warmup_iters: 2
+  timed_iters: 7
+  recall_threshold: 0.88         # ball-recall gate on bf16 data (see knn_ball_recall): a returned neighbour counts if its exact fp32 distance is within the true k-NN ball. bf16 distances tie heavily near rank k, so even a correct bf16 kernel only reaches ~0.94-1.0 (the flashlib reference measured 0.935-1.0). 0.88 clears that with margin while still rejecting a sub-bf16 (e.g. fp8) search, whose coarser distances drop far lower. Precision is pinned by the bf16 DATA, not this threshold.
+  distance_ball_tolerance: 0.0   # relative slack on the k-NN ball radius (the check already carries a 1e-6 absolute epsilon for fp32 reduction jitter)
+  speedup_target: 4.0            # score cap = 2x the flashlib reference geomean on the bf16 real workloads (1.94x on H100: SIFT k10/50/100 = 4.43/2.60/1.48x, GIST = 1.71/1.67/1.10x, ball-recall >=0.94 all 6). bf16 data + modest cuBLAS-cdist headroom keep the factor small.
+  base_seed: 20260701
+  agent_workload_count: 6            # agent's submission feedback covers ALL graded workloads (no blind pass-3/fail-6 cliff); params are agent-visible anyway
+  expose_per_workload_metrics: true  # show per-workload pass/fail so the agent can fix the specific workload it regresses on
+  # REAL-DATA WORKLOADS: exact brute-force k-NN over real descriptor vectors
+  # (SIFT 128d / GIST 960d, 1M-row bases). ANTI-CACHING: every iteration draws a
+  # fresh random Q-subset of the held-out real query set AND a fresh random
+  # M-subset of the real base as the database, so neither the queries nor the
+  # database tensor repeats across calls -- a solution cannot cache a prebuilt
+  # index/norms keyed on a fixed database and skip the timed search (a fixed
+  # database let a trial hit 80x by caching an index instead of writing a fast
+  # kernel). M = database rows drawn per iteration; k varies the neighbour count.
+  # Q <= #queries (SIFT 10000, GIST 1000); M <= base rows (1M).
+  workloads:
+    - {id: sift_k10,  dataset: sift, M: 500000, Q: 1024, k: 10}
+    - {id: sift_k50,  dataset: sift, M: 500000, Q: 1024, k: 50}
+    - {id: sift_k100, dataset: sift, M: 500000, Q: 1024, k: 100}
+    - {id: gist_k10,  dataset: gist, M: 500000, Q: 512,  k: 10}
+    - {id: gist_k50,  dataset: gist, M: 500000, Q: 512,  k: 50}
+    - {id: gist_k100, dataset: gist, M: 500000, Q: 512,  k: 100}
+submission:
+  kind: file
+  path: /app/solution.patch

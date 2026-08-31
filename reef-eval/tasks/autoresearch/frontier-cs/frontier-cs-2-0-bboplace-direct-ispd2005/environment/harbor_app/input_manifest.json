@@ -1,0 +1,88 @@
+{
+  "dataset": "ispd2005",
+  "benchmark": "adaptec1",
+  "benchmark_path": "/app/input/benchmarks/ispd2005/adaptec1",
+  "placer": "mgo",
+  "metric": "mp_hpwl",
+  "objective": "minimize",
+  "dim": 1086,
+  "node_cnt": 543,
+  "net_cnt": 693,
+  "canvas_width": 10692.0,
+  "canvas_height": 10680.0,
+  "canvas_lx": 459,
+  "canvas_ly": 459,
+  "n_grid_x": 224,
+  "n_grid_y": 224,
+  "bounds_kind": "mgo_repeated_grid",
+  "max_candidates_per_submission": 1,
+  "baseline_hpwl": 696000.0,
+  "files": [
+    "adaptec1.aux",
+    "adaptec1.dp.aux",
+    "adaptec1.eplace-ip.pl",
+    "adaptec1.eplace.aux",
+    "adaptec1.lg.pl",
+    "adaptec1.nets",
+    "adaptec1.nodes",
+    "adaptec1.pl",
+    "adaptec1.scl",
+    "adaptec1.wts"
+  ],
+  "submission_path": "/app/solution.json",
+  "coordinate_format": "placement[0:node_cnt] are x-grid coordinates; placement[node_cnt:2*node_cnt] are y-grid coordinates",
+  "macro_selection": {
+    "source_file": "adaptec1.nodes",
+    "selected_nodes": "terminal nodes",
+    "count": 543,
+    "order": "descending width*height area; ties keep adaptec1.nodes file order"
+  },
+  "net_selection": {
+    "source_file": "adaptec1.nets",
+    "count": 693,
+    "rules": [
+      "scan NetDegree records and their pin rows",
+      "keep only pin rows whose node name is one of the 543 selected macros",
+      "within one net, keep only the first pin row for a repeated macro name",
+      "discard nets with fewer than two distinct selected macros",
+      "preserve the remaining net order from adaptec1.nets"
+    ],
+    "degree_histogram": {
+      "2": 516,
+      "3": 51,
+      "4": 90,
+      "5": 13,
+      "6": 8,
+      "7": 3,
+      "8": 10,
+      "10": 1,
+      "349": 1
+    }
+  },
+  "mgo_decode": {
+    "grid": [224, 224],
+    "grid_cell_size": {
+      "width": 47.732142857142854,
+      "height": 47.67857142857143
+    },
+    "bookshelf_to_grid_hint": "Visible .pl coordinates are Bookshelf absolute coordinates. To convert a .pl macro bottom-left coordinate to a requested MGO grid coordinate, use x_grid=(pl_x-canvas_lx)/grid_cell_width and y_grid=(pl_y-canvas_ly)/grid_cell_height.",
+    "coordinate_bounds": {
+      "x": [0, 224],
+      "y": [0, 224]
+    },
+    "coordinate_semantics": "desired MGO grid coordinates; evaluator floors floating coordinates before grid lookup and may move macros during legality repair",
+    "legalizer_rank": {
+      "rank_key": "area_sum",
+      "definition": "For each selected net, net area is the sum of width*height over macros on that net. For each macro, area_sum is the sum of net areas over selected nets containing that macro. Macros are greedily legalized in descending area_sum order; ties keep macro order."
+    },
+    "decode_summary": [
+      "candidate[0:543] and candidate[543:1086] are floored to requested grid ids",
+      "scaled macro size is ceil(width/grid_cell_width), ceil(height/grid_cell_height)",
+      "for each macro in legalizer_rank order, all grid cells that would overlap already placed macros or exceed the legal grid are masked out",
+      "among legal cells, the evaluator minimizes incremental HPWL to nets that already have placed macros, using pin offsets from adaptec1.nets",
+      "ties in incremental HPWL are broken by the L1 physical distance from the requested floored grid coordinate",
+      "the final macro bottom-left position is grid_id_x*grid_cell_width, grid_id_y*grid_cell_height in the evaluator's canvas-local coordinate system"
+    ],
+    "hpwl_summary": "After legalization, MP-HPWL is the sum over the 693 selected nets of (max pin x - min pin x) + (max pin y - min pin y), where pin x/y is macro bottom-left plus half macro size plus the pin offset from adaptec1.nets."
+  }
+}

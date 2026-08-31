@@ -1,0 +1,11 @@
+type: interactive
+
+time: 3s
+memory: 512m
+
+interactor: interactor.cpp
+interactor_type: testlib
+
+subtasks:
+  - score: 100
+    n_cases: 10

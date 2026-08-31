@@ -1,0 +1,109 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a python solution at `/app/solution.patch`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `dbscan_gpu_kernel_optimization`
+Language: `python`
+Time limit: `10800s`
+
+Original problem statement:
+
+# GPU DBSCAN Kernel Optimization
+
+## Problem
+
+You are given a small GPU DBSCAN library, `dbscanlib`, in the Harbor workspace at
+`/app/dbscanlib`. Its public entry point is:
+
+```python
+dbscanlib.dbscan(x, eps, min_samples) -> labels
+```
+
+`x` is an `(N, D)` float32 CUDA tensor of low-dimensional points, `eps` is the
+neighbourhood radius, and `min_samples` is the core-point threshold. It runs
+Euclidean DBSCAN and returns `labels`, an `(N,)` int64 tensor with a cluster id
+`>= 0` per point and `-1` for noise. The shipped implementation is a correct but
+straightforward version.
+
+Your goal is to make `dbscanlib.dbscan` **as fast as possible** on the GPU while
+producing the same clustering. You may rewrite the internals of the package and
+add new modules (including Triton kernels) under `dbscanlib/`. The public
+function signature and return contract must not change, and the result must
+remain a deterministic function of the inputs.
+
+## Workload
+
+The graded workloads are held-out `(N, D)` low-count-cluster point sets with
+`D >= 8`, varying `N`, `D`, cluster count, `eps`, and `min_samples`. Treat it as
+**general Euclidean DBSCAN** and reproduce the *exact* clustering: your labels are
+graded against the exact reference clustering (Adjusted Rand Index), so an
+approximation that only roughly recovers the clusters will not pass. How the point
+sets are generated is not disclosed — solve the general problem, do not special-case.
+
+## Iterate on a GPU
+
+The agent workspace has no GPU, and the data generator is judge-only (it is not in
+your image). To check your current code, **submit it to the judge** — it runs the
+exact graded workloads on a GPU and returns your per-workload result + score. This
+one command packages, submits, and waits for the result:
+
+```bash
+bash /app/public_test.sh
+```
+
+It reports, per graded workload, pass/fail on the quality gate and your speedup,
+plus the geometric-mean speedup and your score (0-100) — the identical evaluation
+used for your final grade. Any workload that fails its gate scores 0. (Equivalently:
+`bash /app/make_submission.sh && bash /app/submit.sh`, then poll with
+`bash /app/submissions.sh`.) Submissions are asynchronous; submit early and iterate.
+
+## Submission
+
+The submitted artifact is a patch over the `dbscanlib` package:
+
+```text
+/app/solution.patch
+```
+
+After editing `/app/dbscanlib`, run `bash /app/make_submission.sh` then
+`bash /app/submit.sh`. Submissions are asynchronous; submit early and iterate.
+The judge applies your patch to a clean copy of `dbscanlib` and times it against
+the original baseline on a GPU, on the same seeded data.
+
+## Correctness
+
+Correctness is a gate. On every timed iteration the judge compares your
+clustering to the baseline's on identical data using the **Adjusted Rand Index**
+(a permutation-invariant clustering-agreement score that also accounts for
+noise), and requires it to stay at or above a high threshold. Crashes,
+non-finite / wrong-shape output, timeouts, and clusterings that disagree with the
+baseline beyond the tolerance are penalized before speed is considered.
+
+## Scoring
+
+Valid submissions are scored by speedup relative to the baseline:
+
+```text
+speedup = baseline_time / your_time
+```
+
+The objective is the geometric mean of per-workload speedups. A result no faster
+than the baseline earns 0; regressions earn 0. The raw geometric-mean speedup is
+reported in the evaluator metrics.
+
+## Patch Policy
+
+Only Python files under `dbscanlib/**` may change. New Python modules inside
+`dbscanlib/` are allowed. Patches may not: modify anything outside `dbscanlib/`;
+import or call an external optimized ML/kernel library (write the kernels
+yourself); read/write environment variables, spawn processes, or access the
+network; or tamper with the measurement framework. The timing harness measures
+your code on freshly generated data every iteration and re-verifies clustering
+agreement each time.
+
+## Resource Budget
+
+```text
+GPU: single Modal GPU (H100 reference; Triton paths also run on L40S / A100)
+Agent container: CPU-only (GPU work is offloaded to Modal)
+```

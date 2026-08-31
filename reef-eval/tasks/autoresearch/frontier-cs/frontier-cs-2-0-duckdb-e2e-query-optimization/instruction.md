@@ -1,0 +1,208 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a cpp solution at `/app/solution.patch`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `duckdb_e2e_query_optimization`
+Language: `cpp`
+Time limit: `10800s`
+
+Original problem statement:
+
+# DuckDB E2E Query Optimization
+
+## Problem
+
+This is an experimental systems task. You are given a pinned DuckDB checkout in
+the Harbor workspace and may modify DuckDB itself. Your goal is to improve
+end-to-end TPC-H style analytical query performance while preserving the
+correctness and generality of DuckDB's SQL execution.
+
+The intended optimization area is end-to-end analytical query optimization:
+join ordering, predicate transfer, join-side filtering, cardinality robustness,
+and closely related optimizer/execution wiring. Strong submissions should
+improve TPC-H geometric mean runtime without hard-coding TPC-H tables, queries,
+benchmark paths, or judge details.
+
+## Workload
+
+The public workload family is DuckDB's built-in TPC-H query set. The public
+scale factor is 1, and the experimental judge evaluates q1 through q22 with
+DuckDB's TPC-H extension, for example by generating data with `CALL dbgen(...)`
+and running queries through `PRAGMA tpch(n)`. DuckDB also exposes its TPC-H
+query text through the extension in normal DuckDB development workflows.
+
+Treat those queries as a representative analytical workload, not as strings to
+recognize. The judge may include additional non-public scale-factor groups, and
+it may vary query order, repetitions, and correctness coverage. Submissions
+should implement general optimizer and execution improvements rather than
+TPC-H-specific special cases.
+
+## Submission
+
+The submitted artifact is a patch file:
+
+```text
+/app/solution.patch
+```
+
+The agent workspace is expected to contain a DuckDB checkout at:
+
+```text
+/app/duckdb
+```
+
+After modifying DuckDB, generate and submit a patch:
+
+```bash
+bash /app/make_submission.sh
+bash /app/submit.sh
+```
+
+Submissions are asynchronous. For this task, submit an initial small, plausible
+patch as soon as it is generated, then continue local review or compilation
+while the judge works. A full local DuckDB build in the agent container can
+consume most of the agent budget and is not required before the first
+submission; the judge builds the submitted patch from a clean prebuilt source
+tree with fixed resource settings.
+
+The judge applies the patch to a clean pinned DuckDB source tree, builds DuckDB
+with the TPC-H extension enabled, and times the evaluated TPC-H queries from
+the judge side. Submitted binaries, build artifacts, generated benchmark files,
+and local timing logs are ignored.
+
+## Correctness
+
+Correctness is a gate. Patched DuckDB must produce the same SQL results as
+vanilla DuckDB on the evaluated workload. Build failures, patch failures,
+incorrect query results, crashes, timeouts, and out-of-memory failures are
+penalized before performance is considered.
+
+The experimental evaluator currently encodes the patch policy, timing
+orchestration, and vanilla-vs-patched TPC-H result comparison inside the custom
+judge image. During iterative asynchronous submissions, the judge keeps feedback
+focused on the public scale-factor TPC-H gate so agents can submit early and
+continue working while evaluation runs. During final verification, the judge
+uses the broader hidden scale-factor set and also runs a small DuckDB
+SQLLogicTest smoke set covering join, filter, and aggregate behavior before
+timing is considered.
+
+## Scoring
+
+Valid submissions are scored by speedup relative to vanilla DuckDB on the same
+hardware, same benchmark list, same clean environment, and same resource limits.
+For each benchmark query:
+
+```text
+speedup = vanilla_time / patched_time
+```
+
+The primary objective is the geometric mean of per-query speedups. The bounded
+score is derived from that geometric mean so that a 1.0x result earns 0 points,
+regressions also earn 0 points, and broad speedups are preferred over a single
+large outlier. The raw geometric mean speedup is reported in evaluator metrics.
+
+## Patch Policy
+
+The evaluator validates the patch before building. The policy is intentionally
+stricter than normal DuckDB development because this task is graded by hidden
+benchmarks.
+
+Allowed optimizer and execution areas:
+
+```text
+src/optimizer/**
+src/include/duckdb/optimizer/**
+src/execution/operator/join/**
+src/include/duckdb/execution/operator/join/**
+src/execution/operator/filter/**
+src/include/duckdb/execution/operator/filter/**
+src/planner/operator/logical_join.cpp
+src/planner/operator/logical_comparison_join.cpp
+src/include/duckdb/planner/operator/logical_join.hpp
+src/include/duckdb/planner/operator/logical_comparison_join.hpp
+```
+
+Conditionally allowed narrow wiring areas:
+
+```text
+src/planner/**
+src/include/duckdb/planner/**
+src/execution/physical_plan/**
+src/include/duckdb/execution/physical_plan/**
+src/common/**
+src/include/duckdb/common/**
+```
+
+New C++ and header files are allowed in these areas. Build-system edits are
+allowed only to add newly introduced `.cpp` files to existing DuckDB build
+targets. Build changes that alter compiler flags, link flags, targets,
+generated code, install paths, external dependencies, benchmark behavior, or
+runtime paths are invalid.
+
+Allowed build-system files:
+
+```text
+CMakeLists.txt
+src/CMakeLists.txt
+src/optimizer/CMakeLists.txt
+src/optimizer/**/CMakeLists.txt
+src/planner/CMakeLists.txt
+src/planner/**/CMakeLists.txt
+src/planner/operator/CMakeLists.txt
+src/common/CMakeLists.txt
+src/common/**/CMakeLists.txt
+src/execution/CMakeLists.txt
+src/execution/operator/CMakeLists.txt
+src/execution/operator/join/CMakeLists.txt
+src/execution/operator/join/**/CMakeLists.txt
+src/execution/operator/filter/CMakeLists.txt
+src/execution/operator/filter/**/CMakeLists.txt
+src/execution/physical_plan/CMakeLists.txt
+src/execution/physical_plan/**/CMakeLists.txt
+extension_config.cmake
+```
+
+Forbidden areas include benchmark files, tests, scripts, TPC-H extension code,
+third-party code, parser/catalog/storage internals, DuckDB main/client context,
+documentation, examples, CI files, package manifests, and timing/scoring code.
+
+Patches may not add environment-variable reads or writes. The judge builds and
+runs both vanilla and patched DuckDB under a minimal fixed environment with no
+Frontier, Harbor, judge, secret, or submission-specific environment variables
+inherited by benchmark subprocesses.
+
+Patches also may not hard-code TPC-H table names, query numbers, benchmark
+names, or benchmark paths in optimizer/execution code.
+
+## Resource Budget
+
+The experimental Harbor budget is:
+
+```text
+vCPUs: 8
+memory: 16 GiB
+storage: 32 GiB
+build timeout: 7200 seconds
+query timeout: 300 seconds
+DuckDB child process address-space limit: 12288 MiB
+```
+
+The judge runs each build and benchmark step in a subprocess with a clean
+environment. DuckDB benchmark runs are configured with fixed thread, memory,
+and temporary-directory limits in the judge image to reduce the chance that a
+bad plan crashes the judge service.
+
+The evaluator runs both vanilla and patched DuckDB with the same SQL runtime
+settings before data generation, correctness checks, and timing:
+
+```sql
+SET threads = 1;
+SET memory_limit = '6GB';
+SET max_temp_directory_size = '2GB';
+SET temp_directory = '<judge temp directory>';
+SET preserve_insertion_order = false;
+```
+
+Subprocesses receive a minimal fixed environment with only basic execution
+paths, locale settings, an isolated home directory, an isolated temp directory,
+and an isolated ccache directory.

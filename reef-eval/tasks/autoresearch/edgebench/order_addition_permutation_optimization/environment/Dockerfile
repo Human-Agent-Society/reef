@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.order_addition_permutation_optimization:f723a1d13d8e
+WORKDIR /home/workspace/complex_job_scheduling

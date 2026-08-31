@@ -1,0 +1,8 @@
+type: interactive
+time: 2s
+memory: 512m
+subtasks:
+  - score: 100
+    n_cases: 1
+interactor: interactor.cc
+checker_type: testlib

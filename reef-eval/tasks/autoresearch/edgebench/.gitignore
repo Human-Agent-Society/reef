@@ -1,0 +1,4 @@
+# All 51 converted task dirs are committed (specs are CC-BY-4.0,
+# (c) ByteDance-Seed, converted verbatim by the local scripts — see README).
+# Only the spec download cache stays local.
+.specs/

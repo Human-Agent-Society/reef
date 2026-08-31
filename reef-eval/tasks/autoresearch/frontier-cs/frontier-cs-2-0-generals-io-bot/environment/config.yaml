@@ -1,0 +1,47 @@
+tag: games
+runtime:
+  language: patch
+  timeout_seconds: 10800
+  environment: "Generals.io bot patch; local generals-bots simulator arena"
+  apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  judge_apt_packages:
+    - bash
+    - ca-certificates
+    - git
+    - python3
+    - python3-pip
+  docker:
+    image: frontiercs/generals-io-bot-agent:experimental-c2b77bf
+    judge_image: frontiercs/generals-io-bot-judge:experimental-c2b77bf
+environment:
+  cpus: 4
+  memory_mb: 8192
+  storage_mb: 8192
+  build_timeout_seconds: 1800
+evaluation:
+  generals_bots_commit: "c2b77bf72812ec91fb2024d80d90112b961dfa7e"
+  arena_seed: 20260608
+  games_per_matchup: 1
+  async_start_method: spawn
+  max_eval_seconds: 240
+  truncation: 180
+  pool_size: 2
+  speed_weight: 0.25
+  grid_sizes:
+    - 10
+  baselines:
+    - random_low_split
+    - expander
+    - strongest_frontier
+    - hunter
+    - fast_pathing
+    - flobot_fast
+submission:
+  kind: file
+  path: /app/solution.patch
+  allow_empty: true

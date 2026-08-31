@@ -1,0 +1,7 @@
+{
+  "kind": "file",
+  "path": "/app/solution.patch",
+  "allow_empty": true,
+  "max_queue_size": 2,
+  "exclude": []
+}

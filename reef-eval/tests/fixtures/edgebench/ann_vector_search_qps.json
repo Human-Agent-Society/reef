@@ -1,0 +1,30 @@
+{
+  "task_id": "ann_vector_search_qps",
+  "name": "Ann Vector Search Qps",
+  "category": "Systems & Software Engineering",
+  "base_image": "python310",
+  "platform": "linux/amd64",
+  "internet": false,
+  "cwd": "/home/workspace/ann-benchmarks",
+  "submit_paths": [
+    "ann_benchmarks/algorithms/custom/"
+  ],
+  "work": {
+    "image_tag": "74bf3ba9a919",
+    "specs_dir": "/home/workspace/ann-benchmarks",
+    "agent_query": "## Role\n\nYou are an expert in approximate nearest neighbor (ANN) search. Your job is to maximize **QPS** (queries per second) on the SIFT-1M dataset (1M × 128-d vectors, 10K queries) under the ann-benchmarks framework, while keeping **Recall@10 ≥ 0.95**.\n\n---\n\n## Repository Layout\n\n- `run.py` — evaluation driver (already present)\n- `ann_benchmarks/algorithms/` — algorithm plugins; each algorithm subclasses `BaseANN` and registers in its own `config.yml`\n- `ann_benchmarks/algorithms/custom/` — **your** slot; contains a baseline `module.py` (brute-force numpy) and a `config.yml` naming the algorithm `custom`\n- `data/sift-128-euclidean.hdf5` — dataset (pre-downloaded, contains `train` and `test` arrays)\n\n---\n\n## What To Do\n\n1. Read `README.md`, `ann_benchmarks/algorithms/README.md`, and look at existing algorithms (e.g. `ann_benchmarks/algorithms/faiss/`) for reference implementations.\n2. Improve `ann_benchmarks/algorithms/custom/module.py` — implement a faster `fit()` + `query()` using FAISS (`faiss-cpu` is pre-installed) or a custom implementation. Keep the class name `Custom` and the module path `ann_benchmarks.algorithms.custom`.\n3. You may tune hyperparameters via `ann_benchmarks/algorithms/custom/config.yml` (IVF nlist, HNSW M/efConstruction, PQ subquantizers, etc.).\n4. For local runs after each change:\n   ```bash\n   python run.py --local --algorithm custom --dataset sift-128-euclidean -k 10 --runs 1 --run-disabled\n   ```\n   The benchmark prints QPS and recall metrics to the console. Use these to track your progress.\n\n---\n\n## Optimization Directions (suggestions)\n\n- IVF bucketing (nlist, nprobe)\n- HNSW (M, ef, efConstruction)\n- Product Quantization (subquantizers, bits)\n- Two-level routing (IVF-HNSW, IVF-PQ)\n- Early termination on candidate scan\n- Multi-threaded search (omp_set_num_threads)\n\nGLM-5.1 reference: 3108 QPS → 21472 QPS (6.9×) over 655 iterations.\n\n---\n\n## Scoring Integrity (CRITICAL)\n\nThe evaluation system independently measures query latency and verifies search results against the ground truth. Your score is determined by the actual search performance of your algorithm.\n\nYou must NOT:\n- Read or access ground truth data (the `neighbors` dataset) during query execution\n- Override timing attributes or manipulate benchmark measurements (e.g., via `get_additional()`)\n- Monkey-patch the `time` module or any benchmark framework internals\n- Attempt to fabricate or inflate scores through any means other than legitimate algorithmic improvements\n\nAny attempt to manipulate scores will result in score=0 and the submission marked as hack.\n\n---\n\n## Rules\n\n- Keep the algorithm name `custom` and leave its config discoverable via `python run.py --list-algorithms`\n- Do NOT modify `run.py` or any file outside `ann_benchmarks/algorithms/custom/`\n- Recall@10 < 0.95 on a config makes that config invalid (score = 0)\n- Final score is the **highest QPS** among valid (recall-passing) configs\n"
+  },
+  "judge": {
+    "image_tag": "9171f6b6de41",
+    "eval_cmd": "cd /home/workspace/ann-benchmarks && python3 /tmp/eval_ann_search.py",
+    "eval_timeout": 7800,
+    "parser": "score_sum",
+    "score_direction": "maximize",
+    "selection": "score_first",
+    "rescale": {
+      "kind": "log_max",
+      "baseline": 3108.0,
+      "expert": 21472.0
+    }
+  }
+}

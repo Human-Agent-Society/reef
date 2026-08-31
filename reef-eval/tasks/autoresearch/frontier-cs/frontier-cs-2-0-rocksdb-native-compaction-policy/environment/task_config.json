@@ -1,0 +1,85 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "cpp",
+    "timeout_seconds": 10800,
+    "environment": "Patch a pinned RocksDB v10.10.1 checkout; native correctness and compaction-cost judge",
+    "apt_packages": [
+      "bash",
+      "build-essential",
+      "ca-certificates",
+      "git",
+      "libbz2-dev",
+      "libgflags-dev",
+      "liblz4-dev",
+      "libsnappy-dev",
+      "libzstd-dev",
+      "zlib1g-dev"
+    ],
+    "docker": {
+      "image": "python:3.12-slim-bookworm",
+      "judge_image": "frontiercs/rocksdb-native-compaction-judge:experimental-v10.10.1-task2"
+    },
+    "visible_inputs": [
+      {
+        "source": "/opt/rocksdb-clean",
+        "destination": "/app/rocksdb"
+      }
+    ]
+  },
+  "environment": {
+    "cpus": 8,
+    "memory_mb": 16384,
+    "storage_mb": 32768,
+    "build_timeout_seconds": 7200
+  },
+  "evaluation": {
+    "schema_version": "rocksdb-native-compaction-v2",
+    "public_suite_id": "rocksdb-native-public-v2",
+    "final_suite_id": "rocksdb-native-final-v2",
+    "rocksdb_commit": "4595a5e95ae8525c42e172a054435782b3479c57",
+    "feedback_cases": [
+      {
+        "seed": 1101,
+        "profile": "smoke"
+      },
+      {
+        "seed": 1202,
+        "profile": "l0_pressure"
+      },
+      {
+        "seed": 1303,
+        "profile": "range_snapshot"
+      },
+      {
+        "seed": 1404,
+        "profile": "scanmix"
+      },
+      {
+        "seed": 1505,
+        "profile": "multi_cf"
+      },
+      {
+        "seed": 1606,
+        "profile": "time_series"
+      },
+      {
+        "seed": 1707,
+        "profile": "difficulty"
+      },
+      {
+        "seed": 1808,
+        "profile": "overlap_rewrite"
+      }
+    ],
+    "build_timeout_seconds": 7200,
+    "run_timeout_seconds": 1800,
+    "build_jobs": 3
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch",
+    "allow_empty": true,
+    "max_queue_size": 2
+  }
+}

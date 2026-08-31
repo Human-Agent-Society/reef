@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.warehouse_forklift_routing:7a86216250d8
+WORKDIR /home/workspace/warehouse_manager

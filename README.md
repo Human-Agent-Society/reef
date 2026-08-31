@@ -17,6 +17,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
+The companion evaluation toolkit lives in [`reef-eval/`](reef-eval/).
+
 Reef is infrastructure that serves an entire continual learning backend. Reef
 exposes standardized http endpoints so that you can download agents just like
 how you download `codex` or `opencode` using `curl`, and so that your agent can

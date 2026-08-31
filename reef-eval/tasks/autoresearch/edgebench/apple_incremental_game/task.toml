@@ -1,0 +1,32 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/apple_incremental_game/solution.py"]
+
+[task]
+name = "edgebench/apple_incremental_game"
+description = "Apple Incremental Game"
+
+[metadata]
+benchmark = "edgebench"
+category = "Combinatorial Optimization"
+judge_parser = "score_sum"
+score_direction = "maximize"
+rescale_kind = "piecewise_max"
+rescale_baseline = 45000000.0
+rescale_rank30 = 262328915.6667
+rescale_rank1 = 282791094.0
+rescale_super_anchor = 289952856.4167
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

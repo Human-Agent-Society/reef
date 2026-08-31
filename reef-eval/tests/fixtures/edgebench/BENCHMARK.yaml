@@ -1,0 +1,130 @@
+name: edgebench
+base_images:
+  java:
+    official_image: maven:3.9-eclipse-temurin-17
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+    - ant
+    - unzip
+    - python3
+  rust:
+    official_image: rust:1.78
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+  python:
+    official_image: python:3.11
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+  python310:
+    official_image: python:3.10
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+  cpp:
+    official_image: ubuntu:22.04
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+    - cmake
+    - gcc
+    - g++
+    - libffi-dev
+    - pkg-config
+    - ca-certificates
+  coq:
+    official_image: coqorg/coq:8.20
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+    - gcc
+    - g++
+    - python3
+    - make
+    - procps
+    user_directive: 'USER root
+
+      '
+    post_install_directive: 'ENV PATH="/home/coq/.opam/${COMPILER}/bin:${PATH}"
+
+      RUN chmod -R a+rX /home/coq/.opam
+
+      ENTRYPOINT []
+
+      '
+  lean_4_28_0_main:
+    official_image: ubuntu:22.04
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+    - gcc
+    - g++
+    - python3
+    - make
+    - procps
+    - ca-certificates
+    user_directive: 'USER root
+
+      '
+    post_install_directive: 'ENV ELAN_HOME=/opt/elan
+
+      ENV PATH="/opt/elan/bin:${PATH}"
+
+      RUN mkdir -p /opt/elan && chown -R agent:agent /opt/elan
+
+      RUN curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
+      -sSf | env ELAN_HOME=/opt/elan sh -s -- -y --default-toolchain none
+
+      WORKDIR /home/workspace
+
+      RUN lake +leanprover/lean4:v4.28.0 new baseline math
+
+      ENTRYPOINT []
+
+      '
+  lean_4:
+    official_image: ubuntu:22.04
+    extra_packages:
+    - git
+    - curl
+    - jq
+    - build-essential
+    - gcc
+    - g++
+    - python3
+    - make
+    - procps
+    - ca-certificates
+    user_directive: 'USER root
+
+      '
+    post_install_directive: 'ENV ELAN_HOME=/opt/elan
+
+      ENV PATH="/opt/elan/bin:${PATH}"
+
+      RUN mkdir -p /opt/elan && chown -R agent:agent /opt/elan
+
+      RUN curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh
+      -sSf | env ELAN_HOME=/opt/elan sh -s -- -y --default-toolchain none
+
+      WORKDIR /home/workspace
+
+      ENTRYPOINT []
+
+      '

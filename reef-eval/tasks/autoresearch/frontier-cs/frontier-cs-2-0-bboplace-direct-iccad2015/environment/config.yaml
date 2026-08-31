@@ -1,0 +1,21 @@
+tag: optimization
+runtime:
+  language: json
+  timeout_seconds: 10800
+  environment: "JSON placement for one visible ICCAD2015 BBOPlace design; hidden evaluator"
+  apt_packages:
+    - python3-numpy
+  docker:
+    image: ubuntu:24.04
+    judge_image: ghcr.io/frontiercs/frontiercs-bboplace-data:2026-06-ispd-iccad
+  visible_inputs:
+    - source: /opt/bboplace-bench/benchmarks/iccad2015/superblue1
+      destination: /app/input/benchmarks/iccad2015/superblue1
+submission:
+  kind: file
+  path: /app/solution.json
+environment:
+  cpus: 4
+  memory_mb: 16384
+  storage_mb: 8192
+  build_timeout_seconds: 3600

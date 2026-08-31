@@ -1,0 +1,268 @@
+BBOPlace Direct ICCAD2015
+========================
+
+Problem
+-------
+
+Directly submit one JSON macro-placement vector for one visible ICCAD2015
+design: `superblue1`. The hidden judge evaluates your vector with the original
+BBOPlace-Bench Mask-Guided Optimization (MGO) MP-HPWL evaluator.
+
+This is a VLSI chip-placement optimization task. A chip design contains many
+rectangular objects. Large objects are called macros, smaller logic objects are
+called standard cells, and nets describe which pins on those objects must be
+connected by wires. A placement assigns physical locations to movable objects
+on a rectangular chip canvas. Good placements keep connected objects near each
+other while avoiding illegal macro overlap and boundary violations.
+
+This direct variant gives you the raw `superblue1` ICCAD2015 input files in the
+agent workspace. You may parse those files, run local search, generate many
+trial JSON files, and call the submit helper for feedback. Only the final
+`/app/solution.json` artifact is graded.
+
+Your JSON vector is not a final DEF placement. It is a BBOPlace MGO genotype:
+one desired grid coordinate for each selected macro. The hidden evaluator
+decodes the vector by placing macros on a 2D grid, masking out illegal grid
+positions, greedily adjusting macros to legal positions, and then reporting
+macro-placement half-perimeter wirelength (MP-HPWL). Lower MP-HPWL is better.
+
+Background definitions
+----------------------
+
+A net connects two or more pins. The half-perimeter wirelength of one net is:
+
+```text
+(max pin x - min pin x) + (max pin y - min pin y)
+```
+
+HPWL is the sum of that value over nets. MP-HPWL is the same idea restricted to
+the macro-placement evaluation path used by BBOPlace-Bench. The judge reports
+only MP-HPWL for scoring; it does not run global placement of standard cells.
+
+ICCAD2015 uses an LEF/DEF-style flow. For this task the visible files have
+these roles:
+
+```text
+.def          design components, floorplan, rows, and initial placements
+.lef          macro geometry and pin shapes
+.v            logical netlist used to select macro-to-macro nets
+.sdc          timing constraints, not used by the MP-HPWL evaluator
+*_Early.lib   early timing library, not used by the MP-HPWL evaluator
+*_Late.lib    late timing library, not used by the MP-HPWL evaluator
+```
+
+Useful ICCAD parsing notes:
+
+- `.def` component coordinates are in database units. The official MGO canvas
+  constants for this task are also provided in `/app/input_manifest.json`.
+- `.lef` contains the macro sizes and pin rectangles needed for a local
+  macro-only model.
+- `.v` contains the logical instance-to-net connections used to build
+  macro-to-macro nets for MP-HPWL.
+- `.sdc` and `.lib` files are present for completeness but are not needed by
+  the MP-HPWL scoring path.
+
+You do not need to reproduce the official HPWL or legalizer exactly to submit a
+valid JSON. Local parsers are useful only for choosing better coordinates before
+calling `/app/submit.sh`.
+
+Runtime and resources
+---------------------
+
+Your final submission is a JSON file at `/app/solution.json`. You are encouraged
+to write Python programs, shell scripts, search loops, local parsers, or any
+other helper code in `/app` while working. Those programs may generate and
+overwrite `/app/solution.json` many times.
+
+The agent container provides:
+
+- 4 CPU cores
+- 16 GiB memory
+- 8 GiB storage
+- no GPU
+- Python 3 with NumPy available for local helper scripts
+- the `superblue1` benchmark input is available in the agent workspace at
+  `/app/input/benchmarks/iccad2015/superblue1`
+
+The judge also runs on CPU only. Do not rely on CUDA, DREAMPlace, Ray, or GPU
+placement libraries for scoring.
+
+Visible input files
+-------------------
+
+The agent can inspect the raw ICCAD2015 placement input while generating
+`/app/solution.json`:
+
+```text
+/app/input_manifest.json
+/app/input/benchmarks/iccad2015/superblue1/superblue1.def
+/app/input/benchmarks/iccad2015/superblue1/superblue1.iccad2015
+/app/input/benchmarks/iccad2015/superblue1/superblue1.lef
+/app/input/benchmarks/iccad2015/superblue1/superblue1.v
+/app/input/benchmarks/iccad2015/superblue1/superblue1.sdc
+/app/input/benchmarks/iccad2015/superblue1/superblue1_Early.lib
+/app/input/benchmarks/iccad2015/superblue1/superblue1_Late.lib
+```
+
+The evaluator implementation and scoring runtime remain hidden in the judge
+image.
+
+`/app/input_manifest.json` is the machine-readable public data channel for
+instance-specific values and evaluator-facing conventions. Read it instead of
+hard-coding dimensions or inferring hidden details from feedback. It includes
+the placement dimension, macro count, grid bounds, canvas information, scoring
+baseline, macro-selection rule, selected-net rule, and a concise description of
+the MGO decode/legalization behavior. Together with the visible LEF/DEF/Verilog
+files, that manifest is intended to be sufficient for building a useful local
+model; external repositories or internet search should not be needed.
+
+Submission format
+-----------------
+
+Submit exactly one placement for `superblue1` by writing `/app/solution.json`.
+After your program writes the file, call:
+
+```bash
+bash /app/submit.sh
+```
+
+to score that JSON through the black-box judge.
+
+The JSON must use one of these forms:
+
+```json
+{"placement": [0.0, 0.0, 1.0, 1.0]}
+```
+
+or:
+
+```json
+{"x": [0.0, 1.0], "y": [0.0, 1.0]}
+```
+
+For smoke testing, this shorthand is also accepted:
+
+```json
+{"fill": 0.0}
+```
+
+`{"fill": v}` expands inside the evaluator to a full vector where every
+coordinate is `v`. It is a convenient way to create a syntactically valid smoke
+test submission.
+
+The placement vector length must equal `dim = 2 * node_cnt = 1024`. The first
+`node_cnt` entries are x-grid coordinates and the remaining `node_cnt` entries
+are y-grid coordinates:
+
+```text
+placement[0:node_cnt]              = x-grid coordinates
+placement[node_cnt:2 * node_cnt]   = y-grid coordinates
+```
+
+Coordinates must be finite. X coordinates must be in `[0, n_grid_x]`; y
+coordinates must be in `[0, n_grid_y]`. Coordinates may be integers or floats.
+Only one placement is accepted.
+
+The public metadata needed for formatting is available before submission in
+`/app/input_manifest.json`. Judge feedback reports scores and MP-HPWL metrics;
+it should not be needed to discover vector dimensions, macro count, grid bounds,
+or MGO decode conventions. The evaluator source stays hidden in the judge
+image.
+
+Tiny example
+------------
+
+Suppose a very small toy instance had this public metadata:
+
+```text
+node_cnt = 2
+dim = 4
+n_grid_x = 10
+n_grid_y = 8
+```
+
+Then this JSON:
+
+```json
+{"placement": [2.0, 7.5, 1.0, 6.0]}
+```
+
+means:
+
+```text
+macro 0 desired MGO grid coordinate: (2.0, 1.0)
+macro 1 desired MGO grid coordinate: (7.5, 6.0)
+```
+
+The equivalent split x/y form is:
+
+```json
+{"x": [2.0, 7.5], "y": [1.0, 6.0]}
+```
+
+Minimal valid artifact
+----------------------
+
+The repository reference solution is:
+
+```json
+{"fill": 0.0}
+```
+
+A small Python generator that writes a random in-bounds candidate from the
+manifest can look like:
+
+```python
+import json
+import numpy as np
+from pathlib import Path
+
+manifest = json.loads(Path("/app/input_manifest.json").read_text())
+node_cnt = int(manifest["node_cnt"])
+n_grid_x = float(manifest["n_grid_x"])
+n_grid_y = float(manifest["n_grid_y"])
+
+rng = np.random.default_rng(1)
+x = rng.uniform(0.0, n_grid_x, size=node_cnt).tolist()
+y = rng.uniform(0.0, n_grid_y, size=node_cnt).tolist()
+
+with open("/app/solution.json", "w", encoding="utf-8") as f:
+    json.dump({"x": x, "y": y}, f)
+```
+
+Validity
+--------
+
+A submission is valid if:
+
+1. `/app/solution.json` is valid JSON.
+2. It describes exactly one placement through `placement`, `x` plus `y`,
+   `candidate`, `candidates`, or `fill`.
+3. The expanded placement has exactly `1024` finite numeric values.
+4. X coordinates are in `[0, 224]` and y coordinates are in `[0, 224]`.
+5. BBOPlace can legalize the submitted candidate.
+
+Invalid submissions, out-of-bounds coordinates, malformed JSON, and candidates
+that cannot be legalized receive score `0`.
+
+Scoring
+-------
+
+The objective is to minimize MP-HPWL for `superblue1`:
+
+```text
+raw_score = 100 * (baseline_hpwl - candidate_hpwl) / baseline_hpwl
+score = max(0, raw_score)
+```
+
+The baseline constant is from the BBOPlace-Bench report, Table V, `MGO + PSO`
+MP-HPWL. The report uses units of `x10^5`; the judge stores the raw HPWL value
+relaxed by `1.2x`:
+
+```text
+superblue1  0.696e5
+```
+
+Both iterative submissions and final verification evaluate this same single
+design. The submit helper may still save the best iterative JSON artifact and
+rerun it during final verification.

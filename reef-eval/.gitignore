@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.venv-docs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+runs/
+site/
+# swebench-verified upstream has no license, so its tasks are fetched, never
+# committed. terminal-bench and cl-bench tasks ARE committed (Apache-2.0);
+# only cl-bench's download cache stays out.
+tasks/continual-learning/swebench-verified/*/
+tasks/continual-learning/cl-bench/.data/
+# 2.6 GB of judge test data for the algorithmic track, fetched on demand.
+tasks/autoresearch/frontier-cs/.problems/
+tasks/autoresearch/frontier-cs/*/environment/.env
+dist/
+build/
+smoke/
+uv.lock
+.DS_Store
+.vercel
+.env*

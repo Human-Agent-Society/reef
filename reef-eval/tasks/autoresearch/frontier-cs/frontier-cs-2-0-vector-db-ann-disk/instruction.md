@@ -1,0 +1,201 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create or modify the project under `/app`. You can call `bash /app/submit.sh` at any time to package a snapshot of `/app` and enqueue it for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation and hidden benchmark data are intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow. The task statement defines the required build and runtime contract.
+
+Final submission path: `/app`
+
+Problem id: `vector_db_ann_disk`
+Language: `rust`
+Time limit: `10800s`
+
+Original problem statement:
+
+# Vector DB ANN Disk
+
+## Problem
+
+Build a fast approximate nearest-neighbor vector search engine for a
+SIFT100M-scale benchmark.
+
+The hidden benchmark contains exactly `100,000,000` base vectors with dimension
+`128`. Queries use the same dimension, distance is squared Euclidean distance,
+and each query asks for the top `10` nearest vector ids.
+
+The benchmark provides a pre-built graph index generated using the [DiskANN](https://github.com/g4197/FreshDiskANN-baseline)
+construction algorithm. The graph has a bounded maximum degree and is stored on
+disk. Your objective is to maximize serving throughput while preserving search
+quality: submissions must reach `recall@10 >= 0.95`, and valid submissions are
+ranked by query throughput.
+
+The Harbor agent container starts with a small Rust skeleton project in
+`/app`. You may use it, modify it, or replace it entirely. You may also use any
+Rust crates, internal harness, data structures, and build layout you want, as
+long as the final project satisfies the judge contract below.
+
+The judge builds and runs your service with:
+
+```bash
+cargo build --release
+PORT=<port> cargo run --release --quiet
+```
+
+The Harbor environment uses the Ubuntu `apt` Rust toolchain:
+
+```text
+rustc 1.75
+cargo 1.75
+```
+
+If you add crates, choose versions compatible with this toolchain or pin
+transitive dependencies accordingly.
+
+The service and judge run with the task resource limits below. Design your
+search strategy for this budget:
+
+```text
+vCPUs: 8
+memory: 8 GiB
+query concurrency: 8
+```
+
+The graph and vector data may be substantially larger than the available
+memory. Submissions may load any information they deem useful into memory
+during the load phase, subject to the memory limit above.
+
+The load phase is executed once before queries begin and must complete within:
+
+```text
+600 seconds
+```
+
+The service must listen on `PORT` and implement these endpoints:
+
+```text
+POST /load
+POST /search
+```
+
+Important: submissions must implement an online ANN service that answers each
+`/search` using the index and vectors provided through `/load`. Query vectors are
+supplied by the evaluator at request time. Results must come from searching the
+provided index; do not hardcode answers or rely on any precomputed or external
+data. Any attempt to obtain results other than by searching the provided index is
+outside the task contract and is treated as invalid.
+
+Optimization guidance: after a valid graph-based ANN implementation exists,
+minor parameter sweeps over search-list size, beam width, or cache limits tend
+to provide limited gains. Prefer substantive algorithmic and I/O improvements,
+such as better graph traversal, batching/asynchronous disk reads, candidate
+management, vector/PQ distance computation, and cache design. A well-designed
+ANN algorithmic change is expected to be a better acceleration path than
+repeated manual tuning of a few constants.
+
+`/load` receives the paths to the pre-built index and vector data:
+
+```json
+{
+    "index_path":"graph.bin",
+    "vector_path":"vectors.bin",
+    "vector_dtype":"uint8",
+    "pq_compressed_path":"pq_compressed.bin",
+    "pq_pivots_path":"pq_pivots.bin"
+}
+```
+
+For compatibility, the service should also accept `graph_path` as an alias for
+`index_path`, and `pq_vector_path` as an alias for `pq_compressed_path`.
+`vector_dtype` is optional and may be `float32`, `uint8`, or `int8`; do not
+assume the vector file stores `float32` rows. These files follow the same format
+and organization as those in the [provided repository](https://github.com/g4197/FreshDiskANN-baseline);
+you can refer to it to load the graph, compressed vectors, and other required
+data structures.
+
+and returns:
+
+```json
+{
+    "status":"ok"
+}
+```
+
+`/search` receives:
+
+```json
+{"vector":[0.1,0.2,...],"top_k":10}
+```
+
+and returns:
+
+```json
+{"results":[{"id":0,"distance":0.0}]}
+```
+
+## Local Harness
+
+The official evaluator uses hidden data and a black-box judge. You may call:
+
+```bash
+bash /app/submit.sh
+```
+
+at any time to submit the current `/app` project to the official judge and get
+score feedback.
+
+Each evaluation rebuilds your project, runs `/load` once (loading the on-disk
+index can take tens of seconds), then runs the timed query phase, so a single
+submission takes on the order of a few minutes to score. Submissions are
+asynchronous: prefer to let a running evaluation finish and read its score
+rather than cancelling and resubmitting repeatedly. To keep iterative feedback
+responsive, an agent `submit.sh` evaluation times only a representative subset
+of the query set (see below); the final score is always computed over the full
+set.
+
+## Validity
+
+A submission is valid if:
+
+1. It builds successfully with `cargo build --release`.
+2. `cargo run --release --quiet` starts the service and implements the required HTTP
+   endpoints.
+3. Every returned id is in `[0, 100_000_000)`.
+4. Its `recall@10` is at least `0.95` against the hidden exact top-10 ground
+   truth.
+5. The `/load` phase completes within `600` seconds.
+
+## Scoring
+
+Each submission is scored against a hidden exact top-10 ground truth and a
+reference throughput baseline (`baseline_qps`) measured under the same `/load`
+and `/search` harness.
+
+The load phase consists of a single `/load` call. Any preprocessing performed
+during `/load` must complete within the timeout above.
+
+After the load phase completes, the query phase uses 8 concurrent workers to
+issue the timed query set and measures only `/search` throughput
+(`candidate_qps`). The reported `qps` is the raw query-only QPS.
+
+If the submission is invalid, if `recall@10 < 0.95`, or if
+`candidate_qps <= baseline_qps`, the score is `0`.
+
+Otherwise:
+
+```text
+score = 100 * (1 - sqrt(baseline_qps) / sqrt(candidate_qps))
+```
+
+The bounded and unbounded score fields both report this score. Harbor JSON
+results include the measured `qps`, `baseline_qps`, `recall_at_10`, load time,
+and runtime metrics under the `metrics` field.
+
+### Iterative feedback vs. final scoring
+
+To make the `submit.sh` loop responsive, an iterative (agent) submission times
+only a representative subset of the query set (`2000` queries by default) and
+reports it as a fast estimate; its message is prefixed with `[iterative]` and
+states how many queries were used. The **final verifier** always times the full
+query set (`Q = 10000`) and reports the authoritative `[final]` score using the
+exact same scoring rule. recall@10 and QPS are stable averages, so the iterative
+estimate closely tracks the final score; use it to iterate quickly, and rely on
+the final score for the definitive number. (The subset size is the `metrics`
+field `n_queries`; the full count is `n_queries_full`.)

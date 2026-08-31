@@ -1,0 +1,83 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a python solution at `/app/solution.patch`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `nanowm_rollout_speedup`
+Language: `python`
+Time limit: `21600s`
+
+Original problem statement:
+
+# NanoWM Rollout Speedup — fast diffusion sampling for a frozen video world model
+
+## Problem
+
+You are given a clean checkout of **Nano World Models** (arXiv:2605.23993) and
+its frozen **NanoWM-L/2 CSGO** checkpoint — a diffusion-forcing video world model.
+The judge runs a **fixed** autoregressive long-rollout: from 4 context frames,
+generate **50 future frames** of held-out CSGO gameplay, sequential scheduling,
+nominal **50 DDIM steps**.
+
+Your job: **make that rollout faster** by submitting a **Python-only patch** to
+the diffusion **sampling** code, **without degrading rollout quality**. Score is
+wall-clock speedup over the unpatched baseline, gated by a quality guardrail.
+
+This is a real fast-sampling problem: the paper's Fig. 6 shows DDIM step count
+genuinely trades off against rollout quality on CSGO (unlike saturated toy
+domains). Naively cutting steps degrades quality and fails the guardrail; to win
+you must reproduce ~50-step quality with less compute — DPM-Solver++ / higher-order
+or exponential integrators, KV/feature caching across denoising steps and frames,
+mixed precision, `torch.compile`, fused attention, redundancy elimination, etc.
+
+## What you submit
+
+A unified-diff patch at **`/app/solution.patch`** against the checkout in
+`/app/nano-world-model`. **Python source only**, and only within the diffusion
+sampling layer:
+
+**Allowed:** `src/diffusion/**.py`, `src/sample/sampling_utils.py`
+**Denied:** the model architecture (`src/models/**`), VAE (`src/latent_codecs/**`),
+the metric (`src/sample/evaluate_metrics.py`), the rollout harness
+(`src/sample/rollout.py`), data loading (`src/wm_datasets/**`), training/eval
+harness, and any native/build/dependency files. New `.py` files inside the
+allowed areas are fine. Patches are validated **before** running.
+
+The rollout invocation (length, context, nominal step count, scheduling) is
+**fixed by the judge** — you change the sampler internals, not the call. Patches
+that read judge/Modal/HF env vars, hard-code episode ids or ground truth,
+short-circuit/sleep, or special-case the benchmark are rejected.
+
+## Evaluation & scoring
+
+- The judge applies your patch to a clean checkout and runs the fixed CSGO
+  rollout on hidden held-out episodes on a **GPU (served via Modal)**. Iterative
+  (`bash /app/submit.sh`) uses a small quick set; the final verifier uses a
+  larger disjoint set.
+- **Quality guardrail:** rollout **LPIPS vs ground truth** must not rise more
+  than `quality_tolerance` (default **3%**) above the unpatched seq@50 baseline.
+  (Calibration: seq@20 is already +5% over seq@50, so naive step-cutting fails
+  this — real fast-sampling is required.)
+- **Score:**
+
+```
+geomean_speedup = baseline_seconds / patched_seconds   (rollout generation)
+score           = clip(100 * log2(geomean_speedup), 0, 100) * quality_multiplier
+```
+
+  `quality_multiplier` is 1.0 within tolerance and decays inverse-proportionally
+  beyond it. `score_unbounded` keeps rewarding speedup past 2× (the bounded score
+  caps at 100). A patch that degrades quality past tolerance is penalized toward
+  0; one that crashes, exceeds limits, or violates the patch policy scores 0.
+
+## Resource budget
+
+CPU agent + judge containers (8 CPU / 32 GB); one Modal GPU per evaluation.
+Evaluation timeout 21600 s. Submission queue depth 2.
+
+## Getting started
+
+`/app/nano-world-model` is the checkout you patch. `bash /app/public_test.sh`
+runs a tiny local policy check on your `solution.patch`. See `AGENT.md` and
+`harbor/app/README.md` for the submission workflow, and the paper / `docs/` for
+the sampling code you'll be optimizing (`src/diffusion/df_sample.py`,
+`gaussian_diffusion.py`).

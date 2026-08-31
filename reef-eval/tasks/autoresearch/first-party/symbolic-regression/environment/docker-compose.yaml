@@ -1,0 +1,29 @@
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+    environment:
+      JUDGE_URL: "http://judge:8082"
+      # VERIFIER_JUDGE_URL is intentionally NOT set here — the verifier
+      # derives it from JUDGE_URL by incrementing the port. Setting it
+      # would expose the verifier endpoint to the agent.
+
+  judge:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: Dockerfile.judge
+    command: ["python3", "/judge/judge_server.py"]
+    # Explicit networking keeps the judge OUT of Harbor's egress-control
+    # namespace under allowlist mode: it stays on the bridge network with
+    # the DNS name "judge", which allowed_hosts = ["judge"] permits.
+    networks: [default]
+    environment:
+      PORT: "8082"
+      VERIFIER_PORT: "8083"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 3s

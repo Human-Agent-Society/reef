@@ -1,0 +1,83 @@
+{
+ "band_width": 168.0,
+ "channels": [
+  {
+   "center_freq": 7.86,
+   "bandwidth": 15.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 31.58,
+   "bandwidth": 15.0,
+   "active_this_scan": true,
+   "power_dbm": -40.0
+  },
+  {
+   "center_freq": 55.8,
+   "bandwidth": 15.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 79.62,
+   "bandwidth": 15.0,
+   "active_this_scan": true,
+   "power_dbm": -40.0
+  },
+  {
+   "center_freq": 103.31,
+   "bandwidth": 15.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 127.34,
+   "bandwidth": 15.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 151.17,
+   "bandwidth": 15.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 19.11,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 43.91,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 67.73,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 91.82,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 115.15,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  },
+  {
+   "center_freq": 139.6,
+   "bandwidth": 5.0,
+   "active_this_scan": false,
+   "power_dbm": -60.0
+  }
+ ]
+}

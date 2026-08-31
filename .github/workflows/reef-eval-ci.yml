@@ -1,0 +1,55 @@
+name: reef-eval-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "reef-eval/**"
+      - ".github/workflows/reef-eval-ci.yml"
+  pull_request:
+    paths:
+      - "reef-eval/**"
+      - ".github/workflows/reef-eval-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: reef-eval
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install uv
+          uv venv
+          uv pip install -e ".[dev]"
+      - name: Lint and type check
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+          uv run mypy
+      - name: Test
+        run: uv run pytest tests/ -q
+      - name: Offline smoke tests
+        run: |
+          uv run python examples/quickstart.py
+          uv run python examples/stream_quickstart.py
+          uv run reef-eval list
+          uv run reef-eval run autoresearch/first-party --agent oracle --fake --lab runs/ci-smoke
+          uv run reef-eval stream autoresearch/first-party --name ci-week --agent oracle --fake --lab runs/ci-smoke
+          uv run reef-eval report --lab runs/ci-smoke

@@ -1,0 +1,79 @@
+tag: systems
+runtime:
+  # Submission is a Python-only source patch (the real reference is
+  # reference.patch). `language: python` keeps the file extension/CLI conventions
+  # standard (mirrors vllm_llm_serving_optimization, #145); there is no separate
+  # "patch" language in the framework.
+  language: python
+  timeout_seconds: 21600
+  environment: >-
+    Python-only patch against a clean NanoWM checkout (Nano World Models,
+    arXiv:2605.23993); Modal GPU runs the NanoWM-L/2 CSGO 50-frame long-rollout;
+    speedup-vs-baseline judge with an LPIPS rollout-quality guardrail
+  apt_packages:
+    - bash
+    - ca-certificates
+    - curl
+    - git
+    - python3
+    - python3-pip
+  judge_apt_packages:
+    - bash
+    - ca-certificates
+    - curl
+    - git
+    - python3
+    - python3-pip
+  judge_pip_packages:
+    - modal
+  docker:
+    # Experimental local images; build with docker/build_images.sh before a local
+    # Harbor trial. Both bake a clean NanoWM checkout + the L/2 CSGO ckpt; the
+    # judge image additionally vendors the held-out CSGO episode subset, the
+    # LPIPS scorer, and the cached vanilla baseline metrics.
+    image: frontiercs/nanowm-rollout-speedup-agent:experimental-v0
+    judge_image: frontiercs/nanowm-rollout-speedup-judge:experimental-v0
+environment:
+  cpus: 8
+  memory_mb: 32768
+  storage_mb: 32768
+  build_timeout_seconds: 5400
+evaluation:
+  # GPU served on Modal (one per environment); judge container is CPU-only.
+  # H100 matches the hardware the reference + noise floor were calibrated on, so
+  # the production scoring path and the validated numbers share one GPU SKU.
+  model: nanowm_l2_csgo
+  dataset: game/csgo
+  gpu: H100
+  # FIXED rollout invocation (the agent's patch changes sampler internals, not these).
+  rollout_length: 50
+  history_length: 4
+  num_steps: 50            # nominal reference DDIM budget
+  scheduling: sequential
+  history_stab: 0.02
+  # Quality guardrail: patched rollout LPIPS-vs-GT may rise at most this
+  # (relative) above the unpatched seq@50 baseline before the score is penalized.
+  # Calibrated: seq@20 is already +5% over seq@50, so a 3% tolerance forces real
+  # fast-sampling work (DPM-Solver++, caching, distillation), not naive step cuts.
+  quality_tolerance: 0.03
+  # (E) Speedup at which the latency score saturates to 100: score is
+  # 100*log2(speedup)/log2(target). The old bare 100*log2 capped everything >=2x
+  # at 100; 4x keeps a gradient across the achievable range (causal-prefix ~3x).
+  speedup_target: 4.0
+  # (A) Faithfulness BACKSTOP: mean LPIPS between PATCHED and BASELINE rollout
+  # frames (paired final run), always reported; penalty only past this generous
+  # threshold so it catches an egregious rollout SUBSTITUTION, not legitimate
+  # iso-quality speedups. Calibrated on H100: bf16 reference drifts 0.206 from the
+  # fp32 baseline (iso-quality vs GT, different trajectory), so 0.30 clears it with
+  # margin while still flagging ~half-divergent substitutions; causal-prefix ~0.
+  faithfulness_tol: 0.30
+  quick_clips: 4           # iterative (agent-role) public feedback
+  final_clips: 16          # final (verifier-role) evaluation
+  batch_size: 4
+  # Key MUST be `baseline_cache` (settings.py strips the FRONTIER_NWM_ prefix and
+  # looks up `baseline_cache`); `baseline_cache_path` was silently ignored.
+  baseline_cache: /opt/nanowm/baseline/baseline_metrics.json
+submission:
+  kind: file
+  path: /app/solution.patch
+  max_queue_size: 2

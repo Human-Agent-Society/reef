@@ -1,0 +1,135 @@
+```markdown
+# Cascading Flip Schedule on a Power Grid Tree
+
+## Problem
+You operate a power grid shaped as a tree with **N** substations (vertices) and **N−1** transmission lines (edges).  
+Each substation has a reversible breaker with two states:
+
+- `W` (white) = **safe to service**
+- `B` (black) = **unsafe to service**
+
+Initially, the states are given by a string **S** of length **N**.
+
+You must **service every substation exactly once** by choosing an order and performing a cascade operation. However, servicing a substation may destabilize nearby substations by flipping breaker states.
+
+### Cascade Service Operation
+You perform **N rounds**. In round **t** you choose a substation **P_t** that has not been serviced yet, and you:
+1. **Pay cost** equal to the number of currently-unsafe breakers (`B`) among **unserviced** substations (including the chosen one if it is `B`).
+2. **Service** substation **P_t** (it becomes “removed” and is never flipped again).
+3. For every **unserviced neighbor** of **P_t**, **flip** its breaker state (`W ↔ B`).
+
+Serviced substations are removed from the system:
+- They no longer contribute to future costs.
+- Their breakers are no longer flipped.
+
+### Feasibility
+Any permutation of vertices is a valid schedule (you may service a `B` substation; it just tends to be expensive).  
+Your goal is not feasibility but **minimizing total instability cost**.
+
+## Input
+```
+N
+A_1 B_1
+A_2 B_2
+…
+A_{N-1} B_{N-1}
+S
+```
+- The graph is a tree.
+- Edge `i` connects vertices `A_i` and `B_i`.
+- `S[i]` is `W` or `B`, the initial breaker state at vertex `i`.
+
+## Output
+Output a permutation of `1..N`:
+```
+P_1 P_2 … P_N
+```
+This is your service order.
+
+A submission is invalid if:
+- It does not contain each vertex exactly once, or
+- It contains an out-of-range index.
+
+Invalid submissions receive the worst possible score for that test.
+
+## Objective
+Let `U_t` be the set of **unserviced** vertices just before round `t` (so `U_1` is all vertices, `U_{N+1}` is empty).
+
+Let `B_t` be the number of vertices in `U_t` whose breaker is `B` at that moment.
+
+Your **total cost** is:
+\[
+C = \sum_{t=1}^{N} B_t
+\]
+You must **minimize** `C`.
+
+Notes:
+- Breaker flips happen **after** paying `B_t`.
+- Only **unserviced neighbors** are flipped.
+
+## Scoring
+This is an **optimization** problem; lower cost is better.
+
+For each test case, the judge computes:
+- `C_out`: cost of your output schedule.
+- `C_base`: cost of a deterministic internal reference schedule computed from that test case.
+
+Your per-test ratio is:
+\[
+s =
+\begin{cases}
+0 & \text{if } C_{\text{base}} = 0 \\
+\mathrm{clamp}\!\left(\frac{C_{\text{base}} - C_{\text{out}}}{C_{\text{base}}},\, 0,\, 1\right) & \text{otherwise}
+\end{cases}
+\]
+where `clamp(x,0,1)=min(1,max(0,x))`.
+
+Special cases:
+- Invalid output: `s = 0`.
+
+### Reference cost `C_base`
+`C_base` is the cost of a deterministic internal reference schedule computed by the judge from the same test case.
+
+The exact construction of this internal reference schedule is intentionally not part of the contestant-facing specification. For solving the problem, you should optimize `C_out` directly according to the objective above.
+
+### Total score
+The per-test ratio `s` is scaled to the total points configured for this problem in the judge configuration; the final score is the sum of these scaled per-test contributions across all test cases.
+
+## Why this is hard
+The cascade flips create long-range dependencies: choosing a vertex changes future states of its neighbors, which changes future costs. Minimizing the integral of “how many unsafe breakers remain over time” is closely related to difficult sequencing problems on graphs; under these constraints, exact optimization is computationally infeasible in practice, so heuristics matter.
+
+Multiple strategies can work well:
+- Greedy selection by estimated marginal impact on future `B_t`
+- Tree decompositions with local dynamic programming + recombination
+- Large neighborhood search / simulated annealing on permutations
+- Beam search over partial schedules
+- Hybrid methods (greedy initialization + local swap/2-opt/segment moves + repair)
+
+## Constraints
+- `1 ≤ N ≤ 2×10^5`
+- `1 ≤ A_i, B_i ≤ N`
+- The input graph is a tree.
+- `S` consists only of `B` and `W`.
+- Time limit: **2 seconds**
+- Memory limit: **1024 MB**
+
+## Example
+Sample input:
+```
+4
+1 2
+2 3
+3 4
+WBWW
+```
+
+One possible output:
+```
+1 2 4 3
+```
+
+Explanation (high level):
+- The judge simulates your order.
+- Each round adds the current count of `B` among remaining vertices, then flips unserviced neighbors of the chosen vertex.
+- The resulting total `C_out` is compared against the judge's deterministic reference cost `C_base`, producing a ratio `s ∈ [0, 1]` for this test which is then scaled to the configured per-test point budget.
+```

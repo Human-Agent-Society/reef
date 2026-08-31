@@ -1,0 +1,78 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a python solution at `/app/solution.patch`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `nanowm_rollout_stability`
+Language: `python`
+Time limit: `43200s`
+
+Original problem statement:
+
+# NanoWM Rollout Stability — minimize long-horizon drift at fixed compute
+
+## Problem
+
+You are given a clean checkout of Nano World Models (arXiv:2605.23993) and its
+frozen NanoWM-L/2 CSGO checkpoint. The judge runs a **fixed long-horizon**
+autoregressive rollout (sequential, **50 DDIM steps**). Long autoregressive
+rollouts accumulate perceptual error — by the tail of the rollout the prediction
+has drifted into a "plausible but wrong" state (paper Finding #5).
+
+Your job: **minimize that drift** — the mean LPIPS-vs-ground-truth over the
+**drifted tail frames** (the late portion of the rollout) — by submitting a
+**Python-only patch** to the diffusion **sampling** code, **without using more
+compute** (a wall-clock budget = the unpatched baseline's generation time is
+enforced).
+
+The exact rollout length and which frames are scored as the "tail" are fixed by
+the judge and **not disclosed** — the scored horizon is drawn per run — so a
+solution must reduce drift **generally**; keying behaviour off an assumed rollout
+length or a hardcoded frame index will not transfer to the scored run.
+
+This is a hard, open problem: simply adding denoising steps reduces drift but is
+disallowed (it costs compute — that's the *speedup* task). At fixed compute you
+must use the budget *smarter*: history stabilization, scheduling-matrix design,
+drift-aware KV/feature caching that frees time for re-grounding, periodic
+context re-anchoring, error-feedback correction, better solvers, etc.
+
+## What you submit
+
+A unified-diff patch at `/app/solution.patch` against `/app/nano-world-model`.
+**Python source only**, within the diffusion sampling layer:
+**Allowed:** `src/diffusion/**.py`, `src/sample/sampling_utils.py`.
+**Denied:** model (`src/models/**`), VAE, the metric, the rollout harness
+(`src/sample/rollout.py`), data loading, training/eval harness, native/build
+files. No env-var/benchmark/timing tricks. Validated before running.
+
+## Evaluation & scoring
+
+- Judge applies your patch, runs the fixed long-horizon CSGO rollout on hidden
+  episodes (Modal GPU), measures **tail-drift** (mean LPIPS-vs-GT over the late /
+  tail frames) and **generation wall-clock**. Quick set for iterative `submit.sh`;
+  a larger disjoint set for the final verifier (enough clips to resolve small drift
+  reductions above per-clip noise). The exact rollout length and tail window are
+  not disclosed and vary per scored run.
+- **Score:**
+
+```
+score = clip(100 * (baseline_tail_drift - patched_tail_drift) / baseline_tail_drift, 0, 100)
+        * wallclock_multiplier
+```
+
+  `wallclock_multiplier` is 1.0 while patched generation time stays within 10%
+  of the baseline, and decays beyond (so you cannot buy drift reduction with
+  more compute). A patch that does not reduce drift, exceeds the wall-clock
+  budget, crashes, or violates the patch policy scores 0.
+
+## Reference & difficulty
+
+`reference.patch` raises history stabilization (a one-line sampling change) — it
+reliably reduces tail-drift ~6.8% (± 1.2%) over the baseline at iso-wall-clock
+(validated under common-random-numbers pairing: 74% per-clip win, pooled paired
+t=5.15, p<1e-4 across 3 seeds × 22 clips), proving the task is solvable.
+Substantially beating it is the open challenge.
+
+## Resource budget
+
+CPU agent + judge; one Modal GPU per evaluation. Evaluation timeout 21600 s.
+See `AGENT.md` and `harbor/app/README.md`.

@@ -1,0 +1,27 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/jagua-rs/lbf/src", "/home/workspace/jagua-rs/jagua-rs/src", "/home/workspace/jagua-rs/lbf/Cargo.toml", "/home/workspace/jagua-rs/jagua-rs/Cargo.toml", "/home/workspace/jagua-rs/Cargo.toml"]
+
+[task]
+name = "edgebench/jagua_nesting_optimization"
+description = "Jagua Nesting Optimization"
+
+[metadata]
+benchmark = "edgebench"
+category = "Combinatorial Optimization"
+judge_parser = "score_sum"
+score_direction = "maximize"
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 1200.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.schemathesis_config_modernization:f9e5ec2c6f1f
+WORKDIR /app

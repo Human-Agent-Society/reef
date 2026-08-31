@@ -1,0 +1,80 @@
+tag: systems
+runtime:
+  # Submission is a Python-only source patch (the real reference is
+  # reference.patch). `language: python` keeps the file extension/CLI conventions
+  # standard (mirrors vllm_llm_serving_optimization, #145); there is no separate
+  # "patch" language in the framework.
+  language: python
+  # 12h. The scored final is a 22->12-clip baseline+patched PAIR of 80-frame
+  # rollouts under strict determinism (TF32 off ~3x slower): ~5-7h on H100. The
+  # old 6h verifier timeout was SHORTER than the final run, so the verifier raised
+  # VerifierTimeoutError -> reward 0 even though the agent submissions scored fine.
+  # Matches the Modal _rollout_pair function timeout (43200s).
+  timeout_seconds: 43200
+  environment: >-
+    Python-only patch against a clean NanoWM checkout (Nano World Models,
+    arXiv:2605.23993); Modal GPU runs a NanoWM-L/2 CSGO long-horizon rollout (the
+    exact length and scored tail are fixed by the judge and not disclosed);
+    minimize long-horizon drift (tail-frame LPIPS) at iso-wall-clock
+  apt_packages: [bash, ca-certificates, curl, git, python3, python3-pip]
+  judge_apt_packages: [bash, ca-certificates, curl, git, python3, python3-pip]
+  judge_pip_packages: [modal]
+  docker:
+    image: frontiercs/nanowm-rollout-stability-agent:experimental-v0
+    judge_image: frontiercs/nanowm-rollout-stability-judge:experimental-v0
+environment:
+  cpus: 8
+  memory_mb: 32768
+  storage_mb: 32768
+  build_timeout_seconds: 5400
+evaluation:
+  # H100 matches the hardware the reference + noise floor were calibrated on, so
+  # the production scoring path and the validated numbers share one GPU SKU.
+  model: nanowm_l2_csgo
+  dataset: game/csgo
+  gpu: H100
+  # LONG rollout so error accumulates into a drifted tail; FIXED steps + a
+  # wall-clock budget => the agent improves the rollout PROCEDURE at iso-compute
+  # (stabilization / scheduling / drift-aware caching), not by adding steps.
+  rollout_length: 80       # NOMINAL: agent-role QUICK loop + cache fingerprint
+  history_length: 4
+  num_steps: 50            # fixed compute budget
+  scheduling: sequential
+  history_stab: 0.02       # baseline default (repo long_rollout setting)
+  drift_tail_start: 60     # NOMINAL tail (cached agent path); scored tail derives from the randomized horizon
+  # Anti-overfit (audit #7): the SCORED (role=final) horizon is drawn at random per
+  # run from [rollout_length_min, rollout_length_max] (MAX < nominal so the agent's
+  # dev-measured horizon never scores, and GT headroom/clip-count are unchanged), and
+  # the scored tail = horizon - tail_frames. This neutralizes the codex module-counter
+  # tail-targeting hack (its period 76 / frame-64 ramp misfire off the tail at <=72;
+  # see stability_eval/test_antihack_horizon.py). Tune to trade anti-hack margin vs
+  # SNR (lower max = stronger anti-hack; raise toward 80 = closer to calibrated tail>=60).
+  rollout_length_min: 64
+  rollout_length_max: 72
+  tail_frames: 20
+  # Wall-clock guardrail: patched gen time may rise at most this over baseline,
+  # else drift is being bought with compute (the speedup task's axis).
+  wallclock_tolerance: 0.10
+  # Drift reductions are small; enough clips to resolve above per-clip noise
+  # (validated under common-random-numbers pairing: stab=0.20 reference beats
+  # baseline; 74% per-clip win, pooled paired t=5.15, p<1e-4 across 3 seeds x 22 clips).
+  quick_clips: 8
+  # Full held-out set = the 22 test_split episodes number<=200 staged from the
+  # 1-200 chunk (>22 indexes past the sliced dataset and crashes). The scored final
+  # uses all 22 for SNR (validated headline). The 80-frame paired rollout is ~10h
+  # sequentially under strict determinism, so the judge FANS the clips out across
+  # Modal containers (chunk_size each) -- bit-identical to the sequential run since
+  # the per-batch seed keys on the global clip index -- finishing in ~one chunk's
+  # wall-time. batch_size=2 => QUICK(8) is a noise-identical prefix of FINAL(22).
+  final_clips: 22
+  batch_size: 2
+  # Clips per Modal container in the fanned-out scored pair (rounded up to a
+  # multiple of batch_size for global batch alignment). 22/4 => 6 parallel chunks.
+  chunk_size: 4
+  # Key MUST be `baseline_cache` (settings.py strips the FRONTIER_NWM_ prefix and
+  # looks up `baseline_cache`); `baseline_cache_path` was silently ignored.
+  baseline_cache: /opt/nanowm/baseline/stability_baseline.json
+submission:
+  kind: file
+  path: /app/solution.patch
+  max_queue_size: 2

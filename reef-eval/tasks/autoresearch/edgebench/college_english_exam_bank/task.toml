@@ -1,0 +1,27 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/A\u5377\u539f\u5377.docx", "/home/workspace/A\u5377\u539f\u5377.pdf", "/home/workspace/A\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.docx", "/home/workspace/A\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.pdf", "/home/workspace/B\u5377\u539f\u5377.docx", "/home/workspace/B\u5377\u539f\u5377.pdf", "/home/workspace/B\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.docx", "/home/workspace/B\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.pdf", "/home/workspace/C\u5377\u539f\u5377.docx", "/home/workspace/C\u5377\u539f\u5377.pdf", "/home/workspace/C\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.docx", "/home/workspace/C\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.pdf", "/home/workspace/D\u5377\u539f\u5377.docx", "/home/workspace/D\u5377\u539f\u5377.pdf", "/home/workspace/D\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.docx", "/home/workspace/D\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.pdf", "/home/workspace/E\u5377\u539f\u5377.docx", "/home/workspace/E\u5377\u539f\u5377.pdf", "/home/workspace/E\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.docx", "/home/workspace/E\u5377\u7b54\u6848\u548c\u8bc4\u5206\u7ec6\u5219.pdf", "/home/workspace/\u4e94\u5957\u7ec4\u5377\u84dd\u56fe\u8868.xlsx", "/home/workspace/\u5957\u95f4\u91cd\u590d\u7387\u81ea\u68c0\u8868.xlsx"]
+
+[task]
+name = "edgebench/college_english_exam_bank"
+description = "College English Exam Bank"
+
+[metadata]
+benchmark = "edgebench"
+category = "Professional Knowledge Work"
+judge_parser = "structured_json"
+score_direction = "maximize"
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 900.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "public"

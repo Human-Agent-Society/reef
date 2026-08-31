@@ -1,0 +1,47 @@
+tag: systems
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "GPU DBSCAN kernel optimization. The agent patches the dbscanlib package; the judge offloads timing to a Modal GPU, comparing the patched dbscan against a frozen naive baseline on hidden low-dimensional workloads with an ARI (clustering-agreement) gate."
+  apt_packages: [bash, ca-certificates, git, python3, python3-pip]
+  judge_apt_packages: [bash, ca-certificates, git, python3, python3-pip]
+  judge_pip_packages: [modal]
+  docker:
+    image: frontiercs/dbscan-gpu-kernel-optimization-agent:experimental-v0.4.0
+    judge_image: frontiercs/dbscan-gpu-kernel-optimization-judge:experimental-v0.4.0
+environment:
+  cpus: 4
+  memory_mb: 8192
+  storage_mb: 16384
+  build_timeout_seconds: 3600
+evaluation:
+  gpu: "H100"
+  cuda_image: "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+  pip: ["torch", "numpy"]
+  app_name: "dbscan-kernel-opt-eval"
+  modal_timeout_seconds: 2400
+  warmup_iters: 2
+  timed_iters: 3            # the O(N^2) naive baseline is seconds/call at these N; keep the timed budget bounded (median of 3)
+  ari_threshold: 0.99            # agent clustering must match the baseline exact DBSCAN (Adjusted Rand Index) every iteration. On the non-convex multi-subspace-moons data a centroid/partition approximation (k-means, or "k-means the points then DBSCAN each cell") mislabels the interleaving arcs -> ARI ~0.72-0.75, and a PCA->2D projection -> ~0.5-0.6, both < 0.99 -> fail; only an exact eps-connectivity scan passes. Exact reference measures ARI ~1.0 (bf16-stable).
+  speedup_target: 130.0          # score cap = 2x the flashlib reference geomean on the non-convex multi-subspace-moons workloads (65x on H100: w0-w3 = 29/65/69/141x, ARI=1.0 all 4). Moons make the naive label-propagation baseline slower (elongated clusters -> long chains) so the factor is higher than the old blob regime (28.6x); the reference's connectivity is unaffected. Points carry only bf16 precision so no solution wins on a lower dtype; eps is tuned so bf16 never flips an eps-neighbour (two exact scans on the same bf16 data agree at ARI 1.0).
+  base_seed: 20260701
+  agent_workload_count: 4            # all 4 flashlib graded workloads (feedback covers every graded shape)
+  expose_per_workload_metrics: true  # show per-workload pass/fail so the agent can fix the specific workload it regresses on
+  # N in the 100k-170k band: the O(N^2) matmul baseline is seconds/call (grid kernel
+  # wins 6-20x) but bounded for timed_iters; below ~100k the tensor-core matmul baseline
+  # is faster than the grid kernel's fixed overhead. Vary N + density so agents can't
+  # special-case. (H100 crossover sweep: 100k->6.0x, 150k->14.1x, 200k->27.0x.)
+  workloads:
+    # NON-CONVEX data: n_centers interleaving half-moons, each moon-pair in its own
+    # random 2-D subspace of R^D (gen in flash_gpu.py). Voronoi/k-means shortcuts
+    # mislabel non-convex arcs (kmeans-shortcut ARI ~0.72-0.75, PCA-2D ~0.5-0.6),
+    # so only an exact eps-neighbourhood scan clears the ARI gate. eps is tuned per D
+    # so DBSCAN gives exactly n_centers clusters with ~0% noise and is bf16-stable
+    # (two exact scans on the same bf16 data agree at ARI 1.0). Generator is judge-only.
+    - {id: w0, N: 20000, D: 8,  eps: 0.90, min_samples: 5, n_centers: 4}
+    - {id: w1, N: 20000, D: 32, eps: 1.15, min_samples: 5, n_centers: 6}
+    - {id: w2, N: 20000, D: 64, eps: 1.40, min_samples: 5, n_centers: 10}
+    - {id: w3, N: 50000, D: 16, eps: 1.00, min_samples: 5, n_centers: 8}
+submission:
+  kind: file
+  path: /app/solution.patch

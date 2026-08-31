@@ -1,0 +1,14 @@
+FROM frontiercs/duckdb-e2e-query-optimization-judge:experimental-v1.5.3
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 ca-certificates  bash build-essential ca-certificates ccache cmake git ninja-build pkg-config python3 && \
+    : && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /judge
+
+COPY judge_server.py problem_evaluator.py task_config.json /judge/
+RUN chmod 600 /judge/problem_evaluator.py
+
+EXPOSE 8082
+CMD ["python3", "/judge/judge_server.py"]

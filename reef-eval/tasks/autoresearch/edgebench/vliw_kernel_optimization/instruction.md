@@ -1,0 +1,1 @@
+Optimize solution.py for the custom VLIW/SIMD kernel generator. Implement KernelBuilder.build_kernel so the generated instruction program is correct and faster on the simulator. Modify only solution.py. Do not change problem.py, runner.py, verifier.py, test cases, or hard-code public or hidden seeds.

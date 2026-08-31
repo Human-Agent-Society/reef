@@ -1,0 +1,9 @@
+type: default
+time: 1s
+memory: 2048m
+subtasks:
+  - score: 100
+    n_cases: 10
+checker: chk.cc
+checker_type: testlib
+filename: std.cc

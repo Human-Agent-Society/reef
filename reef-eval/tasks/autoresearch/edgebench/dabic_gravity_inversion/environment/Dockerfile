@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.dabic_gravity_inversion:85db0aba8a5f
+WORKDIR /home/workspace/dabic_gravity_vinton

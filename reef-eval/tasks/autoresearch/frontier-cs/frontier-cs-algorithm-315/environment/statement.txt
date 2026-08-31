@@ -1,0 +1,185 @@
+```markdown
+# Quadratic Witness Packing
+
+## Problem
+You are building a small library of reusable **quadratic witnesses**.
+
+A witness is a pair of integers \((A,B)\).  
+For a query \((p,x)\), the witness **matches** the query if
+
+\[
+A^2 + B^2 \equiv x \pmod p.
+\]
+
+You are given many weighted queries. Your task is to output at most \(K\) witnesses so that the total weight of matched queries is as large as possible.
+
+A single witness may match many queries, and a query is counted at most once even if several witnesses match it.
+
+The moduli are guaranteed to be odd and square-free, i.e. for every odd prime \(q\mid p\), we have \(q^2 \nmid p\).
+
+This is an optimization problem: any feasible solution is accepted and scored by how much total weight it covers.
+
+## Input
+The input contains one test instance.
+
+- The first line contains three integers:
+  \[
+  n\ \ K\ \ B
+  \]
+  where:
+  - \(n\) is the number of queries,
+  - \(K\) is the maximum number of witnesses you may output,
+  - \(B\) is the coordinate bound for every witness.
+
+- The next \(n\) lines each contain three integers:
+  \[
+  p_i\ \ x_i\ \ w_i
+  \]
+  meaning:
+  - \(p_i\) is the modulus,
+  - \(x_i\) is the target residue,
+  - \(w_i\) is the weight of the query.
+
+A query \(i\) is covered if there exists at least one output witness \((A,B)\) such that
+\[
+A^2 + B^2 \equiv x_i \pmod{p_i}.
+\]
+
+## Output
+Output a feasible witness set:
+
+- The first line contains one integer \(m\) \((0 \le m \le K)\), the number of witnesses you output.
+- The next \(m\) lines each contain two integers:
+  \[
+  A_j\ \ B_j
+  \]
+  satisfying
+  \[
+  0 \le A_j \le B,\qquad 0 \le B_j \le B.
+  \]
+
+### Feasibility rules
+- \(m\) must satisfy \(0 \le m \le K\).
+- Every printed coordinate must be an integer in \([0,B]\).
+- Duplicate witnesses are allowed, but usually useless.
+- If the output is invalid, the submission receives score \(0\) for that test file.
+
+## Objective
+Let \(C\) be the set of queries covered by at least one of your witnesses.
+
+Your objective value is
+
+\[
+V = \sum_{i \in C} w_i.
+\]
+
+You must **maximize** \(V\).
+
+## Scoring
+For each test file, the judge also computes a fixed **baseline solution**:
+
+- it outputs exactly \(K\) witnesses
+  \[
+  (0,0), (1,0), (2,0), \dots, (K-1,0),
+  \]
+- this is always feasible because \(B \ge K-1\).
+
+Let:
+
+- \(W = \sum_{i=1}^n w_i\) be the total weight,
+- \(V_{\text{base}}\) be the baseline objective value,
+- \(U = W - V\) be your uncovered weight,
+- \(U_{\text{base}} = W - V_{\text{base}}\) be the baseline uncovered weight.
+
+The per-file score is:
+
+- if \(U_{\text{base}} = 0\), then every feasible submission gets **1,000,000** points;
+- otherwise,
+  \[
+  \text{score} =
+  \left\lfloor
+  10^6 \cdot
+  \max\left(0,\ \min\left(1,\ \frac{U_{\text{base}} - U}{U_{\text{base}}}\right)\right)
+  \right\rfloor.
+  \]
+
+Equivalently,
+
+\[
+\text{score} =
+\left\lfloor
+10^6 \cdot
+\max\left(0,\ \min\left(1,\ \frac{V - V_{\text{base}}}{W - V_{\text{base}}}\right)\right)
+\right\rfloor
+\quad\text{when } V_{\text{base}} < W.
+\]
+
+So:
+- matching the baseline gives score \(0\),
+- covering all queries gives score \(1{,}000{,}000\),
+- intermediate improvements give proportionally higher scores.
+
+The final contest score is the sum of per-file scores over all test files.
+
+## Constraints
+- \(1 \le n \le 2 \times 10^5\)
+- \(1 \le K \le 60\)
+- \(K-1 \le B \le 10^9\)
+- \(1 \le p_i \le 10^7\)
+- \(p_i\) is odd
+- \(0 \le x_i < p_i\)
+- \(1 \le w_i \le 10^6\)
+- For every odd prime \(q\mid p_i\), \(q^2 \nmid p_i\)
+
+## Constraints
+- Time limit: 4 seconds
+- Memory limit: 512 MB
+
+## Example
+### Sample input
+```text
+6 2 100
+5 0 10
+5 1 8
+13 5 7
+13 8 6
+15 5 9
+15 8 4
+```
+
+### Sample output
+```text
+2
+1 2
+2 2
+```
+
+### Explanation
+The two witnesses are:
+- \((1,2)\), with \(1^2+2^2=5\),
+- \((2,2)\), with \(2^2+2^2=8\).
+
+Thus they cover:
+- residue \(0 \bmod 5\) via \(5\),
+- residue \(5 \bmod 13\) via \(5\),
+- residue \(8 \bmod 13\) via \(8\),
+- residue \(5 \bmod 15\) via \(5\),
+- residue \(8 \bmod 15\) via \(8\).
+
+So the covered total weight is
+\[
+10 + 7 + 6 + 9 + 4 = 36.
+\]
+
+The only uncovered query is \((5,1)\) with weight \(8\), so \(W=44\) and \(U=8\).
+
+The baseline witnesses are \((0,0)\) and \((1,0)\), whose sums are \(0\) and \(1\).  
+They cover only the first two queries, so \(V_{\text{base}}=18\), hence \(U_{\text{base}}=26\).
+
+Therefore the score for this file is
+\[
+\left\lfloor 10^6 \cdot \frac{26-8}{26} \right\rfloor
+=
+692307.
+\]
+```

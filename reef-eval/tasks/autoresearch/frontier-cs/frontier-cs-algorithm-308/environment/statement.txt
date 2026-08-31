@@ -1,0 +1,205 @@
+```markdown
+# Farmwide Teleport Pad Deployment
+
+## Problem
+
+Farmer John is upgrading his manure logistics again.
+
+This time, instead of building a single teleporter, he may install a **network of teleport pads** at selected road intersections across the farm. The farm road system is modeled as a connected, undirected, weighted graph.
+
+There are `N` manure shipments. Shipment `i` must be moved from intersection `s_i` to intersection `t_i`. Each shipment is transported independently.
+
+If Farmer John installs a set of teleport pads, then for any shipment he may choose either:
+
+1. **Drive directly** from `s_i` to `t_i`, or
+2. **Use the teleport network once**:
+   - drive from `s_i` to any installed pad,
+   - teleport instantly and for free to any other installed pad,
+   - drive from that pad to `t_i`.
+
+Teleportation between installed pads has zero cost and unlimited capacity.
+
+However, each candidate pad location has a construction cost, and the total construction cost must not exceed the budget.
+
+Your task is to choose which candidate pad locations to build in order to minimize the total driving distance over all shipments.
+
+This is an **optimization challenge**: better solutions receive higher scores.
+
+---
+
+## Input
+
+The input describes one test file.
+
+- The first line contains five integers  
+  `V E M N C`
+  - `V`: number of intersections (`1..V`)
+  - `E`: number of roads
+  - `M`: number of candidate teleport-pad sites
+  - `N`: number of shipments
+  - `C`: total construction budget
+
+- The next `E` lines each contain three integers  
+  `u v w`  
+  meaning there is an undirected road between intersections `u` and `v` with length `w`.
+
+- The next `M` lines each contain two integers  
+  `p_j cost_j`  
+  meaning candidate site `j` is located at intersection `p_j` and costs `cost_j` to build.
+
+- The next `N` lines each contain two integers  
+  `s_i t_i`  
+  describing a shipment from `s_i` to `t_i`.
+
+All road lengths and construction costs are positive integers.
+
+The graph is connected.
+
+---
+
+## Output
+
+Output a feasible set of candidate sites to build.
+
+- The first line must contain a single integer `K` — the number of chosen sites.
+- The next `K` lines must each contain one integer: the index of a chosen candidate site (an integer from `1` to `M`).
+
+### Feasibility requirements
+
+Your output is **feasible** iff all of the following hold:
+
+- `0 <= K <= M`
+- all chosen indices are distinct
+- each chosen index is between `1` and `M`
+- the sum of construction costs of the chosen sites is at most `C`
+
+If your output is infeasible, your score for that test file is `0`.
+
+---
+
+## Objective
+
+Let `dist(a,b)` be the shortest-path distance between intersections `a` and `b` in the road graph.
+
+Let `S` be the set of chosen candidate sites, and let `P(S)` be their intersections.
+
+For shipment `i`, define:
+
+- Direct cost:
+  `direct_i = dist(s_i, t_i)`
+
+- Teleport-assisted cost:
+  - if `S` is empty, this cost is treated as `+infinity`
+  - otherwise  
+    `tele_i = min_{x in P(S)} dist(s_i, x) + min_{y in P(S)} dist(t_i, y)`
+
+The shipment cost is
+
+`d_i = min(direct_i, tele_i)`
+
+The objective value of your output is
+
+`O = sum_{i=1..N} d_i`
+
+Your goal is to **minimize** `O`.
+
+---
+
+## Scoring
+
+For each test file, define the **baseline** solution as building no pads at all.
+
+Its objective value is therefore
+
+`B = sum_{i=1..N} dist(s_i, t_i)`
+
+For a feasible submission with objective value `O`, the score for that test file is
+
+`score = round(1,000,000 * max(0, min(1, (B - O) / B )))`
+
+Since direct transport is always allowed, any feasible solution satisfies `O <= B`, so this is simply the relative improvement over the baseline, scaled to `1,000,000`.
+
+- Baseline solution: score `0`
+- Better solutions: higher scores
+- Perfectly eliminating all driving distance: score `1,000,000`
+
+If your output is infeasible, the score is `0`.
+
+The total score of a submission is the sum of its scores over all test files.
+
+---
+
+## Constraints
+
+- `2 <= V <= 8000`
+- `V-1 <= E <= 40000`
+- `1 <= M <= 3000`
+- `1 <= N <= 100000`
+- `1 <= C <= 10^12`
+- `1 <= w <= 10^9`
+- `1 <= cost_j <= 10^9`
+- `1 <= u, v, p_j, s_i, t_i <= V`
+- `s_i != t_i`
+- candidate site intersections `p_j` are distinct
+
+The exact optimum is intended to be computationally difficult in general; heuristic and approximation methods are expected.
+
+- Time limit: 4 seconds
+- Memory limit: 1024 MB
+
+---
+
+## Example
+
+### Sample input
+```text
+5 6 3 3 7
+1 2 4
+2 3 4
+3 4 4
+4 5 4
+1 5 20
+2 5 7
+2 3
+4 4
+5 5
+1 4
+1 5
+3 5
+```
+
+### Sample output
+```text
+2
+1
+2
+```
+
+### Explanation
+
+There are 3 candidate pad sites:
+
+- site 1 at intersection 2, cost 3
+- site 2 at intersection 4, cost 4
+- site 3 at intersection 5, cost 5
+
+The sample output builds sites 1 and 2, with total cost `3 + 4 = 7`, which fits the budget.
+
+Shortest direct shipment costs are:
+
+- `1 -> 4`: `12`
+- `1 -> 5`: `11`
+- `3 -> 5`: `8`
+
+So the baseline is `B = 31`.
+
+With pads at intersections 2 and 4:
+
+- `1 -> 4`: drive `1 -> 2` (4), teleport `2 -> 4` (0), drive `4 -> 4` (0), total `4`
+- `1 -> 5`: drive `1 -> 2` (4), teleport `2 -> 4` (0), drive `4 -> 5` (4), total `8`
+- `3 -> 5`: best remains `8`
+
+Thus `O = 4 + 8 + 8 = 20`.
+
+Relative improvement is `(31 - 20) / 31 = 11/31`, so the score for this file is approximately `354,839`.
+```

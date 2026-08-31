@@ -1,0 +1,59 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 21600,
+    "environment": "Python-only patch against a clean NanoWM checkout (Nano World Models, arXiv:2605.23993); Modal GPU runs the NanoWM-L/2 CSGO 50-frame long-rollout; speedup-vs-baseline judge with an LPIPS rollout-quality guardrail",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/nanowm-rollout-speedup-agent:experimental-v0",
+      "judge_image": "frontiercs/nanowm-rollout-speedup-judge:experimental-v0"
+    }
+  },
+  "environment": {
+    "cpus": 8,
+    "memory_mb": 32768,
+    "storage_mb": 32768,
+    "build_timeout_seconds": 5400
+  },
+  "evaluation": {
+    "model": "nanowm_l2_csgo",
+    "dataset": "game/csgo",
+    "gpu": "H100",
+    "rollout_length": 50,
+    "history_length": 4,
+    "num_steps": 50,
+    "scheduling": "sequential",
+    "history_stab": 0.02,
+    "quality_tolerance": 0.03,
+    "speedup_target": 4.0,
+    "faithfulness_tol": 0.3,
+    "quick_clips": 4,
+    "final_clips": 16,
+    "batch_size": 4,
+    "baseline_cache": "/opt/nanowm/baseline/baseline_metrics.json"
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch",
+    "max_queue_size": 2
+  }
+}

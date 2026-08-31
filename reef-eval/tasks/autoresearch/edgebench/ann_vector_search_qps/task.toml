@@ -1,0 +1,30 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/ann-benchmarks/ann_benchmarks/algorithms/custom"]
+
+[task]
+name = "edgebench/ann_vector_search_qps"
+description = "Ann Vector Search Qps"
+
+[metadata]
+benchmark = "edgebench"
+category = "Systems & Software Engineering"
+judge_parser = "score_sum"
+score_direction = "maximize"
+rescale_kind = "log_max"
+rescale_baseline = 3108.0
+rescale_expert = 21472.0
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 7800.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

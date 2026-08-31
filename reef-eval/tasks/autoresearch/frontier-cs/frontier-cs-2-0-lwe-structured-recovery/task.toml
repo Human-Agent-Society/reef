@@ -1,0 +1,41 @@
+schema_version = "1.1"
+source = "https://github.com/FrontierCS/Frontier-CS"
+artifacts = []
+
+[task]
+name = "frontier-cs/frontier-cs-2-0-lwe-structured-recovery"
+description = ""
+keywords = [ "frontier-cs", "frontier-cs-2.0", "optimization", "geometry",]
+[[task.authors]]
+name = "Frontier-CS Team"
+email = "frontier-cs@berkeley.edu"
+
+[metadata]
+difficulty = "hard"
+category = "optimization"
+tags = [ "frontier-cs", "frontier-cs-2.0", "security",]
+frontier_cs_problem_id = "lwe_structured_recovery"
+frontier_cs_track = "2.0"
+
+[verifier]
+timeout_sec = 10800.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 10800.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 1800.0
+os = "linux"
+cpus = 8
+memory_mb = 32768
+storage_mb = 32768
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

@@ -1,0 +1,139 @@
+tag: systems
+runtime:
+  language: python
+  timeout_seconds: 21600
+  environment: "Patched vLLM (v0.11.0) source; Modal H100 GPU serving Qwen3-Coder-30B-A3B-Instruct; two agentic workloads (mini-swe-agent SWE-bench + BFCL memory) scored 50/50; latency-primary judge with a live BFCL accuracy guardrail + greedy/per-sample correctness gates"
+  apt_packages:
+    - bash
+    - ca-certificates
+    - curl
+    - git
+    - python3
+    - python3-pip
+  judge_apt_packages:
+    - bash
+    - ca-certificates
+    - curl
+    - git
+    - python3
+    - python3-pip
+  judge_pip_packages:
+    - modal
+    - openai
+    - datasets
+    - huggingface-hub
+    - rank-bm25
+  docker:
+    # Experimental local images. Build them with
+    # 2.0/problems/vllm_llm_serving_optimization/docker/build_images.sh before running a
+    # local Harbor trial. Both images need a clean upstream vLLM v0.11.0 checkout
+    # (NOT the continuum fork). The judge image additionally vendors the
+    # mini-swe-agent harness and the latency/accuracy scorer.
+    image: frontiercs/vllm-serving-optimization-agent:experimental-v0.11.1
+    judge_image: frontiercs/vllm-serving-optimization-judge:experimental-v0.11.1
+environment:
+  cpus: 8
+  memory_mb: 32768
+  storage_mb: 65536
+  build_timeout_seconds: 7200
+evaluation:
+  # Model + accelerator served on Modal. Qwen3-Coder-30B-A3B (latest Qwen3 coder,
+  # MoE: 30B total / ~3.3B active per token) actually resolves SWE-bench (the 8B
+  # Llama was ~0) and is fast thanks to the sparse MoE. SINGLE H100 on purpose:
+  # the 30B weights (~61GB bf16) leave only ~12-20GB KV (~5 concurrent 32K seqs),
+  # which is exactly the contention this scheduling task needs. H100:2 was measured
+  # to OVER-PROVISION (no queueing -> scheduling can't help -> codex ~1.0x); on one
+  # card the continuum reference wins (SWE ~1.1-1.6x). vLLM TP size is derived from
+  # "H100:N". Avoid B200 (sm_100) — the v0.11.0 precompiled wheel has no Blackwell kernels.
+  model: Qwen/Qwen3-Coder-30B-A3B-Instruct
+  gpu: "H100"
+  # Workload 1 (latency-primary): mini-swe-agent on SWE-bench Lite (split test).
+  # Lite (300, self-contained) is cheaper/cleaner than Verified; instances are
+  # drawn by a fixed-seed RANDOM sample across all 12 repos (not a sorted prefix,
+  # which clustered into 1-2 hard repos and was unrepresentative).
+  dataset: princeton-nlp/SWE-bench_Lite
+  dataset_split: test
+  # Fixed seed for the deterministic random instance sample (SWE + BFCL), so the
+  # evaluated set is reproducible run-to-run.
+  sample_seed: 20260624
+  # Iterative (agent-role) public test: a strict subset of the final eval set.
+  public_slice: "0:5"
+  # Final (verifier-role) evaluation: 50 instances sampled from Lite with
+  # sample_seed (set "0:300" for the full Lite split; that is many H100-hours).
+  eval_slice: "0:50"
+  # Workload 2 (agentic + real correctness): BFCL **memory** category. Each
+  # instance is a multi-turn agentic task — the model is given a key-value memory
+  # tool suite pre-seeded (vendored snapshots) with facts from a prior
+  # conversation, asked a question, and must issue retrieve/search tool calls
+  # over several turns, then answer (word-boundary match vs ground truth). Gives a
+  # genuine multi-step request path AND a non-zero, non-ceilinged accuracy signal
+  # (a strong model gets ~70-90%, not a pinned 1.0), so the guardrail has range.
+  bfcl_public_slice: "0:8"
+  # Full memory verify set: all 155 vendored instances at final.
+  bfcl_eval_slice: "0:155"
+  bfcl_max_tokens: 768
+  memory_max_steps: 20
+  # BFCL memory arrives as a seeded Poisson process at its OWN rate (bfcl_jps).
+  # Measured: BFCL's short, 93%-prefix-cacheable requests have NO clean scheduling
+  # signal at any rate. Below KV saturation (jps<=1.0) the metric is reproducible
+  # (~1.0x, identical run-to-run) but flat; at/above saturation (jps>=1.5) a real
+  # ~1.4x job-FCFS effect appears but is swamped by batch-numerics non-determinism
+  # (the SAME patch measured 0.71x and 1.55x across two clean jps=1.5 runs; an
+  # identical-build control swung 10x at jps=2.5). So BFCL runs at jps=1.0 — the
+  # one reproducible point — mainly for its correctness gate + accuracy guardrail,
+  # and is DOWN-WEIGHTED in the latency blend (see *_weight below). SWE carries the
+  # latency signal (its many-turn latency is robust to single-token flips).
+  bfcl_jps: 1.0
+  # bfcl_workers only caps the fallback burst path (arrival_mode != jps).
+  bfcl_workers: 64
+  # Final score = swebench_weight * SWE-bench score + bfcl_weight * BFCL score.
+  # SWE-heavy: SWE carries the reliable latency signal; BFCL is down-weighted to
+  # 0.2 because at its one reproducible load (jps=1.0) it is latency-neutral (~1.0x)
+  # and mainly serves as the correctness gate + accuracy guardrail.
+  swebench_weight: 0.8
+  bfcl_weight: 0.2
+  # Poisson arrival workload (jobs/second). Mirrors a realistic serving load.
+  arrival_mode: jps
+  jps: 0.5
+  workers: 8
+  step_limit: 50
+  temperature: 0.0
+  max_completion_tokens: 2048
+  # Latency aggregation + scoring.
+  latency_metric: mean_e2e_seconds
+  # Per-instance speedup is clamped to [1/cap, cap]; a failed/early-exit patched
+  # instance is counted as a regression, so "fail fast" cannot inflate the geomean.
+  max_per_instance_speedup: 8.0
+  # Accuracy guardrail (per workload). Within `accuracy_tolerance` relative drop
+  # of baseline => no penalty; beyond it the score decays inverse-proportionally.
+  # No penalty if the accuracy drop is within EITHER the relative tolerance OR
+  # the absolute tolerance (resolve_rate over a finite slice is coarse/noisy).
+  accuracy_tolerance: 0.05
+  accuracy_abs_tolerance: 0.05
+  agent_accuracy_mode: patch_validity
+  final_accuracy_mode: resolve_rate
+  # Greedy-output correctness smoke (fixed prompts must match the baseline
+  # token-for-token at temperature 0 before timing is considered).
+  correctness_smoke_prompts: 8
+  # BFCL per-sample correctness gate: a temperature-0 patch should not flip BFCL
+  # answers correct->wrong/undecodable. Allowed flips = max(the count floor below,
+  # abs_tolerance * n_instances, rel_tolerance * n_baseline_correct) — a 5%/5%
+  # abs-OR-rel band that absorbs batch-numerics non-determinism (which flips many
+  # instances run-to-run even between identical builds under concurrency).
+  bfcl_max_correctness_regressions: 1
+  bfcl_correctness_abs_tolerance: 0.05
+  bfcl_correctness_tolerance: 0.05
+  # Modal serving knobs.
+  modal_scaledown_seconds: 900
+  modal_startup_timeout_seconds: 1200
+  server_health_timeout_seconds: 1800
+  # Per-phase wall-clock budgets (seconds). Matches the documented build budget.
+  build_timeout_seconds: 7200
+  instance_timeout_seconds: 1200
+  # Use a baseline (vanilla vLLM) cached in the judge image when available,
+  # otherwise the judge serves vanilla once and caches it for the trial.
+  baseline_cache_path: /opt/vllm-baseline/baseline_metrics.json
+submission:
+  kind: file
+  path: /app/solution.patch
+  max_queue_size: 2

@@ -1,0 +1,41 @@
+{
+  "solve_sh_scores": 0.5,
+  "cases": [
+    {
+      "solution": {
+        "x": 0.5
+      },
+      "reward": 0.5,
+      "why": "the reference solution scores exactly this"
+    },
+    {
+      "solution": {
+        "x": 1.5
+      },
+      "reward": 0.0,
+      "why": "out-of-bounds values must be rejected"
+    },
+    {
+      "solution": {
+        "x": 1.0000000001
+      },
+      "reward": 0.0,
+      "why": "epsilon over the bound is still out of bounds"
+    },
+    {
+      "solution": {
+        "x": 0.0,
+        "claimed_score": 999.0
+      },
+      "reward": 0.0,
+      "why": "a self-reported score must be ignored"
+    },
+    {
+      "solution": {
+        "nonsense": true
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ]
+}

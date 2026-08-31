@@ -1,0 +1,42 @@
+diff --git a/tests/test_tablib.py b/tests/test_tablib.py
+index ee341868..ee562b9b 100755
+--- a/tests/test_tablib.py
++++ b/tests/test_tablib.py
+@@ -564,12 +564,34 @@ def test_formatters(self):
+         """Confirm formatters are being triggered."""
+ 
+         def _formatter(cell_value):
+-            return str(cell_value).upper()
++            return str(cell_value)[1:]
+ 
+         self.founders.add_formatter('last_name', _formatter)
+ 
+-        for name in [r['last_name'] for r in self.founders.dict]:
+-            self.assertTrue(name.isupper())
++        expected = [
++            {'first_name': 'John', 'last_name': 'dams', 'gpa': 90},
++            {'first_name': 'George', 'last_name': 'ashington', 'gpa': 67},
++            {'first_name': 'Thomas', 'last_name': 'efferson', 'gpa': 50},
++        ]
++        self.assertEqual(self.founders.dict, expected)
++        # Test once more as the result should be the same
++        self.assertEqual(self.founders.dict, expected)
++
++    def test_formatters_all_cols(self):
++        """
++        Passing None as first add_formatter param apply formatter to all columns.
++        """
++
++        def _formatter(cell_value):
++            return str(cell_value).upper()
++
++        self.founders.add_formatter(None, _formatter)
++
++        self.assertEqual(self.founders.dict, [
++            {'first_name': 'JOHN', 'last_name': 'ADAMS', 'gpa': '90'},
++            {'first_name': 'GEORGE', 'last_name': 'WASHINGTON', 'gpa': '67'},
++            {'first_name': 'THOMAS', 'last_name': 'JEFFERSON', 'gpa': '50'},
++        ])
+ 
+     def test_unicode_renders_markdown_table(self):
+         # add another entry to test right field width for

@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.apple_incremental_game:d3c6ed381c59
+WORKDIR /home/workspace/apple_incremental_game

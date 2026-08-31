@@ -1,0 +1,82 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a python solution at `/app/solution.py`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `erdos_demo`
+Language: `python`
+Time limit: `300s`
+
+Original problem statement:
+
+# Erdos Unit Distance Demo
+
+## Problem
+
+Place exactly `N = 10` distinct points in the Euclidean plane so that the
+number of point pairs at Euclidean distance exactly `1` is as large as possible.
+
+This is a tiny, visually inspectable demo version of the planar unit distance
+problem. If your construction naturally has a different common distance, scale
+the coordinates before returning them.
+
+## Program Interface
+
+Submit a Python file defining one of the following:
+
+```python
+def solve(n: int) -> list[tuple[float, float]]:
+    ...
+```
+
+or:
+
+```python
+def generate_points(n: int) -> list[tuple[float, float]]:
+    ...
+```
+
+or:
+
+```python
+POINTS = [(0.0, 0.0), (1.0, 0.0), ...]
+```
+
+The returned value must contain exactly 10 two-dimensional points. No stdin is
+used.
+
+## Validity Constraints
+
+A solution is valid if:
+
+1. It returns exactly 10 points.
+2. Every coordinate is a finite real number.
+3. No two points are closer than `1e-6`.
+
+The objective is translation-invariant. Very large coordinates are allowed as
+long as pairwise squared distances remain finite.
+
+## Objective
+
+For all unordered point pairs, count those whose squared Euclidean distance is
+equal to `1` within a small floating-point tolerance. Let `M` be that count.
+
+Maximize `M`.
+
+## Scoring
+
+The score is naturally scaled to `[0, 100)`, without clipping against a fixed
+target. Let:
+
+```text
+baseline = N
+X = M
+```
+
+If the point set is invalid, or if `X <= baseline`, the score is `0`. Otherwise:
+
+```text
+score = 100 * (X - baseline) / X
+```
+
+This makes the simple `N`-pair baseline worth `0`. With only 10 points, the
+problem is intended as a quick sanity check and visual demo for agent workflows.

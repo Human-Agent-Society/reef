@@ -1,0 +1,95 @@
+diff --git a/tests/test_asyncio.py b/tests/test_asyncio.py
+--- a/tests/test_asyncio.py
++++ b/tests/test_asyncio.py
+@@ -160,6 +160,23 @@ def after(retry_state: RetryCallState) -> None:
+         assert list(attempt_nos2) == [1, 2, 3]
+ 
+ 
++class TestAsyncEnabled(unittest.TestCase):
++    @asynctest
++    async def test_enabled_false_skips_retry(self) -> None:
++        """When enabled=False, async function is called directly without retrying."""
++        call_count = 0
++
++        @retry(enabled=False, stop=stop_after_attempt(3))
++        async def always_fails() -> None:
++            nonlocal call_count
++            call_count += 1
++            raise ValueError("fail")
++
++        with pytest.raises(ValueError, match="fail"):
++            await always_fails()
++        assert call_count == 1
++
++
+ @unittest.skipIf(not have_trio, "trio not installed")
+ class TestTrio(unittest.TestCase):
+     def test_trio_basic(self) -> None:
+diff --git a/tests/test_tenacity.py b/tests/test_tenacity.py
+--- a/tests/test_tenacity.py
++++ b/tests/test_tenacity.py
+@@ -1371,6 +1371,64 @@ def succeeds_first_try() -> bool:
+         assert succeeds_first_try.statistics["delay_since_first_attempt"] == 0
+ 
+ 
++class TestEnabled:
++    def test_enabled_false_skips_retry(self) -> None:
++        """When enabled=False, the function is called directly without retrying."""
++        call_count = 0
++
++        @retry(enabled=False, stop=tenacity.stop_after_attempt(3))
++        def always_fails() -> None:
++            nonlocal call_count
++            call_count += 1
++            raise ValueError("fail")
++
++        with pytest.raises(ValueError, match="fail"):
++            always_fails()
++        assert call_count == 1
++
++    def test_enabled_false_preserves_attributes(self) -> None:
++        """When enabled=False, .retry, .retry_with, .statistics are still available."""
++
++        @retry(enabled=False, stop=tenacity.stop_after_attempt(3))
++        def my_func() -> str:
++            return "ok"
++
++        assert hasattr(my_func, "retry")
++        assert hasattr(my_func, "retry_with")
++        assert hasattr(my_func, "statistics")
++        assert my_func() == "ok"
++
++    def test_enabled_false_via_retry_with(self) -> None:
++        """retry_with(enabled=False) disables retrying."""
++        call_count = 0
++
++        @retry(stop=tenacity.stop_after_attempt(3))
++        def always_fails() -> None:
++            nonlocal call_count
++            call_count += 1
++            raise ValueError("fail")
++
++        disabled = always_fails.retry_with(enabled=False)
++        with pytest.raises(ValueError, match="fail"):
++            disabled()
++        assert call_count == 1
++
++    def test_enabled_true_retries_normally(self) -> None:
++        """When enabled=True (default), retrying works as usual."""
++        call_count = 0
++
++        @retry(enabled=True, stop=tenacity.stop_after_attempt(3), reraise=True)
++        def fails_twice() -> bool:
++            nonlocal call_count
++            call_count += 1
++            if call_count < 3:
++                raise ValueError("fail")
++            return True
++
++        assert fails_twice() is True
++        assert call_count == 3
++
++
+ class TestRetryWith:
+     def test_redefine_wait(self) -> None:
+         start = current_time_ms()

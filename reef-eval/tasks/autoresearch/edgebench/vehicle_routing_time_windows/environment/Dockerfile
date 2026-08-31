@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.vehicle_routing_time_windows:53214fda231b
+WORKDIR /home/workspace/task_cvrptw_905da6dd/workspace

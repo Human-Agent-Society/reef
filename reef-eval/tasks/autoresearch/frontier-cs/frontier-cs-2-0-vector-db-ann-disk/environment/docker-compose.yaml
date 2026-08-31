@@ -1,0 +1,37 @@
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+    environment:
+      JUDGE_URL: "http://judge:8082"
+
+  judge:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: Dockerfile.judge
+    deploy:
+      resources:
+        limits:
+          cpus: "8"
+          memory: "8192M"
+        reservations:
+          cpus: "8"
+          memory: "8192M"
+    command: ["python3", "/judge/judge_server.py"]
+    expose:
+      - "8082"
+    environment:
+      PORT: "8082"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 360
+      start_period: 5s

@@ -1,0 +1,161 @@
+# Vector DB ANN Relaxed
+
+## Problem
+
+Build a fast approximate nearest-neighbor vector search engine for a
+SIFT1M-scale benchmark. This relaxed variant uses the same data, API, resource
+budget, and recall target as Vector DB ANN, but penalizes load/index-build time
+10x less heavily.
+
+The hidden benchmark contains exactly `1,000,000` base vectors with dimension
+`128`. Queries use the same dimension, distance is squared Euclidean distance,
+and each query asks for the top `10` nearest vector ids.
+
+Your objective is to maximize serving throughput while preserving search
+quality: submissions must reach `recall@10 >= 0.95`, and valid submissions are
+ranked by an effective QPS that includes query time plus a small
+load/index-build penalty.
+
+The Harbor agent container starts with a small Rust skeleton project in
+`/app`. You may use it, modify it, or replace it entirely. You may also use any
+Rust crates, internal harness, data structures, and build layout you want, as
+long as the final project satisfies the judge contract below.
+
+The judge builds and runs your service with:
+
+```bash
+cargo build --release
+PORT=<port> cargo run --release --quiet
+```
+
+The Harbor environment uses the Ubuntu `apt` Rust toolchain:
+
+```text
+rustc 1.75
+cargo 1.75
+```
+
+If you add crates, choose versions compatible with this toolchain or pin
+transitive dependencies accordingly.
+
+The service and judge run with the task resource limits below. Design your
+parallel search and indexing strategy for this budget:
+
+```text
+vCPUs: 8
+memory: 16 GiB
+query concurrency: 8
+timed queries per worker: 64
+```
+
+The service must listen on `PORT` and implement these endpoints:
+
+```text
+POST /insert
+POST /bulk_insert
+POST /search
+```
+
+`/bulk_insert` receives:
+
+```json
+{"vectors":[{"id":0,"vector":[0.1,0.2,...]}]}
+```
+
+and returns:
+
+```json
+{"status":"ok","inserted":1}
+```
+
+`/search` receives:
+
+```json
+{"vector":[0.1,0.2,...],"top_k":10}
+```
+
+and returns:
+
+```json
+{"results":[{"id":0,"distance":0.0}]}
+```
+
+## Local Harness
+
+The official evaluator uses hidden data and a black-box judge. You may call:
+
+```bash
+bash /app/submit.sh
+```
+
+at any time to submit the current `/app` project to the official judge and get
+score feedback.
+
+## Validity
+
+A submission is valid if:
+
+1. It builds successfully with `cargo build --release`.
+2. `cargo run --release --quiet` starts the service and implements the required HTTP
+   endpoints.
+3. Every returned id is in `[0, 1_000_000)`.
+4. Its `recall@10` is at least `0.95` against the hidden exact top-10 ground
+   truth.
+
+## Scoring
+
+At trial startup, the Harbor judge sidecar prepares the hidden benchmark and
+runs an exact-search reference HTTP service through the same `/bulk_insert`
+and `/search` client harnesses to produce ground-truth nearest neighbors and
+the trial-local scoring baseline:
+
+```text
+baseline_qps
+baseline_effective_qps
+baseline_load_seconds
+```
+
+Interactive submissions and the final verifier both score through this same
+judge sidecar, so the baseline and runtime environment are shared within a
+trial while still letting different machines measure their own local baseline.
+
+Each submission is then timed independently. The load phase includes all
+`/bulk_insert` calls and any index construction performed by the service before
+queries begin. The query phase uses 8 concurrent workers, each issuing 64
+queries, and measures only `/search` throughput:
+
+```text
+candidate_qps
+candidate_load_seconds
+```
+
+The reported `qps` is the raw query-only QPS. Scoring uses an effective QPS
+that includes a small index-build/load penalty:
+
+```text
+effective_qps = Q / (query_seconds + 0.001 * load_seconds)
+```
+
+The load phase has a default `900s` timeout. This keeps the benchmark focused
+on serving performance while still making very expensive offline indexing pay a
+bounded, explicit cost. This relaxed variant makes the load/index-build penalty
+small enough that spending additional time on a stronger index can be worthwhile
+when it materially improves query throughput or recall.
+
+During evaluation, the load and query phases may stop early and return `0` once
+the elapsed time plus the load penalty makes it impossible for the final
+effective QPS to beat the baseline. During load, this assumes a best-case query
+time of zero.
+
+If the submission is invalid, if `recall@10 < 0.95`, or if
+`candidate_effective_qps <= baseline_effective_qps`, the score is `0`.
+Otherwise:
+
+```text
+score = 100 * (1 - sqrt(baseline_effective_qps) / sqrt(candidate_effective_qps))
+```
+
+The bounded and unbounded score fields both report this score. Harbor JSON
+results include the measured `qps`, `effective_qps`, `baseline_qps`,
+`baseline_effective_qps`, `recall_at_10`, load time, and runtime metrics under
+the `metrics` field.

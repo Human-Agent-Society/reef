@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.graph_node_classification:4d2c1f502d14
+WORKDIR /home/workspace/045_graph_node_classification

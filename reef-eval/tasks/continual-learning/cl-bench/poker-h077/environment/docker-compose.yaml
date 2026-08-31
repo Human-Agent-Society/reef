@@ -1,0 +1,23 @@
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+    environment:
+      JUDGE_URL: "http://judge:8082"
+
+  judge:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: Dockerfile.judge
+    command: ["python3", "/judge/poker_server.py"]
+    networks: [default]
+    environment:
+      PORT: "8082"
+      JUDGE_DIR: "/judge"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 3s

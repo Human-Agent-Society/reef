@@ -1,0 +1,295 @@
+BBOPlace ICCAD2015
+==================
+
+Problem
+-------
+
+Write a Python solution that proposes macro placements for the BBOPlace
+Mask-Guided Optimization (MGO) formulation on eight ICCAD2015 placement
+benchmarks:
+
+```text
+superblue1, superblue3, superblue4, superblue5,
+superblue7, superblue10, superblue16, superblue18
+```
+
+This is a VLSI chip-placement optimization task. A chip design contains many
+rectangular objects. Large objects are called macros, smaller logic objects are
+called standard cells, and nets describe which pins on those objects must be
+connected by wires. A placement assigns physical locations to the movable
+objects on a rectangular chip canvas. Good placements keep connected objects
+near each other while avoiding illegal macro overlap and boundary violations.
+
+This task uses the BBOPlace-Bench MGO representation. Your submitted vector is
+not a final physical DEF placement. It is a genotype: one desired grid
+coordinate for each macro. The hidden BBOPlace evaluator decodes that genotype
+by placing macros on a 2D grid, masking out illegal grid positions, greedily
+adjusting macros to legal positions, and then reporting macro-placement
+half-perimeter wirelength (MP-HPWL). Lower MP-HPWL is better.
+
+You do not need to implement an ICCAD2015 parser, a legalizer, HPWL
+computation, or BBOPlace itself for this suite task. The judge owns the hidden
+benchmark files and the original BBOPlace-Bench evaluator. Your job is to
+generate promising candidate coordinate vectors from the public metadata passed
+to `solve(info)`. External repositories, papers, internet search, and BBOPlace
+source code are not needed for this task. Do not try to fetch or reconstruct
+the hidden evaluator. Treat it as a black box and use only the task statement,
+`AGENT.md`, the `info` dictionary passed to your solution, and feedback
+returned by `/app/submit.sh`.
+
+Background definitions
+----------------------
+
+A net connects two or more pins. The half-perimeter wirelength of one net is:
+
+```text
+(max pin x - min pin x) + (max pin y - min pin y)
+```
+
+HPWL is the sum of that value over nets. MP-HPWL is the same idea restricted to
+the macro-placement evaluation path used by BBOPlace-Bench. The judge reports
+only MP-HPWL for scoring; it does not run global placement of standard cells.
+
+ICCAD2015 contest designs are distributed in an LEF/DEF-style flow. The
+important file roles are:
+
+```text
+.def          design components, pins, nets, floorplan, and placement data
+.lef          technology and macro geometry
+.v            logical netlist
+.sdc          timing constraints
+*_Early.lib   early timing library
+*_Late.lib    late timing library
+```
+
+Those files are hidden for this suite task. They are described here only so the
+optimization problem is clear.
+
+Runtime and resources
+---------------------
+
+Your solution runs in the main agent container with:
+
+- 4 CPU cores
+- 16 GiB memory
+- 8 GiB storage
+- no GPU
+- Python 3 with NumPy available
+
+The final verifier timeout is 10800 seconds. The judge also runs on CPU only.
+Do not rely on CUDA, DREAMPlace, Ray, or GPU placement libraries for scoring;
+the official metric path used here is MGO with MP-HPWL.
+
+Submission interface
+--------------------
+
+Create `/app/solution.py`. It must define one of:
+
+- `solve(info)`
+- `generate(info)`
+- `run(info)`
+- `CANDIDATES`, `CANDIDATE`, or `PLACEMENT`
+
+The recommended interface is `solve(info)`. The judge imports the file in an
+isolated process and calls it once per selected benchmark. `info` is a
+JSON-like dictionary containing:
+
+```text
+dataset: "iccad2015"
+benchmark: one of superblue1, superblue3, superblue4, superblue5,
+           superblue7, superblue10, superblue16, superblue18
+placer: "mgo"
+metric: "mp_hpwl"
+objective: "minimize"
+dim: placement vector length, always 2 * node_cnt
+node_cnt: number of movable macros represented by the vector
+net_cnt: number of nets in the benchmark
+canvas_width, canvas_height: physical canvas dimensions
+n_grid_x, n_grid_y: inclusive MGO grid-coordinate upper bounds
+bounds_kind: "mgo_repeated_grid"
+max_candidates_per_submission: 16
+baseline_hpwl: the HPWL baseline used for scoring
+```
+
+The `info` dictionary is the public data channel for benchmark-specific
+constants in this suite task. The raw ICCAD2015 files stay hidden, but the
+constants needed to create a syntactically valid placement are provided on
+every call to `solve(info)`. In particular, do not assume that the
+quick-feedback benchmark dimensions also apply to the full suite. Read `dim`,
+`node_cnt`, `n_grid_x`, `n_grid_y`, `canvas_width`, `canvas_height`, and
+`baseline_hpwl` from the `info` argument each time the function is called.
+
+Because the raw netlist and macro order are hidden, a useful solver should
+return several robust coordinate patterns rather than trying to compute true
+HPWL locally. Examples include zero or center fills, edge/corner spreads,
+diagonal or striped layouts, clustered layouts, deterministic random layouts,
+and small deterministic variants keyed by `info["benchmark"]`. The judge will
+evaluate up to 16 candidates and keep the best legal candidate for each
+benchmark.
+
+The final verifier calls your solution separately for:
+
+```text
+superblue1, superblue3, superblue4, superblue5,
+superblue7, superblue10, superblue16, superblue18
+```
+
+Each call has the same field names but may have different values. A correct
+solution can therefore be written without knowing or hard-coding the per-design
+constants in advance:
+
+```python
+def solve(info):
+    n = int(info["node_cnt"])
+    gx = float(info["n_grid_x"])
+    gy = float(info["n_grid_y"])
+    x = [0.5 * gx] * n
+    y = [0.5 * gy] * n
+    return x + y
+```
+
+Return either one placement vector of length `dim`, or a 2D list/NumPy array
+with up to 16 placement candidates. For every candidate:
+
+```text
+candidate[0:node_cnt]              = x-grid coordinates
+candidate[node_cnt:2 * node_cnt]   = y-grid coordinates
+x coordinates must be finite and in [0, n_grid_x]
+y coordinates must be finite and in [0, n_grid_y]
+```
+
+Coordinates may be integers or floats. They are interpreted by BBOPlace's MGO
+decoder as desired grid positions; the decoder may move macros during legality
+repair. If you return multiple candidates, the judge evaluates all of them and
+uses the candidate with the lowest legal MP-HPWL for that benchmark.
+
+A minimal valid solution is:
+
+```python
+def solve(info):
+    return [0.0] * int(info["dim"])
+```
+
+Tiny example
+------------
+
+Suppose the judge called `solve(info)` with this small illustrative metadata:
+
+```python
+info = {
+    "benchmark": "toy",
+    "node_cnt": 2,
+    "dim": 4,
+    "n_grid_x": 10,
+    "n_grid_y": 8,
+}
+```
+
+Then a valid single candidate could be:
+
+```python
+[2.0, 7.5, 1.0, 6.0]
+```
+
+The first `node_cnt = 2` values are x-grid coordinates, and the last two values
+are y-grid coordinates. This candidate asks MGO to place macro 0 near grid
+`(2.0, 1.0)` and macro 1 near grid `(7.5, 6.0)`. A two-candidate return value
+for the same toy metadata could be:
+
+```python
+[
+    [2.0, 7.5, 1.0, 6.0],
+    [0.0, 10.0, 0.0, 8.0],
+]
+```
+
+A simple multi-candidate skeleton is:
+
+```python
+import numpy as np
+
+
+def solve(info):
+    n = int(info["node_cnt"])
+    dim = int(info["dim"])
+    gx = float(info["n_grid_x"])
+    gy = float(info["n_grid_y"])
+    name = str(info["benchmark"])
+    seed = sum((i + 1) * ord(ch) for i, ch in enumerate(name)) % (2**32)
+    rng = np.random.default_rng(seed)
+
+    candidates = []
+    candidates.append(np.zeros(dim))
+    for _ in range(15):
+        x = rng.uniform(0.0, gx, size=n)
+        y = rng.uniform(0.0, gy, size=n)
+        candidates.append(np.concatenate([x, y]))
+    return np.asarray(candidates)
+```
+
+Local harness
+-------------
+
+The official evaluator uses hidden data and a black-box judge. During a Harbor
+trial you may call:
+
+```bash
+bash /app/submit.sh
+```
+
+to submit the current `/app/solution.py` and receive public score feedback.
+
+During iterative agent submissions, `/app/submit.sh` gives quick feedback on
+`superblue1` only. The final verifier evaluates the full eight-benchmark
+suite. Use the quick feedback to debug general placement logic, candidate
+formatting, and search ideas, not as the complete leaderboard score.
+
+The submit helper saves the best quick-feedback artifact it has seen. During
+final verification, the verifier reruns both the current `/app/solution.py` and
+that saved best iterative artifact on the full suite, then uses the better
+full-suite score. A quick-feedback score is never used directly as the final
+reward.
+
+Validity
+--------
+
+A submission is valid if:
+
+1. `/app/solution.py` imports successfully with Python 3.
+2. It exposes one of the accepted interfaces listed above.
+3. For each benchmark call, it returns one to 16 candidates.
+4. Every candidate has exactly `dim` finite numeric values.
+5. X coordinates are in `[0, n_grid_x]` and y coordinates are in
+   `[0, n_grid_y]`.
+6. BBOPlace can legalize at least one candidate for each evaluated benchmark.
+
+Invalid submissions, timeouts, and candidates that cannot be legalized receive
+score `0`.
+
+Scoring
+-------
+
+The objective is to minimize MP-HPWL. For each benchmark:
+
+```text
+raw_score = 100 * (baseline_hpwl - candidate_hpwl) / baseline_hpwl
+score = max(0, raw_score)
+```
+
+The final score is the mean score over the eight ICCAD2015 benchmarks. The
+unbounded score is the mean raw score before the zero clip.
+
+The baseline constants are from the BBOPlace-Bench report, Table V,
+`MGO + PSO` MP-HPWL. The paper reports values in units of `x10^5`; the judge
+stores raw HPWL values relaxed by `1.2x`:
+
+```text
+superblue1:  0.696e5
+superblue3:  1.824e5
+superblue4:  1.128e5
+superblue5:  4.512e5
+superblue7:  2.028e5
+superblue10: 0.648e5
+superblue16: 1.152e5
+superblue18: 0.576e5
+```

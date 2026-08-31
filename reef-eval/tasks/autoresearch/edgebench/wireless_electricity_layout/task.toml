@@ -1,0 +1,32 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/wirel/solution.cpp"]
+
+[task]
+name = "edgebench/wireless_electricity_layout"
+description = "Wireless Electricity Layout"
+
+[metadata]
+benchmark = "edgebench"
+category = "Combinatorial Optimization"
+judge_parser = "score_sum"
+score_direction = "minimize"
+rescale_kind = "piecewise_log_min"
+rescale_baseline = 2.6059066264593484e+16
+rescale_rank30 = 2444746514528109.0
+rescale_rank1 = 362439546835871.0
+rescale_super_anchor = 181219773417935.5
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

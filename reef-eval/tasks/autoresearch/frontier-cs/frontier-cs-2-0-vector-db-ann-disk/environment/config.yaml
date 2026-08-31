@@ -1,0 +1,52 @@
+tag: systems
+runtime:
+  language: rust
+  timeout_seconds: 10800
+  environment: "Rust project; hidden disk ANN benchmark; Python/NumPy judge"
+  apt_packages:
+    - build-essential
+    - cargo
+    - git
+    - rustc
+  judge_apt_packages:
+    - build-essential
+    - cargo
+    - rustc
+    - python3-pip
+    - python3-numpy
+  judge_pip_packages:
+    - faiss-cpu
+  docker:
+    # Agent image is the default ubuntu:24.04 (the agent needs no hidden data).
+    # The judge image bakes the SIFT100M benchmark data in; build it before a
+    # local Harbor trial with 2.0/problems/vector_db_ann_disk/docker/build_images.sh.
+    image: ubuntu:24.04
+    judge_image: frontiercs/vector-db-ann-disk-judge:experimental-v1
+environment:
+  # If these resource limits change, also update the resource budget text in
+  # readme and harbor/app/README.md so agents can design parallel algorithms
+  # for the actual CPU and memory budget.
+  cpus: 8
+  memory_mb: 8192
+  storage_mb: 8192
+  build_timeout_seconds: 3600
+evaluation:
+  # The judge drives the search service with this many concurrent workers.
+  # Keep this aligned with the CPU budget unless the task is intentionally
+  # changed into a higher-concurrency service benchmark.
+  query_concurrency: 8
+  # Fallback only: the actual timed query count is pinned to the full official
+  # query set via FRONTIER_VECTOR_DB_Q=10000 in docker/judge/Dockerfile, which
+  # overrides this. (The local CI smoke in evaluate.sh sets its own small Q.)
+  queries_per_worker: 64
+# The hidden benchmark data is baked into the custom judge image
+# (runtime.docker.judge_image); the data paths, dtype, N=100,000,000, and
+# Q=10,000 are pinned as ENV in docker/judge/Dockerfile. truth.bin / baseline.json
+# live under /data/private_100M, which is never passed to /load.
+submission:
+  kind: directory
+  path: /app
+  exclude:
+    - target
+    - .git
+    - .frontier-cs

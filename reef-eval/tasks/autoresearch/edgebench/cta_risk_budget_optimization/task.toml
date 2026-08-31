@@ -1,0 +1,27 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/run.py", "/home/workspace/main.py", "/home/workspace/config.json", "/home/workspace/config.yaml", "/home/workspace/nav_history.csv", "/home/workspace/signal_matrix.csv", "/home/workspace/positions.csv", "/home/workspace/trades.csv", "/home/workspace/risk_budget_allocation.csv", "/home/workspace/performance_report.md", "/home/workspace/performance_report.xlsx", "/home/workspace/stress_test_report.md", "/home/workspace/stress_test_results.xlsx", "/home/workspace/sensitivity_analysis_report.md", "/home/workspace/sensitivity_analysis.xlsx", "/home/workspace/diagnostics.json", "/home/workspace/outputs"]
+
+[task]
+name = "edgebench/cta_risk_budget_optimization"
+description = "Cta Risk Budget Optimization"
+
+[metadata]
+benchmark = "edgebench"
+category = "Professional Knowledge Work"
+judge_parser = "structured_json"
+score_direction = "maximize"
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

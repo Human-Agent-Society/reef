@@ -1,0 +1,7 @@
+type: default
+time: 1s
+memory: 512m
+checker: chk.cc
+subtasks:
+  - score: 1
+    n_cases: 15

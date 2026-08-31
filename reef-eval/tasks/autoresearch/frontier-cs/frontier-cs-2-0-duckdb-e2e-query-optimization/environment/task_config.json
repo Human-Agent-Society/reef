@@ -1,0 +1,57 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "cpp",
+    "timeout_seconds": 10800,
+    "environment": "DuckDB source patch; TPC-H shell timing; experimental judge",
+    "apt_packages": [
+      "bash",
+      "build-essential",
+      "ca-certificates",
+      "ccache",
+      "cmake",
+      "git",
+      "ninja-build",
+      "pkg-config",
+      "python3"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "build-essential",
+      "ca-certificates",
+      "ccache",
+      "cmake",
+      "git",
+      "ninja-build",
+      "pkg-config",
+      "python3"
+    ],
+    "docker": {
+      "image": "frontiercs/duckdb-e2e-query-optimization-agent:experimental-v1.5.3",
+      "judge_image": "frontiercs/duckdb-e2e-query-optimization-judge:experimental-v1.5.3"
+    }
+  },
+  "environment": {
+    "cpus": 8,
+    "memory_mb": 16384,
+    "storage_mb": 32768,
+    "build_timeout_seconds": 7200
+  },
+  "evaluation": {
+    "scale_factor": 1,
+    "agent_scale_factors": [
+      1
+    ],
+    "benchmark_repetitions": 3,
+    "build_timeout_seconds": 7200,
+    "query_timeout_seconds": 300,
+    "sqllogictest_timeout_seconds": 600,
+    "duckdb_memory_limit": "6GB",
+    "duckdb_temp_limit": "2GB",
+    "child_memory_mb": 12288
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch"
+  }
+}

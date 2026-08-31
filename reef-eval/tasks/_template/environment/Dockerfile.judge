@@ -1,0 +1,6 @@
+# The judge's container: the server plus the task's scoring files.
+# The agent can reach the HTTP API and nothing else in here.
+FROM python:3.12-slim
+COPY judge_server.py score.py judge_config.json /judge/
+# TODO(task): COPY final.py (hidden tests) and any data score.py needs
+CMD ["python3", "/judge/judge_server.py"]

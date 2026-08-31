@@ -1,0 +1,47 @@
+{
+  "solve_sh_scores": 0.3333333333333333,
+  "cases": [
+    {
+      "solution": {
+        "x": 0.0,
+        "y": 0.0
+      },
+      "reward": 0.3333333333333333,
+      "tolerance": 1e-12,
+      "why": "the reference solution scores exactly this"
+    },
+    {
+      "solution": {
+        "x": "inf",
+        "y": 0.0
+      },
+      "reward": 0.0,
+      "why": "non-finite values must be rejected"
+    },
+    {
+      "solution": {
+        "x": 1e+300,
+        "y": 0.0
+      },
+      "reward": 0.0,
+      "why": "out-of-bounds values must be rejected"
+    },
+    {
+      "solution": {
+        "x": 1.0
+      },
+      "reward": 0.0,
+      "why": "a missing required field must score zero"
+    },
+    {
+      "solution": {
+        "point": [
+          1,
+          1
+        ]
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ]
+}

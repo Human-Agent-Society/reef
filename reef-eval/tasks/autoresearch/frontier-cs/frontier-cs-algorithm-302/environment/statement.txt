@@ -1,0 +1,125 @@
+```markdown
+# Spectrum-Friendly Beacon String (Optimization)
+
+## Problem
+A satellite sends a beacon as a string of symbols. The radio channel has two kinds of interference:
+
+1. **Transition interference**: certain consecutive symbol pairs (bigrams) are more likely to be misread, causing a penalty.
+2. **Motif interference**: certain short patterns (substrings) trigger harmonics and cause additional penalty every time they appear (overlaps count).
+
+You are given:
+- the beacon length `n`,
+- an alphabet of the first `k` lowercase Latin letters (`a..`),
+- an **exact required usage count** for each letter,
+- a **bigram penalty matrix**,
+- and a list of **motif penalties**.
+
+Your task is to output any feasible beacon string with **minimum total penalty**.
+
+This is an optimization task: many feasible strings exist; they are scored by how small the penalty is.
+
+## Input
+```
+n k
+c1 c2 ... ck
+k lines each with k integers: W[i][j]
+m
+p1 w1
+p2 w2
+...
+pm wm
+```
+
+Where:
+- `1 ≤ k ≤ 26`
+- `k ≤ n ≤ 200000`
+- `ci` are positive integers with `c1 + ... + ck = n` (each letter must appear at least once)
+- `W[i][j]` is the penalty for adjacent letters `(char i) -> (char j)`
+  - indices `i,j` correspond to letters `a..` in order (so `i=1` means `a`)
+  - `0 ≤ W[i][j] ≤ 10^6`
+- `m` is the number of motifs
+  - `0 ≤ m ≤ 200000`
+- Each motif line contains:
+  - `pt` — a non-empty string over the first `k` letters, with `2 ≤ |pt| ≤ 10`
+  - `wt` — an integer penalty, `1 ≤ wt ≤ 10^6`
+- Total motif length over all motifs is at most `200000`.
+
+## Output
+Print a single line containing a string `s` such that:
+- `|s| = n`
+- every character of `s` is among the first `k` letters (`a..`)
+- each letter appears **exactly** `ci` times
+
+Any feasible output is accepted and scored.
+
+## Objective
+Let `s` be your output string.
+
+### 1) Transition penalty
+\[
+P_{\text{bigram}}(s) = \sum_{t=1}^{n-1} W[s_t][s_{t+1}]
+\]
+
+### 2) Motif penalty
+For each motif `pi` with weight `wi`, let `occ(pi, s)` be the number of positions `t`
+such that `s[t..t+|pi|-1] = pi` (overlaps are counted).
+\[
+P_{\text{motif}}(s) = \sum_{i=1}^{m} w_i \cdot occ(p_i, s)
+\]
+
+### Total penalty (to minimize)
+\[
+P(s) = P_{\text{bigram}}(s) + P_{\text{motif}}(s)
+\]
+
+## Scoring
+This problem is evaluated on multiple hidden test instances.
+
+For each test instance:
+- If your output is infeasible (wrong length, characters outside the alphabet, or wrong per-letter counts), you get ratio `0`.
+- Otherwise, let `X = P(s)` be your total penalty.
+- The judge also computes a deterministic internal reference string from the same test instance.
+- Let `B` be the total penalty of that reference string.
+
+Your per-test ratio is:
+\[
+\mathrm{ratio} = \mathrm{clamp}\left(\frac{B - X}{\max(B, 1)},\, 0,\, 1\right)
+\]
+where `clamp(x,0,1)=min(1,max(0,x))`.
+
+Lower penalty is strictly better, and matching or exceeding the baseline penalty gives ratio `0`.
+
+The final score is the sum of per-test ratios, scaled to the total points configured for this problem.
+
+## Constraints
+- Time limit: 2 seconds
+- Memory limit: 256 MB
+
+## Example
+### Input
+```
+10 3
+4 3 3
+0 5 1
+2 0 4
+3 1 0
+3
+ab 7
+baa 6
+cc 5
+```
+
+### Sample Output
+```
+abcabcabca
+```
+
+### Explanation (high-level)
+- This output is just one feasible string for this instance: it uses exactly 4 `a`’s, 3 `b`’s, and 3 `c`’s. It is not claimed to be optimal or even good; any feasible string is accepted.
+- The judge computes:
+  - sum of `W[s_t][s_{t+1}]` over all adjacent pairs,
+  - plus 7 for each occurrence of `"ab"`,
+  - plus 6 for each occurrence of `"baa"`,
+  - plus 5 for each occurrence of `"cc"`.
+- The judge compares that total penalty against its deterministic internal reference penalty for the same test.
+```

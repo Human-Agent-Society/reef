@@ -1,0 +1,3 @@
+FROM python:3.12-slim
+RUN mkdir -p /judge && python3 -c "import urllib.request; urllib.request.urlretrieve('https://huggingface.co/datasets/continual-learning-bench/database-exploration/resolve/a0cc57eeb9a54f01c0490a1b46cb705b4e05aa19/products_drifted.db', '/judge/question.db')"
+COPY dbx_server.py question.json /judge/

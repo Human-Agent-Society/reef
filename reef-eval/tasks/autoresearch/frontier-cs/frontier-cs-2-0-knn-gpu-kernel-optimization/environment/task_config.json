@@ -1,0 +1,108 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 10800,
+    "environment": "GPU brute-force k-NN kernel optimization. The agent patches the knnlib package; the judge offloads timing to a Modal GPU, comparing the patched nearest-neighbor search against a frozen naive baseline on hidden (Q, M, D, k) workloads with a recall@k (retrieval-quality) gate.",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/knn-gpu-kernel-optimization-agent:experimental-v0.6.0",
+      "judge_image": "frontiercs/knn-gpu-kernel-optimization-judge:experimental-v0.6.0"
+    }
+  },
+  "environment": {
+    "cpus": 4,
+    "memory_mb": 8192,
+    "storage_mb": 16384,
+    "build_timeout_seconds": 3600
+  },
+  "evaluation": {
+    "primitive": "knn",
+    "pkg": "knnlib",
+    "ref_module": "refknn",
+    "clean_source": "/opt/knnlib-clean",
+    "baseline_source": "/opt/knn_ref",
+    "gpu": "H100",
+    "cuda_image": "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+    "pip": [
+      "torch",
+      "numpy",
+      "h5py"
+    ],
+    "app_name": "knn-kernel-opt-eval",
+    "dataset_volume": "flashlib-ann-datasets",
+    "modal_timeout_seconds": 3600,
+    "warmup_iters": 2,
+    "timed_iters": 7,
+    "recall_threshold": 0.88,
+    "distance_ball_tolerance": 0.0,
+    "speedup_target": 4.0,
+    "base_seed": 20260701,
+    "agent_workload_count": 6,
+    "expose_per_workload_metrics": true,
+    "workloads": [
+      {
+        "id": "sift_k10",
+        "dataset": "sift",
+        "M": 500000,
+        "Q": 1024,
+        "k": 10
+      },
+      {
+        "id": "sift_k50",
+        "dataset": "sift",
+        "M": 500000,
+        "Q": 1024,
+        "k": 50
+      },
+      {
+        "id": "sift_k100",
+        "dataset": "sift",
+        "M": 500000,
+        "Q": 1024,
+        "k": 100
+      },
+      {
+        "id": "gist_k10",
+        "dataset": "gist",
+        "M": 500000,
+        "Q": 512,
+        "k": 10
+      },
+      {
+        "id": "gist_k50",
+        "dataset": "gist",
+        "M": 500000,
+        "Q": 512,
+        "k": 50
+      },
+      {
+        "id": "gist_k100",
+        "dataset": "gist",
+        "M": 500000,
+        "Q": 512,
+        "k": 100
+      }
+    ]
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch"
+  }
+}

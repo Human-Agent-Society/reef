@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 950 300" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #22363E; }
+    .m { fill: #7A929A; } .a { fill: #0E7490; } .c { fill: #D65F4A; }
+    .lab { font-size: 15px; font-weight: 600; } .sm { font-size: 13px; }
+    .draw { stroke: #22363E; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-f { stroke: #AABDC3; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-a { stroke: #0E7490; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-c { stroke: #D65F4A; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .dash { stroke-dasharray: 4 5; }
+  </style>
+  <defs>
+    <marker id="m-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22363E"/>
+    </marker>
+    <marker id="m-acc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0E7490"/>
+    </marker>
+    <marker id="m-cor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#D65F4A"/>
+    </marker>
+  </defs>
+
+  <!-- ============ the stream: task boxes on one axis, y = 110 ============ -->
+
+  <!-- task 1 -->
+  <rect x="30" y="70" width="150" height="80" rx="10" class="draw"/>
+  <text x="98" y="117" text-anchor="middle" class="lab">task 1</text>
+  <circle cx="156" cy="88" r="9" class="draw-a"/>
+  <path d="M 151.5 88 l 3.5 4 l 6.5 -8" class="draw-a"/>
+
+  <!-- memory carried: task 1 -> task 2 -->
+  <path d="M 180 110 H 240" class="draw-c" marker-end="url(#m-cor)"/>
+  <path d="M 199 78 h 10 l 4 4 h 12 v 16 h -26 z" class="draw-c"/>
+
+  <!-- task 2 -->
+  <rect x="245" y="70" width="150" height="80" rx="10" class="draw"/>
+  <text x="313" y="117" text-anchor="middle" class="lab">task 2</text>
+  <circle cx="371" cy="88" r="9" class="draw-a"/>
+  <path d="M 366.5 88 l 3.5 4 l 6.5 -8" class="draw-a"/>
+
+  <!-- memory carried: task 2 -> task n -->
+  <path d="M 395 110 H 455" class="draw-c" marker-end="url(#m-cor)"/>
+  <path d="M 414 78 h 10 l 4 4 h 12 v 16 h -26 z" class="draw-c"/>
+
+  <!-- the shared memory label, above the whole chain -->
+  <text x="320" y="52" text-anchor="middle" class="sm c">the agent's memory, carried forward</text>
+
+  <!-- task n (not run yet) -->
+  <rect x="460" y="70" width="150" height="80" rx="10" class="draw-f dash"/>
+  <text x="535" y="117" text-anchor="middle" class="lab m">task n</text>
+
+  <!-- captions under the chain -->
+  <text x="320" y="178" text-anchor="middle" class="lab">the task stream</text>
+  <text x="320" y="200" text-anchor="middle" class="sm m">each task runs in a fresh container and is scored on its own;</text>
+  <text x="320" y="218" text-anchor="middle" class="sm m">the memory rides along, with a snapshot kept at every step</text>
+
+  <!-- rewards -> table -->
+  <path d="M 610 110 H 668" class="draw-a" marker-end="url(#m-acc)"/>
+  <text x="639" y="96" text-anchor="middle" class="sm a">reward</text>
+
+  <!-- one table: the bold row sits on the axis, where the arrow points -->
+  <text x="674" y="66" class="lab">one table, every run</text>
+  <circle cx="680" cy="88" r="3" fill="#AABDC3"/>
+  <line x1="694" y1="88" x2="770" y2="88" class="draw-f"/>
+  <circle cx="680" cy="110" r="3.5" fill="#0E7490"/>
+  <line x1="694" y1="110" x2="800" y2="110" class="draw-a" stroke-width="3"/>
+  <text x="812" y="114" class="sm a">reward per task</text>
+  <circle cx="680" cy="132" r="3" fill="#AABDC3"/>
+  <line x1="694" y1="132" x2="782" y2="132" class="draw-f"/>
+  <circle cx="680" cy="154" r="3" fill="#AABDC3"/>
+  <line x1="694" y1="154" x2="764" y2="154" class="draw-f"/>
+  <text x="674" y="200" class="sm m">rewards land next to every other run;</text>
+  <text x="674" y="218" class="sm m">the learning curve is a query</text>
+
+  <!-- the learning curve, along the bottom -->
+  <path d="M 96 246 V 288 H 470" class="draw-f"/>
+  <polyline points="102,282 148,282 148,274 206,274 206,268 264,268 264,258 330,258 330,252 400,252" class="draw-a"/>
+  <circle cx="400" cy="252" r="4" fill="#0E7490"/>
+  <text x="492" y="272" class="sm a">score over the stream: does experience add up?</text>
+</svg>

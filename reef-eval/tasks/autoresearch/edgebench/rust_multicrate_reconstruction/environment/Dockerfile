@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.rust_multicrate_reconstruction:7f639fc9d090
+WORKDIR /home/workspace/cas_rust_benchmark

@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.vliw_kernel_optimization:9fa380a0ebef
+WORKDIR /home/workspace/sebench_performance_takehome

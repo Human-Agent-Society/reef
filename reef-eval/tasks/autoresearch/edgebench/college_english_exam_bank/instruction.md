@@ -1,0 +1,1 @@
+Read the complete task instructions in `/home/workspace/task_instruction.md`, and complete the task according to those requirements. The final deliverables must be written to the file paths specified in `task_instruction.md`.

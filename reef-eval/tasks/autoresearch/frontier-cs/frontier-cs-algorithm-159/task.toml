@@ -1,0 +1,45 @@
+schema_version = "1.1"
+source = "https://github.com/FrontierCS/Frontier-CS"
+artifacts = []
+
+[task]
+name = "frontier-cs/frontier-cs-algorithm-159"
+description = ""
+authors = [{ name = "Frontier-CS Team", email = "frontier-cs@berkeley.edu" }]
+keywords = [ "competitive-programming", "algorithms", "frontier-cs",]
+
+[metadata]
+difficulty = "hard"
+category = "competitive-programming"
+tags = [ "default", "frontier-cs", "competitive-programming",]
+frontier_cs_problem_id = "159"
+frontier_cs_type = "default"
+frontier_cs_time_limit = "10.0"
+frontier_cs_memory_limit = "256"
+frontier_cs_n_cases = "75"
+
+[verifier]
+timeout_sec = 3810.0
+collect = []
+
+[verifier.env]
+PROBLEM_ID = "159"
+JUDGE_URL = "http://judge:8082"
+MAX_POLL_TIME = "3780"
+
+[agent]
+timeout_sec = 10800.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 600.0
+os = "linux"
+cpus = 2
+memory_mb = 4096
+storage_mb = 4096
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

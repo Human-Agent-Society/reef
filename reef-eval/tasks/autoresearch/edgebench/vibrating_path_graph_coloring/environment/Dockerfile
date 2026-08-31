@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.vibrating_path_graph_coloring:e5597c7f3c12
+WORKDIR /home/workspace/vibrating_path

@@ -1,0 +1,8 @@
+type: default
+time: 2s
+memory: 1024m
+subtasks:
+  - score: 100
+    n_cases: 1
+checker: chk.cpp
+checker_type: testlib

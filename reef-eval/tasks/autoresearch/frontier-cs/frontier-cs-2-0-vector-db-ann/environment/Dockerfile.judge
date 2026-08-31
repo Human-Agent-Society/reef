@@ -1,0 +1,14 @@
+FROM ubuntu:24.04
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 ca-certificates  build-essential cargo rustc python3-pip python3-numpy && \
+    pip3 install --break-system-packages faiss-cpu && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /judge
+
+COPY judge_server.py problem_evaluator.py task_config.json /judge/
+RUN chmod 600 /judge/problem_evaluator.py
+
+EXPOSE 8082
+CMD ["python3", "/judge/judge_server.py"]

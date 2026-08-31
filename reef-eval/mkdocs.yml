@@ -1,0 +1,32 @@
+site_name: REEF Eval
+site_description: "Evaluation infrastructure for self-evolving agents: autoresearch and task streams, on the Harbor task standard."
+repo_url: https://github.com/Human-Agent-Society/reef
+edit_uri: edit/main/reef-eval/docs/
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+
+nav:
+  - Home: README.md
+  - Get started: get-started.md
+  - Running agents: running-agents.md
+  - Authoring tasks: authoring-tasks.md
+  - Metrics: metrics.md
+  - Benchmarks: tasks.md
+  - Design: design.md
+  - Glossary: glossary.md
+  - GitHub: https://github.com/Human-Agent-Society/reef/tree/main/reef-eval
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format

@@ -1,0 +1,75 @@
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+    environment:
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "128000"
+      PROBLEM_ID: "16"
+      JUDGE_URL: "http://judge:8082"
+    volumes:
+      - ./AGENT.md:/app/AGENT.md:ro
+      - ./submit.sh:/app/submit.sh:ro
+      - ./submit.py:/app/submit.py:ro
+      - ./statement.txt:/app/statement.txt:ro
+      - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - agent_net
+
+  judge:
+    image: "python:3.12-slim"
+    depends_on:
+      judge-engine:
+        condition: service_started
+    command: ["python3", "/judge/judge_proxy.py"]
+    expose:
+      - "8082"
+    environment:
+      PORT: "8082"
+      PROBLEM_ID: "16"
+      JUDGE_ENGINE_URL: "http://judge-engine:8081"
+      MAX_POLL_TIME: "280"
+    volumes:
+      - ./judge_proxy.py:/judge/judge_proxy.py:ro
+      - ${HOST_ARTIFACTS_PATH}/judge/proxy:/logs/judge
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=2).read()",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 360
+      start_period: 5s
+    networks:
+      - agent_net
+      - judge_net
+
+  judge-engine:
+    image: "yanagiorigami/frontier-cs-harbor-judge:latest"
+    privileged: true
+    shm_size: "4g"
+    ulimits:
+      stack:
+        soft: -1
+        hard: -1
+    environment:
+      PORT: "8081"
+      GJ_ADDR: "http://127.0.0.1:5050"
+      JUDGE_WORKERS: "8"
+      GJ_PARALLELISM: "8"
+      SAVE_OUTPUTS: "false"
+    volumes:
+      - ${FRONTIER_CS_ALGORITHMIC_PATH}/problems/16:/app/problems/16:ro
+      - /app/submissions
+      - /app/data
+    networks:
+      - judge_net
+
+networks:
+  agent_net:
+  judge_net:
+    internal: true

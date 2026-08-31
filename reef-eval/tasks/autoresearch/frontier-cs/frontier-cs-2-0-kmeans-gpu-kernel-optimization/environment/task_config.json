@@ -1,0 +1,106 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 10800,
+    "environment": "GPU K-Means kernel optimization. The agent patches the kmeanslib package; the judge offloads timing to a Modal GPU, comparing the patched kmeans against a frozen naive baseline on hidden (N, D, K) workloads with an inertia (clustering-quality) gate.",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/kmeans-gpu-kernel-optimization-agent:experimental-v0.4.0",
+      "judge_image": "frontiercs/kmeans-gpu-kernel-optimization-judge:experimental-v0.4.0"
+    }
+  },
+  "environment": {
+    "cpus": 4,
+    "memory_mb": 8192,
+    "storage_mb": 16384,
+    "build_timeout_seconds": 3600
+  },
+  "evaluation": {
+    "primitive": "kmeans",
+    "pkg": "kmeanslib",
+    "ref_module": "refkmeans",
+    "clean_source": "/opt/kmeanslib-clean",
+    "baseline_source": "/opt/kmeans_ref",
+    "gpu": "H100",
+    "cuda_image": "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+    "pip": [
+      "torch",
+      "numpy"
+    ],
+    "app_name": "kmeans-kernel-opt-eval",
+    "modal_timeout_seconds": 1800,
+    "warmup_iters": 2,
+    "timed_iters": 1,
+    "inertia_tolerance": 0.05,
+    "label_mismatch_tolerance": 0.002,
+    "speedup_target": 20.0,
+    "base_seed": 20260701,
+    "agent_workload_count": 6,
+    "expose_per_workload_metrics": true,
+    "workloads": [
+      {
+        "id": "w0",
+        "N": 200000,
+        "D": 64,
+        "K": 512,
+        "max_iters": 2
+      },
+      {
+        "id": "w1",
+        "N": 300000,
+        "D": 128,
+        "K": 1024,
+        "max_iters": 2
+      },
+      {
+        "id": "w2",
+        "N": 500000,
+        "D": 128,
+        "K": 1024,
+        "max_iters": 2
+      },
+      {
+        "id": "w3",
+        "N": 150000,
+        "D": 512,
+        "K": 512,
+        "max_iters": 2
+      },
+      {
+        "id": "w4",
+        "N": 1000000,
+        "D": 64,
+        "K": 1024,
+        "max_iters": 2
+      },
+      {
+        "id": "w5",
+        "N": 300000,
+        "D": 256,
+        "K": 2048,
+        "max_iters": 2
+      }
+    ]
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch"
+  }
+}

@@ -1,0 +1,9 @@
+type: default
+# The time limit is now 1 second.
+time: 1s
+memory: 512m
+# A custom checker is required for the special scoring.
+checker: chk.cc
+subtasks:
+  - score: 100
+    n_cases: 1

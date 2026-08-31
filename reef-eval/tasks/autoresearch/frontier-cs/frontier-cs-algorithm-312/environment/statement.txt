@@ -1,0 +1,138 @@
+```markdown
+# Park Ranger Shift Balancing
+
+## Problem
+The city wants to inspect every trail in a large park during one night.
+
+The park has `n` glades, numbered `1` to `n`, and `m` undirected trails, numbered `1` to `m`.  
+Trail `i` connects glades `x_i` and `y_i` and has length `c_i`.
+
+- A trail may be a self-loop (`x_i = y_i`).
+- Several different trails may connect the same pair of glades.
+
+There are `k` ranger teams. Every team starts at glade `1`, walks along trails, and must return to glade `1` by the end of its shift.
+
+A team may traverse any trail any number of times. However, **every original trail must be traversed at least once by some team** so that it gets inspected.
+
+Your task is to output one closed walk for each team so that all trails are inspected, while balancing the teams as well as possible.
+
+## Input
+The first line contains three integers:
+
+`n m k`
+
+- `1 ≤ n ≤ 2 · 10^5`
+- `1 ≤ m ≤ 2 · 10^5`
+- `1 ≤ k ≤ 40`
+
+The next `m` lines describe the trails.  
+Line `i + 1` contains three integers:
+
+`x_i y_i c_i`
+
+- `1 ≤ x_i, y_i ≤ n`
+- `1 ≤ c_i ≤ 10^9`
+
+It is guaranteed that every glade incident to at least one trail is reachable from glade `1`.
+
+## Output
+Output exactly `k` route descriptions, one for each ranger team.
+
+For team `j`, output:
+
+`t_j a_{j,1} a_{j,2} ... a_{j,t_j}`
+
+where:
+
+- `t_j ≥ 0` is the number of trail traversals in team `j`'s walk,
+- each `a_{j,p}` is a nonzero signed integer with `|a_{j,p}|` between `1` and `m`.
+
+Interpretation of a signed trail id:
+
+- if `a = +i`, the team traverses trail `i` from `x_i` to `y_i`,
+- if `a = -i`, the team traverses trail `i` from `y_i` to `x_i`.
+
+A solution is **feasible** iff all of the following hold:
+
+1. Team `j` starts at glade `1`.
+2. For every consecutive traversal in team `j`'s list, the departure glade of the next signed trail equals the current glade.
+3. After its last traversal, team `j` is back at glade `1`.
+4. Every trail id `1..m` appears at least once in at least one team's list.
+
+Empty walks are allowed: `t_j = 0`.
+
+The judge treats all whitespace equally, so route descriptions may span multiple lines if desired.
+
+## Objective
+For each team `j`, let `L_j` be the total length of all traversals in its walk, counting repeated traversals each time.
+
+Your objective value is
+
+`A = max(L_1, L_2, ..., L_k)`
+
+which must be **minimized**.
+
+## Scoring
+For each test case, the judge first computes a deterministic baseline value `B`:
+
+1. Compute shortest-path distances `dist(v)` from glade `1` to every glade.
+2. For each trail `i = (x_i, y_i, c_i)`, define its standalone round-trip cost
+   `τ_i = dist(x_i) + c_i + dist(y_i)`.
+3. Sort all trails by decreasing `τ_i`  
+   (break ties by smaller trail id).
+4. Process trails in that order and assign each trail to the currently least-loaded team  
+   (break ties by smaller team index).
+5. Let `B` be the maximum load of any team after all assignments.
+
+This baseline corresponds to inspecting each trail separately by going from glade `1` to one endpoint, traversing the trail once, and returning from the other endpoint to glade `1`, with greedy load balancing.
+
+For a feasible submission with objective value `A`, the test score is
+
+`score = 100000 · min(2, B / A)`
+
+For an infeasible submission, the test score is `0`.
+
+The final score is the arithmetic mean of test scores over all test cases.
+
+Notes:
+
+- The baseline always scores `100000` on every test.
+- A solution twice as good as the baseline, or better, gets the capped score `200000` on that test.
+
+## Constraints
+- Time limit: 5 seconds
+- Memory limit: 512 MB
+
+## Example
+### Sample input
+```text
+4 4 2
+1 2 3
+2 3 2
+3 1 4
+1 4 5
+```
+
+### Sample output
+```text
+3 1 2 3
+2 4 -4
+```
+
+### Explanation
+- Team 1 walks along trails `1, 2, 3`, i.e. `1 -> 2 -> 3 -> 1`, for total length `3 + 2 + 4 = 9`.
+- Team 2 walks `1 -> 4 -> 1` using trail `4` twice, for total length `5 + 5 = 10`.
+
+All four trails are inspected at least once, and both teams return to glade `1`, so the solution is feasible.
+
+The objective value is `A = max(9, 10) = 10`.
+
+For the baseline:
+- `dist(1)=0`, `dist(2)=3`, `dist(3)=4`, `dist(4)=5`
+- standalone costs are `6, 9, 8, 10`
+- greedy balancing yields loads `16` and `17`, so `B = 17`
+
+Thus the sample score on this test would be
+
+`100000 · (17 / 10) = 170000`.
+```

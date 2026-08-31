@@ -1,0 +1,217 @@
+```markdown
+# Mobile Relay Layout
+
+## Problem
+
+A field-training area contains `N` fixed sensors. Sensor `j` is located at coordinates `(x_j, y_j)` and must upload `d_j` units of data to exactly one mobile relay hub.
+
+You may deploy up to `K` relay hubs. Each hub can be placed at any real-valued coordinate.
+
+If hub `i` is placed at `(X_i, Y_i)` and is assigned a non-empty set of sensors `S_i`, then:
+
+- its **squared service radius** is
+
+\[
+R_i^2 = \max_{j \in S_i} \left((X_i-x_j)^2 + (Y_i-y_j)^2\right)
+\]
+
+- its **load** is
+
+\[
+L_i = \sum_{j \in S_i} d_j
+\]
+
+- its **battery cost** is
+
+\[
+\text{cost}_i = P + A \cdot R_i^2 + B \cdot L_i^2
+\]
+
+where `P`, `A`, and `B` are given constants.
+
+Empty hubs are allowed in the output, but they contribute nothing and are ignored by the judge.
+
+Your task is to choose the number of hubs, their positions, and the assignment of every sensor so that the **total battery cost** is as small as possible.
+
+This is an optimization problem: every feasible output receives a score based on how good its total cost is.
+
+---
+
+## Input
+
+The input contains a single test case.
+
+- First line: two integers `N` and `K`
+- Second line: three real numbers `P`, `A`, and `B`
+- Next `N` lines: three real numbers `x_j`, `y_j`, and `d_j`
+
+### Meaning
+
+- `N`: number of sensors
+- `K`: maximum number of relay hubs you may deploy
+- `P`: fixed activation cost of each non-empty hub
+- `A`: coefficient for coverage radius cost
+- `B`: coefficient for load-balancing cost
+- `(x_j, y_j)`: position of sensor `j`
+- `d_j`: data amount of sensor `j`
+
+Sensors are numbered from `1` to `N` in input order.
+
+---
+
+## Output
+
+Your output must describe one feasible relay layout.
+
+- First line: one integer `M` — the number of hubs you output (`1 <= M <= K`)
+- Next `M` lines: two real numbers `X_i` and `Y_i` — the coordinates of hub `i`
+- Then output `N` integers `a_1, a_2, ..., a_N` (separated by arbitrary whitespace), where `a_j` is the hub index assigned to sensor `j`
+
+### Feasibility requirements
+
+Your output is **feasible** if and only if all of the following hold:
+
+1. `1 <= M <= K`
+2. Every printed hub coordinate is finite and satisfies `|X_i|, |Y_i| <= 10^9`
+3. For every sensor `j`, the assignment `a_j` is an integer in `[1, M]`
+
+If any requirement is violated, the submission is invalid and receives score `0` on that test.
+
+---
+
+## Objective
+
+For each hub `i`, let
+
+\[
+S_i = \{j \mid a_j = i\}
+\]
+
+If `S_i` is empty, hub `i` contributes `0`.
+
+Otherwise:
+
+\[
+R_i^2 = \max_{j \in S_i} \left((X_i-x_j)^2 + (Y_i-y_j)^2\right)
+\]
+
+\[
+L_i = \sum_{j \in S_i} d_j
+\]
+
+\[
+\text{cost}_i = P + A \cdot R_i^2 + B \cdot L_i^2
+\]
+
+The total objective value is
+
+\[
+C = \sum_{i=1}^{M} \text{cost}_i
+\]
+
+Your goal is to **minimize `C`**.
+
+The judge computes all values using `long double`.
+
+---
+
+## Scoring
+
+For each test, the judge also computes a deterministic **baseline** solution:
+
+1. Sort sensors by `(x_j, y_j, j)`.
+2. Split the sorted list into `K` consecutive blocks:
+   - block `t` contains indices from  
+     \[
+     \left\lfloor \frac{(t-1)N}{K} \right\rfloor + 1
+     \quad \text{to} \quad
+     \left\lfloor \frac{tN}{K} \right\rfloor
+     \]
+     in the sorted order, for `t = 1..K`
+3. Ignore empty blocks.
+4. For each non-empty block:
+   - create one hub at the arithmetic mean of the block's sensor coordinates
+   - assign every sensor in that block to that hub
+5. Let the baseline total cost be `C_base`
+
+If your solution has total cost `C`, then your per-test score is
+
+\[
+\text{score} = 10^6 \cdot \frac{C_{base}}{C_{base} + C}
+\]
+
+Properties:
+
+- If your solution matches the baseline exactly, you get `500000`
+- Better-than-baseline solutions get more than `500000`
+- Worse-than-baseline solutions get less than `500000`
+- Invalid outputs get `0`
+
+The final score is the arithmetic mean of per-test scores over all official tests.
+
+---
+
+## Constraints
+
+- `1 <= N <= 200000`
+- `1 <= K <= 100`
+- `0 < P, A, B <= 10^6`
+- `|x_j|, |y_j| <= 10^6`
+- `0 < d_j <= 10^6`
+
+## Constraints
+- Time limit: 4 seconds
+- Memory limit: 512 MB
+
+---
+
+## Example
+
+### Input
+```text
+6 2
+10 1 0.5
+0 0 2
+1 0 1
+0 1 1
+10 0 2
+10 1 1
+11 0 1
+```
+
+### Output
+```text
+2
+0.3333333333 0.3333333333
+10.3333333333 0.3333333333
+1 1 1 2 2 2
+```
+
+### Explanation
+
+The first hub serves sensors `1,2,3`, and the second serves `4,5,6`.
+
+For each hub:
+
+- load `L = 2+1+1 = 4`
+- squared radius  
+  \[
+  R^2 = \max\left(\frac{2}{9}, \frac{5}{9}, \frac{5}{9}\right) = \frac{5}{9}
+  \]
+- cost  
+  \[
+  10 + 1 \cdot \frac{5}{9} + 0.5 \cdot 4^2 = 18.555\ldots
+  \]
+
+So the total cost is approximately:
+
+\[
+C = 37.111\ldots
+\]
+
+For this instance, the deterministic baseline produces the same partition, so `C = C_base`, and the score is exactly:
+
+\[
+10^6 \cdot \frac{C_base}{C_base + C} = 500000
+\]
+```

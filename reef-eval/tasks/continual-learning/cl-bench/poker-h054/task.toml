@@ -1,0 +1,22 @@
+version = "1.0"
+
+[metadata]
+benchmark = "cl-bench"
+domain = "exploitable_poker"
+hand_number = 54
+stage_idx = 2
+variant_id = "calling_station"
+opponent = "Tom"
+oracle_reward = -1.0
+license_note = "CL-Bench (pgasawa/continual-learning-bench), Apache-2.0"
+
+[verifier]
+timeout_sec = 300.0
+
+[agent]
+timeout_sec = 600.0
+network_mode = "allowlist"
+allowed_hosts = ["judge"]
+
+[environment]
+build_timeout_sec = 900.0

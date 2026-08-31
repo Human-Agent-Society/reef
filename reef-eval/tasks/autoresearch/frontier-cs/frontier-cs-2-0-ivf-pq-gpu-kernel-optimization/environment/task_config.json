@@ -1,0 +1,117 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 10800,
+    "environment": "GPU IVF-PQ search kernel optimization. The agent patches the ivfpqlib package; the judge offloads timing to a Modal GPU, comparing the patched ivf_pq_search against a frozen naive baseline over a fixed pre-built index on hidden ANN workloads with an iso-result recall gate.",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/ivf-pq-gpu-kernel-optimization-agent:experimental-v0.4.0",
+      "judge_image": "frontiercs/ivf-pq-gpu-kernel-optimization-judge:experimental-v0.4.0"
+    }
+  },
+  "environment": {
+    "cpus": 4,
+    "memory_mb": 8192,
+    "storage_mb": 16384,
+    "build_timeout_seconds": 3600
+  },
+  "evaluation": {
+    "primitive": "ivfpq",
+    "pkg": "ivfpqlib",
+    "ref_module": "refivfpq",
+    "gpu": "H100",
+    "cuda_image": "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+    "pip": [
+      "torch",
+      "numpy",
+      "h5py"
+    ],
+    "app_name": "ivfpq-kernel-opt-eval",
+    "dataset_volume": "flashlib-ann-datasets",
+    "modal_timeout_seconds": 3600,
+    "warmup_iters": 2,
+    "timed_iters": 7,
+    "recall_threshold": 0.99,
+    "speedup_target": 2551.0,
+    "base_seed": 20260702,
+    "agent_workload_count": 6,
+    "expose_per_workload_metrics": true,
+    "workloads": [
+      {
+        "id": "sift_q4k_np32",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 32,
+        "Q": 4096,
+        "k": 100
+      },
+      {
+        "id": "sift_q4k_np64",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 64,
+        "Q": 4096,
+        "k": 100
+      },
+      {
+        "id": "sift_q2k_np64",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 64,
+        "Q": 2048,
+        "k": 100
+      },
+      {
+        "id": "sift_q2k_np128",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 128,
+        "Q": 2048,
+        "k": 100
+      },
+      {
+        "id": "sift_q1k_np128",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 128,
+        "Q": 1024,
+        "k": 100
+      },
+      {
+        "id": "sift_q1k_np256",
+        "dataset": "sift",
+        "nlist": 8192,
+        "m": 16,
+        "nprobe": 256,
+        "Q": 1024,
+        "k": 100
+      }
+    ]
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch"
+  }
+}

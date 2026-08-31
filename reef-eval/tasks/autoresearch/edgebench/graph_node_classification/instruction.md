@@ -1,0 +1,1 @@
+Solve the graph node classification task described in `README.md` and `solution/problem.md`.

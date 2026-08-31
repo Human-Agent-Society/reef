@@ -1,0 +1,4 @@
+# The judge's container: the server plus this task's scoring files.
+FROM python:3.12-slim
+COPY judge_server.py score.py final.py judge_config.json train.json heldout.json /judge/
+CMD ["python3", "/judge/judge_server.py"]

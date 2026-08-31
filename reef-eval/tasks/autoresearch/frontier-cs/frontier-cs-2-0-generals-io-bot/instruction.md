@@ -1,0 +1,148 @@
+You are solving a Frontier-CS 2.0 open-ended optimization problem.
+
+Create a patch solution at `/app/solution.patch`. You can call `bash /app/submit.sh` at any time to enqueue a snapshot for the same black-box judge used by the final verifier. Submissions are asynchronous: use `bash /app/submissions.sh` and `bash /app/wait_submission.sh <uuid>` to inspect results. The evaluator implementation is intentionally not available in the agent workspace. Read `AGENT.md` for the shared submission workflow.
+
+Problem id: `generals_io_bot`
+Language: `patch`
+Time limit: `10800s`
+
+Original problem statement:
+
+# Generals.io Bot Arena
+
+![Generals.io gameplay](https://raw.githubusercontent.com/strakam/generals-bots/master/generals/assets/gifs/wider_gameplay.gif)
+
+Image credit: `strakam/generals-bots`, MIT license.
+
+## Problem
+
+Implement a bot for a local Generals.io-style arena. Your bot plays repeated
+two-player games against fixed baseline bots in the `generals-bots` simulator.
+
+Your goal is simple: protect your own general and capture the opponent's
+general as often and as quickly as possible.
+
+Each game is played on a square grid with fog of war. If no general is captured
+before the truncation limit, the game is scored as a draw for win-rate purposes.
+
+The environment is the local `generals-bots` simulator, not the online
+generals.io service. Each turn your bot receives an observation containing:
+
+```text
+armies, generals, cities, mountains, neutral_cells, owned_cells,
+opponent_cells, fog_cells, structures_in_fog, owned/opponent land and army
+counts, and timestep
+```
+
+## Game Rules
+
+The arena follows the local `generals-bots` simulator rules:
+
+- The grid contains passable empty cells, impassable mountains, neutral cities,
+  and one general per player.
+- You see every cell in the 3x3 neighborhood around your owned cells. Other
+  cells are fogged. Cities and mountains in fog may appear as
+  `structures_in_fog` obstacles.
+- Each turn both players choose one action. An action is either pass or move
+  from one owned source cell to one adjacent passable destination cell.
+- A non-split move sends `source_army - 1` armies and leaves one army behind.
+  A split move sends `source_army // 2` armies. Moves from cells with one army
+  are invalid and become no-ops.
+- Moving into your own cell reinforces it. Moving into neutral or enemy
+  territory is an attack. The attack captures the destination only when the
+  moving army is strictly larger than the defending army; the remaining army is
+  the absolute difference.
+- Capturing the enemy general immediately wins the game.
+- Army growth is deterministic: every owned cell gains one army when
+  `timestep % 50 == 0`, and owned generals/cities gain one army when
+  `timestep % 2 == 1`.
+- The default task setting uses 10x10 maps, truncates at 180 turns, and runs
+  one game per baseline matchup for quick iteration.
+
+## Submission
+
+Submit a patch against the public `generals_agent` skeleton. In Harbor, edit the
+repository under:
+
+```text
+/app/generals_agent
+```
+
+Then run:
+
+```bash
+bash /app/make_submission.sh
+bash /app/submit.sh
+```
+
+Start by submitting the baseline skeleton once before running long local
+experiments. This establishes black-box feedback early; later submissions can
+replace it as you improve the bot.
+
+The patch must produce a Python module with:
+
+```python
+class FrontierAgent:
+    def act(self, observation, key):
+        ...
+```
+
+`act` must return a `generals-bots` action array:
+
+```text
+[pass, row, col, direction, split]
+```
+
+where `direction` is `0=up`, `1=down`, `2=left`, `3=right`, and `split`
+selects whether to move half the army instead of all-but-one.
+
+Patches may modify only these files:
+
+```text
+bot.py
+strategy.py
+utils.py
+```
+
+The judge rejects binary patches, oversized patches, path traversal, and common
+file/network/process access tokens. This is a bot-policy benchmark, not an
+environment inspection task.
+
+The agent workspace intentionally does not include a Frontier-CS match runner,
+baseline ensemble, hidden seeds, or evaluator implementation. Use the black-box
+submission interface for scoring feedback.
+
+## Scoring
+
+Every submission is evaluated against the same baseline families used by final
+verification. These include random, expansion, hunting/pathing, and
+strategy-inspired rule-based opponents, so exploiting only one weak bot is not
+enough for a high score. Faster wins also matter: the score gives substantial
+credit for capturing the enemy general in fewer turns.
+
+The default Harbor configuration is intentionally lightweight so agents can
+iterate quickly: it uses one game per matchup and an internal evaluator time
+budget. Increase `games_per_matchup`, `grid_sizes`, `truncation`, `pool_size`,
+and `max_eval_seconds` together in `config.yaml` for a heavier run. Adjust
+`speed_weight` if you want fast wins to matter more or less relative to raw win
+rate.
+
+Practical tip: the simulator is JAX-based. Simple array programs compile and
+run much faster than large Python control-flow policies, so keep `act` compact
+and vectorized when possible.
+
+The reported score is scaled to `[0, 100]`:
+
+```text
+score = 100 * ((1 - speed_weight) * mean_baseline_win_rate + speed_weight * mean_baseline_speed_tiebreak)
+```
+
+The default `speed_weight` is `0.25`. The speed credit is only earned on games
+that your bot wins and is larger for earlier captures.
+
+## Notes
+
+- The online generals.io service is not used.
+- The hidden evaluator and hidden seeds are not visible in the agent workspace.
+- The task uses `strakam/generals-bots` at pinned commit
+  `c2b77bf72812ec91fb2024d80d90112b961dfa7e` under the MIT license.

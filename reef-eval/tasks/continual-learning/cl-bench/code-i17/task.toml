@@ -1,0 +1,22 @@
+version = "1.0"
+
+[metadata]
+benchmark = "cl-bench"
+domain = "codebase_adaptation"
+instance_id = "jd__tenacity-614"
+repo = "jd/tenacity"
+sequence_idx = 16
+license_note = "CL-Bench (pgasawa/continual-learning-bench), Apache-2.0"
+
+[verifier]
+timeout_sec = 900.0
+
+[agent]
+timeout_sec = 2400.0
+# Offline, as upstream: the harness adapter allowlists its own LLM API
+# hosts; the task itself allows no egress (for codebase tasks the fix
+# is a public PR — open internet would be a cheat channel).
+network_mode = "allowlist"
+
+[environment]
+build_timeout_sec = 900.0

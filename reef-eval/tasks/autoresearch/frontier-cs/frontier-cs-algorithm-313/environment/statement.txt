@@ -1,0 +1,158 @@
+```markdown
+# Duff's Defensive Lineup
+
+## Problem
+
+Duff has `n` friends. The `i`-th friend has name `s_i` (names are not necessarily unique).
+
+Before asking Malek to collect candies, Duff may reorder her friends into a single queue. Let the final order be a permutation `p` of `1..n`, where friend `p_1` stands first, friend `p_2` stands second, and so on.
+
+Duff then issues `q` complaints. Each complaint is described by three integers `l`, `r`, and `k`.
+
+For one complaint `(l, r, k)`:
+
+- Duff looks at every **adjacent pair of seats** `(i, i+1)` such that `l <= i < r`.
+- For each such pair, she forms the merged badge string  
+  `s_{p_i} + s_{p_{i+1}}`  
+  (plain concatenation, with **no separator**).
+- Malek must pay  
+  `occur(s_k, s_{p_i} + s_{p_{i+1}})`  
+  candies for that pair, where `occur(t, x)` is the number of occurrences of string `t` as a contiguous substring of `x`. Overlapping occurrences count.
+
+Your task is to output **any permutation** of the friends. Better permutations lead to fewer total candies.
+
+This is an optimization problem: the judge will compute the total candies for your permutation.
+
+---
+
+## Input
+
+The input contains a single test case.
+
+- The first line contains two integers `n` and `q`.
+- The next `n` lines contain the names `s_1, s_2, ..., s_n`.
+- The next `q` lines each contain three integers `l`, `r`, and `k`, describing one complaint.
+
+---
+
+## Output
+
+Print one line containing a permutation of `1..n`:
+
+`p_1 p_2 ... p_n`
+
+### Feasibility requirements
+
+Your output is **feasible** if and only if:
+
+- it contains exactly `n` integers,
+- each integer is between `1` and `n`,
+- every value from `1` to `n` appears exactly once.
+
+If the output is infeasible, the score for that test file is `0`.
+
+---
+
+## Objective
+
+For a feasible permutation `p`, define its total candy cost as
+
+\[
+C(p)=\sum_{j=1}^{q}\ \sum_{i=l_j}^{r_j-1} occur\big(s_{k_j},\ s_{p_i}s_{p_{i+1}}\big),
+\]
+
+where `(l_j, r_j, k_j)` is the `j`-th complaint.
+
+Your goal is to **minimize** `C(p)`.
+
+---
+
+## Scoring
+
+Let:
+
+- `Y` = your total candy cost,
+- `B` = the total candy cost of the **baseline permutation**  
+  `p = [1, 2, ..., n]`.
+
+For each test file, your score is
+
+\[
+\text{score} = 1000 \times \min\left(2,\ \frac{B+1}{Y+1}\right).
+\]
+
+### Notes
+
+- The `+1` avoids division-by-zero corner cases.
+- The baseline permutation always scores exactly `1000`.
+- Better-than-baseline solutions score more than `1000`, up to a maximum of `2000`.
+- Worse solutions score less than `1000`.
+- The final contest score is the arithmetic mean of the scores over all test files.
+
+---
+
+## Constraints
+
+- `1 <= n <= 2000`
+- `1 <= q <= 200000`
+- `1 <= |s_i| <= 40`
+- All names consist only of lowercase English letters.
+- `1 <= l < r <= n`
+- `1 <= k <= n`
+- The sum of all `|s_i|` does not exceed `100000`.
+
+- Time limit: 5 seconds
+- Memory limit: 512 MB
+
+---
+
+## Example
+
+### Input
+```text
+4 3
+a
+ba
+ab
+b
+1 4 1
+2 4 2
+1 3 3
+```
+
+### Output
+```text
+2 4 1 3
+```
+
+### Explanation
+
+The output permutation is `[2, 4, 1, 3]`, so the adjacent merged strings are:
+
+- seats `(1,2)`: `s_2 + s_4 = "ba" + "b" = "bab"`
+- seats `(2,3)`: `s_4 + s_1 = "b" + "a" = "ba"`
+- seats `(3,4)`: `s_1 + s_3 = "a" + "ab" = "aab"`
+
+Now evaluate the complaints:
+
+1. `(1, 4, 1)` uses target `s_1 = "a"` on all three adjacent pairs  
+   `occur("a","bab") + occur("a","ba") + occur("a","aab") = 1 + 1 + 2 = 4`
+
+2. `(2, 4, 2)` uses target `s_2 = "ba"` on pairs `(2,3)` and `(3,4)`  
+   `occur("ba","ba") + occur("ba","aab") = 1 + 0 = 1`
+
+3. `(1, 3, 3)` uses target `s_3 = "ab"` on pairs `(1,2)` and `(2,3)`  
+   `occur("ab","bab") + occur("ab","ba") = 1 + 0 = 1`
+
+So the submitted cost is `Y = 4 + 1 + 1 = 6`.
+
+For the baseline permutation `[1,2,3,4]`, the cost is `B = 8`, so this submission would score
+
+\[
+1000 \times \min\left(2,\frac{8+1}{6+1}\right)
+= 1000 \times \frac{9}{7}
+\approx 1285.714.
+\]
+
+Any feasible permutation is accepted; lower total cost gives a better score.
+```

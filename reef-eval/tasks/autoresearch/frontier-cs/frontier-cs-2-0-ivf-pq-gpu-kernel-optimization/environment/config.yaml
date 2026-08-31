@@ -1,0 +1,71 @@
+tag: systems
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "GPU IVF-PQ search kernel optimization. The agent patches the ivfpqlib package; the judge offloads timing to a Modal GPU, comparing the patched ivf_pq_search against a frozen naive baseline over a fixed pre-built index on hidden ANN workloads with an iso-result recall gate."
+  apt_packages: [bash, ca-certificates, git, python3, python3-pip]
+  judge_apt_packages: [bash, ca-certificates, git, python3, python3-pip]
+  judge_pip_packages: [modal]
+  docker:
+    image: frontiercs/ivf-pq-gpu-kernel-optimization-agent:experimental-v0.4.0
+    judge_image: frontiercs/ivf-pq-gpu-kernel-optimization-judge:experimental-v0.4.0
+environment:
+  cpus: 4
+  memory_mb: 8192
+  storage_mb: 16384
+  build_timeout_seconds: 3600
+evaluation:
+  # --- primitive wiring (consumed by public_test's _cfg(); the graded evaluator hardcodes these) ---
+  primitive: ivfpq
+  pkg: ivfpqlib
+  ref_module: refivfpq
+  gpu: "H100"
+  cuda_image: "nvidia/cuda:12.4.1-devel-ubuntu22.04"
+  pip: ["torch", "numpy", "h5py"]   # match the original (validated) image; torch brings its matched triton (a standalone triton pin crashes some flashlib kernels). h5py loads SIFT/GIST HDF5
+  app_name: "ivfpq-kernel-opt-eval"
+  dataset_volume: "flashlib-ann-datasets"   # Modal Volume holding sift.hdf5 / gist.hdf5 (ann-benchmarks); mounted read-only at /data
+  modal_timeout_seconds: 3600    # the naive per-query-loop baseline is seconds/call and real GIST (D=960) is heavier; give the judge margin
+  warmup_iters: 2
+  timed_iters: 7
+  recall_threshold: 0.99         # agent ids must match the FULL-nprobe baseline's top-k (iso-result recall@k) every iteration. Tightened 0.95->0.99 to kill nprobe-truncation: at nlist=8192 halving nprobe drops iso-recall to 0.85-0.92 and a 3/8 cut to ~0.9, all << 0.99, while an honest full-nprobe exact-ADC search stays ~0.9999 (bf16 tie margin). So a solution cannot silently probe fewer lists.
+  speedup_target: 2551.0         # score cap = 2x the gemm-pinned reference geomean on the SIFT nlist=8192 dispatch-capped workloads (1276x on H100: 1000/1663/1012/1750/786/1863x, iso-recall 1.0 all 6, gate 0.99). Reference = fast WGMMA decode+GEMM; beats a scalar-decode kernel ~1.1-1.9x at M16-32, so 100 needs a genuinely better tensor-core kernel. NOTE: the huge factor is the naive Python-loop BASELINE -> a near-reference kernel still scores ~91 (log compression); the planned torch-vectorized baseline will spread the top AND remove the dispatch wall (letting M go fatter). bf16-locked query+index.
+  base_seed: 20260702
+  agent_workload_count: 6            # agent's submission feedback covers ALL graded workloads (no blind pass-3/fail-6 cliff); params are agent-visible anyway
+  expose_per_workload_metrics: true  # show per-workload pass/fail so the agent can fix the specific workload it regresses on
+  # REAL-DATA WORKLOADS: the index (the "database") is built ONCE per workload by
+  # the frozen builder from the full real base (SIFT1M 128d / GIST1M 960d), reused
+  # for every timed iteration (each call gets a fresh clone -- see flash_gpu
+  # _fresh_index); only ivf_pq_search is timed. Each iteration draws a fresh
+  # Q-subset of the held-out real query set (anti-caching). Real datasets have
+  # clustered, imbalanced inverted lists (unlike synthetic gaussian) -> the search
+  # kernel must handle long-tail lists.
+  #
+  # nprobe is the main recall/speed knob and is meant to MATTER: scanning fewer than
+  # the workload's nprobe lists drops iso-recall below the gate.
+  #
+  # SIFT-only, nlist=8192, LARGE Q. The fat GEMM M that makes the reference's WGMMA
+  # decode+GEMM strong comes from a big query batch (M = Q*nprobe/nlist), NOT from a
+  # low nlist -- so nlist stays HIGH (8192, ~122 rows/list) and nprobe genuinely
+  # matters: halving nprobe drops iso-recall to 0.85-0.92 (measured), so a
+  # nprobe-truncating solution fails the 0.99 gate. (A low-nlist "fat M" regime made
+  # M fat but also made high nprobe redundant -> truncation was nearly free; and GIST
+  # with only 1k held-out queries cannot reach a fat M at nlist=8192, so it is dropped.)
+  # The reference is pinned to the gemm variant (see reference.patch); at M>=16 it beats
+  # a query-parallel scalar-decode kernel ~1.5-2.4x, so beating IT 2x needs a genuinely
+  # good tensor-core kernel.
+  # Q*nprobe (the naive Python-loop baseline's per-call dispatch count) is capped at
+  # ~262k so the judge stays practical -- Q=8192 pushed it to ~0.5-1M and the eval
+  # backed up (submissions queued unevaluated). M = Q*nprobe/nlist is kept at 16-32
+  # (fat enough that the pinned gemm reference beats a scalar kernel ~1.1-1.9x). The
+  # deferred torch-vectorized baseline will remove the Python-loop dispatch wall and
+  # allow a fatter M (and fix the score log-compression) in the next round.
+  workloads:
+    - {id: sift_q4k_np32,  dataset: sift, nlist: 8192, m: 16, nprobe: 32,  Q: 4096, k: 100}   # M16 disp131k
+    - {id: sift_q4k_np64,  dataset: sift, nlist: 8192, m: 16, nprobe: 64,  Q: 4096, k: 100}   # M32 disp262k
+    - {id: sift_q2k_np64,  dataset: sift, nlist: 8192, m: 16, nprobe: 64,  Q: 2048, k: 100}   # M16 disp131k
+    - {id: sift_q2k_np128, dataset: sift, nlist: 8192, m: 16, nprobe: 128, Q: 2048, k: 100}   # M32 disp262k
+    - {id: sift_q1k_np128, dataset: sift, nlist: 8192, m: 16, nprobe: 128, Q: 1024, k: 100}   # M16 disp131k
+    - {id: sift_q1k_np256, dataset: sift, nlist: 8192, m: 16, nprobe: 256, Q: 1024, k: 100}   # M32 disp262k
+submission:
+  kind: file
+  path: /app/solution.patch

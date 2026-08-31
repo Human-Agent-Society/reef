@@ -1,0 +1,139 @@
+```markdown
+# Sasha’s Smudged Multiplication Poster (Optimization)
+
+## Problem
+To learn multiplication, Big Ben printed a gigantic poster of a multiplication table created from his favorite integers collected over CALICO's 5 year history. Unfortunately the poster was damaged and now he's very sad :( Many entries were lost, and many others were corrupted. Big Ben now has only a vague memory of his favorite off diagonal cells.
+
+Big Ben is working on a new multiplication table. He doesn't expect a perfect recreation of his old one, and he's happy tolerating a few different entries. Help Big Ben pick numbers for his new multiplication table! 
+
+Your task is to construct a list of $\var{N}$ integers $a_1, a_2, \dots, a_{\var{N}}$, which defines a $\var{N} \times \var{N}$ multiplication table where the entry at row $i$ and column $j$ is $a_i a_j$.
+
+You are given $\var{M}$ constraints, each consisting of:
+\begin{itemize}
+    \item A row index $\var{R}_i$ in the list $\var{R}_1, \var{R}_2, \dots, \var{R}_{\var{M}}$ and a column index $\var{C}_i$ in the list $\var{C}_1, \var{C}_2, \dots, \var{C}_{\var{M}}$
+    \begin{itemize}
+        \item Row and indices are guaranteed to be off-diagonal, $\var{R}_i \ne \var{C}_i$.
+    \end{itemize}
+    \item A value $\var{V}_i$ in the list $\var{V}_1, \var{V}_2, \dots, \var{V}_{\var{M}}$
+    \item A weight $\var{W}_i$ in the list $\var{W}_1, \var{W}_2, \dots, \var{W}_{\var{M}}$
+\end{itemize}
+
+Additionally, you may select a subset $S \subseteq \{1,2,\dots,\var{M}\}$ of $d$ constraints to discard, up to $\var{D}$.
+
+\subsection{Input Format}
+
+Each test file describes a single test case, which contains two lines:
+\begin{itemize}
+    \item The first line of the input contains three space-separated integers $\var{N}$ $\var{M}$ $\var{D}$ denoting the size of the table, the number of observed cells, and the number of observations we can discard, respectively.
+    \item The next $\var{M}$ lines each describe a constraint and each contain four space-separated integers $\var{R_i}$ $\var{C_i}$ $\var{V_i}$ $\var{W_i}$ denoting the row index, column index, value, and weight respectively.
+        \begin{itemize}
+            \item The given constraints are 1-indexed: the first constraint contains $\var{R_1}$, the second contains $\var{R_2}$, and so on.
+        \end{itemize}
+\end{itemize}
+
+Note that multiple constraints may have the same $\var{R_i} = \var{R_j}$ and $\var{C_i} = \var{C_j}$. In these cases, both contribute to the penalty.
+
+\subsection*{Output Format}
+For the single test case in each test file, output two lines:
+\begin{itemize}
+    \item The first line should contain $\var{N}$ space separated integers, $a_0$ $a_1$ $\dots$ $a_\var{N}$
+    \item The second line should contain $d+1$ space separated integers denoting the number of discarded observations followed by the discarded observations themselves, $d$ $S_1$ $S_2$ $\dots$ $S_d$
+\end{itemize}
+
+## Objective
+For each observation `k` not discarded, let:
+
+- `p_k = a_{uk} · a_{vk}`  (computed in exact integer arithmetic; note `p_k` can be up to `10^18`)
+- **weighted relative error**
+  \[
+  e_k = w_k \cdot \frac{|p_k - x_k|}{x_k}
+  \]
+
+Your submission’s **loss** is:
+\[
+L = \sum_{k \notin \text{discarded}} e_k
+\]
+
+You must **minimize** `L`.
+
+---
+
+## Scoring
+Let:
+
+- `L_sub` be your loss.
+- `L_base` be the **baseline loss**, defined deterministically as the loss obtained by:
+  - outputting `ai = 1` for all `i`,
+  - discarding `t = 0` observations.
+
+The per-instance score is:
+\[
+S = 10^6 \cdot \text{clamp}\left(\frac{L_{base} - L_{sub}}{L_{base} - L_{ref}},\ 0,\ 1\right)
+\]
+where `clamp(z,0,1) = min(1, max(0, z))`.
+
+Notes:
+- `L_ref` is provided in the input and satisfies `0 < L_ref < L_base`.
+- Achieving `L_sub = L_ref` gives full score `1,000,000`.
+- Doing worse than baseline gives score `0`.
+- The final contest score is the **sum of S** over all test instances.
+
+All computations for judging use high-precision floating point; ties are broken by smaller `L_sub`.
+
+---
+
+Time Limit: \textbf{10 Seconds}
+
+\subsubsection{Input Constraints}
+
+$1 \leq \var{N} \leq 4 \cdot 10^{3}$ \\
+$1 \leq \var{M} \leq 2 \cdot 10^6$ \\
+$0 \leq \var{D} \leq \var{M}$
+
+$1 \leq \var{R_i}, \var{C_i} \leq \var{N} \\
+\var{R_i} \neq \var{C_i}$ \\
+$1 \leq \var{V_i} \leq 10^9$ \\
+$1 \leq \var{W_i} \leq 10^{3}$
+
+Note that multiple constraints may have the same $\var{R_i} = \var{R_j}$ and $\var{C_i} = \var{C_j}$. In these cases, both contribute to the penalty.
+
+\subsubsection{Output Constraints}
+
+$1 \leq a_i \leq 10^9$ \\
+$0 \leq d \leq \var{D}$ \\
+$1 \leq S_i \leq \var{M}$
+
+(Your program must be fast, but exact optimization is not expected; heuristics are essential.)
+
+---
+
+## Example
+### Sample input
+```
+4 5 1
+120.0
+1 2 6 5
+1 3 9 5
+2 3 18 2
+2 4 7 1
+3 4 12 1
+```
+
+### Sample output
+```
+3 2 6 2
+1 4
+```
+
+### Explanation (high level)
+- Proposed array: `a = [3,2,6,2]`.
+- Discard observation `#4` (at most `D=1` allowed).
+
+Loss is computed over observations {1,2,3,5}:
+- (1,2): predicted 3·2=6, matches x=6 → error 0
+- (1,3): 3·6=18 vs 9 → contributes `5*|18-9|/9 = 5`
+- (2,3): 2·6=12 vs 18 → contributes `2*|12-18|/18 = 0.666...`
+- (3,4): 6·2=12 vs 12 → error 0
+
+Total `L_sub = 5.666...`. The judge computes `L_base` from all-ones with no discards, then applies the scoring formula using the given `L_ref`.
+```

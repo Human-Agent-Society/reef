@@ -1,0 +1,2 @@
+FROM seededge/edgebench.work.schemathesis_reporting_observability:cd6879e59e62
+WORKDIR /app

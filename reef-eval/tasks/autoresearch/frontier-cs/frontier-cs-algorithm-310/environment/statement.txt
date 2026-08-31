@@ -1,0 +1,171 @@
+```markdown
+# Metallic Pink Resonator Layout
+
+## Problem
+The Martians have built a circular relay with ports labeled `0,1,…,M-1`.  
+Some ports will be equipped with **pink emitters**; the rest remain **plain reflectors**.
+
+If port `a` is an emitter and port `b` is a reflector, then together they can generate the frequency
+
+\[
+(a+b)\bmod M.
+\]
+
+For each frequency `r`, the Martians know:
+
+- a **value** `w_r` gained for each successful generating pair producing `r`,
+- a **saturation limit** `d_r`: once `d_r` pairs producing `r` exist, extra pairs for `r` give no additional benefit.
+
+You must choose which ports become emitters, subject to a budget.
+
+Let `A` be the set of chosen emitters, and `B = {0,1,…,M-1} \ A` be the reflectors.  
+For each residue `r`, define
+
+\[
+c_r = |\{(a,b)\in A\times B : (a+b)\bmod M = r\}|,
+\]
+
+where pairs are **ordered**: choosing emitter `a` and reflector `b` is one pair.
+
+The contribution of residue `r` is
+
+\[
+w_r \cdot \min(c_r, d_r).
+\]
+
+Your task is to output any feasible emitter set maximizing the total contribution.
+
+---
+
+## Input
+A single test file contains one instance.
+
+- The first line contains two integers `M` and `B` — the number of ports and the total budget.
+- The second line contains `M` integers `cost_0, cost_1, …, cost_{M-1}` — the cost of installing an emitter at each port.
+- The third line contains `M` integers `w_0, w_1, …, w_{M-1}` — the value of each residue.
+- The fourth line contains `M` integers `d_0, d_1, …, d_{M-1}` — the saturation limit of each residue.
+
+All residue arithmetic is modulo `M`.
+
+---
+
+## Output
+Output any feasible solution.
+
+- The first line must contain one integer `K` — the number of chosen emitter ports.
+- The second line must contain `K` distinct integers `p_1, p_2, …, p_K` in increasing order, each between `0` and `M-1`, denoting the emitter ports.
+
+A solution is **feasible** if:
+
+1. all listed ports are distinct,
+2. all listed ports are valid indices in `[0, M-1]`,
+3. \(\sum_{i=1}^{K} cost_{p_i} \le B\).
+
+If your output is infeasible or malformed, your objective value is `0`.
+
+If `K = 0`, you may omit the second line.
+
+---
+
+## Objective
+For your chosen emitter set `A` and reflector set `B = [0, M-1] \ A`, compute for each residue `r`:
+
+\[
+c_r = |\{(a,b)\in A\times B : (a+b)\bmod M = r\}|.
+\]
+
+Your objective value is
+
+\[
+U = \sum_{r=0}^{M-1} w_r \cdot \min(c_r, d_r).
+\]
+
+Higher is better.
+
+---
+
+## Scoring
+For each official test instance, the judge also computes a deterministic **baseline** solution:
+
+1. Sort all ports by `(cost_i, i)` ascending.
+2. Traverse this order once.
+3. Add port `i` to the emitter set iff doing so keeps the total cost at most `B`.
+
+Let the baseline objective value be `U_base`, and your objective value be `U`.
+
+The score for that test is:
+
+- `0`, if `U = 0` and `U_base = 0`;
+- otherwise
+
+\[
+100 \cdot \frac{U}{U + U_{base}}.
+\]
+
+So:
+- matching the baseline gives `50`,
+- worse than the baseline gives less than `50`,
+- better than the baseline gives more than `50`,
+- the score approaches `100` as `U` becomes much larger than `U_base`.
+
+Your final score is the arithmetic mean of your per-test scores over all official test instances.
+
+---
+
+## Constraints
+- `2 ≤ M ≤ 200000`
+- `1 ≤ cost_i ≤ 10^9`
+- `1 ≤ w_i ≤ 10^6`
+- `1 ≤ d_i ≤ M`
+- `1 ≤ B ≤ 10^18`
+- At least one port satisfies `cost_i ≤ B`
+
+The search space is exponential in `M`; exact optimization is not expected.
+
+- Time limit: 8 seconds
+- Memory limit: 1024 MB
+
+---
+
+## Example
+Input
+```text
+6 5
+3 2 2 4 1 3
+5 1 4 2 3 6
+1 2 1 1 2 1
+```
+
+Output
+```text
+3
+1 2 4
+```
+
+Brief explanation:
+
+- Chosen emitters: `{1,2,4}`
+- Total cost: `2 + 2 + 1 = 5`, so the solution is feasible.
+- Reflectors: `{0,3,5}`
+
+Ordered emitter-reflector pairs generate residues with counts:
+
+- residue `0`: 1 pair
+- residue `1`: 3 pairs
+- residue `2`: 1 pair
+- residue `3`: 1 pair
+- residue `4`: 2 pairs
+- residue `5`: 1 pair
+
+After applying saturation limits `d = [1,2,1,1,2,1]`, the objective is:
+
+\[
+5\cdot1 + 1\cdot2 + 4\cdot1 + 2\cdot1 + 3\cdot2 + 6\cdot1 = 25.
+\]
+
+For this instance, the baseline picks the same set, so `U = U_base = 25`, and the test score is
+
+\[
+100 \cdot \frac{25}{25+25} = 50.
+\]
+```

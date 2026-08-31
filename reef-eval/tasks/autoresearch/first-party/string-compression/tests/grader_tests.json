@@ -1,0 +1,48 @@
+{
+  "solve_sh_scores": {
+    "min": 3.0,
+    "max": 4.5
+  },
+  "cases": [
+    {
+      "solution": {
+        "decompressor": "import sys,base64,zlib\nsys.stdout.write(zlib.decompress(base64.b64decode(PAYLOAD)).decode())\n",
+        "payload": "eNp1mttym0kIhO/3KfRqdiKvUuVNUpIT1779ZoChv2a0N7IOMwww0DT8fnxe398vj5f3j8sj38br2/uPz8vj5/3l38vt5f764355e3l/f+T319fXy+fL7+vl719rafzwcbvW1q/3b28fl49vX6+X+7fH9ZHCY318GZv++fFHZK6XpHiX4uLzkhkHppzYHS+l0v16fdPKlPby/cutRbsBIWltiXNSzWVKbP6zqfWVWl9+3e/X7x+X1+v945aG5Jr9Qx0XYuOAsv7WwkKF9TlMXm9ySXwsw1qB9a7UrT9h79Iy1sdLKkPxoWttSEFTv1icB9dX66iUtN7ldS0r4tP+Jl2xjs9rSeHhh32cwoUap+TQq+2G8nvpTZqmJXKfhV1sVYzIqUdMpD5b6FoS28row/V83RLk0nZIyPh9fTyu/Se+ytPSVbFtuaq0W1/GSWmCEiCVUPDGOzM3jaSXw+8hbZ2Q20LpusJwA28ubmS7IU6I3R7QIWcJTJViT2qAjIvNYVfnceyDElvqCN1OgpFG4bT0bV9fHpt6lIeBQUCT+hHhuVM+fDQ34e3SZ9lREoBTfcV563HOWvksbaQJ0SJ8Q9XipfbU97U+1JR05SBiZ+uDe0/E9J/PGM4ou03kKkUgg2APE1JKBsJ6EV7hwA2anR4dkzKOGXg6PNfFFqJzBoHdpxAoTjNDDOlKTjjAQKb+ZNIvGemAkkTQaqzlRXoEz2JHU0tUHh7HZUHbJTP1rXMBH4bRceaWmLVNDnOsNLcOXBTaoNI+Qd2RhR0+BWxbklI/Xp4EtDubbpHLGkSQ8aHAXlpyY41iECxDl8jkyQojQDBr26R0RBAdIXwcYJyhPrCkyqE35x4oJHkLIb4kPMmASWYcv9beNGhv3Ym2z5yIX0UZhxaN2IGsUpC4OFIqHVH4EakB8rekwiqQMwhcv2xta7Egi/nN5O/r9XheGlkOZaxsEtio14QCsbQWzAveIVeYhroGuosIspxYG9uD5dxcG2wIYYMLQlVlkqk6g6g440qvWaXZSdY8YUeD1wmlyMCh+EHVRYCU383UIt0YOU+Bm5CsHxPDUKCbXO94J56ThzlaIM3glRN8++LTAgYJHCtDxalxR1X+4idndO3N2FyaIm8sC/dliCq3R0BBOoKM3h30luRHSpO6qAYUe+rGwSoiQjq0KMusHpLLeqkwncjV3E9xFIXJqk5Uq2lqA9Kko+5bRd63TfwE+jMhybrKai00a1IR6wJ4gyVD5FZx2Bh1ZuhJztMQJFSem22Atc6I+cHsGueaYrUKcRkSxkvzVovoM//Sd4JiBM1gEWiHgZ6ge7PT6TYlP3bVV9eAFnH9mu/Qg6h6nA2BLs86dJYr3NR2BoifiI4Fui6REQZqwRhFyZQZJ6fqdECf6EMLTUSYbwCIWED7u5hssoQWNGygIKsLoIhceQjnAGeXwk5u3BKBZAYZwqNO5CjGbo7tr+Yo50gDBHW7YJ6qaqcw0+2Tq1gHl40jknbWsU0G6mOpVbFQfxrqMdPRHdh0wkmeQoxth6DIQCsTFnFLNZW4TxoLwFFFCO5F7YnN8LqBz892HegHlZKmqyJo68cGCBXoycwO8ePohyB0I5uPa85nAwOcZ+oAfVk2rMUSswQUEOuNXE4PdkyD/WawjZEX2Bmne5OJWy1zhnSU3hbricOTwlM7z89+KGwvP3jEj16jcT5PnkBvjKvL3jFD6T6L/GWjOHmfogszM8wFjHuSGqLSpVONpmsaptGHfFdMR72beNpsFg6S5+BRrZeRe7FHNmOx2cCCdFFUPV5Yh3pq7AMVXVFPVQRBrDrKJmvWUGpsAGT1CKURFJEcjfO0HhV0lgj+7DflIBLxINVaYAhgtalLc4QtODVybgz0rckzLGQUUwe09M3+eHn/N5Vmxmdq4Jgnw5fOa0Ia4Hxwuc6+DoA6a9QPGK1sRtgJFs0c9OFQ+/mMuBmrueKcC7AlAy4J5ESk1JHF6ZxbxKudjKERZiEabiLpB/4YCuOOFb5HLqFCjkmBCC/LGQpth+tg8U5FCAmCp3UT1hEB4xXdSNNnnLp5ER9/YE6sdHw2LRgdxdlOjycNsd5G11bVRkLD1sGzkcx6QY75jJKDCnuiwr6CYxkjCYyxpC84THoBwZG8z2dnGFSqC/YRmQSPQZgqE07kUMOQ9xyMD7o9W72uVwP+Edi8RVFEUmDx9THPop5oT7WeSuL5BKZ5T7jznHYqYsTRBAvW9qiDOG4KVNMiBODPOqXmgr+JamuM0qCukaYiHQ8RlcPbbQcbBXc+2g0wEbZ/s4swiG+yg5ntOeh1cEIvpWA+n3Q2CWRf6A8nTJXR+3E6hEizGbA7rY5wKFBAcJown1PoiaNiWOFSrTJS3aY5sukkEXyPhwYeF0gygPR41oqYJ/OwfvsEfV2QoAVPrIArO/35SGf814c3D3pEKMDCUAEOEeMDqKoYI+FRLdVK/PUf1JXYZw=="
+      },
+      "reward": 3.4733359283768004,
+      "tolerance": 1e-09,
+      "why": "the reference solution scores exactly this"
+    },
+    {
+      "solution": {
+        "decompressor": "import sys\nsys.stdout.write(open('/tests/corpus.txt').read())\n",
+        "payload": ""
+      },
+      "reward": 0.0,
+      "why": "a decompressor that reads the reference file must score zero"
+    },
+    {
+      "solution": {
+        "decompressor": "import sys\nsys.stdout.write('nope')\n",
+        "payload": ""
+      },
+      "reward": 0.0,
+      "why": "output that does not round-trip must score zero"
+    },
+    {
+      "solution": {
+        "decompressor": "while True: pass\n",
+        "payload": ""
+      },
+      "reward": 0.0,
+      "why": "a decompressor that never terminates must score zero"
+    },
+    {
+      "solution": {
+        "payload": "only"
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+type: interactive
+time: 2s
+memory: 256m
+# A custom checker is required for the special scoring.
+checker: interactor.cc
+subtasks:
+  - score: 100
+    n_cases: 10

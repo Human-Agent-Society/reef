@@ -1,0 +1,90 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 10800,
+    "environment": "GPU DBSCAN kernel optimization. The agent patches the dbscanlib package; the judge offloads timing to a Modal GPU, comparing the patched dbscan against a frozen naive baseline on hidden low-dimensional workloads with an ARI (clustering-agreement) gate.",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal"
+    ],
+    "docker": {
+      "image": "frontiercs/dbscan-gpu-kernel-optimization-agent:experimental-v0.4.0",
+      "judge_image": "frontiercs/dbscan-gpu-kernel-optimization-judge:experimental-v0.4.0"
+    }
+  },
+  "environment": {
+    "cpus": 4,
+    "memory_mb": 8192,
+    "storage_mb": 16384,
+    "build_timeout_seconds": 3600
+  },
+  "evaluation": {
+    "gpu": "H100",
+    "cuda_image": "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+    "pip": [
+      "torch",
+      "numpy"
+    ],
+    "app_name": "dbscan-kernel-opt-eval",
+    "modal_timeout_seconds": 2400,
+    "warmup_iters": 2,
+    "timed_iters": 3,
+    "ari_threshold": 0.99,
+    "speedup_target": 130.0,
+    "base_seed": 20260701,
+    "agent_workload_count": 4,
+    "expose_per_workload_metrics": true,
+    "workloads": [
+      {
+        "id": "w0",
+        "N": 20000,
+        "D": 8,
+        "eps": 0.9,
+        "min_samples": 5,
+        "n_centers": 4
+      },
+      {
+        "id": "w1",
+        "N": 20000,
+        "D": 32,
+        "eps": 1.15,
+        "min_samples": 5,
+        "n_centers": 6
+      },
+      {
+        "id": "w2",
+        "N": 20000,
+        "D": 64,
+        "eps": 1.4,
+        "min_samples": 5,
+        "n_centers": 10
+      },
+      {
+        "id": "w3",
+        "N": 50000,
+        "D": 16,
+        "eps": 1.0,
+        "min_samples": 5,
+        "n_centers": 8
+      }
+    ]
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch"
+  }
+}

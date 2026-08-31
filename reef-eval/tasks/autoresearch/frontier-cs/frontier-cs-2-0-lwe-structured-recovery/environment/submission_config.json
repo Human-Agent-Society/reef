@@ -1,0 +1,6 @@
+{
+  "kind": "file",
+  "path": "/app/solution.json",
+  "max_queue_size": 3,
+  "exclude": []
+}

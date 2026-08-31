@@ -1,0 +1,527 @@
+[
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 372.0,
+  "expected_items_sold": 380.565663,
+  "year": 2028
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 241.0,
+  "expected_items_sold": 227.683415,
+  "year": 2028
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 536.0,
+  "expected_items_sold": 514.935833,
+  "year": 2028
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 314.0,
+  "expected_items_sold": 300.992167,
+  "year": 2028
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 139.0,
+  "expected_items_sold": 135.281011,
+  "year": 2028
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 505.0,
+  "expected_items_sold": 477.229079,
+  "year": 2028
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 184.0,
+  "expected_items_sold": 194.732454,
+  "year": 2028
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 697.0,
+  "expected_items_sold": 681.33626,
+  "year": 2028
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 317.0,
+  "expected_items_sold": 310.885074,
+  "year": 2028
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 134.0,
+  "expected_items_sold": 134.912437,
+  "year": 2028
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 509.0,
+  "expected_items_sold": 489.710741,
+  "year": 2028
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 236.0,
+  "expected_items_sold": 223.215608,
+  "year": 2028
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 622.0,
+  "expected_items_sold": 598.912982,
+  "year": 2028
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 240.0,
+  "expected_items_sold": 264.482873,
+  "year": 2028
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 141.0,
+  "expected_items_sold": 134.825733,
+  "year": 2028
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 470.0,
+  "expected_items_sold": 471.331239,
+  "year": 2029
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 249.0,
+  "expected_items_sold": 258.817913,
+  "year": 2029
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 618.0,
+  "expected_items_sold": 638.0627,
+  "year": 2029
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 342.0,
+  "expected_items_sold": 338.581754,
+  "year": 2029
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 159.0,
+  "expected_items_sold": 149.901257,
+  "year": 2029
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 617.0,
+  "expected_items_sold": 591.049049,
+  "year": 2029
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 230.0,
+  "expected_items_sold": 221.361083,
+  "year": 2029
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 858.0,
+  "expected_items_sold": 844.251314,
+  "year": 2029
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 346.0,
+  "expected_items_sold": 349.710143,
+  "year": 2029
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 139.0,
+  "expected_items_sold": 149.492849,
+  "year": 2029
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 592.0,
+  "expected_items_sold": 606.50761,
+  "year": 2029
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 258.0,
+  "expected_items_sold": 253.739157,
+  "year": 2029
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 835.0,
+  "expected_items_sold": 742.119717,
+  "year": 2029
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 271.0,
+  "expected_items_sold": 297.512975,
+  "year": 2029
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 142.0,
+  "expected_items_sold": 149.396775,
+  "year": 2029
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 584.0,
+  "expected_items_sold": 583.744564,
+  "year": 2030
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 308.0,
+  "expected_items_sold": 294.209888,
+  "year": 2030
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 801.0,
+  "expected_items_sold": 790.630567,
+  "year": 2030
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 409.0,
+  "expected_items_sold": 380.865739,
+  "year": 2030
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 194.0,
+  "expected_items_sold": 166.101558,
+  "year": 2030
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 757.0,
+  "expected_items_sold": 732.015282,
+  "year": 2030
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 266.0,
+  "expected_items_sold": 251.631036,
+  "year": 2030
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1033.0,
+  "expected_items_sold": 1046.121165,
+  "year": 2030
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 355.0,
+  "expected_items_sold": 393.383903,
+  "year": 2030
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 171.0,
+  "expected_items_sold": 165.649013,
+  "year": 2030
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 713.0,
+  "expected_items_sold": 751.160736,
+  "year": 2030
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 304.0,
+  "expected_items_sold": 288.436639,
+  "year": 2030
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 914.0,
+  "expected_items_sold": 919.568771,
+  "year": 2030
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 334.0,
+  "expected_items_sold": 334.668061,
+  "year": 2030
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 171.0,
+  "expected_items_sold": 165.542555,
+  "year": 2030
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 740.0,
+  "expected_items_sold": 722.968665,
+  "year": 2031
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 331.0,
+  "expected_items_sold": 334.441528,
+  "year": 2031
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 948.0,
+  "expected_items_sold": 979.679103,
+  "year": 2031
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 436.0,
+  "expected_items_sold": 428.430385,
+  "year": 2031
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 180.0,
+  "expected_items_sold": 184.052677,
+  "year": 2031
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 930.0,
+  "expected_items_sold": 906.602207,
+  "year": 2031
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 264.0,
+  "expected_items_sold": 286.040244,
+  "year": 2031
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1309.0,
+  "expected_items_sold": 1296.260336,
+  "year": 2031
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 443.0,
+  "expected_items_sold": 442.511888,
+  "year": 2031
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 175.0,
+  "expected_items_sold": 183.551224,
+  "year": 2031
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 895.0,
+  "expected_items_sold": 930.313886,
+  "year": 2031
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 344.0,
+  "expected_items_sold": 327.878818,
+  "year": 2031
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1155.0,
+  "expected_items_sold": 1139.447861,
+  "year": 2031
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 345.0,
+  "expected_items_sold": 376.463282,
+  "year": 2031
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 188.0,
+  "expected_items_sold": 183.433261,
+  "year": 2031
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 921.0,
+  "expected_items_sold": 895.397956,
+  "year": 2032
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 364.0,
+  "expected_items_sold": 380.174631,
+  "year": 2032
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1204.0,
+  "expected_items_sold": 1213.93124,
+  "year": 2032
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 483.0,
+  "expected_items_sold": 481.93517,
+  "year": 2032
+ },
+ {
+  "locality": "Chicago",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 216.0,
+  "expected_items_sold": 203.94383,
+  "year": 2032
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 1081.0,
+  "expected_items_sold": 1122.82842,
+  "year": 2032
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 333.0,
+  "expected_items_sold": 325.154728,
+  "year": 2032
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1568.0,
+  "expected_items_sold": 1606.210557,
+  "year": 2032
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 475.0,
+  "expected_items_sold": 497.77525,
+  "year": 2032
+ },
+ {
+  "locality": "New York",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 202.0,
+  "expected_items_sold": 203.388184,
+  "year": 2032
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Accent Chair",
+  "items_sold": 1153.0,
+  "expected_items_sold": 1152.195376,
+  "year": 2032
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Bookcase",
+  "items_sold": 380.0,
+  "expected_items_sold": 372.714505,
+  "year": 2032
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Brass End Table",
+  "items_sold": 1419.0,
+  "expected_items_sold": 1411.90248,
+  "year": 2032
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay Desk Chair",
+  "items_sold": 438.0,
+  "expected_items_sold": 423.478124,
+  "year": 2032
+ },
+ {
+  "locality": "San Francisco",
+  "furniture_name": "Back Bay King Bed Frame",
+  "items_sold": 191.0,
+  "expected_items_sold": 203.257472,
+  "year": 2032
+ }
+]

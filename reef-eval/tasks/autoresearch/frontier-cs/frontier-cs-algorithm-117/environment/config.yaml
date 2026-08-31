@@ -1,0 +1,14 @@
+# Set the problem type to interactive
+type: interactive
+
+# Specify the interactor source file
+interactor: interactor.cpp
+
+# Time and memory limits still apply to the contestant's solution
+time: 1s
+memory: 256m
+
+# The subtasks section works the same way
+subtasks:
+  - score: 100
+    n_cases: 100 # Looks for 1.in, 2.in, ... 5.in

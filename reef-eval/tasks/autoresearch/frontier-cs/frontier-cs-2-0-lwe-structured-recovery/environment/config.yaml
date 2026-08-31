@@ -1,0 +1,26 @@
+tag: security
+runtime:
+  language: python
+  timeout_seconds: 10800
+  environment: "Public structured-LWE instances; Python 3.12 helper library; CPU only"
+  apt_packages:
+    - build-essential
+    - ca-certificates
+    - fplll-tools
+    - git
+    - libgmp-dev
+    - libmpfr-dev
+    - pkg-config
+    - python3
+    - python3-dev
+  docker:
+    image: ubuntu:24.04
+environment:
+  cpus: 8
+  memory_mb: 32768
+  storage_mb: 32768
+  build_timeout_seconds: 1800
+submission:
+  kind: file
+  path: /app/solution.json
+  max_queue_size: 3

@@ -1,0 +1,41 @@
+schema_version = "1.1"
+source = "https://github.com/FrontierCS/Frontier-CS"
+artifacts = []
+
+[task]
+name = "frontier-cs/frontier-cs-2-0-vector-db-ann"
+description = ""
+keywords = [ "frontier-cs", "frontier-cs-2.0", "optimization", "geometry",]
+[[task.authors]]
+name = "Frontier-CS Team"
+email = "frontier-cs@berkeley.edu"
+
+[metadata]
+difficulty = "hard"
+category = "optimization"
+tags = [ "frontier-cs", "frontier-cs-2.0", "systems",]
+frontier_cs_problem_id = "vector_db_ann"
+frontier_cs_track = "2.0"
+
+[verifier]
+timeout_sec = 10800.0
+collect = []
+
+[verifier.env]
+
+[agent]
+timeout_sec = 10800.0
+
+[environment]
+network_mode = "public"
+build_timeout_sec = 3600.0
+os = "linux"
+cpus = 8
+memory_mb = 16384
+storage_mb = 8192
+gpus = 0
+mcp_servers = []
+
+[environment.env]
+
+[solution.env]

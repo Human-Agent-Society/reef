@@ -1,0 +1,9 @@
+{
+  "kind": "directory",
+  "path": "/app",
+  "exclude": [
+    "target",
+    ".git",
+    ".frontier-cs"
+  ]
+}

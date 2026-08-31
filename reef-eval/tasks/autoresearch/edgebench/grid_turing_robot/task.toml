@@ -1,0 +1,32 @@
+schema_version = "1.4"
+
+artifacts = ["/home/workspace/grid_turing_robot/solution.py"]
+
+[task]
+name = "edgebench/grid_turing_robot"
+description = "Grid Turing Robot"
+
+[metadata]
+benchmark = "edgebench"
+category = "Combinatorial Optimization"
+judge_parser = "score_sum"
+score_direction = "minimize"
+rescale_kind = "piecewise_min"
+rescale_baseline = 9025986.0
+rescale_rank30 = 4490.0
+rescale_rank1 = 1575.0
+rescale_super_anchor = 554.75
+
+[agent]
+# EdgeBench's official budgets are 2-12 h; the budget is a RUN parameter.
+# Override per run: lab.run(..., agent={"override_timeout_sec": h * 3600},
+# tags={"budget": h}).
+timeout_sec = 43200.0
+
+[verifier]
+timeout_sec = 600.0
+environment_mode = "separate"
+
+[environment]
+build_timeout_sec = 1800.0
+network_mode = "no-network"

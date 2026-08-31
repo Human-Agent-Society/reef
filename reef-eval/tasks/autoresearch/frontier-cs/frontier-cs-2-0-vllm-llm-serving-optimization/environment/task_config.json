@@ -1,0 +1,85 @@
+{
+  "tag": "systems",
+  "runtime": {
+    "language": "python",
+    "timeout_seconds": 21600,
+    "environment": "Patched vLLM (v0.11.0) source; Modal H100 GPU serving Qwen3-Coder-30B-A3B-Instruct; two agentic workloads (mini-swe-agent SWE-bench + BFCL memory) scored 50/50; latency-primary judge with a live BFCL accuracy guardrail + greedy/per-sample correctness gates",
+    "apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_apt_packages": [
+      "bash",
+      "ca-certificates",
+      "curl",
+      "git",
+      "python3",
+      "python3-pip"
+    ],
+    "judge_pip_packages": [
+      "modal",
+      "openai",
+      "datasets",
+      "huggingface-hub",
+      "rank-bm25"
+    ],
+    "docker": {
+      "image": "frontiercs/vllm-serving-optimization-agent:experimental-v0.11.1",
+      "judge_image": "frontiercs/vllm-serving-optimization-judge:experimental-v0.11.1"
+    }
+  },
+  "environment": {
+    "cpus": 8,
+    "memory_mb": 32768,
+    "storage_mb": 65536,
+    "build_timeout_seconds": 7200
+  },
+  "evaluation": {
+    "model": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "gpu": "H100",
+    "dataset": "princeton-nlp/SWE-bench_Lite",
+    "dataset_split": "test",
+    "sample_seed": 20260624,
+    "public_slice": "0:5",
+    "eval_slice": "0:50",
+    "bfcl_public_slice": "0:8",
+    "bfcl_eval_slice": "0:155",
+    "bfcl_max_tokens": 768,
+    "memory_max_steps": 20,
+    "bfcl_jps": 1.0,
+    "bfcl_workers": 64,
+    "swebench_weight": 0.8,
+    "bfcl_weight": 0.2,
+    "arrival_mode": "jps",
+    "jps": 0.5,
+    "workers": 8,
+    "step_limit": 50,
+    "temperature": 0.0,
+    "max_completion_tokens": 2048,
+    "latency_metric": "mean_e2e_seconds",
+    "max_per_instance_speedup": 8.0,
+    "accuracy_tolerance": 0.05,
+    "accuracy_abs_tolerance": 0.05,
+    "agent_accuracy_mode": "patch_validity",
+    "final_accuracy_mode": "resolve_rate",
+    "correctness_smoke_prompts": 8,
+    "bfcl_max_correctness_regressions": 1,
+    "bfcl_correctness_abs_tolerance": 0.05,
+    "bfcl_correctness_tolerance": 0.05,
+    "modal_scaledown_seconds": 900,
+    "modal_startup_timeout_seconds": 1200,
+    "server_health_timeout_seconds": 1800,
+    "build_timeout_seconds": 7200,
+    "instance_timeout_seconds": 1200,
+    "baseline_cache_path": "/opt/vllm-baseline/baseline_metrics.json"
+  },
+  "submission": {
+    "kind": "file",
+    "path": "/app/solution.patch",
+    "max_queue_size": 2
+  }
+}

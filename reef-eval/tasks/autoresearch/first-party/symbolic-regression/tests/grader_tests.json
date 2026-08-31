@@ -1,0 +1,117 @@
+{
+  "solve_sh_scores": 0.6098616044633652,
+  "cases": [
+    {
+      "solution": {
+        "expr": "0.5 * x"
+      },
+      "reward": 0.5832487613796966,
+      "tolerance": 1e-09,
+      "why": "the reference expression's score on the TRAINING points (the session score)"
+    },
+    {
+      "solution": {
+        "expr": "(-5.401494684e-18)*x**12 + (-2.413468807e-05)*x**11 + (1.937303963e-16)*x**10 + (0.001147735919)*x**9 + (-2.427429541e-15)*x**8 + (-0.02410515385)*x**7 + (1.321096652e-14)*x**6 + (0.2635274968)*x**5 + (-3.05987931e-14)*x**4 + (-1.33004708)*x**3 + (2.345685976e-14)*x**2 + (2.499019113)*x**1 + (1.876966583e-15)*x**0"
+      },
+      "reward": 0.9998206957283412,
+      "tolerance": 1e-06,
+      "why": "a degree-12 polynomial memorizes the TRAINING points and nearly maxes the session score"
+    },
+    {
+      "solution": {
+        "expr": "__import__('os').system('id')"
+      },
+      "reward": 0.0,
+      "why": "code injection in the expression must be rejected"
+    },
+    {
+      "solution": {
+        "expr": "().__class__"
+      },
+      "reward": 0.0,
+      "why": "an attribute-based sandbox escape must be rejected"
+    },
+    {
+      "solution": {
+        "expr": "exp(exp(exp(x + 100)))"
+      },
+      "reward": 0.0,
+      "why": "non-finite values must be rejected"
+    },
+    {
+      "solution": {
+        "expr": 42
+      },
+      "reward": 0.0,
+      "why": "a non-string expression must be rejected"
+    },
+    {
+      "solution": {
+        "formula": "x"
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ],
+  "final_cases": [
+    {
+      "solution": {
+        "expr": "0.5 * x"
+      },
+      "reward": 0.6098616044633652,
+      "tolerance": 1e-09,
+      "why": "the reference expression's score on the HELD-OUT points"
+    },
+    {
+      "solution": {
+        "expr": "sin(2*x) + 0.5*x"
+      },
+      "reward": 1.0,
+      "tolerance": 1e-06,
+      "why": "the TRUE formula generalizes exactly to the held-out (extrapolation) range"
+    },
+    {
+      "solution": {
+        "expr": "(-5.401494684e-18)*x**12 + (-2.413468807e-05)*x**11 + (1.937303963e-16)*x**10 + (0.001147735919)*x**9 + (-2.427429541e-15)*x**8 + (-0.02410515385)*x**7 + (1.321096652e-14)*x**6 + (0.2635274968)*x**5 + (-3.05987931e-14)*x**4 + (-1.33004708)*x**3 + (2.345685976e-14)*x**2 + (2.499019113)*x**1 + (1.876966583e-15)*x**0"
+      },
+      "reward": 0.01849909171150227,
+      "tolerance": 1e-06,
+      "why": "the memorizing polynomial COLLAPSES on held-out extrapolation (the anti-memorization defense)"
+    },
+    {
+      "solution": {
+        "expr": "__import__('os').system('id')"
+      },
+      "reward": 0.0,
+      "why": "code injection in the expression must be rejected"
+    },
+    {
+      "solution": {
+        "expr": "().__class__"
+      },
+      "reward": 0.0,
+      "why": "an attribute-based sandbox escape must be rejected"
+    },
+    {
+      "solution": {
+        "expr": "exp(exp(exp(x + 100)))"
+      },
+      "reward": 0.0,
+      "why": "non-finite values must be rejected"
+    },
+    {
+      "solution": {
+        "expr": 42
+      },
+      "reward": 0.0,
+      "why": "a non-string expression must be rejected"
+    },
+    {
+      "solution": {
+        "formula": "x"
+      },
+      "reward": 0.0,
+      "why": "malformed input must score zero, not crash"
+    }
+  ]
+}
