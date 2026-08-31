@@ -1,10 +1,10 @@
 """Harness evolution recipe: boots the composition mutation loop from config.
 
-``HarnessEvolveRecipe`` boots the loop from a config yaml. ``propose`` and
+``CordisRecipe`` boots the loop from a config yaml. ``propose`` and
 ``evaluate`` are Python callables, named as dotted ``module:attribute``
 references in YAML or passed directly when registering from code; ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
-one selection decision), or ``None``. ``HarnessEvolveBackend`` owns the
+one selection decision), or ``None``. ``CordisBackend`` owns the
 mutation/render/episode/scoring phases; the recipe composes that evaluator
 and its selection policy into the candidate evaluator executed by ``Trainer``.
 """
@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
@@ -29,10 +28,11 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
+from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.processor import CordisProcessor
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
-from reef.train.harness_backend import EpisodeScorer, HarnessEvolveBackend, Proposer, ScoreComparisonSelector
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
 
 _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
@@ -74,7 +74,7 @@ def _resolve_candidate_selector(value: Any) -> CandidateSelector:
 
 
 @dataclass(frozen=True)
-class HarnessEvolveRecipe(Recipe):
+class CordisRecipe(Recipe):
     """The harness evolution loop as a bootable recipe class.
 
     Config shape (the ``evolution`` section): ``adapter`` (a name
@@ -238,7 +238,7 @@ class HarnessEvolveRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = HarnessEvolveBackend(
+        training_backend = CordisBackend(
             descriptor=get_adapter(self.adapter),
             propose=self.propose,
             score_episode=self.score_episode,
@@ -250,7 +250,7 @@ class HarnessEvolveRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: HarnessEvolveProcessor(
+            processor_factory=lambda context: CordisProcessor(
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
             training_backend=training_backend,

@@ -14,14 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
 from reef.harness.render import render_composition
 from reef.harness.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.recipe import RecipeConfigError
-from reef.train.harness_backend import HarnessEvolveBackend
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import CordisBackend, CordisRecipe
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "version_check.ts"
 
@@ -38,7 +37,7 @@ def _config(**evolution: object) -> dict[str, object]:
 
 
 def test_version_check_seeds_the_shipped_extension_and_renders_it_byte_exact() -> None:
-    recipe = HarnessEvolveRecipe.from_environment({}, config=_config(version_check=True))
+    recipe = CordisRecipe.from_environment({}, config=_config(version_check=True))
     entry = next(options for options in recipe.seed if options["id"] == VERSION_CHECK_ENTRY_ID)
     nodes = tuple((str(options["name"]), options["config"]) for options in recipe.seed)
     files = render_composition(nodes, get_adapter("pi"))
@@ -47,7 +46,7 @@ def test_version_check_seeds_the_shipped_extension_and_renders_it_byte_exact() -
 
 
 def test_version_check_entry_passes_the_backends_seed_validation() -> None:
-    HarnessEvolveBackend(
+    CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, model: None),
         score_episode=resolve_episode_scorer(lambda task, result: 0.0),
@@ -59,16 +58,16 @@ def test_version_check_entry_passes_the_backends_seed_validation() -> None:
 
 def test_version_check_refuses_an_adapter_without_a_shipped_extension() -> None:
     with pytest.raises(RecipeConfigError, match="'opencode' ships no version check extension"):
-        HarnessEvolveRecipe.from_environment({}, config=_config(adapter="opencode", version_check=True))
+        CordisRecipe.from_environment({}, config=_config(adapter="opencode", version_check=True))
 
 
 def test_version_check_must_be_a_boolean() -> None:
     with pytest.raises(RecipeConfigError, match="version_check must be a boolean"):
-        HarnessEvolveRecipe.from_environment({}, config=_config(version_check="yes"))
+        CordisRecipe.from_environment({}, config=_config(version_check="yes"))
 
 
 def test_version_check_off_by_default_seeds_nothing() -> None:
-    recipe = HarnessEvolveRecipe.from_environment({}, config=_config())
+    recipe = CordisRecipe.from_environment({}, config=_config())
     assert not any(options.get("id") == VERSION_CHECK_ENTRY_ID for options in recipe.seed)
 
 

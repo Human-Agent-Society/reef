@@ -1,8 +1,8 @@
-"""HarnessEvolveProcessor: the failed-trace batching half of harness evolution.
+"""CordisProcessor: the failed-trace batching half of harness evolution.
 
 The processor pairs reports with their inference records and batches the
 traces whose scores fall inside the configured window; the evolution backend
-(``HarnessEvolveBackend``) consumes the batch. Exercised directly rather
+(``CordisBackend``) consumes the batch. Exercised directly rather
 than through any Recipe wrapper.
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.harness_evolve.processor import HarnessEvolveProcessor
 from reef.core import AgentRecord, RequestType
+from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.types import ProcessorContext, TraceBatch
 
 
@@ -33,8 +33,8 @@ def _report(agent_record_id: str, score: object, references: list[str]) -> Agent
     )
 
 
-def _processor(config: dict | None = None) -> HarnessEvolveProcessor:
-    return HarnessEvolveProcessor(ProcessorContext("s", config or {}))
+def _processor(config: dict | None = None) -> CordisProcessor:
+    return CordisProcessor(ProcessorContext("s", config or {}))
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
@@ -92,8 +92,8 @@ def test_trace_processor_validates_assembly_config_fields_at_construction() -> N
 
 
 def test_trace_processor_has_no_training_preparation_hook() -> None:
-    assert not hasattr(HarnessEvolveProcessor, "prepare_training_step")
-    assert not hasattr(HarnessEvolveProcessor, "prepare")
+    assert not hasattr(CordisProcessor, "prepare_training_step")
+    assert not hasattr(CordisProcessor, "prepare")
 
 
 def test_trace_processor_refuses_a_non_finite_score() -> None:

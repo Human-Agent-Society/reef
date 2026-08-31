@@ -2,7 +2,7 @@
 
 ``skillclaw.yaml`` names this class as its dotted recipe reference
 (``harness.skillclaw_recipe:SkillClawRecipe``). It changes exactly two things over
-the stock ``HarnessEvolveRecipe`` implementation:
+the stock ``CordisRecipe`` implementation:
 
 - ``build_surface`` returns ``create_skill_surface([SkillCatalogModule(...)])``, so
   every ``/v1`` request the service proxies carries the served pool's
@@ -23,10 +23,10 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.surface import Surface
 from reef.surface.skills import SkillValidator, create_skill_surface
+from reef.train.cordis_backend import CordisRecipe
 
 from .catalog import SkillCatalogModule
 from .config import PUBLIC_SKILL_ROOT
@@ -53,7 +53,7 @@ def seed_skill_entries(skills_dir: Path) -> tuple[dict[str, Any], ...]:
 
 
 @dataclass(frozen=True)
-class SkillClawRecipe(HarnessEvolveRecipe):
+class SkillClawRecipe(CordisRecipe):
     """Harness evolution with catalog-injecting delivery of the skill pool."""
 
     _: KW_ONLY

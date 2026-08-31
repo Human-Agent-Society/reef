@@ -37,11 +37,11 @@ from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
 from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
+from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
+from reef.train.cordis_backend.manifest import advance
+from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation, MutationError, Proposer, accepts_manifest
 from reef.train.evaluation.contracts import CandidateSelector, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.harness_backend.manifest import FailureManifest, FailureObservation
-from reef.train.harness_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
-from reef.train.harness_backend.manifest import advance
-from reef.train.harness_backend.strategies import EpisodeScorer, Mutation, MutationError, Proposer, accepts_manifest
 from reef.train.types import TraceBatch, TrainingBatch, TrainStepResult
 
 from .compose import Context, FiberState
@@ -104,7 +104,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class HarnessEvolveBackend(TrainingBackend):
+class CordisBackend(TrainingBackend):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
@@ -487,3 +487,14 @@ def _write_rendered_files(files: Mapping[str, str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     return directory
+
+
+# Re-exports of the engine's method shell; the ``as`` form marks them as
+# public per PEP 484, which keeps the unused-import hooks off them. Imported
+# last: recipe.py imports CordisBackend from this module.
+
+
+# Re-exports of the engine's method shell, imported last because recipe.py
+# imports CordisBackend from this module.
+from reef.train.cordis_backend.processor import CordisProcessor  # noqa: F401
+from reef.train.cordis_backend.recipe import CordisRecipe  # noqa: F401

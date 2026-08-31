@@ -15,7 +15,7 @@ runnable example.
 | Signal      | one report with a finite ``score`` and exactly one         |
 |             | reference                                                  |
 +-------------+------------------------------------------------------------+
-| Package     | ``recipes/harness_evolve/``                                |
+| Package     | ``reef/train/cordis_backend/``                                   |
 +-------------+------------------------------------------------------------+
 | Loss family | none (no weight training)                                  |
 +-------------+------------------------------------------------------------+
@@ -23,8 +23,8 @@ runnable example.
 +-------------+------------------------------------------------------------+
 | Needs       | one Reef process and one harness binary. No GPU.           |
 +-------------+------------------------------------------------------------+
-| Example     | ``recipes/harness_evolve/examples/``,                      |
-|             | ``recipes/harness_evolve/examples/skillclaw/``       |
+| Example     | ``tutorials/harness_evolve/``,                             |
+|             | ``recipes/skillclaw/``                                     |
 +-------------+------------------------------------------------------------+
 
 How Reef implements it
@@ -73,14 +73,14 @@ Run the example
 
 `Evolve your harness <../evolve-your-harness.rst#run-the-example>`__ has the
 prerequisites and the walkthrough;
-``recipes/harness_evolve/examples/harness_evolve/run.sh`` is the loop already
+``tutorials/harness_evolve/run.sh`` is the loop already
 wired.
 
 Results
 -------
 
 `examples/harness_evolve
-<../../../recipes/harness_evolve/examples/harness_evolve/README.md>`__ measured one
+<../../../tutorials/harness_evolve/README.md>`__ measured one
 end-to-end run in 63 s on Qwen3-8B: one failing task entered the window, the
 served model proposed a new skill beside the starter, the gate scored the
 candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties), and the tree published.
@@ -89,7 +89,7 @@ SkillClaw
 ~~~~~~~~~
 
 `examples/skillclaw
-<../../../recipes/harness_evolve/examples/skillclaw/README.md>`__ is the
+<../../../recipes/skillclaw/README.md>`__ is the
 larger worked instance: a full method package on the same mechanism. Each night,
 ``propose`` makes one decision per skill group plus the no-skill bucket and maps
 them to a single composite mutation sequence. ``selection: always`` publishes
@@ -99,4 +99,9 @@ It also shows the one extension point beyond the three slots. Its skill catalog
 must reach the model on every live request, so its recipe overrides
 ``build_surface``, the hook controlling how a published artifact reaches the
 request path (`skillclaw_recipe.py
-<../../../recipes/harness_evolve/examples/skillclaw/harness/skillclaw_recipe.py>`__).
+<../../../recipes/skillclaw/harness/skillclaw_recipe.py>`__).
+
+See also
+--------
+
+- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling, pinning, and installing a published tree.

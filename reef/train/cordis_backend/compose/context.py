@@ -87,7 +87,7 @@ class Context:
         own["reflect"] = ReflectService(self)
         own["registry"] = RegistryService(self)
         own["events"] = EventsService(self)
-        own["logger"] = logging.getLogger("reef.train.harness_backend.compose")
+        own["logger"] = logging.getLogger("reef.train.cordis_backend.compose")
         # Builtin registrations are not revertible on the root (context.ts:47).
         fiber._disposables.clear()
 

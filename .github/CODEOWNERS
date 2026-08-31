@@ -19,11 +19,11 @@
 /recipes/sao/ @Benjamin-eecs
 /recipes/tttd/ @Benjamin-eecs
 /recipes/openclawrl/ @Benjamin-eecs
-/recipes/harness_evolve/ @Benjamin-eecs
+/reef/train/cordis_backend/ @Benjamin-eecs
 /reef/surface/ @Benjamin-eecs
 /third_party/cordis/ @Benjamin-eecs
-/recipes/harness_evolve/examples/harness_evolve/ @Benjamin-eecs
-/recipes/harness_evolve/examples/skillclaw/ @Benjamin-eecs
+/tutorials/harness_evolve/ @Benjamin-eecs
+/recipes/skillclaw/ @Benjamin-eecs
 
 # Runnable examples of the weight methods (the method packages above stay
 # with the product layer).

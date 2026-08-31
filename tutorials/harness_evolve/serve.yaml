@@ -6,7 +6,7 @@
 # REEF_RECIPE_CONFIG_DIR, so run.sh copies those four sections into
 # work/recipes/harness_evolve.yaml.
 
-implementation: recipes.harness_evolve.recipe:HarnessEvolveRecipe
+implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
 model:
   path: qwen3-8b

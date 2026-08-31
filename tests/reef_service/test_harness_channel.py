@@ -21,7 +21,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import HARNESS_VERSION_SIDECAR, ReefClient
 
 import reef.harness.adapters
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -33,8 +32,8 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
 from reef.service.install_script import composition_checksum, render_install_script
-from reef.train.harness_backend import Mutation
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -89,7 +88,7 @@ def _dispatcher(
     binary = tmp_path / "fake-pi"
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
-    recipe = HarnessEvolveRecipe(
+    recipe = CordisRecipe(
         resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
         resolve_episode_scorer(evaluate),
         ("task one",),

@@ -112,7 +112,7 @@ sections. Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
-   implementation: my_pkg.harness_evolve:HarnessEvolveRecipe
+   implementation: my_pkg.harness_evolve:CordisRecipe
    model:
      path: qwen3-8b
    data:

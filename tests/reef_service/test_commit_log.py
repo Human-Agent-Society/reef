@@ -31,9 +31,9 @@ from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import RetentionDecision, Trainer
+from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
-from reef.train.harness_backend import HarnessEvolveBackend, ScoreComparisonSelector
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
@@ -742,9 +742,9 @@ class _HarnessEvolveTestRecipe(Recipe):
 
     These tests exercise commit-log/version-chain mechanics, not
     harness-evolution semantics specifically; they just need a concrete,
-    artifact-producing Recipe. Constructs HarnessEvolveBackend and
-    HarnessEvolveProcessor directly, the same shape
-    HarnessEvolveRecipe.build() has, minus the config-boot layer these
+    artifact-producing Recipe. Constructs CordisBackend and
+    CordisProcessor directly, the same shape
+    CordisRecipe.build() has, minus the config-boot layer these
     tests never touch (see tests/reef_service/test_harness_recipe.py for
     the backend's own guarantees).
     """
@@ -761,9 +761,9 @@ class _HarnessEvolveTestRecipe(Recipe):
         return create_harness_surface()
 
     def build(self, scenario, records, *, algorithm_state=None) -> Trainer:
-        from recipes.harness_evolve.processor import HarnessEvolveProcessor
+        from reef.train.cordis_backend.processor import CordisProcessor
 
-        training_backend = HarnessEvolveBackend(
+        training_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
             score_episode=resolve_episode_scorer(self.evaluate),
@@ -773,7 +773,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: HarnessEvolveProcessor(
+            processor_factory=lambda context: CordisProcessor(
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
             training_backend=training_backend,

@@ -9,12 +9,12 @@ from typing import Any
 
 import pytest
 
-from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.train.cordis_backend import CordisRecipe
 
 
 class _Response(io.BytesIO):
@@ -173,16 +173,16 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
             },
         }
         runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
-        built = HarnessEvolveRecipe.from_environment({"TEACHER_KEY": "sk-t"}, config=config, runtime=runtime)
+        built = CordisRecipe.from_environment({"TEACHER_KEY": "sk-t"}, config=config, runtime=runtime)
         models = built.model_bindings()
         assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
 
         bad = {**config, "evolution": {**config["evolution"], "models": {"served": {"url": "http://x", "model": "m"}}}}
         with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
-            HarnessEvolveRecipe.from_environment({}, config=bad, runtime=runtime)
+            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
         bad = {**config, "evolution": {**config["evolution"], "models": {"t": {"model": "m"}}}}
         with pytest.raises(RecipeConfigError, match=r"evolution\.models\.t\.url"):
-            HarnessEvolveRecipe.from_environment({}, config=bad, runtime=runtime)
+            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("demo_models", None)

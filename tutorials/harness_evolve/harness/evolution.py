@@ -60,7 +60,7 @@ def propose(nodes, samples, models):
     if proposal is None:
         return None
     entry_id, config = proposal
-    from reef.train.harness_backend import Mutation  # lazy: keeps run.py reef-free
+    from reef.train.cordis_backend import Mutation  # lazy: keeps run.py reef-free
 
     # Convention: a skill's entry id is its skill name, so an id matching an
     # existing skill updates that node and a new id creates a sibling.

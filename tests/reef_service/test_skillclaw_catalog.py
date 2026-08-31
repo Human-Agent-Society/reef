@@ -20,7 +20,7 @@ import pytest
 
 from reef.core.errors import ReefError
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "harness_evolve" / "examples" / "skillclaw"
+EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "skillclaw"
 
 _ALPHA = "---\nname: alpha\ndescription: Count things\n---\n\nCount carefully.\n"
 _BETA = "---\nname: beta\ndescription: Sort things\n---\n\nSort carefully.\n"

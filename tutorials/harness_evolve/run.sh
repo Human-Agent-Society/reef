@@ -11,7 +11,7 @@ python3 materialize_recipe.py
 
 # Start Reef, stop it again when this script exits. The -c path is absolute:
 # reef resolves a relative config path against its own repo root.
-PYTHONPATH=../../../.. python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
+PYTHONPATH=../.. python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
 SERVE_PID=$!
 trap 'kill "$SERVE_PID" 2>/dev/null' EXIT
 

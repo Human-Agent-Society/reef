@@ -137,7 +137,7 @@ Weight recipes need GPUs (`Evolve your model
 
 The one that runs on a laptop is ``harness_evolve``, and it takes a second file:
 a **preset** naming your ``propose`` and ``evaluate`` callables and the tasks to
-evaluate on. ``recipes/harness_evolve/examples/harness_evolve/run.sh`` wires the
+evaluate on. ``tutorials/harness_evolve/run.sh`` wires the
 whole loop together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 
