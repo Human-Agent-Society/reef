@@ -252,6 +252,10 @@ jobs:
       # import the slime package (the wheel does not bundle it) or Slime's
       # optional dependencies.
       - run: python -m pip install pytest
+      # Exercise the repository cookbook as an external consumer of the
+      # installed Reef wheel. Linking only recipes/ keeps the source reef/
+      # package off sys.path, so it cannot shadow the wheel under test.
+      - run: ln -s "${{ github.workspace }}/recipes" "${{ runner.temp }}/recipes"
       - run: >
           python -m pytest ${{ github.workspace }}/tests/reef_service
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
