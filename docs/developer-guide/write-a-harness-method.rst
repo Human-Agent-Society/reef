@@ -92,7 +92,7 @@ The recipe config names the callables, the tasks, and the first-boot tree:
 
 .. code:: yaml
 
-   kind: harness_evolve
+   implementation: my_pkg.harness_evolve:HarnessEvolveRecipe
 
    model:
      path: qwen3-8b

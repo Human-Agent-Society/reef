@@ -154,7 +154,7 @@ const glossaryTerms = [
   "Report",
   "Feedback",
   "Recipe",
-  "Recipe kind",
+  "Recipe reference",
   "Loss family",
   "Preparer",
   "Version chain",

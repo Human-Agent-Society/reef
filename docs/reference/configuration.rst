@@ -26,12 +26,12 @@ a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
 
-Start from a bundled stack
---------------------------
+Start from a cookbook stack
+---------------------------
 
-Every runnable stack lives under ``recipes/``: the learn-nothing ones on the
-base ``recipe`` kind in ``recipes/basic/``, and each method's with its
-examples.
+The source checkout's runnable stacks live under the ``recipes/`` cookbook:
+the learn-nothing ones use the core ``recipe`` implementation in
+``recipes/basic/``, and each method owns its examples.
 
 +-------------------------------------------------------------+----------------------------------------------------------+
 | File                                                        | What it starts                                           |
@@ -70,7 +70,7 @@ The ``reef`` section
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
    reef.checkpoint_every_n_versions | 1 | how often a version becomes durable
 
-Storage paths default under ``.reef/``, but every bundled stack overrides them
+Storage paths default under ``.reef/``, but every cookbook stack overrides them
 to ``/var/lib/reef``. Point them somewhere persistent.
 
 .. config::
@@ -93,23 +93,26 @@ the service does not recognize are handed to the recipe.
 Recipe configuration
 --------------------
 
-A recipe is named three ways:
+A recipe is selected three ways:
 
-- **A bundled kind:** ``recipe: sao``
+- **The core record-only recipe:** ``recipe: recipe``
 - **A dotted class:** ``recipe: "my_pkg.my_method:MyMethodRecipe"``
 - **A named preset:** ``recipe: my-preset``, resolved to ``my-preset.yaml``
   under ``REEF_RECIPE_CONFIG_DIR``
+
+There is no recipe-implementation registry. A bare name other than ``recipe``
+is always a preset name; it never imports a learning method implicitly.
 
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
 
 A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
-in a preset. A preset carries its own ``kind``, ``model``, and ``data``
+in a preset. A preset carries its own ``implementation``, ``model``, and ``data``
 sections. Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
-   kind: harness_evolve
+   implementation: my_pkg.harness_evolve:HarnessEvolveRecipe
    model:
      path: qwen3-8b
    data:
@@ -121,9 +124,12 @@ sections. Harness-evolution presets also carry an ``evolution`` section:
      evaluate: methods.mine:evaluate
      tasks: ["..."]
 
-Weight recipes accept their fields as flat ``reef.<name>`` keys *or* as
-``data.<name>`` in a preset. Other kinds are configured only by a preset, where
-``data`` holds the batching fields and a kind-specific section holds the rest.
+The preset's ``implementation`` is ``recipe`` or a dotted recipe class. Weight-training
+recipes are selected directly by dotted class in the deployment config, so the
+service can assemble their Ray training runtime; their fields are flat
+``reef.<name>`` keys. Presets suit recipes whose runtime can be built from the
+preset or the deployment's upstream proxy. There, ``data`` holds batching
+fields and a recipe-specific section holds the rest.
 
 The ``services`` list
 ---------------------

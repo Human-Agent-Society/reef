@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef import SAORecipe
+from recipes.sao import SAORecipe
 from reef.runtime.adapters.ray_runtime import RayRuntime, RayRuntimeError
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle

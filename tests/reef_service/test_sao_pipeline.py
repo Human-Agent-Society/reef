@@ -20,7 +20,7 @@ from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import RecipeRegistry
-from reef.recipe.registry import build_recipe, recipe_kinds
+from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import StaleCandidate
@@ -103,10 +103,12 @@ def _sao_report(agent_record_id: str, reference: str, score: float) -> AgentReco
 
 
 @pytest.mark.unit
-def test_sao_recipe_is_registered_under_its_kind() -> None:
-    assert "sao" in recipe_kinds()
+def test_sao_recipe_resolves_by_dotted_reference() -> None:
+    reference = "recipes.sao.recipe:SAORecipe"
+    assert recipe_class_for(reference) is SAORecipe
+    assert recipe_class_for("sao") is None
 
-    recipe = build_recipe("sao", {}, runtime=_StubTrainingRuntime())
+    recipe = build_recipe(reference, {}, runtime=_StubTrainingRuntime())
 
     assert isinstance(recipe, SAORecipe)
     assert recipe.name == "sao"

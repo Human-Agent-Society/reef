@@ -1,6 +1,6 @@
 """OpenClaw-RL (arXiv:2603.10165): one method, one package.
 
-- ``recipe`` — the ``openclawrl`` recipe kind and its ``WeightTrainingSpec``.
+- ``recipe`` — the OpenClaw-RL recipe class and its ``WeightTrainingSpec``.
 - ``processor`` — the computed-feedback processor: sessions trace-matched
   from records, turns judged on a processor-private PRM worker.
 - ``sessions`` / ``turns`` / ``prm`` — the derivation machinery the

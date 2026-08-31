@@ -45,7 +45,7 @@ def dispatcher_with_checkpoint_strategy(strategy, *, backend_factory, local_arti
 
 class WeightRecipe(Recipe):
     """A recipe whose scenarios commit live weights, so serving-version
-    verification applies (the bundled ``recipe`` kind serves a plain
+    verification applies (the core ``recipe`` implementation serves a plain
     evolution surface and never verifies a weight version)."""
 
     def build_surface(self, scenario: str) -> Surface:

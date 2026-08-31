@@ -216,21 +216,21 @@ def test_recipe_config_field_declarations_replaced_the_config_spelling_quartet()
 
 
 @pytest.mark.unit
-def test_online_grpo_preparer_and_kind_are_removed() -> None:
-    """Neither the online_grpo step preparer nor its recipe kind may come back.
+def test_online_grpo_preparer_and_recipe_are_removed() -> None:
+    """Neither the online_grpo step preparer nor its recipe class may come back.
 
     Grouped preparers are cookbook-owned now; the grouped machinery (group
     keys, slots, the decide_group barrier in the reported-feedback processor) stays. The
     ``online_rft`` kind that replaced this arm is gone too — a filtered-SFT
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
-    from reef.recipe.registry import recipe_kinds
+    from reef.recipe.registry import recipe_class_for
     from reef.train.algos.registry import resolve_preparer
 
     with pytest.raises(ValueError, match="unknown step preparer"):
         resolve_preparer("online_grpo")
-    assert "online_grpo" not in recipe_kinds()
-    assert "online_rft" not in recipe_kinds()
+    assert recipe_class_for("online_grpo") is None
+    assert recipe_class_for("online_rft") is None
 
 
 @pytest.mark.unit

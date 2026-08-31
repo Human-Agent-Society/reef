@@ -6,10 +6,9 @@ import pytest
 
 import reef.train.processors.reported as reported_module
 from recipes.sao import SAOProcessor
-from recipes.tttd import TTTDProcessor
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import GroupedRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import RecipeRegistry, WeightTrainingRecipe
 from reef.records import RecordStore
@@ -260,7 +259,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
         pytest.param(TTTDProcessor, id="tttd"),
     ],
 )
-def test_bundled_processors_assemble_before_rejecting_multi_turn_reports(
+def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
     processor_type,
     monkeypatch,
 ) -> None:
@@ -289,7 +288,7 @@ def test_bundled_processors_assemble_before_rejecting_multi_turn_reports(
             "comparison_set": "tttd-step-0-group-0",
         }
 
-    report_type = GroupedRolloutReport if processor_type is TTTDProcessor else None
+    report_type = TTTDGroupedRolloutReport if processor_type is TTTDProcessor else None
     processor = processor_type(ProcessorContext("math", config, report_type=report_type))
     processor.ingest(training_inference("i1", [10, 20], [1], [-0.1]))
     multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)

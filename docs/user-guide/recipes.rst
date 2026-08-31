@@ -33,7 +33,7 @@ Pick by the signal your workload can produce.
 | Feedback on individual requests, and failures | `harness_evolve <recipes/harness-evolve.rst>`__ | harness tree  | no         |
 | worth learning from                           |                                                 |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| No feedback yet; record only                  | ``recipe``, the base kind                       | nothing       | no         |
+| No feedback yet; record only                  | ``recipe``, the core record-only recipe         | nothing       | no         |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 
 How a recipe is selected
@@ -46,12 +46,14 @@ a recipe. The scenario header is the only routing a caller provides.
 .. code:: yaml
 
    reef:
-     recipe: sao          # a bundled kind
+     recipe: recipes.sao.recipe:SAORecipe
      batch_size: 1
 
-``reef.recipe`` accepts a bundled kind, dotted class, or preset. `Configuration
-<../reference/configuration.rst#recipe-configuration>`__ describes the config
-for each kind.
+``reef.recipe`` accepts the core value ``recipe``, a dotted class, or a preset.
+Reef does not register or import learning methods. The ``recipes/`` tree in
+this repository is a cookbook; installed method packages work the same way.
+`Configuration <../reference/configuration.rst#recipe-configuration>`__
+describes each spelling.
 
 Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
 ``checkpoint_every_n_versions`` is the shorter spelling in deployment YAML.
@@ -59,6 +61,6 @@ Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
 See also
 --------
 
-- `tttd <recipes/tttd.rst>`__ includes the bundled TTT-Discover example,
+- `tttd <recipes/tttd.rst>`__ includes the cookbook TTT-Discover example,
   formal circle-packing results, and recovery details.
 - `Write a recipe <../developer-guide/write-a-recipe.rst>`__: when none of them fits.

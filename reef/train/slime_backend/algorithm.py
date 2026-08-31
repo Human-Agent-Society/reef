@@ -47,10 +47,9 @@ override to carry per-run state such as a teacher client or a train schedule).
 Adding a family
 ---------------
 
-A family is a package ``recipes/<name>/slime/`` — the same place a method
-keeps its objective:
+A family lives in its method package beside its objective hooks:
 
-    recipes/<name>/slime/
+    my_method/slime/
       __init__.py     the spec: a SlimeAlgorithm subclass, no torch
       objective.py    the @objective hooks, torch (worker side)
       <concern>.py    further worker-side torch modules, imported only from
@@ -65,16 +64,14 @@ validates it at init time::
     def my_loss(args, batch, logits, sum_of_sample_mean): ...
 
 Register the spec by reference from the package ``__init__`` —
-``register_loss_family_ref("<name>", "recipes.<name>.slime:<Pkg>Algorithm")``
+``register_loss_family_ref("<name>", "my_method.slime:MyMethodAlgorithm")``
 (:mod:`reef.train.algos.registry`) — so the service never imports
 the Slime side and the driver imports it on first resolve. Naming conventions, enforced by
 ``tests/reef_service/test_slime_algorithm_contract.py``: the spec class is
 ``<Pkg>Algorithm`` and its driver options ``<Pkg>Settings``, both importable
 from the family package root; ``@objective`` entry points are ``<pkg>_loss``,
 ``<pkg>_advantages``, ``<pkg>_actor_init`` / ``<pkg>_actor_pre_train``; family
-CLI flags are ``--<pkg>-*``. Reference: ``tttd`` is the smallest family with
-an objective; ``sao`` overrides the most hooks; ``openclawrl`` uses the actor
-lifecycle hooks for a trainer-side teacher.
+CLI flags are ``--<pkg>-*``.
 """
 
 from __future__ import annotations
@@ -248,8 +245,8 @@ class SlimeAlgorithm(ABC):
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         """Validate algorithm-specific backend args.
 
-        ``source`` is ``REEF_TRAINING_LOSS=<family>`` or
-        ``REEF_TRAINING_RECIPE=<recipe>`` — use it in error messages.
+        ``source`` identifies the configured ``reef.recipe`` — use it in error
+        messages.
         At minimum, ``pass`` if your algorithm has no specific requirements.
         """
 
@@ -371,7 +368,7 @@ class SlimeAlgorithm(ABC):
     # --- template methods (do not override) ---
 
     def validate_backend_args(self, args: Namespace, *, recipe: str | None = None) -> None:
-        source = f"REEF_TRAINING_RECIPE={recipe}" if recipe else f"REEF_TRAINING_LOSS={self.loss_family}"
+        source = f"reef.recipe={recipe}" if recipe else f"loss family {self.loss_family}"
         actual_loss = getattr(args, "loss_type", None)
         if actual_loss != self.loss_type:
             raise RuntimeError(f"{source} requires --loss-type {self.loss_type}, got {actual_loss!r}")
@@ -395,16 +392,16 @@ class SlimeAlgorithm(ABC):
 # --- loss family registration (driver-side) ---
 
 _loss_families: dict[str, SlimeAlgorithm] = {}
-"""Bundled loss families registered at import time by :func:`register_loss_family`.
+"""Loss families registered at import time by :func:`register_loss_family`.
 
 Read by :class:`~reef.train.slime_backend.loss_families.LossFamilyRegistry`
-for its bundled set; external families are registered at runtime through
+for decorated classes; instances may also be registered at runtime through
 ``register_loss_family(spec)``.
 """
 
 
 def register_loss_family(cls: Callable[..., Any]) -> Callable[..., Any]:
-    """Class decorator: instantiate and register a bundled loss family.
+    """Class decorator: instantiate and register a loss family.
 
     Each algorithm module applies this to its ``SlimeAlgorithm`` subclass so
     resolving the family's reference imports the module — no explicit dict entry.

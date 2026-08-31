@@ -63,20 +63,14 @@ METHOD_PACKAGES = ("harness_evolve", "openclawrl", "sao", "tttd")
 
 def test_infra_never_imports_a_method_package() -> None:
     # The whole of reef is the machinery the method packages build on,
-    # never the reverse: a method registers its recipe kind, step preparer and
-    # loss-family reference at import time (reef/__init__ alone imports the
-    # methods, last), so no other reef module has any reason to name one — at
-    # module scope or inside a function.
+    # never the reverse. Dotted recipe references import cookbook code only
+    # when the operator selects it, so no reef module has any reason to name a
+    # method at module scope or inside a function.
     offenders: list[str] = []
     for path in sorted((REPO_ROOT / "reef").rglob("*.py")):
-        if path == REPO_ROOT / "reef" / "__init__.py":
-            continue
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        for method in METHOD_PACKAGES:
-            offenders.extend(
-                f"{path.relative_to(REPO_ROOT)} -> {target}" for target in _imports_of(imported, f"recipes.{method}")
-            )
+        offenders.extend(f"{path.relative_to(REPO_ROOT)} -> {target}" for target in _imports_of(imported, "recipes"))
     assert offenders == []
 
 
@@ -155,12 +149,11 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     assert offenders == []
 
 
-def test_recipe_package_does_not_load_slime_backend() -> None:
-    # Method packages keep their backend half in a ``slime`` subpackage that
-    # only the training process imports: importing every bundled recipe must
-    # leave the service process free of the Slime stack.
+def test_importing_reef_does_not_load_cookbook_or_slime_packages() -> None:
     _assert_isolated_import(
         "import sys; import reef; "
+        "assert not [m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')], "
+        "[m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')]; "
         "assert not [m for m in sys.modules if m.startswith('reef.train.slime_backend')], "
         "[m for m in sys.modules if m.startswith('reef.train.slime_backend')]"
     )

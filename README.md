@@ -189,10 +189,12 @@ the next time it starts. The [harness evolution guide](https://reefinfra.ai/docs
 describes the proposal, evaluation, and publication process.
 
 
-## Bundled recipes
+## Cookbook recipes
 
 Choose a recipe based on the feedback available from the workload and the
-artifact that should be updated.
+artifact that should be updated. These implementations live in this
+repository's `recipes/` cookbook; they are selected by dotted class reference
+and do not ship in the Reef wheel.
 
 | Workload | Method and recipe | Updated artifact | Documentation |
 |---|---|---|---|
@@ -225,7 +227,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Evolve your harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/): evolve a harness instead of model weights
 - [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/): configure and operate a training deployment
 - [Recipes](https://reefinfra.ai/docs/user-guide/recipes/): additional references on
-  the recipes already implemented in the official Reef installation
+  the cookbook implementations in this repository
 - [Architecture](https://reefinfra.ai/docs/getting-started/architecture/): Overall architecture of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 

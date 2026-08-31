@@ -26,7 +26,6 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import register_kind
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
@@ -74,10 +73,9 @@ def _resolve_candidate_selector(value: Any) -> CandidateSelector:
     )
 
 
-@register_kind("harness_evolve")
 @dataclass(frozen=True)
 class HarnessEvolveRecipe(Recipe):
-    """The harness evolution loop as a bootable recipe kind.
+    """The harness evolution loop as a bootable recipe class.
 
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and

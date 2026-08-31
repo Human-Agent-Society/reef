@@ -130,8 +130,8 @@ serving; delete one and a documented failure returns. The list, naming the
 attribute each requirement forces, is in the module docstrings of
 ``reported.py`` and ``computed.py``.
 
-The bundled processors
-----------------------
+Cookbook processors
+-------------------
 
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+
 | File                                  | Tier     | What its ``judge`` accepts                                       | Batch                  |
@@ -140,8 +140,8 @@ The bundled processors
 |                                       |          | inference whose assembled sample passes the action-mask check;   |                        |
 |                                       |          | one rollout, one unit                                            |                        |
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``recipes/tttd/processor.py``         | reported | a report parsing as ``GroupedRolloutReport`` on this scenario's  | ``GroupedPolicyBatch`` |
-|                                       |          | grid; the step is the group, ready only when every               |                        |
+| ``recipes/tttd/processor.py``         | reported | a report parsing as ``TTTDGroupedRolloutReport`` on this         | ``GroupedPolicyBatch`` |
+|                                       |          | scenario's grid; the step is the group, ready only when every    |                        |
 |                                       |          | ``groups_per_step`` × ``rollouts_per_group`` slot is filled      |                        |
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+
 | ``recipes/harness_evolve/processor.py``| reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |

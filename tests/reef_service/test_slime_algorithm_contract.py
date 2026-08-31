@@ -15,6 +15,7 @@ import pytest
 
 from recipes.sao.slime import CRITIC_ATTENTION_PARAM_PATTERN
 from recipes.sao.slime.utils import schedule as sao_runtime
+from reef.train.algos.registry import register_loss_family_ref
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_objective_paths
 from reef.train.slime_backend.loss_families import (
     LOSS_FAMILIES,
@@ -54,7 +55,7 @@ class _TestAlgorithm(SlimeAlgorithm):
         pass
 
 
-#: The bundled families plus the two plain ones tests/conftest.py registers.
+#: The cookbook families plus the two plain ones tests/conftest.py registers.
 _ALL_FAMILIES = ("openclawrl", "pg", "sao", "sft", "tttd")
 
 
@@ -75,7 +76,7 @@ def test_registry_is_the_complete_slime_loss_family_surface() -> None:
 
 
 @pytest.mark.unit
-def test_register_loss_family_opens_the_bundled_table() -> None:
+def test_register_loss_family_opens_the_registry() -> None:
     toy = _TestAlgorithm(loss_family="toy")
     try:
         assert register_loss_family(toy) is toy
@@ -94,10 +95,12 @@ def test_register_loss_family_opens_the_bundled_table() -> None:
 
 
 @pytest.mark.unit
-def test_bundled_families_cannot_be_unregistered() -> None:
-    with pytest.raises(ValueError, match="bundled"):
-        unregister_loss_family("tttd")
-    with pytest.raises(KeyError, match="registered external families"):
+def test_registered_family_references_can_be_unregistered() -> None:
+    register_loss_family_ref("temporary", "some_package.loss:TemporaryAlgorithm")
+    assert "temporary" in LOSS_FAMILIES.names
+    unregister_loss_family("temporary")
+    assert "temporary" not in LOSS_FAMILIES.names
+    with pytest.raises(KeyError, match="registered families"):
         unregister_loss_family("never_registered")
 
 
@@ -390,8 +393,8 @@ _EXPECTED_OBJECTIVE_CHANNELS = {
 def _family_package_name(loss_family: str) -> str:
     """The name a family's classes, flags and settings are spelled after.
 
-    Every bundled family is spelled after its canonical loss-family name,
-    and lives in its package, ``reef/<name>/slime/``.
+    Every cookbook family is spelled after its canonical loss-family name and
+    lives in its own method package.
     """
     return resolve_loss_family(loss_family).loss_family
 
@@ -407,7 +410,7 @@ def _family_package_dir(loss_family: str) -> Path:
 
 
 def _family_source_files() -> list[Path]:
-    """Every bundled family's source files, ``reef/<name>/slime/``."""
+    """Every cookbook family's source files."""
     files: set[Path] = set()
     for family in _BUNDLED_FAMILIES:
         files.update(_family_package_dir(family).rglob("*.py"))
@@ -687,14 +690,6 @@ def test_dotted_reference_accepts_the_decorated_class(monkeypatch) -> None:
     finally:
         unregister_loss_family("toy_decorated")
     assert "toy_decorated" not in LOSS_FAMILIES.names
-
-
-@pytest.mark.unit
-def test_renamed_family_keeps_its_old_name_as_an_alias() -> None:
-    with pytest.warns(DeprecationWarning, match="'openclawrl-topk' is now 'openclawrl'"):
-        spec = resolve_loss_family("openclawrl-topk")
-    assert spec is resolve_loss_family("openclawrl")
-    assert "openclawrl-topk" not in LOSS_FAMILIES.names
 
 
 @pytest.mark.unit

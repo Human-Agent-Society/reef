@@ -10,7 +10,7 @@ reef:
   host: 127.0.0.1
   model_path: work/model
   port: 8900
-  recipe: tttd
+  recipe: recipes.tttd.recipe:TTTDRecipe
   token: reef-local
   groups_per_step: 8
   rollouts_per_group: 64
@@ -138,7 +138,6 @@ services:
       RAY_ADDRESS: 127.0.0.1:6379
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
-      REEF_TRAINING_RECIPE: tttd
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
     depends_on: [ray-head]

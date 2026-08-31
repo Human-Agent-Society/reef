@@ -13,7 +13,8 @@ Enough to serve, record, report, and evolve a harness against a hosted model.
    git lfs install
 
 ``git lfs`` is required: Reef keeps version history in Git, with weight files
-under LFS. This install runs the base ``recipe`` kind and ``harness_evolve``.
+under LFS. The checkout includes the core ``recipe`` example and the
+``harness_evolve`` cookbook method.
 
 Client only
 -----------

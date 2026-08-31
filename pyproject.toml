@@ -85,13 +85,10 @@ include-package-data = true
 
 # reef-client is now a separate repo (Human-Agent-Society/reef-client) and a
 # declared dependency; the reef wheel must not ship its source.
-# `reef` is the shared machinery; `recipes` holds the bundled methods that
-# `reef/__init__` imports to register their kinds. A method's `examples/`
-# (and the method-less `recipes/basic`) are runnable harnesses, not library
-# code, and never ship.
+# `reef` is the shared machinery. The sibling `recipes` tree is a cookbook,
+# not package code, so neither its methods nor its runnable examples ship.
 [tool.setuptools.packages.find]
-include = ["reef", "reef.*", "recipes", "recipes.*"]
-exclude = ["recipes.basic", "recipes.basic.*", "recipes.*.examples", "recipes.*.examples.*"]
+include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
 reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts"]

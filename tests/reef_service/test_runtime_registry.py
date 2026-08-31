@@ -55,7 +55,7 @@ def test_recipe_rejects_unknown_runtime_before_scenario_is_created(tmp_path) -> 
     recipes = tmp_path / "recipes"
     recipes.mkdir()
     (recipes / "qwen.yaml").write_text(
-        """kind: recipe
+        """implementation: recipe
 runtime:
   type: missing
   base_url: http://runtime
@@ -73,7 +73,7 @@ def test_recipe_resolution_does_not_probe_runtime(tmp_path, monkeypatch) -> None
     recipes = tmp_path / "recipes"
     recipes.mkdir()
     (recipes / "qwen.yaml").write_text(
-        """kind: recipe
+        """implementation: recipe
 runtime:
   type: inference_proxy
   base_url: http://provider

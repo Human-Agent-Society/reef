@@ -29,7 +29,7 @@ from reef.service.deploy.settings import ServiceSettings, service_owned_keys
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
-    """The registered class for ``name`` when it is a weight-training recipe."""
+    """The explicit class for ``name`` when it is a weight-training recipe."""
     recipe_type = recipe_class_for(name)
     if recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe):
         return recipe_type
@@ -168,12 +168,12 @@ def _training_recipe(
 def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, str], connector: Any) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
-    The three spellings differ only in where the recipe's config and runtime
-    come from: a weight-training kind reads the flat ``reef.*`` section and
-    connects the Ray training runtime; a dotted kind is operator configuration
-    built from the environment on the upstream proxy; any other name is a
-    bundled kind or a YAML preset under ``REEF_RECIPE_CONFIG_DIR``, whose own
-    ``runtime`` section wins over the upstream proxy.
+    The spellings differ only in where config and runtime come from: a dotted
+    weight-training class reads the flat ``reef.*`` section and connects the
+    Ray runtime; another dotted class is built from the environment on the
+    upstream proxy; a bare name is ``recipe`` or a YAML preset under
+    ``REEF_RECIPE_CONFIG_DIR``, whose own ``runtime`` section wins over the
+    upstream proxy.
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
@@ -205,7 +205,7 @@ def build_dispatcher(
     )
     # A deployment serves one recipe, so its registry is closed over that
     # single entry and request-time names never materialize another. Scenarios
-    # bind to the operator's public name; a dotted kind is not a request name,
+    # bind to the operator's public name; an implementation reference is not a request name,
     # so it serves under the recipe's own.
     name = recipe.name if ":" in selected_recipe else selected_recipe
     return Dispatcher(

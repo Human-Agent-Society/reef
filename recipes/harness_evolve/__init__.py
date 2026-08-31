@@ -1,6 +1,6 @@
 """Harness composition evolution: one method, one package.
 
-- ``recipe`` — the ``harness_evolve`` recipe kind; ``propose`` and
+- ``recipe`` — the harness-evolution recipe class; ``propose`` and
   ``evaluate`` bind as dotted callable references.
 - ``processor`` — batches scored traces for the propose/evaluate/select
   loop.

@@ -6,7 +6,7 @@ This example rebuilds the SkillClaw method from [Evolving Skills for Autonomous 
 
 ```text
 skillclaw/
-  skillclaw.yaml      the recipe the driver boots: dotted kind, selection
+  skillclaw.yaml      the recipe the driver boots: explicit implementation, selection
                       always, batch_size 60, probe tasks, seed composition
   harbor/             one Harbor-format task (the standard layout the
                       sibling examples follow): the benchmark's
