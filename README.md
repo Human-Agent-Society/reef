@@ -12,6 +12,7 @@
 [![Docs Build](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml)
 
 [![Docs](https://img.shields.io/badge/docs-reefinfra.ai-0E7490?logo=readthedocs&logoColor=white)](https://reefinfra.ai)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/8k4WeVuTb)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
