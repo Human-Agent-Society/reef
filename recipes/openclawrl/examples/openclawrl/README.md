@@ -211,6 +211,4 @@ uv run --no-project --with matplotlib \
 
 ![Accumulated accepts and the rolling bold and list rates over the first 36 sessions of the stream](results/2026-08-27-gsm8k-stream-qwen3-4b-thinking/learning_curve.png)
 
-As the learning curve shows, both the bold rate and the list rate start to
-decrease as training goes on, indicating that the training effectively adapts
-the agent to the user's preference.
+A session passes when the agent's first solution reply already matches the student's preferences, with the work shown and the correct answer. The student wants homework that does not look AI-written, so a reply that uses bold text or a bullet or numbered list draws a complaint. The bold rate and the list rate measure this habit over the run, as the fraction of the last ten sessions whose first reply still contains bold text or a list. From the curves we see both fall as training goes on, and the run reaches the paper's adaptation criterion (three passed sessions in a row) at session 14.
