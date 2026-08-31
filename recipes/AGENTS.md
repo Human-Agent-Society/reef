@@ -1,7 +1,7 @@
 # How to write a new example
 
 Every example is a self-contained Harbor task + Reef harness that `run.sh`
-wires together through [REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval).
+wires together through [reef-eval](https://github.com/Human-Agent-Society/reef-eval).
 Copy `recipes/basic/` as a starting point; a method's examples live under
 `recipes/<method>/examples/<example>/`; it is the minimal valid structure.
 
@@ -9,7 +9,7 @@ Copy `recipes/basic/` as a starting point; a method's examples live under
 
 ```text
 my_example/
-  harbor/                task definition (consumed by REEF Eval/Harbor)
+  harbor/                task definition (consumed by reef-eval/Harbor)
     task.toml             metadata, timeouts, resource limits
     instruction.md        the prompt shown to the model
     environment/
@@ -22,8 +22,8 @@ my_example/
     agent.py              HarborAgent(BaseAgent) — the agent logic
     report.py             optional: post a trainable verifier reward to Reef
   my_example.yaml         Reef service config (recipe, host, token, services)
-  run.sh                  starts reef serve, then runs REEF Eval with the harness
-  pyproject.toml          makes harness/ importable by REEF Eval's uvx environment
+  run.sh                  starts reef serve, then runs reef-eval with the harness
+  pyproject.toml          makes harness/ importable by reef-eval's uvx environment
   README.md               what the example demonstrates and how to run it
 ```
 
@@ -35,23 +35,27 @@ The example directory is **not** a Python package. There is no
 
 ```toml
 [project]
-dependencies = ["reef-client", "reef-eval[harbor]"]
+requires-python = ">=3.12"
+dependencies = [
+    "reef-client",
+    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["harness*"]
 ```
 
-Only examples that do not use REEF Eval (for example, a direct
-`reef_client` campaign driver) should omit `reef-eval[harbor]`.
+Only examples that do not use reef-eval (for example, a direct
+`reef_client` campaign driver) should omit the reef-eval dependency.
 
-`run.sh` installs it into REEF Eval's ephemeral environment with
+`run.sh` installs it into reef-eval's ephemeral environment with
 `--with-editable "$PWD"`.
 
 ## harness/`__init__.py`
 
 Lazily export `HarborAgent` so importing the harness package does not require
-the `harbor` runtime — REEF Eval loads it when resolving
+the `harbor` runtime — reef-eval loads it when resolving
 `--agent harness:HarborAgent`:
 
 ```python
@@ -125,9 +129,9 @@ training stack under the same `reef:` section.
 
 1. Set environment variables (port, token, scenario, recipe, work dir).
 2. Start `reef serve -c <yaml>` in the background; wait for `/healthz`.
-3. Run REEF Eval with `--with-editable "$PWD"` (installs `harness/`) and
+3. Run reef-eval with `--with-editable "$PWD"` (installs `harness/`) and
    `--with reef-client` (installs the SDK from PyPI).
-4. REEF Eval resolves `--agent harness:HarborAgent` and runs the Harbor task.
+4. reef-eval resolves `--agent harness:HarborAgent` and runs the Harbor task.
 
 See `basic/run.sh` for the minimal version (60 lines). `tttd/run.sh` adds
 model download and GPU stack startup.

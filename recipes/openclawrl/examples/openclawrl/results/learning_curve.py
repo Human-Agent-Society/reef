@@ -1,7 +1,7 @@
 """Per-session accept and style metrics of a GSM8K homework stream.
 
 Reef's training run logs loss and rewards; the judge sidecar's verdict, whether
-the agent's first reply satisfies the student, lands per session in the REEF Eval
+the agent's first reply satisfies the student, lands per session in the reef-eval
 lab as ``verifier/final.json``, which Reef never sees. This script reads those
 verdicts and turns them into the stream's learning curve, in two ways.
 
@@ -272,7 +272,7 @@ def log_to_wandb(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--lab", type=Path, help="the REEF Eval lab directory ($RUN_DIR/lab)")
+    parser.add_argument("--lab", type=Path, help="the reef-eval lab directory ($RUN_DIR/lab)")
     parser.add_argument("--from-csv", type=Path, help="read the per-session rows from a CSV instead of a lab")
     parser.add_argument("--csv", type=Path, help="export the per-session rows to this CSV and exit")
     parser.add_argument("--plot", type=Path, help="draw the learning curve to this PNG and exit")

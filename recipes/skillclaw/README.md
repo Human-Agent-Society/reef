@@ -48,7 +48,7 @@ skillclaw/
                       embeds the Reef service, runs the docker day, reports
                       every grade, and seals rounds; `run.py report`
                       prints the gain table; `run.py solve` runs the
-                      harbor/ task once through REEF Eval (the smoke)
+                      harbor/ task once through reef-eval (the smoke)
   run.sh              materializes the benchmark checkout (ensure_benchmark)
                       before day one, then runs the driver
   pyproject.toml      makes harness/ an installable package

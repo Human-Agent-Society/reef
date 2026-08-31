@@ -1,4 +1,4 @@
-"""Executable host-side contracts for the shipped REEF Eval/Harbor examples."""
+"""Executable host-side contracts for the shipped reef-eval/Harbor examples."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import pytest
 
 try:
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
+except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
     import tomli as tomllib
 
 
@@ -29,7 +29,7 @@ EXAMPLE_DIRS = {
 }
 REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),
-    ROOT / "recipes" / "harness_evolve" / "examples" / "skillclaw",
+    ROOT / "recipes" / "skillclaw",
     ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
 )
 
@@ -38,7 +38,8 @@ REEF_EVAL_EXAMPLE_DIRS = (
 @pytest.mark.parametrize("example_dir", REEF_EVAL_EXAMPLE_DIRS, ids=lambda path: path.name)
 def test_reef_eval_examples_declare_their_runtime_dependency(example_dir: Path) -> None:
     project = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]
-    assert "reef-eval[harbor]" in project["dependencies"]
+    assert project["requires-python"] == ">=3.12"
+    assert "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git" in project["dependencies"]
 
 
 def _install_harbor_protocol(monkeypatch) -> None:

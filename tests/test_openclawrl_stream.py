@@ -1,4 +1,4 @@
-"""OpenClaw-RL REEF Eval stream example: student sidecar, tasks, harness."""
+"""OpenClaw-RL reef-eval stream example: student sidecar, tasks, harness."""
 
 from __future__ import annotations
 
@@ -273,7 +273,7 @@ class TestHarness:
                 self.commands.append(command)
                 if "cat /agent/problem.json" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(problem), stderr="")
-                if "cat /reef-eval/state/scenario" in command:
+                if "cat /reef_eval/state/scenario" in command:
                     return SimpleNamespace(return_code=0, stdout="", stderr="")
                 if "$JUDGE_URL/state" in command or "$JUDGE_URL/reply" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(next(states)), stderr="")

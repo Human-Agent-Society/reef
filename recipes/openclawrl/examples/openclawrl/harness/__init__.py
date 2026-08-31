@@ -1,7 +1,7 @@
-"""REEF Eval/Harbor harness for the OpenClaw-RL GSM8K stream.
+"""reef-eval/Harbor harness for the OpenClaw-RL GSM8K stream.
 
 ``HermesStreamAgent`` is exported lazily so importing the package does not
-require the harbor runtime; REEF Eval loads it when resolving
+require the harbor runtime; reef-eval loads it when resolving
 ``--agent harness:HermesStreamAgent``.
 """
 

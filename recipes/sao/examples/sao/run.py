@@ -2,7 +2,7 @@
 
 For each task, in order:
 
-    solve  — REEF Eval runs the task under our agent (six attempts, each an
+    solve  — reef-eval runs the task under our agent (six attempts, each an
              inference through Reef)
     verify — Harbor's isolated verifier scores every attempt
     learn  — the agent reports each score against its receipt; Reef's SAO

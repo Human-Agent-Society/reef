@@ -6,8 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "reef-basic-harness"
 version = "0.1.0"
 description = "Minimal Harbor agent harness that talks to a Reef service"
-requires-python = ">=3.10"
-dependencies = ["reef-client", "reef-eval[harbor]"]
+requires-python = ">=3.12"
+dependencies = [
+    "reef-client",
+    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

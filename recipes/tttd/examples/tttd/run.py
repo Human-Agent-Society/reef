@@ -2,7 +2,7 @@
 
 One episode:
 
-    solve  — REEF Eval runs the selected harbor/ task under our agent; every
+    solve  — reef-eval runs the selected harbor/ task under our agent; every
              rollout is
              an inference through Reef, stamped with its step-grid
              coordinates
@@ -11,7 +11,7 @@ One episode:
              one complete step grid (8 groups x 64 rollouts), trains, and
              serves the updated weights
 
-``Lab.run`` is REEF Eval's one primitive: task in, trusted scored row out.
+``Lab.run`` is reef-eval's one primitive: task in, trusted scored row out.
 """
 
 import asyncio

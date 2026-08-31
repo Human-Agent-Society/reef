@@ -25,7 +25,7 @@ the authority (_committed_pool).
 
 ``python3 run.py report`` prints the gain table over both runs' sealed
 rounds (``stats.py``, the preregistered criterion). ``python3 run.py solve``
-runs the bundled ``harbor/`` task once through REEF Eval instead - the sibling
+runs the bundled ``harbor/`` task once through reef-eval instead - the sibling
 examples' smoke idiom - against the same embedded service.
 """
 
@@ -625,13 +625,13 @@ def main() -> None:
 
 
 def solve() -> None:
-    """One REEF Eval episode on the bundled ``harbor/`` task: the sibling
+    """One reef-eval episode on the bundled ``harbor/`` task: the sibling
     examples' smoke idiom (``lab.run(harbor_dir, agent)``), against the same
     embedded service the campaign runs, so the recorded exchange carries the
     served pool's catalog. The task is self-contained (plain base image plus
     the vendored benchmark files), so this works anywhere docker does; the
-    campaign's own day loop never goes through REEF Eval. A repeated solve with
-    unchanged settings returns the stored row without re-running (REEF Eval's
+    campaign's own day loop never goes through reef-eval. A repeated solve with
+    unchanged settings returns the stored row without re-running (reef-eval's
     resume key)."""
     from reef_eval import Lab  # solve-only dependency, declared in pyproject.toml
 

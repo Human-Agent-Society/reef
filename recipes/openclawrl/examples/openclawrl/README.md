@@ -35,7 +35,7 @@ harbor-tasks/
       problem.json               this session's question and gold answer
     tests/test.sh                copies the judge's /final verdict into the verifier output
 harness/
-  agent.py                       HermesStreamAgent: the REEF Eval agent that runs one session
+  agent.py                       HermesStreamAgent: the reef-eval agent that runs one session
 user_sim/
   personas.py                    the student persona and the strict acceptance criterion
   student_server.py              the judge sidecar (HTTP), scripted or LLM-backed
@@ -68,8 +68,8 @@ reactions come from the Qwen3-32B persona.
 
 ## The homework stream
 
-The stream is a [REEF Eval task stream](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval):
-an ordered folder of ordinary Harbor tasks that REEF Eval runs strictly in order,
+The stream is a [reef-eval task stream](https://github.com/Human-Agent-Society/reef-eval):
+an ordered folder of ordinary Harbor tasks that reef-eval runs strictly in order,
 with one directory (`$REEF_EVAL_STATE_DIR`) mounted into every position. The
 agent carries state across sessions, so the sessions cannot be run as
 independent trials.
@@ -106,7 +106,7 @@ position. Around the unmodified agent it makes three changes:
 The runtime flow is:
 
 ```text
-REEF Eval starts the task container and the judge sidecar for the next session
+reef-eval starts the task container and the judge sidecar for the next session
   -> the harness reads the student's message from the sidecar
   -> hermes runs one turn; its model calls go through the shim to Reef
   -> the SGLang backend records the sampled tokens, loss mask, log-probabilities, and top-K capture
@@ -121,7 +121,7 @@ REEF Eval starts the task container and the judge sidecar for the next session
 ## Setup (once)
 
 You need a GPU host that matches the cuda maps in `serve.yaml`, Docker, and
-`uv` (for `uvx`, which runs REEF Eval). The default map uses seven GPUs and leaves
+`uv` (for `uvx`, which runs reef-eval). The default map uses seven GPUs and leaves
 GPU 0 free for other users of a shared host: GPUs 1-4 for the Megatron actor
 (tensor parallel 4), 5 for the policy rollout engine, 6 for the PRM, and 7
 for the student model.
@@ -137,7 +137,7 @@ Qwen3-4B-Thinking-2507 serves as both the policy and the PRM, as in the
 reference run script. The PRM is the frozen base model on its own engine;
 the policy is trained. Qwen3-32B is only needed for the LLM student.
 
-Two more things to check on a host you did not set up yourself. REEF Eval needs
+Two more things to check on a host you did not set up yourself. reef-eval needs
 Python 3.12 or newer; if `uvx` picks an older interpreter, set
 `UV_PYTHON=3.12`. And the repository root must not contain a stale
 `reef.egg-info`, because it is mounted into the container and shadows the
@@ -151,7 +151,7 @@ bash recipes/openclawrl/examples/openclawrl/run.sh
 
 This builds the sidecar image, boots the training stack in Docker (about six
 minutes on B200s), waits for it to become healthy, then runs the 72-session
-stream through REEF Eval. The stack keeps running after the stream ends.
+stream through reef-eval. The stack keeps running after the stream ends.
 Re-running the same command resumes the stream where the lab left off and
 reuses the healthy stack.
 
@@ -172,7 +172,7 @@ starting a variant.
 
 ### Reading a run
 
-The REEF Eval lab is at `~/reef-run/lab`. Each session's verdict is in
+The reef-eval lab is at `~/reef-run/lab`. Each session's verdict is in
 `trials/gsm8k-sNNN__*/verifier/final.json`, with the reward, the list of
 violated rules, and the turn count. `results/learning_curve.py` turns those
 verdicts into the stream's learning curve: whether the first reply was

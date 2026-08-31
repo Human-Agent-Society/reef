@@ -2,7 +2,7 @@
 
 One episode:
 
-    guide   — REEF Eval runs the harbor/ task under our agent; every rollout asks
+    guide   — reef-eval runs the harbor/ task under our agent; every rollout asks
               the trainable Qwen policy for guidance through Reef, which
               records the exact tokens and returns a receipt
     execute — a frozen external model turns that guidance into a complete
@@ -13,7 +13,7 @@ One episode:
               (``groups_per_step`` x ``rollouts_per_group``), updates the
               rank-32 LoRA adapter, and serves it
 
-``Lab.run`` is REEF Eval's one primitive: task in, trusted scored row out.
+``Lab.run`` is reef-eval's one primitive: task in, trusted scored row out.
 """
 
 import asyncio

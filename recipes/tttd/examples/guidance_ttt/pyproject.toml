@@ -6,8 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "reef-guidance-ttt-harness"
 version = "0.1.0"
 description = "Summary-only Guidance-TTT harness that talks to a Reef service"
-requires-python = ">=3.10"
-dependencies = ["reef-client", "reef-eval[harbor]", "pyyaml"]
+requires-python = ">=3.12"
+dependencies = [
+    "reef-client",
+    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+    "pyyaml",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
