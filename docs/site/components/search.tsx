@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { ArrowRight, FileText, Search as SearchIcon, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 type SearchDocument = {
   slug: string;
@@ -37,6 +38,17 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
     if (open) requestAnimationFrame(() => inputRef.current?.focus());
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    // Same scroll lock as the nav drawer: result-list scrolling must not
+    // chain into the page behind the dialog.
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open]);
+
   const results = useMemo(() => {
     const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
     if (!terms.length) return documents.slice(0, 6);
@@ -68,7 +80,10 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
         <kbd>⌘ K</kbd>
       </button>
 
-      {open && (
+      {/* Portal: the fixed overlay must escape the header, whose
+          backdrop-filter makes it the containing block for fixed children;
+          inside it, the backdrop is header-sized and outside clicks miss it. */}
+      {open && createPortal(
         <div className="search-overlay" role="presentation" onMouseDown={closeSearch}>
           <div className="search-dialog" role="dialog" aria-modal="true" aria-label="Search documentation" onMouseDown={(event) => event.stopPropagation()}>
             <div className="search-input-row">
@@ -103,7 +118,8 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
             </div>
             <div className="search-footer"><span><kbd>↵</kbd> Open result</span><span><kbd>esc</kbd> Close</span></div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

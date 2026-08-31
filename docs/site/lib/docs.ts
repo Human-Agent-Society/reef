@@ -211,7 +211,7 @@ const highlighter = createHighlighterCoreSync({
 
 function highlightedHtml(code: string, language: string) {
   if (!highlighter.getLoadedLanguages().includes(language)) return undefined;
-  return highlighter.codeToHtml(code, {
+  const html = highlighter.codeToHtml(code, {
     lang: language,
     theme: "reef",
     transformers: [
@@ -224,6 +224,10 @@ function highlightedHtml(code: string, language: string) {
       },
     ],
   });
+  // One line of HTML: the RST generator re-indents every line it writes, and
+  // inside <pre> that indent becomes phantom leading spaces on nested code
+  // blocks. Line breaks come back through display:block on .line in CSS.
+  return html.replace(/\n/g, "");
 }
 
 // Inline markup inside figure labels and reference rows: the directive bodies
@@ -348,9 +352,13 @@ function compileRst(content: string, sourcePath: string) {
       const language = /^[a-z0-9_+#.-]+$/i.test(node.initContentText)
         ? node.initContentText.toLowerCase()
         : "text";
+      const fallback = escapeHtml(node.rawBodyText)
+        .split("\n")
+        .map((line) => `<span class="line">${line}</span>`)
+        .join("");
       generatorState.writeLine(
         highlightedHtml(node.rawBodyText, language) ??
-          `<pre class="code language-${escapeHtml(language)}">${escapeHtml(node.rawBodyText)}</pre>`,
+          `<pre class="code language-${escapeHtml(language)}">${fallback}</pre>`,
       );
     },
   });
