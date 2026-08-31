@@ -37,8 +37,14 @@ REEF_EVAL_EXAMPLE_DIRS = (
 @pytest.mark.unit
 @pytest.mark.parametrize("example_dir", REEF_EVAL_EXAMPLE_DIRS, ids=lambda path: path.name)
 def test_reef_eval_examples_declare_their_runtime_dependency(example_dir: Path) -> None:
-    project = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    config = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))
+    project = config["project"]
+    source = config["tool"]["uv"]["sources"]["reef-eval"]
+
+    assert project["requires-python"] == ">=3.12"
     assert "reef-eval[harbor]" in project["dependencies"]
+    assert source["editable"] is True
+    assert (example_dir / source["path"]).resolve() == ROOT / "reef-eval"
 
 
 def _install_harbor_protocol(monkeypatch) -> None:

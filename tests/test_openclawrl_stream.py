@@ -172,6 +172,12 @@ class TestStudentSession:
 
 
 class TestStreamTasks:
+    def test_launcher_uses_the_repository_reef_eval_checkout(self):
+        launcher = (EXAMPLE / "run.sh").read_text(encoding="utf-8")
+        assert 'REEF_EVAL_DIR="$REEF_ROOT/reef-eval"' in launcher
+        assert '--from "${REEF_EVAL_DIR}[harbor]"' in launcher
+        assert '--from "reef-eval[harbor]"' not in launcher
+
     def test_the_stream_is_the_papers_exp1_length(self):
         tasks = sorted((EXAMPLE / "harbor-tasks").glob("gsm8k-s*"))
         assert len(tasks) == 72, "the committed stream is the paper's Exp. 1 length"

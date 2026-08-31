@@ -118,7 +118,7 @@ the Slime driver, and CUDA builds of torch, SGLang, and Megatron. Inside it,
 from this directory:
 
 ```bash
-pip install -e .
+pip install -e "$(git rev-parse --show-toplevel)/reef-eval[harbor]" -e .
 hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
 ```
 

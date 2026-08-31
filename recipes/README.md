@@ -1,11 +1,11 @@
 # Examples
 
-Setup, once per example directory (installs the example's harness and its
-declared dependencies, including `reef-client` and, where used,
-[REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval)):
+With Python 3.12+, set up once per example directory. REEF Eval examples use
+the checkout at this repository's `reef-eval/` path rather than fetching the
+package from PyPI:
 
 ```bash
-pip install -e .
+pip install -e "$(git rev-parse --show-toplevel)/reef-eval[harbor]" -e .
 ```
 
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop

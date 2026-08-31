@@ -35,13 +35,19 @@ The example directory is **not** a Python package. There is no
 
 ```toml
 [project]
+requires-python = ">=3.12"
 dependencies = ["reef-client", "reef-eval[harbor]"]
+
+[tool.uv.sources]
+reef-eval = { path = "../../../../reef-eval", editable = true }
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["harness*"]
 ```
 
+The source path is relative to the example: the conventional nested layout
+above uses `../../../../reef-eval`; `recipes/basic` uses `../../reef-eval`.
 Only examples that do not use REEF Eval (for example, a direct
 `reef_client` campaign driver) should omit `reef-eval[harbor]`.
 
@@ -125,7 +131,8 @@ training stack under the same `reef:` section.
 
 1. Set environment variables (port, token, scenario, recipe, work dir).
 2. Start `reef serve -c <yaml>` in the background; wait for `/healthz`.
-3. Run REEF Eval with `--with-editable "$PWD"` (installs `harness/`) and
+3. Resolve the repository root, then run REEF Eval from
+   `$REPO_ROOT/reef-eval[harbor]` with `--with-editable "$PWD"` (installs `harness/`) and
    `--with reef-client` (installs the SDK from PyPI).
 4. REEF Eval resolves `--agent harness:HarborAgent` and runs the Harbor task.
 

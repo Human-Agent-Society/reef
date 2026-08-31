@@ -9,6 +9,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 REEF_ROOT="$(cd ../../../.. && pwd)"
+REEF_EVAL_DIR="$REEF_ROOT/reef-eval"
+if [ ! -f "$REEF_EVAL_DIR/pyproject.toml" ]; then
+    echo "run.sh: local reef-eval checkout not found at $REEF_EVAL_DIR" >&2
+    exit 1
+fi
 
 REEF_IMAGE="reef-openclawrl"
 REEF_CONFIG="recipes/openclawrl/examples/openclawrl/serve.yaml"
@@ -58,7 +63,7 @@ fi
 
 echo "==> [2/2] streaming $TASKS as '$STREAM_NAME' (agent: harness:HermesStreamAgent)"
 REEF_TOKEN="$REEF_TOKEN" uvx \
-    --from "reef-eval[harbor]" \
+    --from "${REEF_EVAL_DIR}[harbor]" \
     --with-editable "$PWD" \
     --with reef-client \
     reef-eval stream "$TASKS" --name "$STREAM_NAME" \
