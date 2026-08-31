@@ -301,7 +301,9 @@ class AdapterResidencyManager:
             name = self._current.get(scenario)
             slot = self._slots.get(name) if name is not None else None
             if slot is None or slot.state != "active":
-                raise AdapterNotActive(f"scenario {scenario!r} has no active adapter to alias runtime load {runtime_load_id!r} to")
+                raise AdapterNotActive(
+                    f"scenario {scenario!r} has no active adapter to alias runtime load {runtime_load_id!r} to"
+                )
             if runtime_load_id not in slot.runtime_load_ids:
                 slot.runtime_load_ids.append(runtime_load_id)
             return slot.name
@@ -364,7 +366,9 @@ class AdapterResidencyManager:
         for slot in self._slots.values():
             if slot.scenario == scenario and runtime_load_id in slot.runtime_load_ids:
                 return slot
-        raise AdapterNotActive(f"scenario {scenario!r} has no resident adapter for runtime_load_id {runtime_load_id!r}")
+        raise AdapterNotActive(
+            f"scenario {scenario!r} has no resident adapter for runtime_load_id {runtime_load_id!r}"
+        )
 
     # -- Capacity --------------------------------------------------------
 

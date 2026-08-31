@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.names import SCENARIO_LEDGER_FILENAME
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json, write_json
 from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json, write_json
 
 LEDGER_FILENAME = SCENARIO_LEDGER_FILENAME
 LEDGER_FORMAT = 1

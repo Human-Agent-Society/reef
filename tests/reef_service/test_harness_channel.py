@@ -13,16 +13,13 @@ import hashlib
 import json
 import os
 import subprocess
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import ReefClient
-
-from reef.service.install_script import HARNESS_RELEASE_SIDECAR
 
 import reef.harness.adapters
 from reef.artifact import InMemoryRepositoryBackend
@@ -35,7 +32,7 @@ from reef.recipe import Recipe, RecipeRegistry
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.service.install_script import composition_checksum, render_install_script
+from reef.service.install_script import HARNESS_RELEASE_SIDECAR, composition_checksum, render_install_script
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 

@@ -27,7 +27,7 @@ from reef.surface.base import (
 from reef.surface.files import TextFileTree
 from reef.surface.harnesses import create_harness_surface
 from reef.surface.skills import RequestSkillLayer, SkillLayer, create_skill_surface, validate_tree
-from reef.surface.weights import WeightInferenceHooks, WeightLoader, RuntimeLoadMismatch, create_weight_surface
+from reef.surface.weights import RuntimeLoadMismatch, WeightInferenceHooks, WeightLoader, create_weight_surface
 
 __all__ = [
     "ArtifactActivator",

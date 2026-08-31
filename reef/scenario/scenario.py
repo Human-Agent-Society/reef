@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
-from reef.artifact.repository import Repository
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
+from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
 from reef.records import RecordStore
 from reef.runtime.base import InferenceRuntime

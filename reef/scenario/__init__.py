@@ -32,7 +32,7 @@ from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario, ReleaseNotRestorable
+from reef.scenario.scenario import ReleaseNotRestorable, Scenario
 from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY
 
 __all__ = [

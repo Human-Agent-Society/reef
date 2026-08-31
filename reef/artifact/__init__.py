@@ -35,6 +35,7 @@ from reef.artifact.artifact import (
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
+from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
     CachedRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
@@ -51,7 +52,6 @@ from reef.artifact.sources import (
     download_huggingface_snapshot,
     parse_artifact_source,
 )
-from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 
 __all__ = [
     "AdapterArtifactError",

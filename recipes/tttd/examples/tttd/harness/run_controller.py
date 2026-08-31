@@ -108,7 +108,9 @@ class ReefTrainingStatusClient:
             raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid scenario_step {step!r}")
         runtime_load_id = value.get("current_runtime_load_id")
         if runtime_load_id is not None and (not isinstance(runtime_load_id, str) or not runtime_load_id):
-            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid runtime load ID {runtime_load_id!r}")
+            raise RuntimeError(
+                f"Reef status for scenario {scenario!r} has invalid runtime load ID {runtime_load_id!r}"
+            )
         processor = value.get("processor")
         failed_values = processor.get("failed_steps", []) if isinstance(processor, Mapping) else []
         if not isinstance(failed_values, list):

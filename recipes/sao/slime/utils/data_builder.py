@@ -85,7 +85,9 @@ def build_sao_rollout_data(
 
         base_rows.append([source_id, row_tokens, row_loss_mask, row_log_probs, reward])
         action_masks.append(row_action_mask)
-        producing_runtime_load_ids.append(None if producing_runtime_load_id is None else str(producing_runtime_load_id))
+        producing_runtime_load_ids.append(
+            None if producing_runtime_load_id is None else str(producing_runtime_load_id)
+        )
         rollout_created_ats.append(None if rollout_created_at is None else float(rollout_created_at))
 
     data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)

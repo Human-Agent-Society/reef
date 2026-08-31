@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
 from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
 
 
 def test_lag_counts_only_the_scenarios_own_publications(tmp_path: Path) -> None:

@@ -173,9 +173,7 @@ def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
 
     assert dispatcher.get_or_create_scenario("math").repository.base_artifact.release_id == selected
     with pytest.raises(ArtifactConflict, match="already bound"):
-        service.accept(
-            {**headers, "x-reef-release-id": "other"}, {"score": 2.0}, request_type=RequestType.REPORT
-        )
+        service.accept({**headers, "x-reef-release-id": "other"}, {"score": 2.0}, request_type=RequestType.REPORT)
 
 
 @pytest.mark.unit

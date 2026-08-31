@@ -6,12 +6,12 @@ from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
 from reef.scenario import AcceptAnyArtifact
 from reef.surface import (
+    RuntimeLoadMismatch,
     SkillLayer,
     Surface,
     WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
-    RuntimeLoadMismatch,
     create_harness_surface,
     create_skill_surface,
     create_weight_surface,

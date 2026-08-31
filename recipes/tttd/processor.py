@@ -116,11 +116,7 @@ class TTTDProcessor(ReportedFeedbackProcessor):
             return GroupDecision.INCOMPLETE
         # 2. A step whose reports span releases is discarded
         #    wholesale — mixed-version rewards are not comparable.
-        versions = {
-            candidate.value.release_id
-            for candidate in candidates
-            if candidate.value.release_id is not None
-        }
+        versions = {candidate.value.release_id for candidate in candidates if candidate.value.release_id is not None}
         if len(versions) <= 1:
             return GroupDecision.READY
         if not isinstance(key, int):

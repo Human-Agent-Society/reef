@@ -420,9 +420,7 @@ class ScenarioCommitProtocol:
         try:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
-            raise ArtifactNotFound(
-                f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}"
-            ) from exc
+            raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}") from exc
 
     @staticmethod
     def _release_row(

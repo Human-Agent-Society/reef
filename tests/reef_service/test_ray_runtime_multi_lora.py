@@ -18,9 +18,7 @@ class ScenarioLoraHandle(DeferredWeightUpdateTrainGroupHandle):
         self.adapter_residency = {
             "capacity": 2,
             "resident": 1,
-            "scenarios": {
-                "math": {"current": {"runtime_load_id": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}
-            },
+            "scenarios": {"math": {"current": {"runtime_load_id": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}},
         }
         self.job_scenario = "math"
         self.acknowledged: list[str] = []
