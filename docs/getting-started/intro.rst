@@ -41,7 +41,7 @@ Reef closes that loop in the serving lifecycle for continual learning.
    :loop: the next request is served by the new version
 
    Serve :: forward the request and keep the exchange
-   Record :: store the artifact version that produced the response
+   Record :: store the release that produced the response
    Learn* :: the recipe uses records to create a candidate version
    Publish :: an accepted candidate becomes the current version
 

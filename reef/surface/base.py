@@ -1,6 +1,6 @@
 """The serving capabilities attached to one scenario.
 
-A surface describes how one frozen artifact version reaches inference or a
+A surface describes how one frozen release reaches inference or a
 client pulling files. The capabilities are explicit: record-only surfaces
 have none, while model, adapter, and harness surfaces compose only the pieces
 they use.
@@ -26,7 +26,7 @@ class ServingRuntime(Protocol):
 class WeightRuntime(ServingRuntime, Protocol):
     """A runtime that can inspect and restore served model weights."""
 
-    def serving_weight_version(self) -> str | None: ...
+    def serving_runtime_load_id(self) -> str | None: ...
 
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
 
@@ -46,11 +46,11 @@ class ArtifactLoader(Protocol):
 
 @runtime_checkable
 class ArtifactActivator(Protocol):
-    """Optional loader capability: make a published version servable.
+    """Optional loader capability: make a published release servable.
 
-    Called once a version is final — after startup recovery has a
+    Called once a release is final — after startup recovery has a
     materializable head and after a publication or rollback commit has
-    minted its version — and before the scenario routes traffic to it.
+    minted its release — and before the scenario routes traffic to it.
     ``source`` names the artifact whose bytes a rollback republished.
     """
 

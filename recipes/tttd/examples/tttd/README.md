@@ -68,7 +68,7 @@ harness = ReefTTTDiscoverHarness(
     "task instruction",
     scenario="my-single-discovery-problem",
     recipe="tttd",
-    artifact_version="checkpoint-v42",  # optional starting checkpoint
+    release_id="checkpoint-v42",  # optional starting checkpoint
     model="reef",
 )
 best = harness.run(steps=50)
@@ -102,7 +102,7 @@ PUCT chooses G parents
   -> Slime applies frozen-base token KL and un-clipped importance sampling
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> valid children update the local PUCT archive
-  -> the Harbor controller waits for the durable scenario commit and new weight version
+  -> the Harbor controller waits for the durable scenario commit and new runtime load ID
   -> the post-step PUCT archive is atomically paired with that committed version
 ```
 
@@ -185,7 +185,7 @@ scenario records, and PUCT state; a second problem needs its own directory so
 the two cannot mix. `work/erdos_min_overlap/tttd-search-state.json` records a
 pending archive immediately after a search step and marks it committed only
 after Reef's durable training transaction advances the scenario and publishes
-a new serving weight version.
+a new serving runtime load ID.
 Restarting with the same scenario, task instruction, and sampling settings
 resumes that paired state; a missing or mismatched step fails closed instead
 of silently restarting PUCT against a later model checkpoint. Serving weight

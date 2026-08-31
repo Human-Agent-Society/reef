@@ -99,7 +99,7 @@ position. Around the unmodified agent it makes three changes:
    to Reef.
 2. It mints a Reef scenario id at position 0 and writes it to
    `$REEF_EVAL_STATE_DIR`. One stream is one scenario, which is one chain of
-   weight versions in Reef.
+   runtime load IDs in Reef.
 3. It writes the hermes config on first use with context compression turned
    off.
 

@@ -131,7 +131,7 @@ def training_inference(
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": rollout_log_probs,
-                    "weight_version": "wv-1",
+                    "runtime_load_id": "wv-1",
                 }
             }
         },
@@ -240,7 +240,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
             (1, 0, 1),
             (-0.1, 0.0, -0.2),
             0.75,
-            weight_version="wv-1",
+            runtime_load_id="wv-1",
             turn_count=2,
         ),
     )
@@ -457,7 +457,7 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert result is not None
     assert result.metrics["samples"] == 1
     assert result.artifact is None
-    assert result.weight_version is None
+    assert result.runtime_load_id is None
     assert trainer.state == {}
     prepared = trainer.commit()
     trainer.apply_compaction(prepared.compacted_ids)
@@ -787,7 +787,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 candidate_id=job_id,
                 training_job_id=job_id,
                 checkpoint_path=str(checkpoint),
-                current_weight_version=None,
+                current_runtime_load_id=None,
             )
 
         def activate_candidate(self, candidate):
@@ -806,13 +806,14 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         step_preparer = _GROUPED_PG_PREPARER
         loss_family = "pg"
 
-        def build(self, scenario, records, *, algorithm_state=None):
+        def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
             return Trainer.build(
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
                 training_backend=SlimeTrainingBackend(self.runtime, self.step_preparer),
                 algorithm_state=algorithm_state,
+                experiment_logger=experiment_logger,
             )
 
     dispatcher = Dispatcher(

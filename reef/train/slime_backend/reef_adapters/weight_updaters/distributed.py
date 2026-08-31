@@ -31,12 +31,12 @@ from reef.train.slime_backend.reef_adapters.weight_updaters.lora_transport impor
 
 
 class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeightFromDistributed):
-    """Distributed updater with exact versions and synchronized failures."""
+    """Distributed updater with exact runtime load IDs and synchronized failures."""
 
     def __init__(
         self,
         *args: Any,
-        weight_version_incarnation: str | None = None,
+        runtime_load_id_incarnation: str | None = None,
         is_lora: bool | None = None,
         tie_word_embeddings: bool = False,
         **kwargs: Any,
@@ -44,7 +44,7 @@ class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeigh
         slime_args = args[0] if args else kwargs["args"]
         weights_getter = args[2] if len(args) > 2 else kwargs["weights_getter"]
         super().__init__(*args, **kwargs)
-        self._initialize_weight_version(weight_version_incarnation)
+        self._initialize_runtime_load_id(runtime_load_id_incarnation)
         self.is_lora = megatron_lora_enabled(slime_args) if is_lora is None else is_lora
         self.tie_word_embeddings = tie_word_embeddings
         self._base_checksums: dict[str, str] | None = None
@@ -66,7 +66,7 @@ class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeigh
         """The engine adapter name the next publication loads under."""
         if not self.active_scenario:
             raise RuntimeError("LoRA publication requires an active scenario")
-        return scenario_adapter_name(self.active_scenario, str(self.weight_version))
+        return scenario_adapter_name(self.active_scenario, str(self.runtime_load_id))
 
     def publish_lora_adapter(self, lora_name: str) -> None:
         """Load the slot's adapter under ``lora_name`` without a version bump."""
@@ -192,9 +192,9 @@ class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeigh
             )
         self._run_rank_zero_action(
             lambda: ray.get(
-                [engine.set_weight_version.remote(str(self.weight_version)) for engine in self.rollout_engines]
+                [engine.set_runtime_load_id.remote(str(self.runtime_load_id)) for engine in self.rollout_engines]
             ),
-            phase="commit LoRA weight version",
+            phase="commit LoRA runtime load ID",
         )
         if manage_generation:
             self._run_rank_zero_action(

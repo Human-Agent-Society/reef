@@ -17,7 +17,7 @@ def _turn(
     loss_mask: list[int],
     log_probs: list[float],
     *,
-    weight_version: str = "wv-1",
+    runtime_load_id: str = "wv-1",
 ) -> AgentRecord:
     return AgentRecord.create(
         scenario="s",
@@ -29,7 +29,7 @@ def _turn(
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": log_probs,
-                    "weight_version": weight_version,
+                    "runtime_load_id": runtime_load_id,
                 }
             }
         },
@@ -45,7 +45,7 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
                     "tokens": [10, 11, 20],
                     "loss_mask": [1],
                     "rollout_log_probs": [-0.25],
-                    "weight_version": "wv-1",
+                    "runtime_load_id": "wv-1",
                 }
             }
         }
@@ -56,27 +56,27 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
     assert sample.tokens == (10, 11, 20)
     assert sample.loss_mask == (1,)
     assert sample.rollout_log_probs == (-0.25,)
-    assert sample.weight_version == "wv-1"
+    assert sample.runtime_load_id == "wv-1"
     assert sample.turn_count == 1
     assert sample.is_multi_turn is False
 
 
 @pytest.mark.unit
-def test_policy_sample_preserves_mixed_token_weight_versions() -> None:
+def test_policy_sample_preserves_mixed_token_runtime_load_ids() -> None:
     spans = [
-        {"start": 0, "end": 1, "weight_version": "engine:6"},
-        {"start": 1, "end": 3, "weight_version": "engine:7"},
+        {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+        {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
     ]
     item = _inference(
         {
-            "weight_version_spans": spans,
+            "runtime_load_spans": spans,
             "response": {
                 "training": {
                     "tokens": [10, 20, 21, 22],
                     "loss_mask": [1, 1, 1],
                     "rollout_log_probs": [-0.1, -0.2, -0.3],
-                    "weight_version": None,
-                    "weight_version_spans": spans,
+                    "runtime_load_id": None,
+                    "runtime_load_spans": spans,
                 }
             },
         }
@@ -84,24 +84,24 @@ def test_policy_sample_preserves_mixed_token_weight_versions() -> None:
 
     sample = make_policy_sample(item, 1.0)
 
-    assert sample.weight_version is None
-    assert [(span.start, span.end, span.weight_version) for span in sample.weight_version_spans] == [
+    assert sample.runtime_load_id is None
+    assert [(span.start, span.end, span.runtime_load_id) for span in sample.runtime_load_spans] == [
         (0, 1, "engine:6"),
         (1, 3, "engine:7"),
     ]
 
 
 @pytest.mark.unit
-def test_policy_sample_rejects_conflicting_validated_and_training_weight_versions() -> None:
+def test_policy_sample_rejects_conflicting_validated_and_training_runtime_load_ids() -> None:
     item = _inference(
         {
-            "weight_version": "engine:3",
+            "runtime_load_id": "engine:3",
             "response": {
                 "training": {
                     "tokens": [10, 11, 20],
                     "loss_mask": [1],
                     "rollout_log_probs": [-0.25],
-                    "weight_version": "engine:1",
+                    "runtime_load_id": "engine:1",
                 }
             },
         }
@@ -141,7 +141,7 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
             "tokens": [1, 2, 3],
             "loss_mask": [1],
             "rollout_log_probs": [-0.5],
-            "weight_version": "harness-v1",
+            "runtime_load_id": "harness-v1",
         }
     )
 
@@ -150,7 +150,7 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
     assert sample.tokens == (1, 2, 3)
     assert sample.loss_mask == (1,)
     assert sample.rollout_log_probs == (-0.5,)
-    assert sample.weight_version == "harness-v1"
+    assert sample.runtime_load_id == "harness-v1"
 
 
 @pytest.mark.unit
@@ -188,7 +188,7 @@ def test_multi_turn_policy_sample_assembles_clean_linear_history() -> None:
     assert sample.loss_mask == (1, 1, 0, 1, 0, 1, 1)
     assert sample.rollout_log_probs == (-0.1, -0.2, 0.0, -0.3, 0.0, -0.4, -0.5)
     assert sample.reward == 0.75
-    assert sample.weight_version == "wv-1"
+    assert sample.runtime_load_id == "wv-1"
     assert sample.turn_count == 3
     assert sample.is_multi_turn is True
 
@@ -251,8 +251,8 @@ def test_multi_turn_policy_sample_rejects_replacement_over_threshold() -> None:
             _turn("i2", [1, 9, 3, 4], [1], [-0.4]),
         ],
         [
-            _turn("i1", [1, 2, 3], [1], [-0.3], weight_version="wv-1"),
-            _turn("i2", [1, 2, 3, 4], [1], [-0.4], weight_version="wv-2"),
+            _turn("i1", [1, 2, 3], [1], [-0.3], runtime_load_id="wv-1"),
+            _turn("i2", [1, 2, 3, 4], [1], [-0.4], runtime_load_id="wv-2"),
         ],
     ],
 )

@@ -2,9 +2,9 @@ Architecture
 ============
 
 An agent is a model plus its harness. Reef sits between the harness and the
-runtime that executes the model. It records the artifact version that served
+runtime that executes the model. It records the release that served
 each response, accepts feedback that refers to those responses, and lets a
-scenario's recipe use eligible records to produce the next version.
+scenario's recipe use eligible records to produce the next release.
 
 Which package holds which code is `Codebase structure
 <../contributing/codebase-structure.rst>`__.
@@ -25,15 +25,15 @@ The core loop
 
        opt Harness recipe: pull the served tree
          H->>S: GET /reef/harness for scenario
-         S-->>H: Harness tree and artifact version
+         S-->>H: Harness tree and release
          Note over H: Agent runs on that tree
        end
        Note over H,I: Serve and record each request
        H->>S: Inference request for scenario
-       S->>S: Freeze current artifact version
+       S->>S: Freeze current release
        S->>I: Provider-native request
        I-->>S: Provider response
-       S->>S: Validate frozen version and store record
+       S->>S: Validate frozen release and store record
        S-->>H: Response and receipt
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
@@ -41,7 +41,7 @@ The core loop
          Note over S,G: Update and commit
          T->>G: Prepared step
          G-->>T: Trained artifact ready
-         T->>S: Commit new version
+         T->>S: Commit new release
        end
 
 The inference runtime is always required. The training runtime exists only for
@@ -50,33 +50,33 @@ own process, with no GPU.
 
 The opening pull is for recipes whose artifact is the harness tree: the agent
 fetches the currently served tree (``GET /reef/harness``, or the install script
-built on it) and runs on that version, so the harness it uses is the one whose
+built on it) and runs on that release, so the harness it uses is the one whose
 receipts it will later report against. Weight recipes skip this pull because
-their artifact lives in the inference runtime. Requests reach the new version
+their artifact lives in the inference runtime. Requests reach the new release
 there directly.
 
 The request path
 ----------------
 
 Before calling the model, Reef reads the scenario's current artifact ref and
-builds the request against that version. The stored exchange uses the same ref,
+builds the request against that release. The stored exchange uses the same ref,
 so an update completing mid-request does not change what the receipt records.
 
 Reef validates a response before recording it. ``prepare_request`` transforms
 the outgoing payload, and Reef forwards *and records* the transformed payload.
-``verify_response`` checks the provider's answer against the frozen version. On
+``verify_response`` checks the provider's answer against the frozen release. On
 failure Reef records nothing and returns the error.
 
-For live weights, Reef asks the engine to report the serving version for each
-generated token span. A response may cover several versions if an update lands
+For live weights, Reef asks the engine to report the ``runtime_load_id`` for each
+generated token span. A response may cover several runtime loads if an update lands
 mid-generation; Reef accepts it only when the span information accounts for
-every generated token and is consistent with the frozen version. Missing or
+every generated token and is consistent with the frozen release. Missing or
 inconsistent spans are a backend contract error and return HTTP 409.
 
 Pass-through streaming cannot do that check. Reef leaves ``return_meta_info``
 disabled when ``stream`` is true and records a plain SSE exchange. The training
 backend buffers its stream instead and validates the complete response against
-the frozen version before recording.
+the frozen release before recording.
 
 Records
 -------
@@ -100,8 +100,8 @@ survive a restart.
 Scenarios
 ---------
 
-A scenario isolates the records, trainer, and version chain for one workload.
-The first request creates it, names its recipe, and may pin a starting version.
+A scenario isolates the records, trainer, and release chain for one workload.
+The first request creates it, names its recipe, and may pin a starting release.
 Those bindings never change; a request naming a different recipe returns HTTP
 409. The surface, runtime, inference backend, and optional report schema chosen
 when the recipe is constructed are fixed with it.
@@ -123,7 +123,7 @@ A surface delivers a published artifact to whoever uses it.
 | record-only   | no loader, inference hooks, or file tree                      |
 +---------------+---------------------------------------------------------------+
 | weights       | pushed into the serving engine by the training runtime; the   |
-|               | surface owns serving-version policy                           |
+|               | surface owns runtime-load fencing policy                      |
 +---------------+---------------------------------------------------------------+
 | harness files | an adapter-specific tree, pulled by the client                |
 +---------------+---------------------------------------------------------------+
@@ -136,26 +136,29 @@ identity, advertise what it supports, and ``None`` means the capability is
 absent. Artifact admission is a separate binding the recipe selects: the commit
 path validates candidates and rollback sources before they enter the chain.
 
-The version chain
+The release chain
 -----------------
 
-Every accepted update creates a version with a parent. A version may refer to
-durable bytes or to bytes held only by the current process; its identity is
-stored durably either way.
+Every accepted update creates a release with a parent. Three identities stay
+separate: ``release_id`` names Reef's publication decision, ``content_id`` names
+the selected model or harness content, and ``runtime_load_id`` names a concrete
+serving-engine weight load. A release may refer to durable bytes or to live
+weights held only by the current process; its identity is stored durably either
+way.
 
 .. code:: mermaid
 
    flowchart TB
-       accTitle: When artifact versions become durable
+       accTitle: When releases become durable
        subgraph START["1. Durable start"]
            direction LR
            C0[("Checkpoint r0")] -->|"scenario starts"| S0["Serving r0"]
        end
        subgraph LIVE["2. Engine memory (restart restores r0)"]
            direction LR
-           V1["Live v1"] -->|"step 2: train and sync"| V2["Live v2"]
+           V1["Live release r1 / load l1"] -->|"step 2: train and sync"| V2["Live release r2 / load l2"]
        end
-       subgraph NEXT["3. Next durable version"]
+       subgraph NEXT["3. Next durable release"]
            direction LR
            C1[("Checkpoint r1")] -->|"continue serving"| S1["Serving r1"]
        end
@@ -165,19 +168,19 @@ stored durably either way.
        class V1,V2 volatile
 
 Checkpoint cadence controls when live weights become durable, not how often they
-change; any number of live steps may occur between checkpoints. A live version's
-``weight_version`` is an opaque ``<incarnation>:<sequence>`` token, where the
-incarnation keeps tokens unique across training-group restarts. The version
+change; any number of live steps may occur between checkpoints. A live release's
+``runtime_load_id`` is an opaque ``<incarnation>:<sequence>`` token, where the
+incarnation keeps tokens unique across training-group restarts. The release
 record is durable; the bytes are not, so a restart restores the last checkpoint.
 The step counter, algorithm state, and record progress do survive.
 
-Durable versions are Git-backed, one ref per scenario, with LFS patterns for
-weight files and a ``reef-artifact.json`` manifest in every version. Heads move
+Durable releases are Git-backed, one ref per scenario, with LFS patterns for
+weight files and a ``reef-artifact.json`` manifest in every release. Heads move
 only by compare-and-swap: ``advance_current`` requires the expected head,
 ``publish`` requires the expected parent, and the push carries a lease, so a
 stale publication conflicts instead of overwriting. Rollback does not rewrite
-history. It activates an earlier version and publishes the same bytes as a new
-commit, keeping step numbers monotonic.
+history. It activates an earlier release's ``content_id`` and publishes it under
+a new ``release_id``, keeping step numbers monotonic.
 
 Durability
 ----------

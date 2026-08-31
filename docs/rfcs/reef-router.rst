@@ -43,7 +43,7 @@ configuration comes first; learnable router artifacts remain follow-on work.
 Motivation
 ----------
 
-A scenario already isolates records, trainer state, and artifact versions.
+A scenario already isolates records, trainer state, and releases.
 Routing one scenario into another would break that ownership model and could
 mix tenant traffic or training data. Semantic Router owns model-choice policy;
 Reef enforces scenario isolation and records the resulting execution.
@@ -189,7 +189,7 @@ The bridge defines ``routing.version`` as an immutable identifier for the exact
 active routing document. The initial adapter computes a SHA-256 hash of the
 loaded canonical bytes, called ``DocumentHash`` in this RFC, and exposes it as
 ``x-vsr-config-version``. This is a Reef integration contract, not a model
-artifact version or an upstream tenant identifier.
+release or an upstream tenant identifier.
 
 Before admission, Reef pins one reconciled snapshot:
 
@@ -381,7 +381,7 @@ IDs.
    └── payload
        ├── model: tenant-a/student-v7        # resolved provider model
        ├── <existing request fields>
-       ├── weight_version[_spans]: <verified serving versions>
+       ├── runtime_load_id[_spans]: <verified serving versions>
        ├── response: <validated response>
        └── metadata
            ├── tags: optional

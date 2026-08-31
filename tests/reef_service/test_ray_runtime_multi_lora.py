@@ -14,11 +14,11 @@ class ScenarioLoraHandle(DeferredWeightUpdateTrainGroupHandle):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self.lora_mode = "scenario"
-        self.lora_adapters = {"math": {"weight_version": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}
+        self.lora_adapters = {"math": {"runtime_load_id": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}
         self.adapter_residency = {
             "capacity": 2,
             "resident": 1,
-            "scenarios": {"math": {"current": {"version": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}},
+            "scenarios": {"math": {"current": {"runtime_load_id": "inc:4", "adapter": "reef-adapter-bWF0aA.inc:4"}}},
         }
         self.job_scenario = "math"
         self.acknowledged: list[str] = []
@@ -40,14 +40,14 @@ def test_scenario_mode_enables_concurrent_training_scenarios() -> None:
     runtime = RayRuntime(train_group_handle=ScenarioLoraHandle(), inference_url="http://router")
     assert runtime.concurrent_training_scenarios is True
     assert runtime.serving_adapter_name() is None
-    assert runtime.serving_adapter_version("math") == "inc:4"
-    assert runtime.serving_adapter_version("code") is None
+    assert runtime.serving_adapter_runtime_load_id("math") == "inc:4"
+    assert runtime.serving_adapter_runtime_load_id("code") is None
 
 
 def test_shared_mode_is_the_default() -> None:
     runtime = RayRuntime(train_group_handle=DeferredWeightUpdateTrainGroupHandle(), inference_url="http://router")
     assert runtime.concurrent_training_scenarios is False
-    assert runtime.serving_adapter_version("math") is None
+    assert runtime.serving_adapter_runtime_load_id("math") is None
     assert runtime.adapter_residency_status() is None
     assert SAORecipe(runtime).serving_status() is None
 

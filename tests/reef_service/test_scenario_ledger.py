@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
-from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion
 
 
 def test_ledger_round_trips_and_computes_per_scenario_lag(tmp_path: Path) -> None:
     path = ledger_path(str(tmp_path / "hf" / "{rollout_id}"))
     ledger = ScenarioLedger(path)
-    assert ledger.scenarios == () and ledger.lag("a", WeightVersion("inc", 1)) == 0
+    assert ledger.scenarios == () and ledger.lag("a", RuntimeLoadId("inc", 1)) == 0
     ledger.record_checkpoint("a", 0)
     ledger.record_publication("a", "inc:1", "name-1")
     ledger.record_checkpoint("b", 1)
@@ -21,12 +21,12 @@ def test_ledger_round_trips_and_computes_per_scenario_lag(tmp_path: Path) -> Non
     ledger.record_checkpoint("a", 2)
     ledger.record_publication("a", "inc:3", "name-3")
     # b's publication (inc:2) does not age a's rollouts; a's own do.
-    assert ledger.lag("a", WeightVersion("inc", 1)) == 1
-    assert ledger.lag("a", WeightVersion("inc", 2)) == 1
-    assert ledger.lag("a", WeightVersion("inc", 3)) == 0
-    assert ledger.lag("b", WeightVersion("inc", 1)) == 1
-    assert ledger.lag("b", WeightVersion("inc", 3)) == 0
-    assert ledger.lag("a", WeightVersion("other", 3)) is None
+    assert ledger.lag("a", RuntimeLoadId("inc", 1)) == 1
+    assert ledger.lag("a", RuntimeLoadId("inc", 2)) == 1
+    assert ledger.lag("a", RuntimeLoadId("inc", 3)) == 0
+    assert ledger.lag("b", RuntimeLoadId("inc", 1)) == 1
+    assert ledger.lag("b", RuntimeLoadId("inc", 3)) == 0
+    assert ledger.lag("a", RuntimeLoadId("other", 3)) is None
     assert ledger.protected_rollouts() == {1, 2}
     reloaded = ScenarioLedger(path)
     assert reloaded.status() == ledger.status()

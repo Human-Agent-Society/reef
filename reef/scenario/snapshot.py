@@ -20,22 +20,20 @@ from reef.artifact.artifact import ArtifactRef, decode_artifact_ref, encode_arti
 from reef.train.types import PreparedCommit
 
 SCENARIO_SNAPSHOT_METADATA_KEY = "scenario_snapshot"
-SCENARIO_SNAPSHOT_KIND = "reef-scenario/3"
+SCENARIO_SNAPSHOT_KIND = "reef-scenario/4"
 
 
 @dataclass(frozen=True)
 class RecordProgress:
     """Record-consumption watermark pinned by a snapshot or commit record.
 
-    ``consumed_ids`` names the rows the step's batch consumed; ``None`` marks
-    a record written before the field existed, when the consumed set was not
-    recorded and recovery cannot know it.
+    ``consumed_ids`` names the rows the step's batch consumed.
     """
 
     high_water_sequence: int
     high_water_offset: int
     compacted_ids: frozenset[str] = frozenset()
-    consumed_ids: frozenset[str] | None = None
+    consumed_ids: frozenset[str] = frozenset()
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
@@ -51,21 +49,17 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
         field = value.get(name)
         if not isinstance(field, int) or isinstance(field, bool) or field < 0:
             raise ValueError(f"{context} record_progress.{name} must be a non-negative integer")
-    compacted_ids = value.get("compacted_ids", [])
+    compacted_ids = value.get("compacted_ids")
     if not isinstance(compacted_ids, list) or any(not isinstance(item, str) for item in compacted_ids):
         raise ValueError(f"{context} record_progress.compacted_ids must be a list of strings")
-    # Absent on records written before the field existed; None keeps that
-    # distinguishable from a step that consumed nothing.
     consumed_ids = value.get("consumed_ids")
-    if consumed_ids is not None and (
-        not isinstance(consumed_ids, list) or any(not isinstance(item, str) for item in consumed_ids)
-    ):
+    if not isinstance(consumed_ids, list) or any(not isinstance(item, str) for item in consumed_ids):
         raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
     return RecordProgress(
         high_water_sequence=value["high_water_sequence"],
         high_water_offset=value["high_water_offset"],
         compacted_ids=frozenset(compacted_ids),
-        consumed_ids=None if consumed_ids is None else frozenset(consumed_ids),
+        consumed_ids=frozenset(consumed_ids),
     )
 
 
@@ -81,7 +75,7 @@ class ScenarioSnapshot:
     record_progress: RecordProgress | None
     training_job_id: str | None = None
     operation: str | None = None
-    rollback_target_artifact_version: str | None = None
+    rollback_target_release_id: str | None = None
 
 
 def snapshot_metadata_for(
@@ -93,7 +87,7 @@ def snapshot_metadata_for(
     algorithm_state: Mapping[str, Any] | None = None,
     prepared: PreparedCommit | None = None,
     operation: str = "training",
-    rollback_target_artifact_version: str | None = None,
+    rollback_target_release_id: str | None = None,
 ) -> dict[str, object]:
     if not isinstance(scenario_step, int) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
@@ -108,11 +102,11 @@ def snapshot_metadata_for(
     if operation not in ("training", "rollback"):
         raise ValueError("scenario snapshot operation must be 'training' or 'rollback'")
     if operation == "rollback":
-        if not isinstance(rollback_target_artifact_version, str) or not rollback_target_artifact_version:
-            raise ValueError("rollback scenario snapshot requires rollback_target_artifact_version")
-        metadata["rollback_target_artifact_version"] = rollback_target_artifact_version
-    elif rollback_target_artifact_version is not None:
-        raise ValueError("training scenario snapshot must not carry rollback_target_artifact_version")
+        if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
+            raise ValueError("rollback scenario snapshot requires rollback_target_release_id")
+        metadata["rollback_target_release_id"] = rollback_target_release_id
+    elif rollback_target_release_id is not None:
+        raise ValueError("training scenario snapshot must not carry rollback_target_release_id")
     if algorithm_state is not None:
         metadata["algorithm_state"] = dict(algorithm_state)
     if prepared is not None:
@@ -155,26 +149,22 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
     record_progress: RecordProgress | None = None
     if raw_progress is not None:
         record_progress = parse_record_progress(raw_progress, context="scenario snapshot")
+    if scenario_step > 0 and record_progress is None:
+        raise ValueError("scenario snapshot requires record_progress after step zero")
     training_job_id = value.get("training_job_id")
     if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
         raise ValueError("scenario snapshot training_job_id must be a non-empty string or null")
     operation = value.get("operation")
-    rollback_target_artifact_version = value.get("rollback_target_artifact_version")
-    if operation is None and "rollback" in value:
-        legacy_rollback = value.get("rollback")
-        if not isinstance(legacy_rollback, Mapping):
-            raise ValueError("scenario snapshot rollback must be an object")
-        operation = "rollback"
-        rollback_target_artifact_version = legacy_rollback.get("target_artifact_version")
+    rollback_target_release_id = value.get("rollback_target_release_id")
     if operation is not None and operation not in ("training", "rollback"):
         raise ValueError("scenario snapshot operation must be 'training' or 'rollback'")
     if operation == "rollback":
-        if not isinstance(rollback_target_artifact_version, str) or not rollback_target_artifact_version:
-            raise ValueError("rollback scenario snapshot requires rollback_target_artifact_version")
+        if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
+            raise ValueError("rollback scenario snapshot requires rollback_target_release_id")
         if training_job_id is not None:
             raise ValueError("rollback scenario snapshot cannot carry training_job_id")
-    elif rollback_target_artifact_version is not None:
-        raise ValueError("non-rollback scenario snapshot cannot carry rollback_target_artifact_version")
+    elif rollback_target_release_id is not None:
+        raise ValueError("non-rollback scenario snapshot cannot carry rollback_target_release_id")
     return ScenarioSnapshot(
         scenario=scenario,
         recipe=recipe,
@@ -184,7 +174,7 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
         record_progress=record_progress,
         training_job_id=training_job_id,
         operation=operation,
-        rollback_target_artifact_version=rollback_target_artifact_version,
+        rollback_target_release_id=rollback_target_release_id,
     )
 
 

@@ -173,7 +173,7 @@ def test_tttd_does_not_mix_complete_groups_from_different_steps() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_accepts_one_durable_artifact_version() -> None:
+def test_tttd_accepts_one_durable_release_id() -> None:
     processor = _processor()
     artifact_ref = ArtifactRef("artifact-1", "checkpoint-1", None)
     for group in range(2):
@@ -191,7 +191,7 @@ def test_tttd_accepts_one_durable_artifact_version() -> None:
 
 
 @pytest.mark.unit
-def test_tttd_rejects_and_releases_a_step_spanning_artifact_versions(caplog) -> None:
+def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
     processor = _processor()
     with caplog.at_level("WARNING", logger="recipes.tttd.processor"):
         for group in range(2):
@@ -207,13 +207,13 @@ def test_tttd_rejects_and_releases_a_step_spanning_artifact_versions(caplog) -> 
                 processor.ingest(_report(0, group, rollout, float(group + rollout)))
 
     assert not processor.ready()
-    assert "span artifact versions" in caplog.text
+    assert "span releases" in caplog.text
     assert processor.status() == {
         "failed_steps": [
             {
                 "step": 0,
-                "reason": "mixed_artifact_versions",
-                "artifact_versions": ["checkpoint-1", "checkpoint-2"],
+                "reason": "mixed_release_ids",
+                "release_ids": ["checkpoint-1", "checkpoint-2"],
             }
         ]
     }

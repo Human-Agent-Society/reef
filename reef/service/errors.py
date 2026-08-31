@@ -13,13 +13,13 @@ import logging
 from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.artifact.version_chain import VersionNotRestorable
+from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import ReefError, UnknownScenario
 from reef.recipe.errors import ScenarioRecipeConflict
 from reef.records import RecordConflict
 from reef.runtime.inference import UpstreamStatusError
 from reef.service.request_service import InferenceRetryTimeout
-from reef.surface.weights import WeightVersionMismatch
+from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +28,10 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
     (ArtifactConflict, web.HTTPConflict),
-    (VersionNotRestorable, web.HTTPConflict),
+    (ReleaseNotRestorable, web.HTTPConflict),
     (RecordConflict, web.HTTPConflict),
     (ScenarioRecipeConflict, web.HTTPConflict),
-    (WeightVersionMismatch, web.HTTPConflict),
+    (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),
     (ReefError, web.HTTPBadRequest),

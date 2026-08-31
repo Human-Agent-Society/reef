@@ -18,7 +18,7 @@ from reef.train.slime_backend.reef_adapters.sglang import plugin as sglang_plugi
 from reef.train.slime_backend.reef_adapters.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
     install_colocated_retract_offload,
-    install_scheduler_weight_version_tracking,
+    install_scheduler_runtime_load_id_tracking,
 )
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
@@ -194,7 +194,7 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
     engine.node_rank = 0
     engine._make_request = request
 
-    assert engine.set_weight_version("deployment:2") == {"success": True}
+    assert engine.set_runtime_load_id("deployment:2") == {"success": True}
     assert engine.load_lora_adapter_from_tensors(
         "adapter",
         {"r": 8},
@@ -215,12 +215,12 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
     assert engine.unload_lora_adapter("adapter") == {"success": True}
     assert calls == [
         (
-            "update_weight_version",
+            "update_runtime_load_id",
             {"new_version": "deployment:2", "abort_all_requests": False},
         ),
         (
             "set_internal_state",
-            {"server_args": {"weight_version": "deployment:2"}},
+            {"server_args": {"runtime_load_id": "deployment:2"}},
         ),
         (
             "load_lora_adapter_from_tensors",
@@ -251,7 +251,7 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
 
 
 @pytest.mark.unit
-def test_get_weight_version_uses_model_info(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_sglang_engine_module(monkeypatch)
     requested: list[tuple[str, float]] = []
 
@@ -260,7 +260,7 @@ def test_get_weight_version_uses_model_info(monkeypatch: pytest.MonkeyPatch) -> 
             return None
 
         def json(self) -> dict[str, str]:
-            return {"weight_version": "training-incarnation:3"}
+            return {"runtime_load_id": "training-incarnation:3"}
 
     def get(url: str, *, timeout: float):
         requested.append((url, timeout))
@@ -273,12 +273,12 @@ def test_get_weight_version_uses_model_info(monkeypatch: pytest.MonkeyPatch) -> 
     engine.server_port = 30000
     engine.args = types.SimpleNamespace(distributed_timeout_minutes=10)
 
-    assert engine.get_weight_version() == "training-incarnation:3"
+    assert engine.get_runtime_load_id() == "training-incarnation:3"
     assert requested == [("http://127.0.0.1:30000/model_info", 30.0)]
 
 
 @pytest.mark.unit
-def test_engine_preflights_scheduler_weight_version_tracking_before_registration(
+def test_engine_preflights_scheduler_runtime_load_id_tracking_before_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_sglang_engine_module(monkeypatch)
@@ -286,11 +286,11 @@ def test_engine_preflights_scheduler_weight_version_tracking_before_registration
     engine = object.__new__(module.ReefSGLangEngine)
     engine.node_rank = 0
     engine.worker_type = "regular"
-    engine.get_weight_version = lambda: "engine:3"
+    engine.get_runtime_load_id = lambda: "engine:3"
     engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or [True]
 
     assert engine._register_to_router({"model_path": "model"}) == "registered"
-    assert events == [("set_internal_state", {"server_args": {"weight_version": "engine:3"}})]
+    assert events == [("set_internal_state", {"server_args": {"runtime_load_id": "engine:3"}})]
     assert engine.registered == {"model_path": "model"}
 
 
@@ -314,12 +314,12 @@ def test_disk_weight_update_does_not_implicitly_flush_kv_cache(monkeypatch: pyte
     engine = object.__new__(module.ReefSGLangEngine)
     engine._make_request = lambda endpoint, payload: requested.append((endpoint, payload)) or {"success": True}
 
-    engine.update_weights_from_disk("/weights/v2", weight_version="engine:2")
+    engine.update_weights_from_disk("/weights/v2", runtime_load_id="engine:2")
 
     assert requested == [
         (
             "update_weights_from_disk",
-            {"model_path": "/weights/v2", "flush_cache": False, "weight_version": "engine:2"},
+            {"model_path": "/weights/v2", "flush_cache": False, "runtime_load_id": "engine:2"},
         )
     ]
 
@@ -456,8 +456,8 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
     installed = []
     monkeypatch.setattr(
         sglang_plugin,
-        "install_scheduler_weight_version_tracking",
-        lambda: installed.append("weight_versions"),
+        "install_scheduler_runtime_load_id_tracking",
+        lambda: installed.append("runtime_load_ids"),
     )
     monkeypatch.setattr(
         sglang_plugin,
@@ -471,7 +471,7 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setenv(REEF_SGLANG_PLUGIN_ENV, "1")
     sglang_plugin.install_sglang_plugin()
-    assert installed == ["weight_versions", "colocated"]
+    assert installed == ["runtime_load_ids", "colocated"]
 
 
 @pytest.mark.unit
@@ -523,7 +523,7 @@ sglang:
 
 @pytest.mark.unit
 def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
-    current_args = types.SimpleNamespace(weight_version="engine:6")
+    current_args = types.SimpleNamespace(runtime_load_id="engine:6")
     server_args = types.ModuleType("sglang.srt.server_args")
     server_args.get_global_server_args = lambda: current_args  # type: ignore[attr-defined]
 
@@ -590,17 +590,17 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
             return UpdateResult()
 
         def update_weights_from_disk(self, recv_req):
-            self.calls.append(("disk", recv_req.weight_version))
+            self.calls.append(("disk", recv_req.runtime_load_id))
             return UpdateResult()
 
         def update_weights_from_distributed(self, recv_req):
             assert self._weight_update_in_progress, "requires an open begin_weight_update session"
-            self.calls.append(("distributed", recv_req.weight_version))
+            self.calls.append(("distributed", recv_req.runtime_load_id))
             return UpdateResult()
 
         def update_weights_from_tensor(self, recv_req):
             assert self._weight_update_in_progress, "requires an open begin_weight_update session"
-            self.calls.append(("tensor", recv_req.weight_version))
+            self.calls.append(("tensor", recv_req.runtime_load_id))
             return UpdateResult()
 
     weight_updater.SchedulerWeightUpdaterManager = SchedulerWeightUpdaterManager  # type: ignore[attr-defined]
@@ -611,32 +611,32 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components.output_streamer", output_streamer)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components.weight_updater", weight_updater)
 
-    install_scheduler_weight_version_tracking()
+    install_scheduler_runtime_load_id_tracking()
     request = types.SimpleNamespace(output_ids_through_stop=[20, 21], customized_info=None, accepted=False)
     Accumulator().accept(req=request)
-    current_args.weight_version = "engine:7"
+    current_args.runtime_load_id = "engine:7"
     request.output_ids_through_stop.append(22)
     Accumulator().accept(req=request)
-    assert request.customized_info["_reef_token_weight_versions"] == ["engine:6", "engine:6", "engine:7"]
+    assert request.customized_info["_reef_token_runtime_load_ids"] == ["engine:6", "engine:6", "engine:7"]
 
     scheduler = Scheduler()
     queued_request = types.SimpleNamespace(output_ids_through_stop=[40], customized_info=None, accepted=False)
     queued_batch = types.SimpleNamespace(req=queued_request, result=object())
-    current_args.weight_version = "engine:9"
+    current_args.runtime_load_id = "engine:9"
     queued_result = scheduler.run_batch(queued_batch)
-    current_args.weight_version = "engine:10"
+    current_args.runtime_load_id = "engine:10"
     scheduler.process_batch_result(queued_batch, queued_result)
-    assert queued_request.customized_info["_reef_token_weight_versions"] == ["engine:9"]
+    assert queued_request.customized_info["_reef_token_runtime_load_ids"] == ["engine:9"]
 
-    result = scheduler.set_internal_state(types.SimpleNamespace(server_args={"weight_version": "engine:8"}))
+    result = scheduler.set_internal_state(types.SimpleNamespace(server_args={"runtime_load_id": "engine:8"}))
     assert result.updated is True
-    assert current_args.weight_version == "engine:8"
+    assert current_args.runtime_load_id == "engine:8"
 
     updater = SchedulerWeightUpdaterManager()
-    current_args.weight_version = "engine:7"
-    stale = updater.update_weights_from_disk(types.SimpleNamespace(load_format="delta", weight_version="engine:6"))
+    current_args.runtime_load_id = "engine:7"
+    stale = updater.update_weights_from_disk(types.SimpleNamespace(load_format="delta", runtime_load_id="engine:6"))
     cross_incarnation = updater.update_weights_from_disk(
-        types.SimpleNamespace(load_format="delta", weight_version="previous:99")
+        types.SimpleNamespace(load_format="delta", runtime_load_id="previous:99")
     )
     assert stale.success is False
     assert "refusing stale delta" in stale.message
@@ -644,10 +644,10 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
     assert SchedulerWeightUpdaterManager.calls == []
 
     current_batch = updater.update_weights_from_disk(
-        types.SimpleNamespace(load_format="delta", weight_version="engine:7")
+        types.SimpleNamespace(load_format="delta", runtime_load_id="engine:7")
     )
-    next_tensor = updater.update_weights_from_tensor(types.SimpleNamespace(weight_version="engine:8"))
-    synced = updater.update_weights_from_distributed(types.SimpleNamespace(weight_version="engine:9"))
+    next_tensor = updater.update_weights_from_tensor(types.SimpleNamespace(runtime_load_id="engine:8"))
+    synced = updater.update_weights_from_distributed(types.SimpleNamespace(runtime_load_id="engine:9"))
     assert current_batch.success is True
     assert next_tensor.success is True
     assert synced.success is True
@@ -664,7 +664,7 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
         ("end", None),
     ]
     assert updater._weight_update_in_progress is False
-    assert current_args.weight_version == "engine:9"
+    assert current_args.runtime_load_id == "engine:9"
 
 
 @pytest.mark.unit

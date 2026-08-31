@@ -490,7 +490,7 @@ def test_disjoint_updater_publishes_lora_through_distributed_receiver(monkeypatc
     updater._model_update_groups = "slime-group"
     updater._group_name = "slime-pp_0"
     updater._lora_config = {"r": 1}
-    updater.weight_version = "deployment:3"
+    updater.runtime_load_id = "deployment:3"
     updater._base_checksums = None
     updater.tie_word_embeddings = False
     updater.active_scenario = "math"
@@ -505,7 +505,7 @@ def test_disjoint_updater_publishes_lora_through_distributed_receiver(monkeypatc
             events.append((self.name, args, kwargs))
             return {"success": True}
 
-    updater.rollout_engines = [SimpleNamespace(set_weight_version=RemoteMethod("version"))]
+    updater.rollout_engines = [SimpleNamespace(set_runtime_load_id=RemoteMethod("version"))]
     updater._run_rank_zero_action = lambda action, **_kwargs: action()
 
     def raise_synchronized(error, **_kwargs):

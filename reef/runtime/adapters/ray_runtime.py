@@ -37,7 +37,7 @@ class RayTrainGroupHandle(ABC):
     handle. ``RayRuntime`` depends only on this contract.
     """
 
-    def serving_weight_version(self) -> str | None:
+    def serving_runtime_load_id(self) -> str | None:
         """Return the serving version, or ``None`` when unavailable."""
         return None
 
@@ -121,7 +121,7 @@ class RayRuntime(TrainingRuntime):
         adapter = training_job.get("lora_adapter")
         self._serving_adapter_name = adapter if isinstance(adapter, str) and adapter else None
         self._per_scenario_adapters = training_job.get("lora_mode") == "scenario"
-        self._current_weight_version: str | None = None
+        self._current_runtime_load_id: str | None = None
         self._sync_inference_admission(training_job)
 
     @property
@@ -147,14 +147,14 @@ class RayRuntime(TrainingRuntime):
     def concurrent_training_scenarios(self) -> bool:
         return self._per_scenario_adapters
 
-    def serving_adapter_version(self, scenario: str) -> str | None:
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         if not self._per_scenario_adapters:
             return None
         adapters = self._training_job_status().get("lora_adapters") or {}
         entry = adapters.get(scenario)
         if not isinstance(entry, Mapping):
             return None
-        version = entry.get("weight_version")
+        version = entry.get("runtime_load_id")
         return version if isinstance(version, str) and version else None
 
     def adapter_residency_status(self) -> Mapping[str, Any] | None:
@@ -164,14 +164,14 @@ class RayRuntime(TrainingRuntime):
         status = self._training_job_status().get("adapter_residency")
         return status if isinstance(status, Mapping) else None
 
-    def serving_weight_version(self) -> str | None:
-        version = self._train_group_handle.serving_weight_version()
+    def serving_runtime_load_id(self) -> str | None:
+        version = self._train_group_handle.serving_runtime_load_id()
         if version is not None and (not isinstance(version, str) or not version):
-            raise RayRuntimeError("train group handle must return a non-empty serving weight version or None")
+            raise RayRuntimeError("train group handle must return a non-empty serving runtime load ID or None")
         return version
 
-    def current_weight_version(self) -> str | None:
-        return self._current_weight_version
+    def current_runtime_load_id(self) -> str | None:
+        return self._current_runtime_load_id
 
     def prepare_training_step(
         self,
@@ -200,7 +200,7 @@ class RayRuntime(TrainingRuntime):
                 samples = tuple(samples[row] for row in source_rows)
             except (IndexError, TypeError) as exc:
                 raise RayRuntimeError(f"prepared payload names invalid source rows: {exc}") from exc
-        versions = tuple(sample.weight_version for sample in samples)
+        versions = tuple(sample.runtime_load_id for sample in samples)
         if not samples:
             raise RayRuntimeError("a training job requires at least one policy sample")
         version_spans = [
@@ -208,36 +208,36 @@ class RayRuntime(TrainingRuntime):
                 {
                     "start": span.start,
                     "end": span.end,
-                    "weight_version": span.weight_version,
+                    "runtime_load_id": span.runtime_load_id,
                 }
-                for span in sample.weight_version_spans
+                for span in sample.runtime_load_spans
             ]
             for sample in samples
         ]
         if any(version_spans):
-            payload["producing_weight_version_spans"] = version_spans
+            payload["producing_runtime_load_spans"] = version_spans
         if self._max_staleness == 0 and any(
             version is None and not spans for version, spans in zip(versions, version_spans, strict=True)
         ):
-            raise RayRuntimeError("a training job requires a recorded producing weight version for every sample")
-        span_versions = {span["weight_version"] for spans in version_spans for span in spans}
+            raise RayRuntimeError("a training job requires a recorded producing runtime load ID for every sample")
+        span_versions = {span["runtime_load_id"] for spans in version_spans for span in spans}
         recorded_versions = span_versions | {version for version in versions if version is not None}
         requires_staleness_admission = (
             self._max_staleness > 0 or any(version is None for version in versions) or len(recorded_versions) != 1
         )
         if not requires_staleness_admission:
-            expected_weight_version = recorded_versions.pop()
-            if expected_weight_version is None:
-                raise RayRuntimeError("recorded producing weight version cannot be null")
+            expected_runtime_load_id = recorded_versions.pop()
+            if expected_runtime_load_id is None:
+                raise RayRuntimeError("recorded producing runtime load ID cannot be null")
         else:
-            expected_weight_version = self.serving_weight_version()
-            if expected_weight_version is None:
-                raise RayRuntimeError("token staleness admission requires a verified serving weight version")
+            expected_runtime_load_id = self.serving_runtime_load_id()
+            if expected_runtime_load_id is None:
+                raise RayRuntimeError("token staleness admission requires a verified serving runtime load ID")
             payload["max_staleness"] = self._max_staleness
-            payload["producing_weight_versions"] = list(versions)
+            payload["producing_runtime_load_ids"] = list(versions)
         # The scenario step crosses into the backend job as ``rollout_id`` —
         # the training backend's own (wire) name for the same integer.
-        payload.update(rollout_id=scenario_step, expected_weight_version=expected_weight_version)
+        payload.update(rollout_id=scenario_step, expected_runtime_load_id=expected_runtime_load_id)
         return PreparedTrainingStep(
             action="train",
             payload=payload,
@@ -293,7 +293,7 @@ class RayRuntime(TrainingRuntime):
 
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         """Train through checkpoint export without changing serving weights."""
-        current = self.current_weight_version()
+        current = self.current_runtime_load_id()
         if self._colocated:
             self._inference_admission.close()
         try:
@@ -322,10 +322,9 @@ class RayRuntime(TrainingRuntime):
             raise RayRuntimeError("exported checkpoint must carry a checkpoint path")
         return ModelCandidate(
             candidate_id=checkpoint.training_job_id,
-            current_version=current,
             training_job_id=checkpoint.training_job_id,
             checkpoint_path=checkpoint.checkpoint_path,
-            current_weight_version=current,
+            current_runtime_load_id=current,
             training_metrics=dict(checkpoint.metrics or {}),
         )
 
@@ -336,7 +335,7 @@ class RayRuntime(TrainingRuntime):
         updated = self._validated_result(self._train_group_handle.update_serving_weights(candidate.training_job_id))
         if updated.outcome != "complete" or updated.training_job_id != candidate.training_job_id:
             raise RayRuntimeError("serving-weight update returned an invalid completed result")
-        return ActivatedModel(candidate.candidate_id, updated.weight_version)
+        return ActivatedModel(candidate.candidate_id, updated.runtime_load_id)
 
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         self._train_group_handle.reject_training_candidate(candidate.training_job_id)
@@ -406,9 +405,9 @@ class RayRuntime(TrainingRuntime):
 
     def _finish_committed_training_job(self, training_job_id: str) -> None:
         self._train_group_handle.acknowledge_training_commit(training_job_id)
-        current_weight_version = self.serving_weight_version()
+        current_runtime_load_id = self.serving_runtime_load_id()
         self._inference_admission.open()
-        self._current_weight_version = current_weight_version
+        self._current_runtime_load_id = current_runtime_load_id
 
     def _sync_inference_admission(self, training_job: Mapping[str, Any]) -> bool:
         """Apply states that need no weight-update recovery; return if settled."""
@@ -416,16 +415,16 @@ class RayRuntime(TrainingRuntime):
         if status in {"IDLE", "REJECTED"} or (
             status == "COMPLETE" and training_job.get("commit_acknowledged") is True
         ):
-            current_weight_version = self.serving_weight_version()
+            current_runtime_load_id = self.serving_runtime_load_id()
             self._inference_admission.open()
-            self._current_weight_version = current_weight_version
+            self._current_runtime_load_id = current_runtime_load_id
             return True
         if status in {"RUNNING", "CHECKPOINT"}:
             if self._colocated:
                 self._inference_admission.close()
             else:
-                if self._current_weight_version is None:
-                    self._current_weight_version = self.serving_weight_version()
+                if self._current_runtime_load_id is None:
+                    self._current_runtime_load_id = self.serving_runtime_load_id()
                 self._inference_admission.open()
             return True
         self._inference_admission.close()
@@ -531,9 +530,9 @@ class RemoteRayTrainGroupHandle(RayTrainGroupHandle):
             timeout=self._timeout_s,
         )
 
-    def serving_weight_version(self) -> str | None:
+    def serving_runtime_load_id(self) -> str | None:
         version = self._get(
-            self._train_group_actor.serving_weight_version.remote(),
+            self._train_group_actor.serving_runtime_load_id.remote(),
             timeout=self._timeout_s,
         )
         return None if version is None else str(version)

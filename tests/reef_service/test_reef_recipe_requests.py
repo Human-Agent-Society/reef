@@ -249,9 +249,9 @@ def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
     load_or_create = dispatcher._registry._scenario_factory.load_or_create
     entered = Barrier(2)
 
-    def load_or_create_together(scenario, recipe, artifact_version):
+    def load_or_create_together(scenario, recipe, release_id):
         entered.wait(timeout=2)
-        return load_or_create(scenario, recipe, artifact_version)
+        return load_or_create(scenario, recipe, release_id)
 
     monkeypatch.setattr(dispatcher._registry._scenario_factory, "load_or_create", load_or_create_together)
 
@@ -266,7 +266,7 @@ def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_create_freezes_latest_selector_at_the_resolved_version(monkeypatch, tmp_path) -> None:
+def test_create_freezes_head_selector_at_the_resolved_release(monkeypatch, tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     backend_factory = InMemoryRepositoryBackend.factory(
@@ -274,29 +274,29 @@ def test_create_freezes_latest_selector_at_the_resolved_version(monkeypatch, tmp
         root=tmp_path / "repository",
     )
     backend = backend_factory("moving-latest")
-    initial_version = backend.resolve_version("latest").version
-    resolve_version = backend.resolve_version
-    latest_calls = 0
+    initial_release_id = backend.resolve_release("head").release_id
+    resolve_release = backend.resolve_release
+    head_calls = 0
 
-    def moving_latest(version=None):
-        nonlocal latest_calls
-        if version == "latest":
-            latest_calls += 1
-            if latest_calls > 1:
-                return ArtifactRef("moved", "moved-version", initial_version)
-        return resolve_version(version)
+    def moving_head(release_id=None):
+        nonlocal head_calls
+        if release_id == "head":
+            head_calls += 1
+            if head_calls > 1:
+                return ArtifactRef("moved", "moved-release", initial_release_id)
+        return resolve_release(release_id)
 
-    monkeypatch.setattr(backend, "resolve_version", moving_latest)
+    monkeypatch.setattr(backend, "resolve_release", moving_head)
     dispatcher = build_default_dispatcher(backend_factory=backend_factory)
 
     created = dispatcher.get_or_create_scenario(
         "moving-latest",
         "recipe",
-        "latest",
+        "head",
     )
 
-    assert created.repository.base_artifact.version == initial_version
-    assert latest_calls == 1
+    assert created.repository.base_artifact.release_id == initial_release_id
+    assert head_calls == 1
 
 
 @pytest.mark.integration

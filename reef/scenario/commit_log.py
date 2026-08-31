@@ -38,7 +38,7 @@ from reef.artifact.artifact import ArtifactRef, decode_artifact_ref, encode_arti
 from reef.core.errors import ReefError
 from reef.scenario.snapshot import parse_record_progress
 
-RECORD_KIND = "reef-commit/4"
+RECORD_KIND = "reef-commit/5"
 
 
 class CommitLogError(ReefError):
@@ -46,15 +46,13 @@ class CommitLogError(ReefError):
 
 
 class CommitRecord:
-    """One committed training step: the atomic version record.
+    """One committed training step: the atomic release record.
 
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
     consumed, the rows its batch consumed, and the rows its compaction
     deleted, so the record store and processor memory can be re-derived after
-    a crash. ``consumed_ids`` is ``None`` on records written before the field
-    existed; recovery treats an unknown consumed set as a reason not to
-    reingest, never as an empty one.
+    a crash.
     """
 
     def __init__(
@@ -68,11 +66,11 @@ class CommitRecord:
         high_water_sequence: int,
         high_water_offset: int,
         compacted_ids: frozenset[str] = frozenset(),
-        consumed_ids: frozenset[str] | None = None,
+        consumed_ids: frozenset[str] = frozenset(),
         recorded_at: float | None = None,
         operation: str = "training",
         operation_verified: bool = True,
-        rollback_target_artifact_version: str | None = None,
+        rollback_target_release_id: str | None = None,
         metrics: Mapping[str, Any] | None = None,
         training_job_id: str | None = None,
     ) -> None:
@@ -89,20 +87,20 @@ class CommitRecord:
         self.high_water_sequence = high_water_sequence
         self.high_water_offset = high_water_offset
         self.compacted_ids = frozenset(compacted_ids)
-        self.consumed_ids = None if consumed_ids is None else frozenset(consumed_ids)
+        self.consumed_ids = frozenset(consumed_ids)
         self.recorded_at = time.time() if recorded_at is None else recorded_at
         if operation not in ("training", "rollback"):
             raise CommitLogError("commit record operation must be 'training' or 'rollback'")
         if not isinstance(operation_verified, bool):
             raise CommitLogError("commit record operation_verified must be a boolean")
         if operation == "rollback":
-            if not isinstance(rollback_target_artifact_version, str) or not rollback_target_artifact_version:
-                raise CommitLogError("rollback commit requires rollback_target_artifact_version")
-        elif rollback_target_artifact_version is not None:
-            raise CommitLogError("training commit must not carry rollback_target_artifact_version")
+            if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
+                raise CommitLogError("rollback commit requires rollback_target_release_id")
+        elif rollback_target_release_id is not None:
+            raise CommitLogError("training commit must not carry rollback_target_release_id")
         self.operation = operation
         self.operation_verified = operation_verified
-        self.rollback_target_artifact_version = rollback_target_artifact_version
+        self.rollback_target_release_id = rollback_target_release_id
         if metrics is not None and not isinstance(metrics, Mapping):
             raise CommitLogError("commit record metrics must be an object or null")
         self.metrics = None if metrics is None else dict(metrics)
@@ -118,8 +116,7 @@ class CommitRecord:
             "high_water_offset": self.high_water_offset,
             "compacted_ids": sorted(self.compacted_ids),
         }
-        if self.consumed_ids is not None:
-            record_progress["consumed_ids"] = sorted(self.consumed_ids)
+        record_progress["consumed_ids"] = sorted(self.consumed_ids)
         value = {
             "record": RECORD_KIND,
             "scenario": self.scenario,
@@ -132,7 +129,7 @@ class CommitRecord:
         }
         if self.operation != "training":
             value["operation"] = self.operation
-            value["rollback_target_artifact_version"] = self.rollback_target_artifact_version
+            value["rollback_target_release_id"] = self.rollback_target_release_id
         if not self.operation_verified:
             value["operation_verified"] = False
         if self.metrics is not None:
@@ -176,7 +173,7 @@ class CommitRecord:
             raise CommitLogError("commit record recorded_at must be a number")
         operation = value.get("operation", "training")
         operation_verified = value.get("operation_verified", True)
-        rollback_target_artifact_version = value.get("rollback_target_artifact_version")
+        rollback_target_release_id = value.get("rollback_target_release_id")
         return cls(
             scenario=scenario,
             step=step,
@@ -190,7 +187,7 @@ class CommitRecord:
             recorded_at=float(recorded_at),
             operation=operation,
             operation_verified=operation_verified,
-            rollback_target_artifact_version=rollback_target_artifact_version,
+            rollback_target_release_id=rollback_target_release_id,
             metrics=value.get("metrics"),
             training_job_id=value.get("training_job_id"),
         )
@@ -201,7 +198,7 @@ class CommitRecord:
         return self.to_dict() == other.to_dict()
 
     def __repr__(self) -> str:
-        return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, version={self.artifact_ref.version!r})"
+        return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.artifact_ref.release_id!r})"
 
 
 class CommitLog:

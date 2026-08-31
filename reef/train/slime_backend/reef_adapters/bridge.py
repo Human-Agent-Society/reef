@@ -31,7 +31,7 @@ from typing import Any, Literal
 
 import ray
 
-from reef.core.artifact_ref import parse_weight_version_spans
+from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.adapter_residency import AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
@@ -82,7 +82,7 @@ def _max_staleness(payload: Mapping[str, Any]) -> int:
 
 def _uses_staleness_admission(payload: Mapping[str, Any]) -> bool:
     """Whether the serving version is an admission fence, not job identity."""
-    return _max_staleness(payload) > 0 or "producing_weight_versions" in payload
+    return _max_staleness(payload) > 0 or "producing_runtime_load_ids" in payload
 
 
 def _training_job_id(payload: Mapping[str, Any]) -> str:
@@ -95,7 +95,7 @@ def _training_job_id(payload: Mapping[str, Any]) -> str:
         # newer on a lost-ack replay after this job published. It fences only a
         # fresh execution; sample rows and rollout id are the retry-stable
         # logical job identity.
-        identity.pop("expected_weight_version", None)
+        identity.pop("expected_runtime_load_id", None)
     encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -109,27 +109,27 @@ def _source_agent_record_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _producing_weight_versions(payload: Mapping[str, Any]) -> Sequence[Any]:
-    versions = payload.get("producing_weight_versions")
+def _producing_runtime_load_ids(payload: Mapping[str, Any]) -> Sequence[Any]:
+    versions = payload.get("producing_runtime_load_ids")
     if not isinstance(versions, Sequence) or isinstance(versions, str | bytes) or not versions:
-        raise ValueError("bounded staleness admission requires producing_weight_versions")
+        raise ValueError("bounded staleness admission requires producing_runtime_load_ids")
     source_ids = _source_agent_record_ids(payload)
     if len(versions) != len(source_ids):
         raise ValueError(
-            "bounded staleness admission requires one producing weight version "
+            "bounded staleness admission requires one producing runtime load ID "
             f"per sample: {len(versions)} versions for {len(source_ids)} samples"
         )
     return versions
 
 
-def _admission_weight_version_groups(payload: Mapping[str, Any]) -> list[list[Any]]:
+def _admission_runtime_load_id_groups(payload: Mapping[str, Any]) -> list[list[Any]]:
     """Return each sample's exact span versions for bounded admission."""
-    versions = _producing_weight_versions(payload)
-    raw_groups = payload.get("producing_weight_version_spans")
+    versions = _producing_runtime_load_ids(payload)
+    raw_groups = payload.get("producing_runtime_load_spans")
     if raw_groups is None:
         return [[version] for version in versions]
     if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, str | bytes) or len(raw_groups) != len(versions):
-        raise ValueError("producing_weight_version_spans must contain one span list per sample")
+        raise ValueError("producing_runtime_load_spans must contain one span list per sample")
     samples = payload["samples"]
     groups: list[list[Any]] = []
     for sample_index, (raw_spans, scalar) in enumerate(zip(raw_groups, versions, strict=True)):
@@ -138,15 +138,15 @@ def _admission_weight_version_groups(payload: Mapping[str, Any]) -> list[list[An
             continue
         row = samples[sample_index]
         response_length = len(row[2]) if isinstance(row, Sequence) and len(row) > 2 else None
-        spans = parse_weight_version_spans(
+        spans = parse_runtime_load_spans(
             raw_spans,
-            field_name=f"producing_weight_version_spans[{sample_index}]",
+            field_name=f"producing_runtime_load_spans[{sample_index}]",
             response_length=response_length,
         )
-        group = [span.weight_version for span in spans]
+        group = [span.runtime_load_id for span in spans]
         span_versions = set(group)
         if scalar is not None and span_versions != {scalar}:
-            raise ValueError(f"producing weight version for sample {sample_index} disagrees with its token spans")
+            raise ValueError(f"producing runtime load ID for sample {sample_index} disagrees with its token spans")
         groups.append(group)
     return groups
 
@@ -154,20 +154,20 @@ def _admission_weight_version_groups(payload: Mapping[str, Any]) -> list[list[An
 def _stale_drop_decision(
     payload: Mapping[str, Any],
     *,
-    serving_weight_version: str,
-    producing_weight_versions: Sequence[Any],
+    serving_runtime_load_id: str,
+    producing_runtime_load_ids: Sequence[Any],
     reason: str,
     policy_lags: Sequence[int] = (),
 ) -> _StalenessDecision:
     source_ids = _source_agent_record_ids(payload)
     metrics: dict[str, Any] = {
-        "staleness/samples_dropped": len(source_ids) or len(producing_weight_versions),
+        "staleness/samples_dropped": len(source_ids) or len(producing_runtime_load_ids),
         "staleness/drop_reason": reason,
         "staleness/source_agent_record_ids": list(source_ids),
-        "staleness/producing_weight_versions": [
-            None if version is None else str(version) for version in producing_weight_versions
+        "staleness/producing_runtime_load_ids": [
+            None if version is None else str(version) for version in producing_runtime_load_ids
         ],
-        "staleness/serving_weight_version": serving_weight_version,
+        "staleness/serving_runtime_load_id": serving_runtime_load_id,
     }
     if policy_lags:
         metrics["staleness/drop_policy_lags"] = list(policy_lags)
@@ -177,22 +177,22 @@ def _stale_drop_decision(
 def _staleness_admission(
     payload: Mapping[str, Any],
     *,
-    serving_weight_version: str,
+    serving_runtime_load_id: str,
     max_staleness: int,
 ) -> _StalenessDecision:
     # The reef wheel ships without the slime distribution; staleness admission
     # only runs inside a live bridge, where slime is installed.
-    from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion
+    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 
     try:
-        serving = WeightVersion.parse(serving_weight_version)
+        serving = RuntimeLoadId.parse(serving_runtime_load_id)
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
-            f"cannot classify staleness from serving weight version {serving_weight_version!r}"
+            f"cannot classify staleness from serving runtime load ID {serving_runtime_load_id!r}"
         ) from exc
-    if str(serving) != serving_weight_version:
-        raise RuntimeError(f"cannot classify staleness from non-canonical serving version {serving_weight_version!r}")
-    producing_groups = _admission_weight_version_groups(payload)
+    if str(serving) != serving_runtime_load_id:
+        raise RuntimeError(f"cannot classify staleness from non-canonical serving version {serving_runtime_load_id!r}")
+    producing_groups = _admission_runtime_load_id_groups(payload)
     producing_versions = [version for group in producing_groups for version in group]
 
     lags: list[int] = []
@@ -201,8 +201,8 @@ def _staleness_admission(
     def drop(reason: str) -> _StalenessDecision:
         return _stale_drop_decision(
             payload,
-            serving_weight_version=serving_weight_version,
-            producing_weight_versions=producing_versions,
+            serving_runtime_load_id=serving_runtime_load_id,
+            producing_runtime_load_ids=producing_versions,
             reason=reason,
             policy_lags=lags,
         )
@@ -212,23 +212,23 @@ def _staleness_admission(
         previous_sequence: int | None = None
         for value in group:
             if not isinstance(value, str) or not value:
-                return drop("missing_producing_weight_version")
+                return drop("missing_producing_runtime_load_id")
             try:
-                producing = WeightVersion.parse(value)
+                producing = RuntimeLoadId.parse(value)
             except (TypeError, ValueError):
-                return drop("malformed_producing_weight_version")
+                return drop("malformed_producing_runtime_load_id")
             if str(producing) != value:
-                return drop("malformed_producing_weight_version")
+                return drop("malformed_producing_runtime_load_id")
             if producing.incarnation != serving.incarnation:
                 return drop("cross_incarnation")
             if previous_sequence is not None and producing.sequence <= previous_sequence:
-                return drop("non_monotonic_producing_weight_versions")
+                return drop("non_monotonic_producing_runtime_load_ids")
             previous_sequence = producing.sequence
             lag = serving.sequence - producing.sequence
             lags.append(lag)
             group_lags.append(lag)
             if lag < 0:
-                return drop("future_producing_weight_version")
+                return drop("future_producing_runtime_load_id")
             if lag > max_staleness:
                 return drop("policy_lag_exceeded")
         sample_lags.append(max(group_lags))
@@ -246,22 +246,22 @@ def _scenario_staleness_admission(
     *,
     scenario: str,
     ledger: ScenarioLedger,
-    serving_weight_version: str,
+    serving_runtime_load_id: str,
     max_staleness: int,
 ) -> _StalenessDecision:
     """Bounded admission against one scenario's own publication history.
 
-    The engine's weight version advances on every scenario's publication, so
+    The engine's runtime load ID advances on every scenario's publication, so
     the global sequence gap overstates this scenario's staleness. A sample's
     lag is the number of *this* scenario's publications that postdate the
     version its tokens were produced under.
     """
-    from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion
+    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 
     if _uses_staleness_admission(payload):
-        producing_groups = _admission_weight_version_groups(payload)
+        producing_groups = _admission_runtime_load_id_groups(payload)
     else:
-        expected = payload.get("expected_weight_version")
+        expected = payload.get("expected_runtime_load_id")
         producing_groups = [[expected]]
     producing_versions = [version for group in producing_groups for version in group]
     lags: list[int] = []
@@ -270,8 +270,8 @@ def _scenario_staleness_admission(
     def drop(reason: str) -> _StalenessDecision:
         return _stale_drop_decision(
             payload,
-            serving_weight_version=serving_weight_version,
-            producing_weight_versions=producing_versions,
+            serving_runtime_load_id=serving_runtime_load_id,
+            producing_runtime_load_ids=producing_versions,
             reason=reason,
             policy_lags=lags,
         )
@@ -280,11 +280,11 @@ def _scenario_staleness_admission(
         group_lags: list[int] = []
         for value in group:
             if not isinstance(value, str) or not value:
-                return drop("missing_producing_weight_version")
+                return drop("missing_producing_runtime_load_id")
             try:
-                producing = WeightVersion.parse(value)
+                producing = RuntimeLoadId.parse(value)
             except (TypeError, ValueError):
-                return drop("malformed_producing_weight_version")
+                return drop("malformed_producing_runtime_load_id")
             lag = ledger.lag(scenario, producing)
             if lag is None:
                 return drop("cross_incarnation")
@@ -412,7 +412,7 @@ class TrainBridgeActorImpl:
         # A LoRA deployment serves one adapter per scenario: the scenarios
         # time-slice the group's one adapter slot, each publishes under its
         # own scenario-qualified versioned name, and the ledger keeps the
-        # per-scenario history the engine-global weight version cannot
+        # per-scenario history the engine-global runtime load ID cannot
         # express. Reporting it in health is what lets the serving side
         # address each scenario's adapter.
         self._lora = lora
@@ -465,25 +465,25 @@ class TrainBridgeActorImpl:
             transition_marker(self._marker_path(), marker, "REJECTED")
             marker_status = "REJECTED"
         self._inference_url = self._manager_call("inference_url")
-        versions = self._manager_call("get_weight_versions")
+        versions = self._manager_call("get_runtime_load_ids")
         if not versions or (marker_status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
             raise RuntimeError(f"serving engines disagree at bridge startup: {versions!r}")
         # An UPDATING_WEIGHTS marker explicitly means this observation may be mixed.
         # It is only a temporary seed; the forced full publication below must
         # converge every engine before construction succeeds.
-        self._weight_version = str(versions[0])
-        recovered_weight_version = None
+        self._runtime_load_id = str(versions[0])
+        recovered_runtime_load_id = None
         if marker_status in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
             if marker is None:
                 raise RuntimeError(f"{marker_status} marker status has no marker payload")
-            recovered_weight_version = str(marker["weight_version"])
-        if recovered_weight_version is not None:
+            recovered_runtime_load_id = str(marker["runtime_load_id"])
+        if recovered_runtime_load_id is not None:
             # The paired checkpoint contains exactly the weights that were
             # published under this token before the restart. Seed every
             # updater with its predecessor so the mandatory startup publish
             # recreates the same serving identity and the durable Reef head
             # remains tied to the correct serving version.
-            self._group.restore_weight_version_for_republication(recovered_weight_version)
+            self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
         if self._ledger is not None:
             self._recover_scenario_adapters(marker)
         if marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED"}:
@@ -504,7 +504,7 @@ class TrainBridgeActorImpl:
             # LoRA bridge that never trained has nothing to publish: the frozen
             # base SGLang booted from is exactly what every fresh adapter
             # computes, and the ledger replay above restored trained ones.
-            self._weight_version = self._update_serving(
+            self._runtime_load_id = self._update_serving(
                 force_full=marker is not None,
                 scenario=self._marker_scenario(marker),
             )
@@ -516,21 +516,21 @@ class TrainBridgeActorImpl:
             if self._colocate:
                 self._manager_call("onload_weights")
                 self._manager_call("onload_kv")
-            self._weight_version = str(self._group.sync_serving_weight_version())
-            observed = [str(value) for value in self._manager_call("get_weight_versions")]
-            if not observed or set(observed) != {self._weight_version}:
+            self._runtime_load_id = str(self._group.sync_serving_runtime_load_id())
+            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
+            if not observed or set(observed) != {self._runtime_load_id}:
                 raise RuntimeError(f"serving engines disagree after version sync: {observed!r}")
-        if recovered_weight_version is not None and self._weight_version != recovered_weight_version:
+        if recovered_runtime_load_id is not None and self._runtime_load_id != recovered_runtime_load_id:
             raise RuntimeError(
-                "checkpoint republication changed weight version "
-                f"{recovered_weight_version!r} to {self._weight_version!r}"
+                "checkpoint republication changed runtime load ID "
+                f"{recovered_runtime_load_id!r} to {self._runtime_load_id!r}"
             )
         if marker is not None and marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
             transition_marker(
                 self._marker_path(),
                 marker,
                 "READY_TO_COMMIT",
-                weight_version=self._weight_version,
+                runtime_load_id=self._runtime_load_id,
             )
             self._phase = "awaiting_commit"
         elif marker_status == "READY_TO_COMMIT":
@@ -558,7 +558,7 @@ class TrainBridgeActorImpl:
         is loaded under the name its last publication recorded, so Reef's
         routing for that scenario keeps resolving. The marker's scenario is
         activated last: the regular startup republication then publishes it
-        under the recovered weight version.
+        under the recovered runtime load ID.
         """
         ledger = self._require_ledger()
         residency = self._require_residency()
@@ -621,7 +621,7 @@ class TrainBridgeActorImpl:
                 # Reef reasons in scenario steps; in per-scenario mode the
                 # marker's rollout id is the bridge-global checkpoint index.
                 rollout_id=marker.get("scenario_step", marker["rollout_id"]),
-                weight_version=marker.get("weight_version"),
+                runtime_load_id=marker.get("runtime_load_id"),
                 commit_acknowledged=marker.get("commit_acknowledged", False),
             )
             if "scenario" in marker:
@@ -664,12 +664,12 @@ class TrainBridgeActorImpl:
         changed; the next optimizer-backed publication advances it normally.
         """
         with self._operation_lock:
-            expected = self._weight_version
-            self._group.restore_weight_version_for_republication(expected)
+            expected = self._runtime_load_id
+            self._group.restore_runtime_load_id_for_republication(expected)
             marker = read_marker(self._marker_path()) if self._save_hf_template is not None else None
             published = self._update_serving(scenario=self._marker_scenario(marker))
             if published != expected:
-                raise RuntimeError(f"serving republication changed weight version {expected!r} to {published!r}")
+                raise RuntimeError(f"serving republication changed runtime load ID {expected!r} to {published!r}")
             self._phase = "serving"
             return published
 
@@ -772,7 +772,7 @@ class TrainBridgeActorImpl:
                     self._marker_path(),
                     marker,
                     "READY_TO_COMMIT",
-                    weight_version=published,
+                    runtime_load_id=published,
                 )
                 self._phase = "awaiting_commit"
             except BaseException:
@@ -881,49 +881,49 @@ class TrainBridgeActorImpl:
                 payload,
                 scenario=scenario,
                 ledger=self._require_ledger(),
-                serving_weight_version=self._weight_version,
+                serving_runtime_load_id=self._runtime_load_id,
                 max_staleness=max_staleness,
             )
             if admission.action == "drop":
                 return TrainingJobResult(
                     outcome="stale",
-                    weight_version=self._weight_version,
+                    runtime_load_id=self._runtime_load_id,
                     metrics=admission.metrics,
                 )
             durable_metrics.update(admission.metrics)
         elif _uses_staleness_admission(payload):
-            producing_versions = [version for group in _admission_weight_version_groups(payload) for version in group]
-            if payload.get("expected_weight_version") != self._weight_version:
+            producing_versions = [version for group in _admission_runtime_load_id_groups(payload) for version in group]
+            if payload.get("expected_runtime_load_id") != self._runtime_load_id:
                 admission = _stale_drop_decision(
                     payload,
-                    serving_weight_version=self._weight_version,
-                    producing_weight_versions=producing_versions,
+                    serving_runtime_load_id=self._runtime_load_id,
+                    producing_runtime_load_ids=producing_versions,
                     reason="execution_fence_mismatch",
                 )
             else:
                 admission = _staleness_admission(
                     payload,
-                    serving_weight_version=self._weight_version,
+                    serving_runtime_load_id=self._runtime_load_id,
                     max_staleness=max_staleness,
                 )
             if admission.action == "drop":
                 return TrainingJobResult(
                     outcome="stale",
-                    weight_version=self._weight_version,
+                    runtime_load_id=self._runtime_load_id,
                     metrics=admission.metrics,
                 )
             durable_metrics.update(admission.metrics)
-        elif payload.get("expected_weight_version") != self._weight_version:
-            return TrainingJobResult(outcome="stale", weight_version=self._weight_version)
+        elif payload.get("expected_runtime_load_id") != self._runtime_load_id:
+            return TrainingJobResult(outcome="stale", runtime_load_id=self._runtime_load_id)
         checkpoint = Path(self._checkpoint_path(rollout_id))
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
-        rollout_versions = rollout_data.get("producing_weight_versions")
+        rollout_versions = rollout_data.get("producing_runtime_load_ids")
         if (
             max_staleness > 0
             and rollout_versions is not None
-            and list(rollout_versions) != list(_producing_weight_versions(payload))
+            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
         ):
             raise ValueError("loss-family row provenance does not match the shared training payload")
         self._algo.validate_payload(rollout_data)
@@ -942,7 +942,7 @@ class TrainBridgeActorImpl:
                 return TrainingJobResult(
                     outcome="storage_blocked",
                     storage=storage_plan,
-                    weight_version=self._weight_version,
+                    runtime_load_id=self._runtime_load_id,
                 )
             # The teacher is scored before the RUNNING marker so a
             # scoring failure leaves no partial state: the job
@@ -982,7 +982,7 @@ class TrainBridgeActorImpl:
                 )
                 train_results = training.worker_results
                 durable_metrics.update(training.durable_metrics)
-                durable_metrics.update(self._algo.provenance_metrics(rollout_data, self.serving_weight_version()))
+                durable_metrics.update(self._algo.provenance_metrics(rollout_data, self.serving_runtime_load_id()))
                 worker_metrics = dict(self._get(self._group.async_pop_rank0_metrics()))
                 train_metrics = next(
                     (dict(result) for result in train_results if isinstance(result, Mapping) and result),
@@ -1026,16 +1026,16 @@ class TrainBridgeActorImpl:
                 raise
         return marker, train_metrics, durable_metrics
 
-    def serving_weight_version(self) -> str:
-        """Return the last successfully published serving-weight version.
+    def serving_runtime_load_id(self) -> str:
+        """Return the last successfully published serving-runtime load ID.
 
         Failed swaps can consume a backend counter before raising, so this
         caches only completed publications. Reef recovery uses the value to
         reconcile the serving engine with its recovered head.
         """
-        if self._weight_version == "0":
-            self._weight_version = str(self._get(self._group.async_get_rank0_weight_version()))
-        return self._weight_version
+        if self._runtime_load_id == "0":
+            self._runtime_load_id = str(self._get(self._group.async_get_rank0_runtime_load_id()))
+        return self._runtime_load_id
 
     def _update_serving(self, *, force_full: bool = False, scenario: str | None = None) -> str:
         """Publish the group's weights; ``scenario`` names the adapter a LoRA publication belongs to.
@@ -1059,8 +1059,8 @@ class TrainBridgeActorImpl:
             )
             if self._colocate:
                 self._manager_call("onload_kv")
-            raw_version = str(self._get(self._group.async_get_rank0_weight_version()))
-            observed = [str(value) for value in self._manager_call("get_weight_versions")]
+            raw_version = str(self._get(self._group.async_get_rank0_runtime_load_id()))
+            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
             if not observed or set(observed) != {raw_version}:
                 raise RuntimeError(f"serving engines disagree after update: {observed!r}")
             if residency is not None and scenario is not None:
@@ -1070,7 +1070,7 @@ class TrainBridgeActorImpl:
             with suppress(Exception):
                 self._manager_call("terminate_updatable_engines")
             raise
-        self._weight_version = raw_version
+        self._runtime_load_id = raw_version
         return raw_version
 
     def _manager_call(self, method: str, *args: Any) -> Any:

@@ -36,7 +36,7 @@ const methods = [
 
 const steps = [
   "Serve the request, forwarded to the model unchanged",
-  "Record the exchange and the artifact version behind it",
+  "Record the exchange and the release behind it",
   "Learn: turn eligible feedback into a candidate update",
   "Publish the accepted candidate and serve it next",
 ];
@@ -183,7 +183,7 @@ curl http://localhost:8900/healthz`}</code></pre>
       <section className="home-section process-section" id="learning-loop">
         <div>
           <h2>How Reef learns</h2>
-          <p>Your harness keeps its prompts, tools, environments, and graders. Reef records which artifact version served each response.</p>
+          <p>Your harness keeps its prompts, tools, environments, and graders. Reef records which release served each response.</p>
           <Link className="text-link" href="/docs/getting-started/architecture">Read the architecture <ArrowRight size={15} /></Link>
         </div>
         <ol className="step-list">

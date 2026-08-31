@@ -181,7 +181,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     Every ingested receipt sits in exactly one state: tracked
     (awaiting future traffic) → in-flight (judging) → candidate | terminal
     | trained. Terminal records are released for compaction instead of
-    ever entering a batch. Only the newest weight version (by record
+    ever entering a batch. Only the newest runtime load ID (by record
     arrival, not judgment arrival) ever batches: continual serving
     advances the version every step, and stale pending candidates would
     deadlock the FIFO.
@@ -308,8 +308,8 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             self._candidates[judgment.receipt] = sample
             if self._pending is None:
                 newest = max(self._candidates, key=self._arrival_order.__getitem__)
-                newest_version = self._candidates[newest].weight_version
-                for receipt in [r for r, s in self._candidates.items() if s.weight_version != newest_version]:
+                newest_version = self._candidates[newest].runtime_load_id
+                for receipt in [r for r, s in self._candidates.items() if s.runtime_load_id != newest_version]:
                     self._candidates.pop(receipt)
                     self.retire(receipt)
 

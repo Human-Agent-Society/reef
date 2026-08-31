@@ -7,13 +7,13 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
-# Re-exported for backward compatibility: the pure identity types moved to
-# reef.core so reef.core never imports from reef.artifact.
+# Re-export the pure identity types while keeping ``reef.core`` independent of
+# storage implementations.
 from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
 
 __all__ = [
-    "LOCAL_VERSION_PREFIX",
+    "LOCAL_RELEASE_PREFIX",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
@@ -26,22 +26,22 @@ __all__ = [
     "LiveWeightArtifactRef",
     "decode_artifact_ref",
     "encode_artifact_ref",
-    "is_local_version",
+    "is_local_release",
 ]
 
-#: Version prefix for process-local (staged, never published) artifacts.
-#: ``Artifact.local`` and repository staging both mint versions under it;
-#: ``is_local_version`` is the shared predicate for recognizing them.
-LOCAL_VERSION_PREFIX = "local:"
+#: Release prefix for process-local (staged, never published) artifacts.
+#: ``Artifact.local`` and repository staging both mint releases under it;
+#: ``is_local_release`` is the shared predicate for recognizing them.
+LOCAL_RELEASE_PREFIX = "local:"
 
 
-def is_local_version(version: str) -> bool:
-    """True when ``version`` names a process-local artifact without durable bytes."""
-    return version.startswith(LOCAL_VERSION_PREFIX)
+def is_local_release(release_id: str) -> bool:
+    """True when ``release_id`` names a process-local artifact without durable bytes."""
+    return release_id.startswith(LOCAL_RELEASE_PREFIX)
 
 
 class ArtifactError(ReefError):
-    """Base class for artifact storage and version-chain errors."""
+    """Base class for artifact storage and release-chain errors."""
 
 
 class ArtifactSourceError(ArtifactError):
@@ -122,9 +122,9 @@ class Artifact:
         token = uuid.uuid4().hex
         return cls(
             ArtifactRef(
-                artifact_id=f"{LOCAL_VERSION_PREFIX}{token}",
-                version=f"{LOCAL_VERSION_PREFIX}{token}",
-                parent_version=None,
+                content_id=f"content:{token}",
+                release_id=f"{LOCAL_RELEASE_PREFIX}{token}",
+                parent_release_id=None,
             ),
             repository,
             local_path=path,

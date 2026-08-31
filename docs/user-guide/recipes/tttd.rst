@@ -61,7 +61,7 @@ records the adapter version with the inference.
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
 group, and position. ``TTTDProcessor`` waits for every position in the grid. It
-rejects a grid that contains more than one artifact version. Groups with one
+rejects a grid that contains more than one release. Groups with one
 reward value across all siblings are removed after the grid reaches the barrier.
 If every group is constant, the processor keeps one group so that the training
 runtime receives a zero-signal batch.
@@ -74,7 +74,7 @@ SGLang after the optimizer step succeeds.
 
 The controller writes the updated PUCT archive to
 ``tttd-search-state.json`` with phase ``pending``. It waits for Reef's scenario
-step to advance and for the serving weight version to change. It then records
+step to advance and for the serving runtime load ID to change. It then records
 phase ``committed`` with the new scenario step and starts the next search step.
 
 Configuration
@@ -164,7 +164,7 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and weight version:
+status endpoint reports the scenario step and runtime load ID:
 
 .. code:: bash
 
@@ -382,7 +382,7 @@ before it can use an incompatible archive.
 A ``pending`` state contains the evaluated children for a step that the
 controller has not observed as committed. On restart, the controller waits for
 that transaction. A ``committed`` state records the scenario step and serving
-weight version that completed it. Serving weight-version strings belong to one
+runtime load ID that completed it. Serving runtime-load-ID strings belong to one
 engine session, so a restored checkpoint can receive a new string after the
 runtime starts. The controller accepts the new string after Reef restores the
 expected scenario step.

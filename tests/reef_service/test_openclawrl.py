@@ -50,7 +50,7 @@ def _turn(
     tokens=(1, 2, 3, 4),
     loss_mask=(1, 1),
     logprobs=(-0.1, -0.2),
-    weight_version="v1",
+    runtime_load_id="v1",
     topk_rows=None,
 ):
     training = {
@@ -61,7 +61,7 @@ def _turn(
         # every response token.
         "topk_indices": [[1, 2] for _ in loss_mask] if topk_rows is None else topk_rows,
         "topk_log_probs": [[-0.1, -2.0] for _ in loss_mask],
-        "weight_version": weight_version,
+        "runtime_load_id": runtime_load_id,
         "response_length": len(loss_mask),
     }
     return AgentRecord.create(
@@ -188,12 +188,12 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
 
 
 @pytest.mark.unit
-def test_stale_weight_versions_drop_from_pending_candidates() -> None:
+def test_stale_runtime_load_ids_drop_from_pending_candidates() -> None:
     worker = FakeWorker()
     processor = _processor(batch_size=2, worker=worker)
-    processor.ingest(_turn("old", Q1, weight_version="v1"))
+    processor.ingest(_turn("old", Q1, runtime_load_id="v1"))
     processor.ingest(_turn("cont1", _successor(Q1, "ok")))
-    processor.ingest(_turn("new", Q2, weight_version="v2"))
+    processor.ingest(_turn("new", Q2, runtime_load_id="v2"))
     processor.ingest(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
@@ -343,9 +343,9 @@ def test_stale_drop_uses_record_arrival_order_not_verdict_order() -> None:
     """A slow judgment for an old-version turn must not purge fresh candidates."""
     worker = FakeWorker()
     processor = _processor(batch_size=2, worker=worker)
-    processor.ingest(_turn("old", Q1, weight_version="v1"))
+    processor.ingest(_turn("old", Q1, runtime_load_id="v1"))
     processor.ingest(_turn("cont1", _successor(Q1, "ok")))
-    processor.ingest(_turn("new", Q2, weight_version="v2"))
+    processor.ingest(_turn("new", Q2, runtime_load_id="v2"))
     processor.ingest(_turn("cont2", _successor(Q2, "ok")))
     # Judgments land in the OPPOSITE order of generation: v2 first, v1 last.
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))

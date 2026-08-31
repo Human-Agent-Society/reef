@@ -28,18 +28,18 @@ def _group(*handlers):
 def test_bridge_facing_train_group_methods_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ray_train_groups.ray, "get", lambda value: value)
     first = SimpleNamespace(
-        restore_weight_version_for_republication=_RemoteMethod("restore-0"),
+        restore_runtime_load_id_for_republication=_RemoteMethod("restore-0"),
         pop_metrics=_RemoteMethod("metrics"),
-        get_weight_version=_RemoteMethod("incarnation:4"),
+        get_runtime_load_id=_RemoteMethod("incarnation:4"),
     )
     second = SimpleNamespace(
-        restore_weight_version_for_republication=_RemoteMethod("restore-1"),
+        restore_runtime_load_id_for_republication=_RemoteMethod("restore-1"),
     )
     group = _group(first, second)
 
-    assert group.restore_weight_version_for_republication("incarnation:4") == ["restore-0", "restore-1"]
+    assert group.restore_runtime_load_id_for_republication("incarnation:4") == ["restore-0", "restore-1"]
     assert group.async_pop_rank0_metrics() == "metrics"
-    assert group.async_get_rank0_weight_version() == "incarnation:4"
+    assert group.async_get_rank0_runtime_load_id() == "incarnation:4"
 
 
 @pytest.mark.unit
@@ -53,11 +53,11 @@ def test_train_group_uses_public_update_path_until_full_disk_reload(monkeypatch:
 
     update = _RemoteMethod("updated")
     version = _RemoteMethod("deployment:6")
-    group._actor_handlers = [SimpleNamespace(update_weights=update, get_weight_version=version)]
+    group._actor_handlers = [SimpleNamespace(update_weights=update, get_runtime_load_id=version)]
     group._full_disk_weight_update_enabled = lambda: True
     group._release_train_enabled = lambda: True
     group.args = SimpleNamespace(update_weight_disk_dir=str(tmp_path))
-    group._disk_weight_version = 5
+    group._disk_runtime_load_id = 5
     released: list[bool] = []
     reloaded: list[tuple[object, int, str, bool]] = []
     group.release = lambda: released.append(True)
@@ -66,7 +66,7 @@ def test_train_group_uses_public_update_path_until_full_disk_reload(monkeypatch:
     )
 
     assert group.update_weights() is None
-    assert group._disk_weight_version == 6
+    assert group._disk_runtime_load_id == 6
     assert update.calls == [((), {})]
     assert released == [True]
     assert reloaded == [(tmp_path / "weight_v000006", 6, "deployment:6", True)]

@@ -2,7 +2,7 @@ Quickstart
 ==========
 
 Reef adds four things to an ordinary inference endpoint: a scenario, a receipt,
-a report, and a version chain.
+a report, and a release chain.
 
 Two more terms matter once you want it to learn: the **recipe** and the
 **artifact**, shown below.
@@ -13,7 +13,7 @@ Two more terms matter once you want it to learn: the **recipe** and the
    Report :: feedback that quotes receipts
    Recipe* :: the method that turns reports into the next artifact
    Artifact* :: what gets versioned: weights or a harness tree
-   Version chain :: the history of served artifacts
+   Release chain :: the history of served artifacts
 
 Run the loop
 ------------
@@ -118,15 +118,15 @@ with no GPU.
            -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
          # x-reef-agent-record-id: ee5aa401634b4567bf9dae21816abde4
 
-   #. **Read the version chain.**
+   #. **Read the release chain.**
 
       .. code:: bash
 
          curl -sS -H "Authorization: Bearer reef-local" \
-           http://127.0.0.1:8900/reef/scenarios/hello-reef/versions
-         # {"scenario": "hello-reef", "versions": [{"artifact_version": "...", "step": 0, ...}]}
+           http://127.0.0.1:8900/reef/scenarios/hello-reef/releases
+         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "step": 0, ...}]}
 
-      One version, and it will stay at one: this deployment's recipe is the
+      One release, and it will stay at one: this deployment's recipe is the
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
@@ -146,7 +146,7 @@ whole loop together. Run it, then read `Evolve your harness
 Scenario
 --------
 
-A scenario is one workload: its records, its training state, its version chain.
+A scenario is one workload: its records, its training state, its release chain.
 Scenarios never share data or updates.
 
 The first request carrying a new ``x-reef-scenario`` creates it and binds it to
@@ -162,7 +162,7 @@ Receipt
 -------
 
 Every recorded exchange gets an id, and that id is the receipt. It identifies
-the request, the response, and the artifact version that produced it.
+the request, the response, and the release that produced it.
 
 The receipt arrives in the ``x-reef-agent-record-id`` response header or in the
 terminal SSE metadata for a stream. `HTTP API
@@ -180,24 +180,24 @@ Whatever already decides whether your agent did well stays in your harness.
 That may be a test suite, a verifier, or a human. Reports are consumed at most
 once, so a retry or late arrival is never counted twice.
 
-Version chain
+Release chain
 -------------
 
-Every accepted update creates a version with a parent, so a scenario's history
-is a chain rather than a mutable pointer. A receipt names the version that
+Every accepted update creates a release with a parent, so a scenario's history
+is a chain rather than a mutable pointer. A receipt names the release that
 served it.
 
 .. flow::
    :loop: each accepted update extends the chain
 
-   v0 :: the starting artifact
-   v1 :: first accepted update
-   v2* :: current version serving requests
+   r0 :: the starting artifact
+   r1 :: first accepted update
+   r2* :: current release serving requests
 
-Durable versions are Git-backed and can be pinned or rolled back. Between
-checkpoints, weight versions live in engine memory; their bytes are not
+Durable releases are Git-backed and can be pinned or rolled back. Between
+checkpoints, runtime load IDs live in engine memory; their bytes are not
 restorable after a restart. `Architecture
-<architecture.rst#the-version-chain>`__ has the details.
+<architecture.rst#the-release-chain>`__ has the details.
 
 Recipe and artifact
 -------------------

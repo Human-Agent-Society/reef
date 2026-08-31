@@ -77,7 +77,7 @@ class _ToyProcessor(ComputedFeedbackProcessor):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            weight_version=record.payload.get("version", "v1"),
+            runtime_load_id=record.payload.get("version", "v1"),
         )
 
     def make_batch(self, samples: tuple[PolicySample, ...], batch_number: int) -> PolicyBatch:
@@ -144,7 +144,7 @@ def test_refused_submission_retires_immediately() -> None:
     assert "r1" in processor.retention_decision().releasable_agent_record_ids
 
 
-def test_stale_weight_versions_drop_by_record_arrival() -> None:
+def test_stale_runtime_load_ids_drop_by_record_arrival() -> None:
     processor, worker = _engine(batch_size=2)
     processor.ingest(_record("old", track=True, version="v1"))
     processor.ingest(_record("done1", completes="old"))

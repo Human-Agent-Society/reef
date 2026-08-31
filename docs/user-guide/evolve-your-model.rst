@@ -9,7 +9,7 @@ the serving engine, so inference keeps answering across the update.
 +==========================+===============================================+
 | Ray and the Slime driver | GPUs, the optimizer, checkpoints              |
 +--------------------------+-----------------------------------------------+
-| Reef                     | requests, records, the version chain          |
+| Reef                     | requests, records, the release chain          |
 +--------------------------+-----------------------------------------------+
 | Engine                   | SGLang, serving the current weights           |
 +--------------------------+-----------------------------------------------+
@@ -129,8 +129,8 @@ publishes it to the engine, and records a new version.
    export SCENARIO=<the x-reef-scenario you sent>   # examples/sao uses sao-smoke
 
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/versions
-   # {"scenario": "...", "versions": [{"kind": "training", "step": 1, ...}, ...]}
+     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/releases
+   # {"scenario": "...", "releases": [{"kind": "training", "step": 1, ...}, ...]}
 
 You are training when a new ``training`` entry appears, which happens once
 ``batch_size`` eligible records have arrived. Later requests use the current
@@ -169,10 +169,10 @@ list, and size the engine's adapter table for the scenarios you will train, plus
 one slot for the revision being published. The training thread takes turns
 between scenarios; each keeps its own adapter and optimizer state, and a restart
 recovers every one of them. ``/reef/status`` lists each scenario with its
-``adapter_weight_version``.
+``adapter_runtime_load_id``.
 
 An adapter the scenario did not train, such as one from an offline SFT run,
-is admitted the same way. It enters the version chain only if
+is admitted the same way. It enters the release chain only if
 ``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.

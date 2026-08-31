@@ -65,7 +65,7 @@ def test_lookup_does_not_cross_scenario_boundaries() -> None:
 
 
 @pytest.mark.unit
-def test_inference_data_can_record_artifact_version() -> None:
+def test_inference_data_can_record_release_id() -> None:
     artifact = ArtifactRef("artifact-1", "version-1", "initial")
 
     inference = AgentRecord.create(
@@ -85,7 +85,7 @@ def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
         "artifact-1",
         "version-1",
         "initial",
-        weight_version="weights-1",
+        runtime_load_id="weights-1",
     )
     original = AgentRecord.create(
         agent_record_id="persisted",

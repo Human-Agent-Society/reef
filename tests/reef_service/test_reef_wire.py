@@ -17,13 +17,13 @@ def test_parse_request_headers_is_case_insensitive_and_preserves_scenario() -> N
     parsed = parse_request_headers(
         {
             "X-reef-Scenario": "code-repair",
-            "X-reef-Artifact-Version": "checkpoint-v42",
+            "X-reef-Release-Id": "checkpoint-v42",
         },
         RequestType.REPORT,
     )
 
     assert parsed.scenario == "code-repair"
-    assert parsed.artifact_version == "checkpoint-v42"
+    assert parsed.release_id == "checkpoint-v42"
     assert parsed.request_type is RequestType.REPORT
 
 

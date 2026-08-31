@@ -46,4 +46,4 @@ Where it writes
 
 Each service gets a log and a PID file under ``run_dir``, which defaults to
 ``/tmp/reef-stack``. Reef writes its own state, including records, commit logs,
-and the Git-backed version chain, to the ``reef.*_dir`` paths in the config.
+and the Git-backed release chain, to the ``reef.*_dir`` paths in the config.

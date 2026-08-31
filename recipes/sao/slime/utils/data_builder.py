@@ -11,7 +11,7 @@ from reef.train.types import PolicySample
 
 _ROW_SHAPE = (
     "[source_id, tokens, loss_mask, rollout_log_probs, reward, action_mask, "
-    "producing_weight_version, rollout_created_at]"
+    "producing_runtime_load_id, rollout_created_at]"
 )
 
 
@@ -20,7 +20,7 @@ def sao_sample_row(sample: PolicySample) -> list[Any]:
 
     The first five columns are the shared policy 5-tuple; SAO appends the
     action mask (for skip-observation GAE) and rollout provenance (producing
-    weight version, creation time) the 5-tuple has no slot for. Outbound
+    runtime load ID, creation time) the 5-tuple has no slot for. Outbound
     mirror of :func:`build_sao_rollout_data`.
     """
     return [
@@ -30,7 +30,7 @@ def sao_sample_row(sample: PolicySample) -> list[Any]:
         list(sample.rollout_log_probs),
         sample.reward,
         list(sample.action_mask),
-        sample.weight_version,
+        sample.runtime_load_id,
         sample.rollout_created_at,
     ]
 
@@ -44,7 +44,7 @@ def build_sao_rollout_data(
 
     SAO's wire row keeps the policy 5-tuple as its prefix and appends the
     action mask plus rollout provenance: ``[source_id, tokens, loss_mask,
-    rollout_log_probs, reward, action_mask, producing_weight_version,
+    rollout_log_probs, reward, action_mask, producing_runtime_load_id,
     rollout_created_at]``. The shared policy builder assembles the 5-tuple
     columns; this builder validates the appended columns and attaches them.
     Each SAO sample is one independently scheduled rollout, so there is no
@@ -55,7 +55,7 @@ def build_sao_rollout_data(
     """
     base_rows: list[list[Any]] = []
     action_masks: list[list[int]] = []
-    producing_weight_versions: list[str | None] = []
+    producing_runtime_load_ids: list[str | None] = []
     rollout_created_ats: list[float | None] = []
 
     for sample_index, row in enumerate(samples):
@@ -68,7 +68,7 @@ def build_sao_rollout_data(
             row_log_probs,
             reward,
             row_action_mask,
-            producing_weight_version,
+            producing_runtime_load_id,
             rollout_created_at,
         ) = row
         row_tokens, row_loss_mask, row_log_probs, row_action_mask, reward = validate_policy_columns(
@@ -85,11 +85,13 @@ def build_sao_rollout_data(
 
         base_rows.append([source_id, row_tokens, row_loss_mask, row_log_probs, reward])
         action_masks.append(row_action_mask)
-        producing_weight_versions.append(None if producing_weight_version is None else str(producing_weight_version))
+        producing_runtime_load_ids.append(
+            None if producing_runtime_load_id is None else str(producing_runtime_load_id)
+        )
         rollout_created_ats.append(None if rollout_created_at is None else float(rollout_created_at))
 
     data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
     data["action_masks"] = action_masks
-    data["producing_weight_versions"] = producing_weight_versions
+    data["producing_runtime_load_ids"] = producing_runtime_load_ids
     data["rollout_created_ats"] = rollout_created_ats
     return data

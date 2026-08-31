@@ -6,8 +6,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
-from reef.artifact.version_chain import ArtifactVersionChain, VersionNotRestorable
 from reef.core.reports import ReportBase
 from reef.records import RecordStore
 from reef.runtime.base import InferenceRuntime
@@ -24,7 +24,7 @@ from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class Scenario:
-    """Scenario aggregate owning one immutable recipe binding and artifact version chain."""
+    """Scenario aggregate owning one immutable recipe binding and release chain."""
 
     def __init__(
         self,
@@ -44,7 +44,7 @@ class Scenario:
         self._surface = binding.surface
         self._records = records
         self._trainer = trainer
-        self._artifact_chain = ArtifactVersionChain(repository, process_id=process_id)
+        self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._commit_protocol = ScenarioCommitProtocol(
             name=name,
             binding=binding,
@@ -79,7 +79,7 @@ class Scenario:
 
     @property
     def repository(self) -> Repository:
-        """The version chain's scenario-scoped artifact repository.
+        """The release chain's scenario-scoped artifact repository.
 
         The public read path to artifact heads (base, current, checkpoint);
         mutation goes through Scenario methods so it stays serialized with
@@ -167,36 +167,36 @@ class Scenario:
             record = records[-1]
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
 
-    def metrics_for_version(self, artifact_version: str) -> Mapping[str, Any] | None:
-        """Metrics of the training step that published ``artifact_version``, if logged."""
-        return self._commit_protocol.metrics_for_version(artifact_version)
+    def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
+        """Metrics of the training step that published ``release_id``, if logged."""
+        return self._commit_protocol.metrics_for_version(release_id)
 
-    def versions(self) -> tuple[dict[str, Any], ...]:
-        return self._commit_protocol.versions()
+    def releases(self) -> tuple[dict[str, Any], ...]:
+        return self._commit_protocol.releases()
 
-    def artifact_for_version(self, artifact_version: str) -> Artifact:
+    def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a catalog version for read-only serving; absence raises ArtifactNotFound."""
-        return self._commit_protocol.artifact_for_version(artifact_version)
+        return self._commit_protocol.artifact_for_version(release_id)
 
     def artifact_snapshot(
         self,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
         """Freeze one artifact and its gate metrics outside an in-flight commit."""
         with self._commit_protocol.lock:
             artifact = (
                 Artifact(self.repository.require_current_artifact(), self.repository)
-                if artifact_version is None
-                else self._commit_protocol.artifact_for_version(artifact_version)
+                if release_id is None
+                else self._commit_protocol.artifact_for_version(release_id)
             )
-            metrics = self._commit_protocol.metrics_for_version(artifact.ref.version)
+            metrics = self._commit_protocol.metrics_for_version(artifact.ref.release_id)
             return artifact, metrics
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
 
-    def rollback(self, artifact_version: str) -> ArtifactRef:
-        return self._commit_protocol.rollback(artifact_version)
+    def rollback(self, release_id: str) -> ArtifactRef:
+        return self._commit_protocol.rollback(release_id)
 
     def commit(self, result: TrainStepResult) -> Any:
         return self._commit_protocol.commit(result)
@@ -224,6 +224,6 @@ class Scenario:
 
 __all__ = [
     "SCENARIO_SNAPSHOT_METADATA_KEY",
+    "ReleaseNotRestorable",
     "Scenario",
-    "VersionNotRestorable",
 ]

@@ -28,7 +28,7 @@ def _sao_row(
     action_mask: list[int] | None = None,
     log_probs: list[float] | None = None,
     reward: float = 0.5,
-    producing_weight_version: str | None = "slime-v3",
+    producing_runtime_load_id: str | None = "slime-v3",
     rollout_created_at: float | None = 1234.5,
 ) -> list[object]:
     """One 8-element SAO row as emitted by Reef's remote handle."""
@@ -43,7 +43,7 @@ def _sao_row(
         log_probs,
         reward,
         action_mask,
-        producing_weight_version,
+        producing_runtime_load_id,
         rollout_created_at,
     ]
 
@@ -67,7 +67,7 @@ def _execute_and_update_weights(actor, payload):
 @pytest.mark.unit
 def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
     converted = to_slime_rollout_data(
-        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_weight_version="slime-v4")])
+        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_runtime_load_id="slime-v4")])
     )
 
     assert converted["loss"] == "sao"
@@ -78,7 +78,7 @@ def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
     assert converted["response_lengths"] == [3, 3]
     assert converted["rollout_log_probs"] == [[-0.1, -0.2, -0.3], [-0.1, -0.2, -0.3]]
     # Provenance rides through for policy lag / queue age.
-    assert converted["producing_weight_versions"] == ["slime-v3", "slime-v4"]
+    assert converted["producing_runtime_load_ids"] == ["slime-v3", "slime-v4"]
     assert converted["rollout_created_ats"] == [1234.5, 1234.5]
     # No comparison-group barrier: one rollout per id, and no advantages.
     assert converted["rollout_ids"] == [0, 1]
@@ -143,25 +143,25 @@ def test_sao_parser_requires_rollout_ids_for_every_sample() -> None:
 
 @pytest.mark.unit
 def test_sao_parser_tolerates_missing_provenance() -> None:
-    converted = to_slime_rollout_data(_payload([_sao_row(producing_weight_version=None, rollout_created_at=None)]))
+    converted = to_slime_rollout_data(_payload([_sao_row(producing_runtime_load_id=None, rollout_created_at=None)]))
 
-    assert converted["producing_weight_versions"] == [None]
+    assert converted["producing_runtime_load_ids"] == [None]
     assert converted["rollout_created_ats"] == [None]
 
 
 @pytest.mark.unit
-def test_weight_version_sequence_parses_matching_incarnation() -> None:
-    from recipes.sao.slime import _weight_version_sequence
+def test_runtime_load_id_sequence_parses_matching_incarnation() -> None:
+    from recipes.sao.slime import _runtime_load_id_sequence
 
-    assert _weight_version_sequence("abc:7", "abc") == 7
+    assert _runtime_load_id_sequence("abc:7", "abc") == 7
 
 
 @pytest.mark.unit
-def test_weight_version_sequence_is_none_across_incarnations() -> None:
-    from recipes.sao.slime import _weight_version_sequence
+def test_runtime_load_id_sequence_is_none_across_incarnations() -> None:
+    from recipes.sao.slime import _runtime_load_id_sequence
 
-    assert _weight_version_sequence("old:7", "new") is None
-    assert _weight_version_sequence("no-colon", "no-colon") is None
+    assert _runtime_load_id_sequence("old:7", "new") is None
+    assert _runtime_load_id_sequence("no-colon", "no-colon") is None
 
 
 @pytest.mark.unit
@@ -170,8 +170,8 @@ def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> 
     rollout_data = to_slime_rollout_data(
         _payload(
             [
-                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_weight_version="inc:2"),
-                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_weight_version="inc:4"),
+                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:2"),
+                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:4"),
             ]
         )
     )
@@ -190,8 +190,8 @@ def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplo
     rollout_data = to_slime_rollout_data(
         _payload(
             [
-                _sao_row("a", producing_weight_version="inc:2"),
-                _sao_row("b", producing_weight_version="inc:9"),
+                _sao_row("a", producing_runtime_load_id="inc:2"),
+                _sao_row("b", producing_runtime_load_id="inc:9"),
             ]
         )
     )
@@ -206,7 +206,7 @@ def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplo
 @pytest.mark.unit
 def test_sao_provenance_metrics_skips_lag_across_incarnation() -> None:
     sao = resolve_loss_family("sao")
-    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_weight_version="oldinc:2")]))
+    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="oldinc:2")]))
 
     metrics = sao.provenance_metrics(rollout_data, serving_version="newinc:5")
 
@@ -226,12 +226,12 @@ class _FakeRank:
     def __init__(self, version="v1", metrics=None):
         self.version = version
         self.metrics = {} if metrics is None else metrics
-        self.get_weight_version = _RemoteMethod(lambda: self.version)
+        self.get_runtime_load_id = _RemoteMethod(lambda: self.version)
         self.pop_metrics = _RemoteMethod(lambda: self.metrics)
 
 
 # The serving head and the rows' producing head share an incarnation so policy
-# lag is defined; ``_weight_version_sequence`` drops lag across a restart.
+# lag is defined; ``_runtime_load_id_sequence`` drops lag across a restart.
 SERVING_VERSION = "inc:5"
 
 
@@ -240,7 +240,7 @@ class _FakeRolloutManager:
         self.packed = packed
         self.prepare_external_train_data = _RemoteMethod(lambda data: "packed-ref")
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
-        self.get_weight_versions = _RemoteMethod(lambda: [SERVING_VERSION])
+        self.get_runtime_load_ids = _RemoteMethod(lambda: [SERVING_VERSION])
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
         self.pause_generation_for_update = _RemoteMethod(lambda: None)
         self.continue_generation_after_update = _RemoteMethod(lambda: None)
@@ -266,13 +266,13 @@ class _RecordingGroup:
     def async_pop_rank0_metrics(self):
         return self._actor_handlers[0].pop_metrics.remote()
 
-    def async_get_rank0_weight_version(self):
-        return self._actor_handlers[0].get_weight_version.remote()
+    def async_get_rank0_runtime_load_id(self):
+        return self._actor_handlers[0].get_runtime_load_id.remote()
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         del force_full, manage_generation
 
-    def restore_weight_version_for_republication(self, weight_version):
+    def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
     def save_model(self, rollout_id, force_sync=False):
@@ -308,11 +308,11 @@ def _sao_actor(
     )
     payload = _payload(
         [
-            _sao_row("a", producing_weight_version="inc:4"),
-            _sao_row("b", reward=1.0, producing_weight_version="inc:3"),
+            _sao_row("a", producing_runtime_load_id="inc:4"),
+            _sao_row("b", reward=1.0, producing_runtime_load_id="inc:3"),
         ]
     )
-    payload.update(rollout_id=0, expected_weight_version=SERVING_VERSION)
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
     return actor, actor_group, critic_group, payload
 
 
@@ -433,8 +433,8 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
         critic_group=critic_group,
         loss_family="sao",
     )
-    payload = _payload([_sao_row("a", producing_weight_version="inc:4")])
-    payload.update(rollout_id=0, expected_weight_version=SERVING_VERSION)
+    payload = _payload([_sao_row("a", producing_runtime_load_id="inc:4")])
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -687,7 +687,7 @@ def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
         loss_family="sao",
     )
     payload = _payload([_sao_row("a")])
-    payload.update(rollout_id=0, expected_weight_version=SERVING_VERSION)
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
 
     with pytest.raises(RuntimeError, match="SAO requires a value model"):
         _execute_and_update_weights(actor, payload)

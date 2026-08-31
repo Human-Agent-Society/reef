@@ -52,7 +52,7 @@ class GuidanceRunOutcome:
     start_step: int
     next_step: int
     step_summaries: tuple[dict[str, Any], ...]
-    weight_version: str | None
+    runtime_load_id: str | None
 
 
 class SearchHarness(Protocol):
@@ -147,7 +147,7 @@ def wait_for_training_step(
         if failure is not None:
             raise RuntimeError(
                 f"TTTD step {expected_rollout_id} failed ({failure['reason']}) because its reports span "
-                f"artifact versions {failure['artifact_versions']!r}"
+                f"releases {failure['release_ids']!r}"
             )
         if last_health.get("completed_train_steps") == expected_completed_steps:
             if last_health.get("last_train_rollout_id") != expected_rollout_id:
@@ -187,7 +187,7 @@ def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any]
             not isinstance(failure, Mapping)
             or not isinstance(failure.get("reason"), str)
             or not failure["reason"]
-            or not isinstance(failure.get("artifact_versions"), list)
+            or not isinstance(failure.get("release_ids"), list)
         ):
             raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
         if failure.get("step") == step:
@@ -324,7 +324,7 @@ class GuidanceRunController:
 
         step_summaries = [dict(summary) for summary in (saved or {}).get("step_summaries", [])]
         all_results: list[Any] = []
-        weight_version: str | None = None
+        runtime_load_id: str | None = None
         for step in range(start_step, total_steps):
             started_at = time.monotonic()
             self.emit({"event": "guidance_step_started", "step": step})
@@ -382,7 +382,7 @@ class GuidanceRunController:
                 step_summaries=step_summaries,
                 extra=self.resume_extra,
             )
-            weight_version = bridge_health.get("weight_version") or weight_version
+            runtime_load_id = bridge_health.get("runtime_load_id") or runtime_load_id
             all_results.extend(results)
             self.emit({"event": "guidance_step_committed", **summary})
 
@@ -391,7 +391,7 @@ class GuidanceRunController:
             start_step=start_step,
             next_step=total_steps,
             step_summaries=tuple(step_summaries),
-            weight_version=weight_version,
+            runtime_load_id=runtime_load_id,
         )
 
 

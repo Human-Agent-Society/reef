@@ -157,7 +157,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["version"] = request.headers["x-reef-artifact-version"]
+            received["version"] = request.headers["x-reef-release-id"]
             received["authorization"] = request.headers["Authorization"]
             return __import__("aiohttp").web.json_response({"provider": "ok"})
 

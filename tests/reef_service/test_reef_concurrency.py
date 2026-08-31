@@ -61,12 +61,12 @@ class CountingRuntime(TrainingRuntime):
             candidate_id=job_id,
             training_job_id=job_id,
             checkpoint_path="/unused",
-            current_weight_version=None,
-            metadata={"weight_version": version},
+            current_runtime_load_id=None,
+            metadata={"runtime_load_id": version},
         )
 
     def activate_candidate(self, candidate):
-        return ActivatedModel(candidate.candidate_id, str(candidate.metadata["weight_version"]))
+        return ActivatedModel(candidate.candidate_id, str(candidate.metadata["runtime_load_id"]))
 
     def reject_candidate(self, candidate, decision: SelectionDecision):
         del candidate, decision
@@ -124,16 +124,16 @@ def test_advance_current_requires_the_observed_head(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
-    repository = Repository(backend, backend.resolve_version())
+    repository = Repository(backend, backend.resolve_release())
     repository.fork()
     head = repository.require_current_artifact()
 
-    stale = ArtifactRef(artifact_id="artifact:stale", version="stale", parent_version=None)
+    stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
     advanced = LiveWeightArtifactRef(
-        artifact_id="live:1",
-        version="live:proc:w1:1",
-        parent_version=head.version,
-        weight_version="w1",
+        content_id="live:1",
+        release_id="live:proc:w1:1",
+        parent_release_id=head.release_id,
+        runtime_load_id="w1",
     )
     with pytest.raises(ArtifactConflict, match="serving head advanced"):
         repository.advance_current(advanced, expected=stale)
@@ -176,8 +176,8 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     assert scenario.scenario_step == total
     head = scenario.repository.require_current_artifact()
     assert isinstance(head, LiveWeightArtifactRef)
-    assert head.weight_version == f"w{total}"
-    assert head.version.endswith(f":w{total}:{total}")
+    assert head.runtime_load_id == f"w{total}"
+    assert head.release_id.endswith(f":w{total}:{total}")
 
 
 @pytest.mark.unit
@@ -249,16 +249,16 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact
-    # Walk the durable version chain: every publish linked exactly one parent, so
+    # Walk the durable release chain: every publish linked exactly one parent, so
     # the chain from the tip reaches the bootstrap ref in total + fork + base
     # hops, with no forks or skipped links.
     node = backend.current()
     nodes = 0
     while True:
         nodes += 1
-        if node.parent_version is None:
+        if node.parent_release_id is None:
             break
-        node = backend.resolve_version(node.parent_version)
+        node = backend.resolve_release(node.parent_release_id)
     assert nodes == total + 2
 
 
@@ -280,10 +280,10 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
         # A concurrent writer moving the serving head after this commit
         # observed it: the fenced advance must fail instead of overwriting.
         intruder = LiveWeightArtifactRef(
-            artifact_id="live:intruder",
-            version="live:other:w9:9",
-            parent_version=None,
-            weight_version="w9",
+            content_id="live:intruder",
+            release_id="live:other:w9:9",
+            parent_release_id=None,
+            runtime_load_id="w9",
         )
         Repository.advance_current(repository, intruder, expected=repository.require_current_artifact())
         return staged
@@ -296,5 +296,5 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
         dispatcher._commit_result("chat", TrainStepResult(state=None, artifact=Artifact.local(candidate)))
 
     assert scenario.scenario_step == 0
-    assert repository.current_artifact.version == "live:other:w9:9"
+    assert repository.current_artifact.release_id == "live:other:w9:9"
     assert list((tmp_path / "staged").rglob("*")) == []

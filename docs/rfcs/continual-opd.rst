@@ -48,7 +48,7 @@ Continual OPD on Reef: framework
                  already samples from the improved model
                                    │
                                    ▼
-      artifact version chain (one version per distillation step;
+      release chain (one version per distillation step;
       probe-set regression → rollback)
 
 1. **Router:** v1 lives on the harness side (~50 LoC). The student runs first;

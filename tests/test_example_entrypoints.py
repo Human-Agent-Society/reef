@@ -234,7 +234,7 @@ def test_basic_harness_runs_inference_and_preserves_its_receipt(monkeypatch) -> 
         {
             "choices": [{"message": {"content": "42"}}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 1},
-            "metadata": {"weight_version": "basic:0"},
+            "metadata": {"runtime_load_id": "basic:0"},
         },
         "receipt-basic",
     )
@@ -246,7 +246,7 @@ def test_basic_harness_runs_inference_and_preserves_its_receipt(monkeypatch) -> 
     assert environment.commands and "42" in environment.commands[0]
     assert context.metadata["reef"] == {
         "agent_record_ids": ["receipt-basic"],
-        "weight_versions": ["basic:0"],
+        "runtime_load_ids": ["basic:0"],
     }
     assert (context.n_input_tokens, context.n_output_tokens) == (3, 1)
 

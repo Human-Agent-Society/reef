@@ -18,10 +18,10 @@ from slime.backends.megatron_utils.update_weight.update_weight_from_distributed 
 from slime.utils.distributed_utils import get_gloo_group
 from tqdm import tqdm
 
-from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion, new_weight_version_incarnation
+from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
 
 
-class _TransportWeightVersion(WeightVersion):
+class _TransportRuntimeLoadId(RuntimeLoadId):
     """Numeric formatting used only by raw Slime's disk-delta file layout."""
 
     def __format__(self, format_spec: str) -> str:
@@ -43,45 +43,45 @@ class SynchronizedWeightUpdateMixin:
     _is_pp_src_rank: bool
     _group_name: str
     _model_update_groups: Any
-    weight_version_incarnation: str
+    runtime_load_id_incarnation: str
     weight_update_sequence: int
     _on_chunk: Callable[[list[tuple[str, torch.Tensor]]], None]
 
-    def _initialize_weight_version(self, incarnation: str | None = None) -> None:
+    def _initialize_runtime_load_id(self, incarnation: str | None = None) -> None:
         if incarnation is None:
-            shared = [new_weight_version_incarnation() if dist.get_rank() == 0 else None]
+            shared = [new_runtime_load_id_incarnation() if dist.get_rank() == 0 else None]
             dist.broadcast_object_list(shared, src=0, group=get_gloo_group())
             incarnation = shared[0]
         if not isinstance(incarnation, str) or not incarnation:
-            raise ValueError("weight-version incarnation must be a non-empty string")
-        self.weight_version_incarnation = incarnation
+            raise ValueError("runtime-load-ID incarnation must be a non-empty string")
+        self.runtime_load_id_incarnation = incarnation
         self.weight_update_sequence = 0
         self._source_phase_sequences: dict[str, int] = {}
 
     @property
-    def weight_version(self) -> WeightVersion:
-        return _TransportWeightVersion(self.weight_version_incarnation, self.weight_update_sequence)
+    def runtime_load_id(self) -> RuntimeLoadId:
+        return _TransportRuntimeLoadId(self.runtime_load_id_incarnation, self.weight_update_sequence)
 
-    @weight_version.setter
-    def weight_version(self, value: int | WeightVersion) -> None:
-        if isinstance(value, WeightVersion):
-            self.weight_version_incarnation = value.incarnation
+    @runtime_load_id.setter
+    def runtime_load_id(self, value: int | RuntimeLoadId) -> None:
+        if isinstance(value, RuntimeLoadId):
+            self.runtime_load_id_incarnation = value.incarnation
             self.weight_update_sequence = value.sequence
         else:
             self.weight_update_sequence = int(value)
 
     @property
-    def exact_weight_version(self) -> WeightVersion:
-        return self.weight_version
+    def exact_runtime_load_id(self) -> RuntimeLoadId:
+        return self.runtime_load_id
 
-    def restore_exact_weight_version(self, value: str) -> None:
-        published = WeightVersion.parse(value)
+    def restore_exact_runtime_load_id(self, value: str) -> None:
+        published = RuntimeLoadId.parse(value)
         if published.sequence < 1:
-            raise ValueError("a published checkpoint weight version must have a positive sequence")
-        current = self.weight_version
+            raise ValueError("a published checkpoint runtime load ID must have a positive sequence")
+        current = self.runtime_load_id
         if current.sequence != 0 and current != published:
-            raise RuntimeError(f"cannot republish weight version {published}; updater currently reports {current}")
-        self.weight_version_incarnation = published.incarnation
+            raise RuntimeError(f"cannot republish runtime load ID {published}; updater currently reports {current}")
+        self.runtime_load_id_incarnation = published.incarnation
         # The mandatory republication advances once and must recreate the
         # exact durable token tied to the recovered checkpoint.
         self.weight_update_sequence = published.sequence - 1
@@ -89,7 +89,7 @@ class SynchronizedWeightUpdateMixin:
     def _new_source_phase_prefix(self, kind: str) -> str:
         sequence = self._source_phase_sequences.get(kind, 0)
         self._source_phase_sequences[kind] = sequence + 1
-        return f"{self.weight_version_incarnation}:{mpu.get_pipeline_model_parallel_rank()}:{kind}:{sequence}"
+        return f"{self.runtime_load_id_incarnation}:{mpu.get_pipeline_model_parallel_rank()}:{kind}:{sequence}"
 
     def _reset_source_phases(self) -> None:
         self._source_phase_sequences.clear()
@@ -308,7 +308,7 @@ class SynchronizedWeightUpdateMixin:
             refs = update_weights_from_distributed(
                 self._group_name,
                 self._model_update_groups,
-                str(self.weight_version),
+                str(self.runtime_load_id),
                 self.rollout_engines,
                 converted_named_tensors,
                 load_format=load_format,

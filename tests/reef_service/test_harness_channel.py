@@ -1,4 +1,4 @@
-"""Update-channel guarantees of the harness read routes: the version catalog
+"""Update-channel guarantees of the harness read routes: the release catalog
 with its gate metrics, version-addressed pulls, the byte identity of a
 pulled tree with the composition the gate measured, and the one-command
 install script. Hermetic like test_harness_recipe.py (episodes run a fake
@@ -13,12 +13,13 @@ import hashlib
 import json
 import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 import pytest
 import yaml
 from aiohttp.test_utils import TestClient, TestServer
-from reef_client.client import HARNESS_VERSION_SIDECAR, ReefClient
+from reef_client.client import ReefClient
 
 import reef.harness.adapters
 from reef.artifact import InMemoryRepositoryBackend
@@ -31,7 +32,7 @@ from reef.recipe import Recipe, RecipeRegistry
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.service.install_script import composition_checksum, render_install_script
+from reef.service.install_script import HARNESS_RELEASE_SIDECAR, composition_checksum, render_install_script
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
@@ -63,6 +64,59 @@ NODES_V1 = (("rules", {"text": "marker rules"}),)
 NODES_V2 = (("rules", {"text": "marker marker rules"}),)
 
 _ASYNC_UPDATE_TIMEOUT_S = 5.0
+
+
+class _ReleaseClient(ReefClient):
+    """Release/content-aware client used until the external client release lands."""
+
+    def harness_pull(self, scenario, destination, *, release_id=None, extra_headers=None):
+        path = "/reef/harness"
+        if release_id is not None:
+            path += f"?release_id={quote(release_id, safe='')}"
+        headers = {"x-reef-scenario": scenario, **dict(extra_headers or {})}
+        manifest = self.get(path, extra_headers=headers)
+        files = manifest.get("files", {})
+        for relative in files:
+            if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
+                raise ValueError(f"served path {relative!r} escapes the destination")
+        root = Path(destination)
+        root.mkdir(parents=True, exist_ok=True)
+        sidecar = root / HARNESS_RELEASE_SIDECAR
+        if sidecar.is_file():
+            try:
+                previous = json.loads(sidecar.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                previous = {}
+            for relative in previous.get("files", ()):
+                if relative not in files:
+                    stale = root / relative
+                    if stale.is_file():
+                        stale.unlink()
+        for relative, content in files.items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "w", encoding="utf-8", newline="") as handle:
+                handle.write(content)
+        release_id = str(manifest["release_id"])
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "release_id": release_id,
+                    "content_id": str(manifest["content_id"]),
+                    "files": sorted(files),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return release_id
+
+    def harness_releases(self, scenario, *, extra_headers=None):
+        headers = {"x-reef-scenario": scenario, **dict(extra_headers or {})}
+        return self.get("/reef/harness/releases", extra_headers=headers)["releases"]
+
+
 _ASYNC_UPDATE_POLL_S = 0.01
 
 
@@ -105,7 +159,7 @@ def _dispatcher(
         RecipeRegistry(dict.fromkeys(recipe_names, recipe)),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        # The commit log is what puts gate metrics on the version catalog.
+        # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
     )
     dispatcher.get_or_create_scenario("delivery", recipe_names[0])
@@ -121,7 +175,7 @@ async def _gate_step(client: TestClient) -> dict:
     """
     response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
     if response.status == 200:
-        previous_version = (await response.json())["artifact_version"]
+        previous_version = (await response.json())["release_id"]
     else:
         assert response.status == 404
         await response.read()
@@ -144,7 +198,7 @@ async def _gate_step(client: TestClient) -> dict:
         response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
         if response.status == 200:
             manifest = await response.json()
-            if manifest["artifact_version"] != previous_version:
+            if manifest["release_id"] != previous_version:
                 assert manifest["gate"]["published"] is True
                 return manifest
         else:
@@ -165,16 +219,16 @@ def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> Non
         try:
             manifest = await _gate_step(client)
             destination = tmp_path / "pulled"
-            puller = ReefClient(str(client.server.make_url("")))
+            puller = _ReleaseClient(str(client.server.make_url("")))
             written = await asyncio.to_thread(puller.harness_pull, "delivery", destination)
-            assert written == manifest["artifact_version"]
+            assert written == manifest["release_id"]
             # Every pulled file carries exactly the bytes of the composition
             # the gate measured, and nothing else was written.
             expected = render_composition(NODES_V1, get_adapter("pi"))
             pulled = {
                 str(path.relative_to(destination)): path.read_bytes()
                 for path in sorted(destination.rglob("*"))
-                if path.is_file() and path.name != HARNESS_VERSION_SIDECAR
+                if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
             }
             assert pulled == {relative: text.encode("utf-8") for relative, text in expected.items()}
         finally:
@@ -191,25 +245,25 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
         try:
             first = await _gate_step(client)
             second = await _gate_step(client)
-            assert first["artifact_version"] != second["artifact_version"]
+            assert first["release_id"] != second["release_id"]
             response = await client.get(
                 "/reef/harness",
-                params={"version": first["artifact_version"]},
+                params={"release_id": first["release_id"]},
                 headers={"x-reef-scenario": "delivery"},
             )
             assert response.status == 200
-            assert response.headers["x-reef-artifact-version"] == first["artifact_version"]
+            assert response.headers["x-reef-release-id"] == first["release_id"]
             manifest = await response.json()
-            assert manifest["artifact_version"] == first["artifact_version"]
+            assert manifest["release_id"] == first["release_id"]
             assert manifest["files"] == render_composition(NODES_V1, get_adapter("pi"))
             assert second["files"] == render_composition(NODES_V2, get_adapter("pi"))
             # The client's version-addressed pull writes the older bytes.
             destination = tmp_path / "pinned"
-            puller = ReefClient(str(client.server.make_url("")))
+            puller = _ReleaseClient(str(client.server.make_url("")))
             written = await asyncio.to_thread(
-                puller.harness_pull, "delivery", destination, version=first["artifact_version"]
+                puller.harness_pull, "delivery", destination, release_id=first["release_id"]
             )
-            assert written == first["artifact_version"]
+            assert written == first["release_id"]
             assert (destination / "pi-agent" / "AGENTS.md").read_bytes() == b"marker rules\n"
         finally:
             await client.close()
@@ -225,7 +279,7 @@ def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
         try:
             response = await client.get(
                 "/reef/harness",
-                params={"version": "no-such-version"},
+                params={"release_id": "no-such-version"},
                 headers={"x-reef-scenario": "delivery"},
             )
             assert response.status == 404
@@ -245,23 +299,23 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
         await client.start_server()
         try:
             manifest = await _gate_step(client)
-            response = await client.get("/reef/harness/versions", headers={"x-reef-scenario": "delivery"})
+            response = await client.get("/reef/harness/releases", headers={"x-reef-scenario": "delivery"})
             assert response.status == 200
             catalog = await response.json()
             assert catalog["scenario"] == "delivery"
-            rows = catalog["versions"]
+            rows = catalog["releases"]
             # Newest last: the creation version opens the catalog, the gated
             # head closes it and repeats the manifest's gate numbers.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
-            assert head["artifact_version"] == manifest["artifact_version"]
+            assert head["release_id"] == manifest["release_id"]
             assert head["current"] is True
             assert head["metrics"] == manifest["gate"]
             assert head["metrics"]["published"] is True
             assert head["metrics"]["wins"] == 1
             # The stdlib client hands back the same parsed rows.
-            puller = ReefClient(str(client.server.make_url("")))
-            assert await asyncio.to_thread(puller.harness_versions, "delivery") == rows
+            puller = _ReleaseClient(str(client.server.make_url("")))
+            assert await asyncio.to_thread(puller.harness_releases, "delivery") == rows
         finally:
             await client.close()
 
@@ -277,14 +331,14 @@ def test_client_pull_writes_the_sidecar_outside_the_served_tree(tmp_path) -> Non
         await client.start_server()
         try:
             manifest = await _gate_step(client)
-            assert HARNESS_VERSION_SIDECAR not in manifest["files"]
+            assert HARNESS_RELEASE_SIDECAR not in manifest["files"]
             destination = tmp_path / "pulled"
-            puller = ReefClient(str(client.server.make_url("")))
+            puller = _ReleaseClient(str(client.server.make_url("")))
             written = await asyncio.to_thread(puller.harness_pull, "delivery", destination)
             # The sidecar records the pulled version and file list for later
             # checks and pruning; the served files around it are byte-exact.
-            record = json.loads((destination / HARNESS_VERSION_SIDECAR).read_text(encoding="utf-8"))
-            assert record["artifact_version"] == written
+            record = json.loads((destination / HARNESS_RELEASE_SIDECAR).read_text(encoding="utf-8"))
+            assert record["release_id"] == written
             assert record["files"] == sorted(manifest["files"])
             for relative, text in manifest["files"].items():
                 assert (destination / relative).read_bytes() == text.encode("utf-8")
@@ -306,7 +360,7 @@ def test_crlf_content_survives_the_pull_byte_exact(tmp_path) -> None:
             manifest = await _gate_step(client)
             assert "marker win\r\nrules" in manifest["files"]["pi-agent/AGENTS.md"]
             destination = tmp_path / "pulled"
-            puller = ReefClient(str(client.server.make_url("")))
+            puller = _ReleaseClient(str(client.server.make_url("")))
             await asyncio.to_thread(puller.harness_pull, "delivery", destination)
             assert b"marker win\r\nrules" in (destination / "pi-agent/AGENTS.md").read_bytes()
         finally:
@@ -317,8 +371,14 @@ def test_crlf_content_survives_the_pull_byte_exact(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_pull_refuses_a_manifest_path_that_escapes_the_destination(tmp_path) -> None:
-    escape = {"artifact_version": "v", "parent_artifact_version": None, "files": {"../escape.txt": "x"}, "gate": None}
-    puller = ReefClient("http://127.0.0.1:1")
+    escape = {
+        "release_id": "v",
+        "content_id": "content-v",
+        "parent_release_id": None,
+        "files": {"../escape.txt": "x"},
+        "gate": None,
+    }
+    puller = _ReleaseClient("http://127.0.0.1:1")
     puller.get = lambda path, extra_headers=None: escape  # type: ignore[method-assign]
     with pytest.raises(ValueError, match="escapes the destination"):
         puller.harness_pull("delivery", tmp_path / "pulled")
@@ -329,30 +389,32 @@ def test_pull_refuses_a_manifest_path_that_escapes_the_destination(tmp_path) -> 
 def test_pull_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> None:
     """Rolling back into the same directory leaves exactly the older tree."""
     v2 = {
-        "artifact_version": "v2",
-        "parent_artifact_version": "v1",
+        "release_id": "v2",
+        "content_id": "content-v2",
+        "parent_release_id": "v1",
         "gate": None,
         "files": {"pi-agent/AGENTS.md": "new rules", "pi-agent/prompts/helper.md": "added in v2"},
     }
     v1 = {
-        "artifact_version": "v1",
-        "parent_artifact_version": None,
+        "release_id": "v1",
+        "content_id": "content-v1",
+        "parent_release_id": None,
         "gate": None,
         "files": {"pi-agent/AGENTS.md": "old rules"},
     }
     manifests = {None: v2, "v1": v1}
-    puller = ReefClient("http://127.0.0.1:1")
+    puller = _ReleaseClient("http://127.0.0.1:1")
     puller.get = (  # type: ignore[method-assign]
-        lambda path, extra_headers=None: manifests["v1" if "version=v1" in path else None]
+        lambda path, extra_headers=None: manifests["v1" if "release_id=v1" in path else None]
     )
     destination = tmp_path / "pulled"
     puller.harness_pull("delivery", destination)
     assert (destination / "pi-agent/prompts/helper.md").is_file()
-    puller.harness_pull("delivery", destination, version="v1")
+    puller.harness_pull("delivery", destination, release_id="v1")
     on_disk = {
         str(path.relative_to(destination))
         for path in destination.rglob("*")
-        if path.is_file() and path.name != HARNESS_VERSION_SIDECAR
+        if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
     }
     assert on_disk == {"pi-agent/AGENTS.md"}
     assert (destination / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == "old rules"
@@ -387,7 +449,11 @@ def _install_fixture(
     script = tmp_path / "install.sh"
     script.write_text(
         render_install_script(
-            descriptor=get_adapter("pi"), files=HOSTILE_FILES, artifact_version="v-test", scenario=scenario
+            descriptor=get_adapter("pi"),
+            files=HOSTILE_FILES,
+            release_id="v-test",
+            content_id="content-test",
+            scenario=scenario,
         )
     )
     prefix = tmp_path / "prefix"
@@ -415,10 +481,12 @@ def test_install_script_golden_structure() -> None:
     script re-checks after writing.
     """
     files = {"pi-agent/AGENTS.md": "hello\n"}
-    sidecar = json.dumps({"artifact_version": "v1", "files": ["pi-agent/AGENTS.md"]}, indent=2) + "\n"
+    sidecar = (
+        json.dumps({"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}, indent=2) + "\n"
+    )
     golden = (
         r"""#!/bin/sh
-# Reef harness install: adapter pi, composition version v1.
+# Reef harness install: adapter pi, release v1.
 # Self contained: the composition files ride inline below and the harness
 # binary comes from the vendor's own channel; running this script calls no
 # reef route and carries no token. Inspect freely, then run:
@@ -474,9 +542,9 @@ mkdir -p "$DEST/pi-agent"
 # A rerun on a current machine writes nothing at all, not even the sidecar.
 current=""
 sidecar=""
-if [ -f "$DEST/.reef-harness-version" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
+if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
     current="$(compose_stream | sha256)"
-    sidecar="$(sha256 < "$DEST/.reef-harness-version")"
+    sidecar="$(sha256 < "$DEST/.reef-harness-release")"
 fi
 if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then
     echo "reef: composition already current"
@@ -485,8 +553,8 @@ else
     # composition lacks, exactly like the stdlib client pull. The sidecar
     # is json.dumps at indent 2, so every file entry is one four-space
     # indented quoted line.
-    if [ -f "$DEST/.reef-harness-version" ]; then
-        sed -n 's/^    "\(.*\)",\{0,1\}$/\1/p' "$DEST/.reef-harness-version" |
+    if [ -f "$DEST/.reef-harness-release" ]; then
+        sed -n 's/^    "\(.*\)",\{0,1\}$/\1/p' "$DEST/.reef-harness-release" |
             while IFS= read -r old; do
                 case "$old" in
                     'pi-agent/AGENTS.md') ;;
@@ -508,7 +576,7 @@ hello
     cat > "$DEST/reef-pi" <<REEF_WRAPPER_EOF
 #!/bin/sh
 # reef-pi: run pi with the reef-evolved composition.
-# Generated by reef harness install (adapter pi, version v1).
+# Generated by reef harness install (adapter pi, release v1).
 # Usage: reef-pi -p "fix the bug"     # run the agent (receipts captured)
 #        reef-pi report --score 0 --feedback "..."  # report last run's receipts
 export REEF_HARNESS_BINARY="$BINARY_ABS"
@@ -527,7 +595,7 @@ REEF_WRAPPER_EOF
         *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
     esac
     # The same sidecar the stdlib client pull writes: pulled version and file list.
-cat > "$DEST/.reef-harness-version" <<'@SIDECAR_EOF@'
+cat > "$DEST/.reef-harness-release" <<'@SIDECAR_EOF@'
 @SIDECAR_JSON@@SIDECAR_EOF@
 fi
 
@@ -541,7 +609,11 @@ echo "harness: $DEST"
     golden = golden.replace("@SIDECAR_EOF@", "REEF_EOF_" + hashlib.sha256(sidecar.encode()).hexdigest()[:12])
     golden = golden.replace("@SIDECAR_JSON@", sidecar)
     script = render_install_script(
-        descriptor=get_adapter("pi"), files=files, artifact_version="v1", scenario="code-repair"
+        descriptor=get_adapter("pi"),
+        files=files,
+        release_id="v1",
+        content_id="content-v1",
+        scenario="code-repair",
     )
     assert script == golden
     assert composition_checksum(files) in script
@@ -564,8 +636,8 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
     assert "already current" not in first.stdout
     for relative, text in HOSTILE_FILES.items():
         assert (dest / relative).read_bytes() == text.encode("utf-8")
-    sidecar = dest / HARNESS_VERSION_SIDECAR
-    record = {"artifact_version": "v-test", "files": sorted(HOSTILE_FILES)}
+    sidecar = dest / HARNESS_RELEASE_SIDECAR
+    record = {"release_id": "v-test", "content_id": "content-test", "files": sorted(HOSTILE_FILES)}
     assert sidecar.read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
     # Rerun on a current machine: still exit 0, writes nothing at all (the
     # read-only bits make any write attempt, sidecar included, a hard fail).
@@ -665,9 +737,11 @@ def _pinned_env(tmp_path: Path) -> tuple[Path, dict]:
     return prefix, env
 
 
-def _render_to(path: Path, files: dict[str, str], artifact_version: str) -> Path:
+def _render_to(path: Path, files: dict[str, str], release_id: str) -> Path:
     path.write_text(
-        render_install_script(descriptor=get_adapter("pi"), files=files, artifact_version=artifact_version)
+        render_install_script(
+            descriptor=get_adapter("pi"), files=files, release_id=release_id, content_id=f"content-{release_id}"
+        )
     )
     return path
 
@@ -692,12 +766,12 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
     on_disk = {
         str(path.relative_to(dest))
         for path in dest.rglob("*")
-        if path.is_file() and path.name != HARNESS_VERSION_SIDECAR
+        if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
     }
     assert on_disk == {"pi-agent/AGENTS.md", "reef-pi"}
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n"
-    record = {"artifact_version": "v1", "files": ["pi-agent/AGENTS.md"]}
-    assert (dest / HARNESS_VERSION_SIDECAR).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    record = {"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}
+    assert (dest / HARNESS_RELEASE_SIDECAR).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
 
 
 @pytest.mark.unit
@@ -706,7 +780,9 @@ def test_render_refuses_a_composition_path_that_escapes_the_destination(tmp_path
     absolute path or any ``..`` part refuses the render, nothing is written."""
     for hostile in ("../outside-marker.txt", "/outside-marker.txt", "inner/../../outside-marker.txt"):
         with pytest.raises(ValueError, match="escapes the destination"):
-            render_install_script(descriptor=get_adapter("pi"), files={hostile: "marker"}, artifact_version="v-esc")
+            render_install_script(
+                descriptor=get_adapter("pi"), files={hostile: "marker"}, release_id="v-esc", content_id="content-esc"
+            )
     assert list(tmp_path.iterdir()) == []
 
 
@@ -718,7 +794,7 @@ def test_composition_checksum_length_framing_rejects_the_aliasing_pair(tmp_path)
     aliased = {"a": "1", "b": "2b\n3"}
     files = {"a": "1b\n2", "b": "3"}
     assert composition_checksum(aliased) != composition_checksum(files)
-    # Same artifact version on purpose: the two sidecars are then identical,
+    # Same release on purpose: the two sidecars are then identical,
     # so only the composition checksum can tell the trees apart under sh.
     prefix, env = _pinned_env(tmp_path)
     dest = tmp_path / "dest"
@@ -768,7 +844,7 @@ def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) 
             assert "marker marker rules" in script  # the composition rides inline
             response = await client.get(
                 "/reef/harness/install",
-                params={"adapter": "pi", "version": first["artifact_version"]},
+                params={"adapter": "pi", "release_id": first["release_id"]},
                 headers={"x-reef-scenario": "delivery"},
             )
             assert response.status == 200
@@ -920,7 +996,7 @@ def test_install_route_refuses_an_unknown_version_with_a_404_naming_it(tmp_path)
         try:
             response = await client.get(
                 "/reef/harness/install",
-                params={"adapter": "pi", "version": "no-such-version"},
+                params={"adapter": "pi", "release_id": "no-such-version"},
                 headers={"x-reef-scenario": "delivery"},
             )
             assert response.status == 404

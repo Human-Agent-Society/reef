@@ -17,7 +17,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
-from reef.artifact.artifact import Artifact, is_local_version
+from reef.artifact.artifact import Artifact, is_local_release
 from reef.runtime.inference import HttpInferenceBackend, InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -83,7 +83,7 @@ class _NativeStreamCapture:
         "output_token_ids_logprobs",
         "output_token_sampling_mask",
         "output_token_sampling_logprobs",
-        "_reef_token_weight_versions",
+        "_reef_token_runtime_load_ids",
     )
 
     def __init__(self) -> None:
@@ -142,9 +142,9 @@ class _NativeStreamCapture:
         if not self.seen:
             raise ValueError("SGLang stream completed without a generation event")
         response: dict[str, Any] = {"text": self.text, "meta_info": dict(self.meta)}
-        versions = self.meta.get("_reef_token_weight_versions")
+        versions = self.meta.get("_reef_token_runtime_load_ids")
         if versions is not None:
-            response["_reef_token_weight_versions"] = versions
+            response["_reef_token_runtime_load_ids"] = versions
         return response
 
 
@@ -276,7 +276,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         native_payload = self._native_payload(request, prompt_ids, sampling_params)
         native = await self._native_inference(artifact, native_payload)
         output_ids, rollout_log_probs = self._output_tensors(native)
-        version_spans = self._weight_version_spans(native, len(output_ids))
+        version_spans = self._runtime_load_spans(native, len(output_ids))
 
         response = self._chat_response(
             request,
@@ -285,7 +285,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
             loss_mask=[1] * len(output_ids),
-            weight_version_spans=version_spans,
+            runtime_load_spans=version_spans,
             tool_parser=tool_parser,
         )
         if not anthropic:
@@ -296,7 +296,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         """Count the exact templated input without creating policy tensors."""
         request = self._anthropic_request({**payload, "max_tokens": 1})
         prompt_ids = self._render_prompt(request)
-        weight_version = getattr(artifact.ref, "weight_version", None) or artifact.ref.version
+        runtime_load_id = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
         return {
             "input_tokens": len(prompt_ids),
             # RequestService strips this block from the client response. It
@@ -304,7 +304,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
             # deliberately contains no tokens/loss mask/log-probabilities, so
             # a token-count call can never become a policy sample.
             "training": {
-                "weight_version": str(weight_version),
+                "runtime_load_id": str(runtime_load_id),
                 "request_messages": list(request.get("messages") or []),
                 "request_tools": request.get("tools"),
             },
@@ -588,28 +588,28 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         artifact: Artifact,
         response: dict[str, Any],
     ) -> dict[str, Any]:
-        exact_weight_versions_required = not is_local_version(artifact.ref.version)
+        exact_runtime_load_ids_required = not is_local_release(artifact.ref.release_id)
         meta = response.get("meta_info")
         if not isinstance(meta, Mapping):
             raise ValueError("SGLang /generate response lacks meta_info")
         pairs = meta.get("output_token_logprobs")
         if not isinstance(pairs, list):
             raise ValueError("SGLang /generate response lacks output token log probabilities")
-        stamped = meta.get("_reef_token_weight_versions")
-        if stamped is None and not exact_weight_versions_required:
-            version = meta.get("weight_version")
+        stamped = meta.get("_reef_token_runtime_load_ids")
+        if stamped is None and not exact_runtime_load_ids_required:
+            version = meta.get("runtime_load_id")
             stamped = [version] * len(pairs)
         if (
             not isinstance(stamped, list)
             or len(stamped) != len(pairs)
             or any(not isinstance(version, str) or not version for version in stamped)
         ):
-            raise ValueError("SGLang /generate response lacks scheduler-stamped token weight versions")
+            raise ValueError("SGLang /generate response lacks scheduler-stamped token runtime load IDs")
         normalized_meta = dict(meta)
         if stamped:
-            normalized_meta["weight_version"] = stamped[-1]
+            normalized_meta["runtime_load_id"] = stamped[-1]
         response["meta_info"] = normalized_meta
-        response["_reef_token_weight_versions"] = stamped
+        response["_reef_token_runtime_load_ids"] = stamped
         return response
 
     async def inference_stream(
@@ -872,7 +872,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
 
                 native = self._normalize_native_response(artifact, capture.response())
                 output_ids, rollout_log_probs = self._output_tensors(native)
-                version_spans = self._weight_version_spans(native, len(output_ids))
+                version_spans = self._runtime_load_spans(native, len(output_ids))
                 # Streaming parsers are stateful. Parse the complete sample
                 # with a fresh instance for the canonical training response.
                 final_tool_parser = self._configured_tool_parser(request)
@@ -883,7 +883,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
                     output_ids=output_ids,
                     rollout_log_probs=rollout_log_probs,
                     loss_mask=[1] * len(output_ids),
-                    weight_version_spans=version_spans,
+                    runtime_load_spans=version_spans,
                     tool_parser=final_tool_parser,
                 )
                 response["id"] = chat_id
@@ -1171,7 +1171,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         output_ids: list[int],
         rollout_log_probs: list[float],
         loss_mask: list[int],
-        weight_version_spans: list[dict[str, Any]],
+        runtime_load_spans: list[dict[str, Any]],
         tool_parser: Any = None,
     ) -> dict[str, Any]:
         if len(output_ids) != len(rollout_log_probs) or len(output_ids) != len(loss_mask):
@@ -1187,7 +1187,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
             for key, value in meta.items()
             if key
             not in {
-                "_reef_token_weight_versions",
+                "_reef_token_runtime_load_ids",
                 "input_token_logprobs",
                 "output_token_logprobs",
             }
@@ -1205,8 +1205,8 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         }
         if request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(output_ids, rollout_log_probs)}
-        versions = {span["weight_version"] for span in weight_version_spans}
-        weight_version = versions.pop() if len(versions) == 1 else None
+        versions = {span["runtime_load_id"] for span in runtime_load_spans}
+        runtime_load_id = versions.pop() if len(versions) == 1 else None
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -1224,31 +1224,31 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
                 "rollout_log_probs": rollout_log_probs,
                 "prompt_length": len(prompt_ids),
                 "response_length": len(output_ids),
-                "weight_version": None if weight_version is None else str(weight_version),
-                "weight_version_spans": weight_version_spans,
+                "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
+                "runtime_load_spans": runtime_load_spans,
                 **self._captured_topk(meta, len(output_ids)),
             },
         }
 
     @staticmethod
-    def _weight_version_spans(response: Mapping[str, Any], response_length: int) -> list[dict[str, Any]]:
-        raw = response.get("_reef_token_weight_versions")
+    def _runtime_load_spans(response: Mapping[str, Any], response_length: int) -> list[dict[str, Any]]:
+        raw = response.get("_reef_token_runtime_load_ids")
         if raw is None:
             meta = response.get("meta_info")
-            version = meta.get("weight_version") if isinstance(meta, Mapping) else None
+            version = meta.get("runtime_load_id") if isinstance(meta, Mapping) else None
             raw = [version] * response_length
         if (
             not isinstance(raw, list)
             or len(raw) != response_length
             or any(not isinstance(version, str) or not version for version in raw)
         ):
-            raise ValueError("SGLang response has incomplete token weight versions")
+            raise ValueError("SGLang response has incomplete token runtime load IDs")
         spans: list[dict[str, Any]] = []
         for index, version in enumerate(raw):
-            if spans and spans[-1]["weight_version"] == version:
+            if spans and spans[-1]["runtime_load_id"] == version:
                 spans[-1]["end"] = index + 1
             else:
-                spans.append({"start": index, "end": index + 1, "weight_version": version})
+                spans.append({"start": index, "end": index + 1, "runtime_load_id": version})
         return spans
 
     def _configured_tool_parser(self, request: Mapping[str, Any]) -> Any:

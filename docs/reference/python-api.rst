@@ -368,8 +368,8 @@ depend on mutable external state.
 
 A ``PolicySample`` carries ``source_agent_record_id``, ``tokens``,
 ``loss_mask``, ``rollout_log_probs``, and ``reward``. When available, it also carries
-``weight_version``, ``action_mask``, ``rollout_created_at``, ``turn_count``,
-``topk_indices`` / ``topk_log_probs``, ``weight_version_spans``, and ``extras``,
+``runtime_load_id``, ``action_mask``, ``rollout_created_at``, ``turn_count``,
+``topk_indices`` / ``topk_log_probs``, ``runtime_load_spans``, and ``extras``,
 the field a processor uses for its own loss family. Use the shared assembly
 helpers in ``reef.train.processors.reported`` and
 ``reef.train.processors.common`` rather than re-parsing provider responses.
@@ -515,7 +515,7 @@ Surface
        Surface, create_harness_surface, create_skill_surface, create_weight_surface,
    )
 
-A surface binds one frozen artifact version to its consumers.
+A surface binds one frozen release to its consumers.
 ``WeightTrainingRecipe.build_surface()`` already calls
 ``create_weight_surface()``, and ``CordisRecipe`` calls
 ``create_harness_surface()``, so most methods never touch this.
@@ -543,7 +543,7 @@ returning a lease the service releases when the attempt ends, so serving state
 such as a resident adapter stays protected for its duration.
 
 A surface does not decide which records train, compute candidates, execute a
-training job, admit an artifact, or mutate the version chain. Artifact admission
+training job, admit an artifact, or mutate the release chain. Artifact admission
 is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.

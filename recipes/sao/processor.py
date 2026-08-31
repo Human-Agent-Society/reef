@@ -21,7 +21,7 @@ def make_sao_sample(item: AgentRecord, reward: float) -> PolicySample:
 
     ``make_policy_sample`` builds the policy 5-tuple, so SAO and the
     group-relative processors resolve every shared field identically —
-    including the ``weight_version`` fallback chain the durable runtime needs
+    including the ``runtime_load_id`` fallback chain the durable runtime needs
     to identify a training job's producing version. SAO then fills the two
     fields that path leaves at their defaults: ``action_mask`` (read from
     ``response.training`` first, the top-level payload second) and

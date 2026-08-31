@@ -14,7 +14,7 @@ def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> No
     parameters = inspect.signature(Dispatcher).parameters
 
     assert "recipe_store" not in parameters
-    assert "artifact_version_store" not in parameters
+    assert "release_id_store" not in parameters
     assert "recipe_resolver" not in parameters
     assert "recipe_validator" not in parameters
     assert "checkpoint_strategy" not in parameters
@@ -28,7 +28,7 @@ def test_scenario_owns_recipe_and_base_artifact() -> None:
     scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
 
     assert scenario.recipe == "recipe"
-    assert scenario.repository.base_artifact.version
+    assert scenario.repository.base_artifact.release_id
     assert scenario._commit_protocol.checkpoint_strategy is not None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
 
@@ -38,10 +38,10 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
     assert not hasattr(scenario.repository.base_artifact, "scenario")
     assert scenario.scenario_step == 0
-    assert scenario.repository.current_artifact.version
-    assert scenario.repository.checkpoint_artifact.version
-    assert not hasattr(scenario, "artifact_version")
-    assert not hasattr(scenario, "selected_artifact_version")
+    assert scenario.repository.current_artifact.release_id
+    assert scenario.repository.checkpoint_artifact.release_id
+    assert not hasattr(scenario, "release_id")
+    assert not hasattr(scenario, "selected_release_id")
 
 
 def test_scenario_owns_scenario_scoped_repository() -> None:
@@ -84,7 +84,7 @@ def test_scenario_snapshot_round_trips() -> None:
     scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
     metadata = scenario.to_snapshot_metadata()
 
-    assert metadata["format"] == "reef-scenario/3"
+    assert metadata["format"] == "reef-scenario/4"
     assert "scenario" not in metadata["base_artifact"]
     assert metadata["scenario_step"] == 0
     assert metadata["operation"] == "training"
@@ -97,23 +97,23 @@ def test_scenario_snapshot_round_trips() -> None:
         record_progress=None,
         training_job_id=None,
         operation="training",
-        rollback_target_artifact_version=None,
+        rollback_target_release_id=None,
     )
 
 
-def test_legacy_rollback_snapshot_preserves_its_operation() -> None:
+def test_rollback_snapshot_preserves_its_operation() -> None:
     from reef.scenario.snapshot import parse_snapshot_metadata
 
     scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
     assert scenario is not None
     metadata = scenario.to_snapshot_metadata()
-    metadata.pop("operation")
-    metadata["rollback"] = {"target_artifact_version": "checkpoint-v1"}
+    metadata["operation"] = "rollback"
+    metadata["rollback_target_release_id"] = "checkpoint-v1"
 
     snapshot = parse_snapshot_metadata(metadata)
 
     assert snapshot.operation == "rollback"
-    assert snapshot.rollback_target_artifact_version == "checkpoint-v1"
+    assert snapshot.rollback_target_release_id == "checkpoint-v1"
 
 
 def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) -> None:

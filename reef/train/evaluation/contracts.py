@@ -12,27 +12,19 @@ class UpdateCandidate:
     """One update that has been produced but not selected for serving.
 
     ``candidate_id`` is the stable idempotency and audit key for the attempt.
-    ``current_version`` names the incumbent when the producing layer knows it;
-    local artifact methods may leave it ``None`` and bind the version later in
-    the scenario coordinator.
     """
 
     candidate_id: str
-    current_version: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate_id, str) or not self.candidate_id:
             raise ValueError("candidate_id must be a non-empty string")
-        if self.current_version is not None and (
-            not isinstance(self.current_version, str) or not self.current_version
-        ):
-            raise ValueError("current_version must be a non-empty string or None")
 
 
 @dataclass(frozen=True)
 class EvaluationResult:
-    """Measurements produced by evaluating one candidate against its current version."""
+    """Measurements produced by evaluating one candidate against the incumbent."""
 
     evaluator: str
     evaluator_version: str

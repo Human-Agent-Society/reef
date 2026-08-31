@@ -2,7 +2,7 @@
 
 The bridge's marker records one job at a time. When several scenarios share
 the training group, each also needs its own publication history — the
-serving weight version is engine-global and advances whenever *any*
+serving runtime load ID is engine-global and advances whenever *any*
 scenario publishes, so a scenario's staleness is the number of *its own*
 publications since a rollout, not the global sequence gap — and the
 checkpoint that last captured its adapter, which retention must not delete
@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.names import SCENARIO_LEDGER_FILENAME
+from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json, write_json
-from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion
 
 LEDGER_FILENAME = SCENARIO_LEDGER_FILENAME
 LEDGER_FORMAT = 1
@@ -73,7 +73,7 @@ class ScenarioLedger:
             return None
         return str(entry["publications"][-1])
 
-    def lag(self, scenario: str, producing: WeightVersion) -> int | None:
+    def lag(self, scenario: str, producing: RuntimeLoadId) -> int | None:
         """How many of ``scenario``'s publications postdate ``producing``.
 
         ``None`` means the producing version belongs to another incarnation
@@ -83,13 +83,13 @@ class ScenarioLedger:
         publications = [] if entry is None else entry["publications"]
         lag = 0
         for value in publications:
-            published = WeightVersion.parse(value)
+            published = RuntimeLoadId.parse(value)
             if published.incarnation != producing.incarnation:
                 continue
             if published.sequence > producing.sequence:
                 lag += 1
         if publications:
-            latest = WeightVersion.parse(publications[-1])
+            latest = RuntimeLoadId.parse(publications[-1])
             if latest.incarnation != producing.incarnation:
                 return None
         return lag
@@ -110,19 +110,19 @@ class ScenarioLedger:
         entry["steps"] = int(entry.get("steps", 0)) + 1
         self._write()
 
-    def record_publication(self, scenario: str, weight_version: str, adapter: str) -> None:
+    def record_publication(self, scenario: str, runtime_load_id: str, adapter: str) -> None:
         entry = self._entries.setdefault(
             scenario, {"publications": [], "adapter": None, "rollout_id": None, "steps": 0}
         )
-        if not entry["publications"] or entry["publications"][-1] != weight_version:
-            entry["publications"].append(weight_version)
+        if not entry["publications"] or entry["publications"][-1] != runtime_load_id:
+            entry["publications"].append(runtime_load_id)
         entry["adapter"] = adapter
         self._write()
 
     def status(self) -> dict[str, dict[str, Any]]:
         return {
             scenario: {
-                "weight_version": self.last_publication(scenario),
+                "runtime_load_id": self.last_publication(scenario),
                 "adapter": self.adapter(scenario),
                 "publications": len(entry["publications"]),
                 "rollout_id": entry.get("rollout_id"),
