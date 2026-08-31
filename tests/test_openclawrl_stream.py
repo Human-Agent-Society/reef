@@ -237,9 +237,9 @@ class TestStreamTasks:
                     modules = [node.module or ""]
                 for module in modules:
                     root = module.split(".")[0]
-                    assert root in sys.stdlib_module_names or root.startswith(allowed_prefixes), (
-                        f"{path.name} imports non-stdlib module {module!r}"
-                    )
+                    assert root in sys.stdlib_module_names or root.startswith(
+                        allowed_prefixes
+                    ), f"{path.name} imports non-stdlib module {module!r}"
 
 
 class TestHarness:
