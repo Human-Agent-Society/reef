@@ -1,22 +1,15 @@
-"""Grouped rollout report contracts."""
+"""TTT-Discover's grouped rollout report contract."""
 
 from dataclasses import dataclass
 
-from reef.core.reports.base import ReportValidationError
-from reef.core.reports.scored_rollout import ScoredRolloutReport
+from reef.core.reports import ReportValidationError, ScoredRolloutReport
 
-__all__ = ["GroupedRolloutReport"]
+__all__ = ["TTTDGroupedRolloutReport"]
 
 
 @dataclass(frozen=True)
-class GroupedRolloutReport(ScoredRolloutReport):
-    """One rollout addressed into a step's exact comparison-group grid.
-
-    The metadata block is self-describing: coordinates plus the grid
-    cardinalities they index, the algorithm tag, and the ``comparison_set``
-    echo derived from the coordinates. Whether the announced grid matches the
-    serving recipe's configuration is the processor's decision.
-    """
+class TTTDGroupedRolloutReport(ScoredRolloutReport):
+    """One rollout addressed into a TTT-Discover comparison grid."""
 
     score: float
     step: int

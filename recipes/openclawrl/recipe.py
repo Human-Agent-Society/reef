@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
-from reef.recipe.registry import register_kind
 
 _logger = logging.getLogger(__name__)
 
@@ -18,7 +17,6 @@ _logger = logging.getLogger(__name__)
 _RETIRED_FIELDS = {"prm_teacher_timeout_s": 900.0, "prm_logprob_temperature": 1.0}
 
 
-@register_kind("openclawrl")
 @dataclass(frozen=True, kw_only=True)
 class OpenClawRLRecipe(WeightTrainingRecipe):
     """Reproduces upstream OpenClaw-RL's binary-RL configuration on reef.

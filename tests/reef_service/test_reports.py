@@ -10,10 +10,10 @@ from typing import Any
 
 import pytest
 
-from recipes.tttd import TTTDProcessor
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import GroupedRolloutReport, ReportBase, ReportValidationError, ScoredRolloutReport
+from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
 from reef.recipe.registry import RecipeRegistry
@@ -60,11 +60,11 @@ def test_scored_rollout_round_trip() -> None:
 
 
 def test_grouped_rollout_round_trip() -> None:
-    schema = GroupedRolloutReport(score=0.5, step=4, group=1, rollout=17, groups_per_step=8, rollouts_per_group=64)
+    schema = TTTDGroupedRolloutReport(score=0.5, step=4, group=1, rollout=17, groups_per_step=8, rollouts_per_group=64)
     body = schema.to_dict()
     assert isinstance(schema, ScoredRolloutReport)
     assert body["metadata"]["comparison_set"] == "tttd-step-4-group-1"
-    assert GroupedRolloutReport.from_dict(body) == schema
+    assert TTTDGroupedRolloutReport.from_dict(body) == schema
 
 
 def test_task_outcome_round_trip() -> None:
@@ -96,9 +96,9 @@ def test_minimal_score_only_report_is_a_valid_task_outcome() -> None:
         (ScoredRolloutReport, {}, "score is required"),
         (ScoredRolloutReport, {"score": True}, "score must be a number"),
         (ScoredRolloutReport, {"score": float("nan")}, "score must be finite"),
-        (GroupedRolloutReport, {"score": 1.0}, "metadata.step is required"),
+        (TTTDGroupedRolloutReport, {"score": 1.0}, "metadata.step is required"),
         (
-            GroupedRolloutReport,
+            TTTDGroupedRolloutReport,
             {
                 "score": 1.0,
                 "metadata": {
@@ -122,22 +122,22 @@ def test_violations_name_the_broken_field(report_type: type[ReportBase], payload
 
 
 def test_tttd_coordinates_must_sit_inside_their_announced_grid() -> None:
-    body = GroupedRolloutReport(
+    body = TTTDGroupedRolloutReport(
         score=1.0, step=0, group=0, rollout=0, groups_per_step=2, rollouts_per_group=3
     ).to_dict()
     body["metadata"]["group"] = 2  # == groups_per_step
     body["metadata"]["comparison_set"] = "tttd-step-0-group-2"
     with pytest.raises(ReportValidationError, match="group"):
-        GroupedRolloutReport.from_dict(body)
+        TTTDGroupedRolloutReport.from_dict(body)
 
 
 def test_tttd_comparison_set_must_echo_coordinates() -> None:
-    body = GroupedRolloutReport(
+    body = TTTDGroupedRolloutReport(
         score=1.0, step=0, group=0, rollout=0, groups_per_step=2, rollouts_per_group=3
     ).to_dict()
     body["metadata"]["comparison_set"] = "tttd-step-9-group-9"
     with pytest.raises(ReportValidationError, match="comparison_set"):
-        GroupedRolloutReport.from_dict(body)
+        TTTDGroupedRolloutReport.from_dict(body)
 
 
 # --------------------------------------------------------- floor, not a ceiling
@@ -234,12 +234,12 @@ def test_tttd_names_grid_mismatch_and_schema_violations() -> None:
         ProcessorContext(
             "discovery",
             {"groups_per_step": 2, "rollouts_per_group": 3},
-            report_type=GroupedRolloutReport,
+            report_type=TTTDGroupedRolloutReport,
         )
     )
     # Announces an 8x64 grid at a 2x3 scenario: a config-relative rejection
     # from the judge, named.
-    mismatched = GroupedRolloutReport(
+    mismatched = TTTDGroupedRolloutReport(
         score=1.0, step=0, group=0, rollout=0, groups_per_step=8, rollouts_per_group=64
     ).to_dict(references=["inference-a"])
     processor.ingest(

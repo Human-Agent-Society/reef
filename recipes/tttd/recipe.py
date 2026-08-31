@@ -5,13 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from recipes.tttd.processor import TTTDProcessor
-from reef.core.reports import GroupedRolloutReport, ReportBase
+from recipes.tttd.report import TTTDGroupedRolloutReport
+from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
-from reef.recipe.registry import register_kind
 
 
-@register_kind("tttd")
 @dataclass(frozen=True, kw_only=True)
 class TTTDRecipe(WeightTrainingRecipe):
     name: str = "tttd"
@@ -22,7 +21,7 @@ class TTTDRecipe(WeightTrainingRecipe):
     def report_type(self) -> type[ReportBase]:
         # One rollout addressed into its exact step grid; the processor adds
         # the config-relative check against the served grid.
-        return GroupedRolloutReport
+        return TTTDGroupedRolloutReport
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:

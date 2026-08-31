@@ -1136,8 +1136,8 @@ def start_bridge(
         ray.init(namespace=namespace)
     pgs = create_placement_groups(args)
     rollout_manager = create_rollout_manager(args, pgs["rollout"])
-    # The sao loss family needs the critic actor group; the other loss
-    # families discard it. ``args.use_critic`` comes from the explicit
+    # Loss families that train a value model need the critic actor group;
+    # the others discard it. ``args.use_critic`` comes from the explicit
     # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
     # so keeping the group here is what wires the value model into the bridge
     # schedule rather than leaving it uninitialized.

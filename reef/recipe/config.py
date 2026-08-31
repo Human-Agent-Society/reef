@@ -20,8 +20,8 @@ def load_recipe_config(path: str | Path) -> dict[str, Any]:
     if not isinstance(loaded, Mapping):
         raise RecipeConfigError("recipe config must be a YAML object")
     config = dict(loaded)
-    if not isinstance(config.get("kind"), str) or not config["kind"]:
-        raise RecipeConfigError("recipe config must contain a non-empty 'kind'")
+    if not isinstance(config.get("implementation"), str) or not config["implementation"]:
+        raise RecipeConfigError("recipe config must contain a non-empty 'implementation'")
     for section in ("data", "artifact", "runtime", "model", "rollout", "optimization"):
         value = config.get(section, {})
         if not isinstance(value, Mapping):

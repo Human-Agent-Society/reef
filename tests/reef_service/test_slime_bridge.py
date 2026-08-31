@@ -833,7 +833,7 @@ def test_bridge_enforces_the_inclusive_max_staleness_boundary(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("loss_family", ["openclawrl", "sao", "tttd"])
-def test_bridge_admits_bounded_lag_for_every_bundled_loss_family(tmp_path, loss_family) -> None:
+def test_bridge_admits_bounded_lag_for_every_cookbook_loss_family(tmp_path, loss_family) -> None:
     actor, group, manager, payload = _loss_family_durable_actor(tmp_path, loss_family)
 
     result = _execute_and_update_weights(actor, payload)
@@ -1345,22 +1345,19 @@ def test_driver_accepts_matching_reef_and_slime_objectives(loss_family, loss_typ
 
 
 @pytest.mark.unit
-def test_driver_resolves_loss_env_before_recipe_registry() -> None:
+def test_driver_requires_an_explicit_loss_environment() -> None:
     from reef.train.slime_backend.loss_families import resolve_loss_family
     from reef.train.slime_backend.reef_adapters.driver import _resolve_loss_family
 
     assert _resolve_loss_family({"REEF_TRAINING_LOSS": "pg"}) == ("pg", None, resolve_loss_family("pg"))
-    # REEF_TRAINING_RECIPE is informational when REEF_TRAINING_LOSS is set.
+    # REEF_TRAINING_RECIPE is an informational label when the explicit loss is set.
     assert _resolve_loss_family({"REEF_TRAINING_LOSS": "sft", "REEF_TRAINING_RECIPE": "custom_method"}) == (
         "sft",
-        None,
+        "custom_method",
         resolve_loss_family("sft"),
     )
-    assert _resolve_loss_family({"REEF_TRAINING_RECIPE": "openclawrl"}) == (
-        "openclawrl",
-        "openclawrl",
-        resolve_loss_family("openclawrl"),
-    )
+    with pytest.raises(RuntimeError, match="REEF_TRAINING_LOSS is required"):
+        _resolve_loss_family({"REEF_TRAINING_RECIPE": "openclawrl"})
     assert _resolve_loss_family({}) == (None, None, None)
 
 

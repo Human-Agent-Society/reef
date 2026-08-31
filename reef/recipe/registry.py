@@ -1,13 +1,11 @@
-"""Recipe kind table and config-backed resolution of recipes by public name.
+"""Recipe references and config-backed resolution by public name.
 
 Two axes live here, deliberately separate:
 
-- The module-level *kind table* maps a config ``kind`` to a Recipe
-  implementation class (:func:`register_kind`, :func:`recipe_class_for`,
-  :func:`build_recipe`). Registration is process-wide and happens at import
-  time.
+- :func:`recipe_class_for` and :func:`build_recipe` resolve the core
+  record-only recipe or an explicit ``package.module:ClassName`` reference.
 - :func:`build_named_recipe` builds the recipe a deployment names: a YAML
-  preset from the recipe config directory, else a bundled kind.
+  preset from the recipe config directory, or the core record-only recipe.
 - :class:`RecipeRegistry` is the closed *instance* table mapping the public
   names scenarios bind to onto built ``Recipe`` objects.
 """
@@ -17,7 +15,7 @@ from __future__ import annotations
 import importlib
 import os
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,60 +28,41 @@ from reef.runtime.registry import RuntimeRegistry
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 RecipeType = type[Recipe]
 
-_RECIPE_KINDS: dict[str, RecipeType] = {}
 
+def recipe_class_for(reference: str) -> RecipeType | None:
+    """Return the Recipe implementation for ``reference``.
 
-def register_kind(kind: str) -> Callable[[RecipeType], RecipeType]:
-    """Register a Recipe implementation class under a config kind."""
-
-    def register(recipe_class: RecipeType) -> RecipeType:
-        if kind in _RECIPE_KINDS:
-            raise ValueError(f"recipe kind {kind!r} is already registered")
-        _RECIPE_KINDS[kind] = recipe_class
-        return recipe_class
-
-    return register
-
-
-register_kind("recipe")(Recipe)  # the base kind: records everything, trains nothing — the wiring check
-
-
-def recipe_kinds() -> tuple[str, ...]:
-    return tuple(_RECIPE_KINDS)
-
-
-def recipe_class_for(kind: str) -> RecipeType | None:
-    """Return the Recipe implementation for ``kind``.
-
-    A kind is either a registered name or a dotted reference
-    ``package.module:ClassName`` to a recipe class reef does not bundle — the
-    config path's way of serving cookbook and experiment recipes without a
-    hand-rolled service assembly per example.
+    ``recipe`` is the core record-only recipe. Every learning method is an
+    explicit ``package.module:ClassName`` reference, so importing Reef never
+    imports method code and operators can see exactly what a deployment loads.
+    A different bare name is a public preset name, not a class reference, and
+    returns ``None`` here.
     """
-    registered = _RECIPE_KINDS.get(kind)
-    if registered is not None or ":" not in kind:
-        return registered
-    module_name, _, attribute = kind.partition(":")
+    if reference == "recipe":
+        return Recipe
+    if ":" not in reference:
+        return None
+    module_name, _, attribute = reference.partition(":")
     if not module_name or not attribute:
-        raise RecipeConfigError(f"dotted recipe kind {kind!r} must be 'package.module:ClassName'")
+        raise RecipeConfigError(f"dotted recipe reference {reference!r} must be 'package.module:ClassName'")
     try:
         candidate = getattr(importlib.import_module(module_name), attribute)
     except (ImportError, AttributeError) as exc:
-        raise RecipeConfigError(f"cannot import recipe kind {kind!r}: {exc}") from exc
+        raise RecipeConfigError(f"cannot import recipe reference {reference!r}: {exc}") from exc
     if not (isinstance(candidate, type) and issubclass(candidate, Recipe)):
-        raise RecipeConfigError(f"recipe kind {kind!r} is not a Recipe class")
+        raise RecipeConfigError(f"recipe reference {reference!r} is not a Recipe class")
     return candidate
 
 
 def build_recipe(
-    kind: str,
+    implementation: str,
     environ: Mapping[str, str] | None = None,
     config: Mapping[str, Any] | None = None,
     runtime: InferenceRuntime | None = None,
 ) -> Recipe:
-    recipe_class = recipe_class_for(kind)
+    recipe_class = recipe_class_for(implementation)
     if recipe_class is None:
-        raise ValueError(f"unknown recipe kind {kind!r}")
+        raise ValueError(f"unknown recipe reference {implementation!r}")
     return recipe_class.from_environment(environ, config=config, runtime=runtime)
 
 
@@ -98,10 +77,10 @@ def build_named_recipe(
     """Build the recipe a deployment names by its public name.
 
     ``name`` is a YAML preset ``<name>.yaml`` under ``config_directory``
-    (defaulting to ``REEF_RECIPE_CONFIG_DIR``), else a bundled kind registered
-    under that name. reef bundles no presets — they are deployment data (see
+    (defaulting to ``REEF_RECIPE_CONFIG_DIR``), or the reserved core name
+    ``recipe``. Reef bundles no presets — they are deployment data (see
     ``docs/reference/configuration.rst``). A preset's ``runtime`` section builds the recipe's
-    runtime; without one the recipe gets ``default_runtime``. Dotted kinds are
+    runtime; without one the recipe gets ``default_runtime``. Dotted references are
     not names: they are operator configuration for :func:`build_recipe`, so a
     name never triggers an import.
     """
@@ -112,14 +91,14 @@ def build_named_recipe(
     directory = None if configured is None else Path(configured)
     path = None if directory is None else directory / f"{name}.yaml"
     if path is None or not path.exists():
-        if recipe_class_for(name) is None:
-            available = set(recipe_kinds())
-            if directory is not None:
-                available.update(preset.stem for preset in directory.glob("*.yaml"))
-            raise UnknownScenarioRecipe(
-                f"unknown scenario recipe {name!r}; available recipes: {', '.join(sorted(available))}"
-            )
-        return build_recipe(name, values, runtime=default_runtime)
+        if name == "recipe":
+            return build_recipe(name, values, runtime=default_runtime)
+        available = {"recipe"}
+        if directory is not None:
+            available.update(preset.stem for preset in directory.glob("*.yaml"))
+        raise UnknownScenarioRecipe(
+            f"unknown scenario recipe {name!r}; available recipes: {', '.join(sorted(available))}"
+        )
 
     settings = load_recipe_config(path)
     model_path = settings["model"].get("path")
@@ -134,14 +113,14 @@ def build_named_recipe(
         if runtime_config
         else default_runtime
     )
-    return build_recipe(settings["kind"], values, config=settings, runtime=runtime)
+    return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
 
 
 class RecipeRegistry:
     """The recipes a process serves, by the public name scenarios bind to.
 
     A closed set: request-time names resolve only to what the operator
-    injected, never materializing another kind or preset. A reef deployment
+    injected, never materializing another implementation or preset. A reef deployment
     serves exactly one recipe (see :attr:`served_recipe`); multi-recipe
     registries exist for tests that exercise scenario bindings across
     deployments.

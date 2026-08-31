@@ -201,20 +201,24 @@ jobs:
           assert expected_backend_files <= installed_files
           PY
       # Run outside the repo so `import reef` resolves to the installed wheel,
-      # not the source tree. Proves the wheel is complete: modules import,
-      # bundled recipes register, no named configs ship, entrypoint answers.
+      # not the source tree. Proves the wheel is complete: core modules import,
+      # cookbook methods and named configs do not ship, entrypoint answers.
       - run: |
           python -c "
           import importlib.util, pathlib
           import reef, reef.service.deploy
           import reef_client
           import reef.recipe as rp
-          from reef.recipe.registry import recipe_kinds
+          from reef.recipe import Recipe
+          from reef.recipe.registry import recipe_class_for
           assert importlib.util.find_spec('reef.train.slime_backend') is not None
-          assert recipe_kinds(), 'no bundled recipes registered'
+          assert importlib.util.find_spec('recipes') is None
+          assert not hasattr(rp, 'register_kind')
+          assert recipe_class_for('recipe') is Recipe
+          assert recipe_class_for('sao') is None
           leftover = sorted(p.name for p in (pathlib.Path(rp.__file__).parent / 'configs').glob('*.yaml'))
           assert not leftover, f'named recipe configs are deployment data and must not ship: {leftover}'
-          print('recipe kinds:', recipe_kinds())
+          print('core recipe:', recipe_class_for('recipe'))
           "
           reef --help
         working-directory: ${{ runner.temp }}

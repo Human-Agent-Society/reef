@@ -189,7 +189,7 @@ The integration reproduces:
 - sampling at `temperature=1.0, top_p=1.0`, a constant policy learning rate
   of `1e-6`, and no entropy bonus.
 
-The bundled configuration is a functional smoke rather than the paper's
+The cookbook configuration is a functional smoke rather than the paper's
 setup: it serves Qwen2.5-1.5B-Instruct with a 2048-token generation window,
 trains on the benchmark's own problems, and starts from the public
 instruction-tuned checkpoint. The paper-scale run below closes the model gap

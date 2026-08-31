@@ -19,10 +19,10 @@ Variable                         Meaning
                                  ``run_dir``); ``--ready-file`` overrides it.
 ``REEF_BRIDGE_HEALTH_TIMEOUT_S``  Healthcheck RPC timeout in seconds
                                  (default ``10``).
-``REEF_TRAINING_LOSS``           Loss family to run, named directly.
-``REEF_TRAINING_RECIPE``         Bundled recipe whose loss family to run;
-                                 informational when ``REEF_TRAINING_LOSS``
-                                 is set.
+``REEF_TRAINING_LOSS``           Required for training. A registered family
+                                 name or dotted ``package.module:SPEC``.
+``REEF_TRAINING_RECIPE``         Optional recipe label for logs and errors;
+                                 never used to infer the loss family.
 ===============================  =============================================
 """
 
@@ -102,47 +102,28 @@ def _parse_slime_args(arguments: Sequence[str]):
         sys.argv = original_argv
 
 
-def _recipe_loss_family(recipe: str) -> str:
-    """Resolve a recipe name to its configured backend loss family.
-
-    The registry is the single source of truth: the backend never keeps its
-    own list of method names, so a new method that reuses an existing loss
-    family needs no driver changes.
-    """
-    from reef.recipe import WeightTrainingRecipe
-    from reef.recipe.registry import recipe_class_for
-
-    recipe_type = recipe_class_for(recipe)
-    if recipe_type is None or not issubclass(recipe_type, WeightTrainingRecipe):
-        raise RuntimeError(f"unsupported REEF_TRAINING_RECIPE: {recipe!r}")
-    loss_family = recipe_type.training_spec().loss_family
-    if not loss_family:
-        raise RuntimeError(f"unsupported REEF_TRAINING_RECIPE: {recipe!r}")
-    return loss_family
-
-
 def _resolve_loss_family(environ) -> tuple[str | None, str | None, SlimeAlgorithm | None]:
     """Resolve the training loss family and its spec from the driver environment.
 
-    ``REEF_TRAINING_LOSS`` names a loss family directly, so self-registered
-    (cookbook) methods never have to borrow a bundled recipe's name. When it
-    is set, ``REEF_TRAINING_RECIPE`` is informational only. Without it, the
-    bundled recipe registry resolves ``REEF_TRAINING_RECIPE`` as before.
+    ``REEF_TRAINING_LOSS`` names the family directly. Cookbook methods should
+    use a dotted reference so the driver and fresh workers can import their
+    implementation without Reef importing any method at boot.
+    ``REEF_TRAINING_RECIPE`` is only an optional label; it cannot select a
+    loss family.
     Returns ``(loss_family, recipe, spec)``, resolved through the loss-family
     registry exactly once, or ``(None, None, None)`` when neither variable is
     set. The registry is the vocabulary authority: an unknown family fails in
     ``resolve_loss_family``.
     """
     loss = environ.get("REEF_TRAINING_LOSS", "").strip()
+    recipe = environ.get("REEF_TRAINING_RECIPE", "").strip() or None
     if loss:
         try:
-            return loss, None, resolve_loss_family(loss)
+            return loss, recipe, resolve_loss_family(loss)
         except UnknownLossFamilyError as exc:
             raise RuntimeError(f"unsupported REEF_TRAINING_LOSS: {loss!r} ({exc})") from exc
-    recipe = environ.get("REEF_TRAINING_RECIPE", "").strip()
     if recipe:
-        loss = _recipe_loss_family(recipe)
-        return loss, recipe, resolve_loss_family(loss)
+        raise RuntimeError("REEF_TRAINING_LOSS is required when REEF_TRAINING_RECIPE is set")
     return None, None, None
 
 

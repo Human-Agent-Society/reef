@@ -31,7 +31,7 @@ Run one scenario per problem. The search archive retains the best candidate
 found so far. Mean rollout reward describes the programs sampled for a training
 step, so it can decrease even when the best archived solution does not change.
 
-The bundled example uses Qwen3-8B and includes the Erdős minimum-overlap problem
+The cookbook example uses Qwen3-8B and includes the Erdős minimum-overlap problem
 and the circle-packing problems for 26 and 32 circles.
 
 How one step runs
@@ -127,7 +127,7 @@ step grid. Reef validates these fields when it receives the report.
        },
    }, references=[receipt])
 
-The `bundled harness
+The `cookbook harness
 <../../../recipes/tttd/examples/tttd/README.md>`__ keeps the ordinary PUCT
 search separate from its Reef adapter. The adapter sends each inference through
 the scenario endpoint, retains the returned receipt, and reports the judge's

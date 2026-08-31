@@ -707,7 +707,7 @@ def build_default_dispatcher(
     local_artifact_dir: Path | None = None,
     agent_record_dir: Path | None = None,
 ) -> Dispatcher:
-    """Build a Dispatcher serving the bundled ``recipe`` kind.
+    """Build a Dispatcher serving the core record-only ``recipe``.
 
     Convenience for tests and service entrypoints that want a working
     dispatcher without configuring a recipe registry by hand. The recipe is

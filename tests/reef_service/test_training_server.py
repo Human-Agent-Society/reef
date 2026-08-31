@@ -12,14 +12,16 @@ from reef.service.assembly import _repository_location
 from reef.service.deploy.config import interpolate_config
 from reef.service.deploy.settings import ServiceSettings
 
+OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
+SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+
 
 def _example_owned(relative_path: str):
     """An example-owned stack, skipped where the examples do not ship.
 
     The package job runs this suite against the installed distribution, so
-    PROJECT_ROOT is site-packages: nothing under ``recipes/`` but the method
-    packages ships with the wheel. Absent there is correct, not
-    broken.
+    PROJECT_ROOT is site-packages and nothing under ``recipes/`` ships with
+    the wheel. Absent there is correct, not broken.
     """
     return pytest.param(
         relative_path,
@@ -40,7 +42,7 @@ def _settings(**overrides) -> ServiceSettings:
         "host": "0.0.0.0",
         "port": 8900,
         "tokens": ("token",),
-        "recipe": "openclawrl",
+        "recipe": OPENCLAWRL_RECIPE,
         "ray_address": "ray-head:6379",
         "ray_namespace": "reef",
         "ray_actor_name": "reef-train-bridge",
@@ -64,9 +66,9 @@ def _settings(**overrides) -> ServiceSettings:
 
 @pytest.mark.unit
 def test_service_config_exposes_shared_batch_controls() -> None:
-    args = deploy.service_settings_from_config({"reef": {"recipe": "openclawrl", "batch_size": 4}})
+    args = deploy.service_settings_from_config({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
 
-    assert args.recipe == "openclawrl"
+    assert args.recipe == OPENCLAWRL_RECIPE
     assert not hasattr(args, "default_recipe")
     # Recipe config fields are not service settings fields: they pass through raw so each
     # default lives with its recipe.
@@ -88,7 +90,7 @@ def test_service_config_preserves_inference_backend_config() -> None:
     args = deploy.service_settings_from_config(
         {
             "reef": {
-                "recipe": "openclawrl",
+                "recipe": OPENCLAWRL_RECIPE,
                 "inference_backend_factory": "example.factory",
                 "inference_backend_config": {"tool_call_parser": "qwen25"},
             }
@@ -105,7 +107,7 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
         "config": {"threshold": 0.8},
     }
 
-    args = deploy.service_settings_from_config({"reef": {"recipe": "sao"}, "evaluation": evaluation})
+    args = deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
 
     assert args.evaluation_settings == evaluation
 
@@ -113,7 +115,7 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
 @pytest.mark.unit
 def test_service_config_rejects_non_object_evaluation_section() -> None:
     with pytest.raises(ValueError, match="evaluation must be an object"):
-        deploy.service_settings_from_config({"reef": {"recipe": "sao"}, "evaluation": "disabled"})
+        deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
 
 
 @pytest.mark.unit
@@ -147,10 +149,10 @@ def test_service_config_requires_recipe() -> None:
     [
         ("recipes/basic/local-sglang.yaml", "recipe"),
         ("recipes/basic/external-provider.yaml", "recipe"),
-        ("recipes/openclawrl/examples/openclawrl/serve.yaml", "openclawrl"),
+        ("recipes/openclawrl/examples/openclawrl/serve.yaml", OPENCLAWRL_RECIPE),
     ],
 )
-def test_bundled_configs_launch_internal_service_from_reef_settings(
+def test_cookbook_configs_launch_internal_service_from_reef_settings(
     config_name: str,
     recipe: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -178,7 +180,7 @@ def test_bundled_configs_launch_internal_service_from_reef_settings(
         _example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),
     ],
 )
-def test_bundled_training_configs_leave_max_staleness_unset(relative_path) -> None:
+def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> None:
     config = deploy.load_config(deploy.PROJECT_ROOT / relative_path)
 
     assert "max_staleness" not in config["reef"]
@@ -259,7 +261,7 @@ def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_pa
     assert registry.names == ("recipe",)
     assert registry.served_recipe == "recipe"
     # The deployment serves one recipe: a request-time name never materializes
-    # another bundled kind, even though the open resolver could have built it.
+    # another method, even though a dotted resolver could have built it.
     with pytest.raises(UnknownScenarioRecipe):
         registry.resolve("harness_evolve")
 
@@ -295,7 +297,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
     monkeypatch.setattr(deploy.GitLFSRepositoryBackend, "factory", factory)
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="openclawrl",
+            recipe=OPENCLAWRL_RECIPE,
             recipe_settings={"batch_size": 4, "checkpoint_every_n_versions": 5},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
@@ -323,7 +325,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
 
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="openclawrl",
+            recipe=OPENCLAWRL_RECIPE,
             evaluation_settings=evaluation,
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
@@ -369,7 +371,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
     with pytest.raises(RecipeConfigError, match=r"OpenClawRLRecipe does not consume reef\.groups_per_step") as excinfo:
         deploy.build_dispatcher(
             _settings(
-                recipe="openclawrl",
+                recipe=OPENCLAWRL_RECIPE,
                 recipe_settings={"groups_per_step": 4},
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),
@@ -429,7 +431,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
 
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="sao",
+            recipe=SAO_RECIPE,
             recipe_settings={"max_staleness": 2},
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
@@ -463,7 +465,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
         return StubRuntime(max_staleness=kwargs.get("max_staleness", 0))
 
     dispatcher = deploy.build_dispatcher(
-        _settings(recipe="openclawrl", agent_record_dir=str(tmp_path / "agent-record")),
+        _settings(recipe=OPENCLAWRL_RECIPE, agent_record_dir=str(tmp_path / "agent-record")),
         environ={"REEF_MAX_STALENESS": str(max_staleness)},
         connector=connector,
     )
@@ -515,7 +517,7 @@ def test_service_tokens_rejects_non_list() -> None:
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
     """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
-    training recipe would reject the bundled configs as unconsumed settings."""
+    training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings
 
     config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}

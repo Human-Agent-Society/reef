@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from abc import ABC
 
-from reef import OpenClawRLRecipe
+from recipes.openclawrl import OpenClawRLRecipe
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend, RepositoryBackend
 from reef.recipe import Recipe
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions

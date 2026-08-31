@@ -31,7 +31,7 @@ Use the structured template that matches the work:
 - **Example** for a runnable user-facing recipe or reference deployment with a
   documented setup and expected result.
 - **RFC proposal** when the change may affect public interfaces,
-  persistence, trust boundaries, topology, bundled recipes, training
+  persistence, trust boundaries, topology, recipe extension contracts, training
   backends, or project-wide policy.
 - **Maintainer task** for scoped implementation, refactoring, cleanup, or
   project work that a maintainer has created or approved.
@@ -93,7 +93,7 @@ invitation to submit competing pull requests without coordination.
 Write an RFC before implementing a change that:
 
 - adds a new top-level package under `reef`;
-- adds a bundled recipe, learning method, or training backend;
+- adds a shared training backend or changes the recipe extension contract;
 - makes a significant or backwards-incompatible public interface change;
 - changes a persisted format, wire contract, trust boundary, or service
   topology; or

@@ -7,8 +7,8 @@ This page says which package should own a change.
 Choose a destination
 --------------------
 
-``reef/`` holds every shared mechanism. Each bundled method lives in one
-package under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
+``reef/`` holds every shared mechanism. Cookbook methods live in separate
+packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
 ``harness_evolve``) with that method's recipe, processor, step
 preparer, and, for weight methods, the ``slime/`` subpackage only the training
 plane imports. Nothing under ``reef/`` imports a method package.
@@ -66,8 +66,8 @@ import a concrete integration.
 | ``reef/scenario/``   | scenario binding, commit ordering,                       | training algorithms, repository            |
 |                      | recovery, checkpoint policy                              | implementations                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/recipe/``     | the contract a method implements, and                    | any particular method                      |
-|                      | kind registration                                        |                                            |
+| ``reef/recipe/``     | the contract a method implements, dotted                 | any particular method                      |
+|                      | class resolution, and runtime instance binding           |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/train/``      | the trainer loop, processor engines, batch               | HTTP endpoints, deployment                 |
 |                      | types, backend integrations                              | configuration parsing                      |
@@ -145,7 +145,7 @@ two packages that need more than a docstring are `Surfaces
 <../developer-guide/processors.rst>`__; the extension points every package
 exposes are in `Python API <../reference/python-api.rst>`__, and the public
 harness wire contract is `HTTP API <../reference/http-api.rst>`__. The
-`top-level README <../../README.md>`__ shows how the bundled methods sit
+`top-level README <../../README.md>`__ shows how the cookbook methods sit
 beside ``reef/``.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``

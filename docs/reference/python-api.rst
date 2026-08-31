@@ -164,8 +164,10 @@ Report
 
 .. code:: python
 
-   from reef.core.reports import ReportBase, ReportValidationError
-   from reef.core.reports import GroupedRolloutReport, ScoredRolloutReport   # bundled contracts
+   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+
+Method-specific report contracts live in their method package; Reef does not
+import or re-export them.
 
 A report type declares the feedback a method accepts, so malformed input fails
 at ingress with HTTP 400.

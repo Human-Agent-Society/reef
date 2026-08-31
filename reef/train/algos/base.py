@@ -1,4 +1,4 @@
-"""Internal base and bundled registration for step preparers.
+"""Internal base and decorator registration for step preparers.
 
 Subclass :class:`StepPreparer`, set the class attribute ``name``, implement
 :meth:`StepPreparer.__call__`, and register with ``@register_step_preparer``::
@@ -40,8 +40,8 @@ class StepPreparer(ABC):
         ``__call__`` — turn a reserved batch and algorithm state into a
         :class:`StepSignal`.
 
-    Register a bundled preparer with the ``@register_step_preparer`` class
-    decorator; external preparers are either registered at runtime via
+    Register a preparer with the ``@register_step_preparer`` class decorator;
+    callers may alternatively register an instance at runtime via
     :func:`reef.train.algos.registry.register_preparer` or named as a dotted
     ``"module:callable"`` reference resolved by
     :func:`reef.train.algos.registry.resolve_preparer`.
@@ -72,27 +72,27 @@ class _CallableStepPreparer(StepPreparer):
 
 
 # ---------------------------------------------------------------------------
-# bundled-preparer registration (populated by the class decorator)
+# decorator registration
 # ---------------------------------------------------------------------------
 
-_builtin_preparers: dict[str, StepPreparer] = {}
-"""Bundled preparers registered at import time by :func:`register_step_preparer`.
+_decorated_preparers: dict[str, StepPreparer] = {}
+"""Preparers registered at import time by :func:`register_step_preparer`.
 
-Read by :class:`~reef.train.algos.registry.StepPreparerRegistry` for its
-bundled set; external preparers are registered at runtime through
+Read by :class:`~reef.train.algos.registry.StepPreparerRegistry`; instances
+may also be registered at runtime through
 :func:`~reef.train.algos.registry.register_preparer`.
 """
 
 
 def register_step_preparer(cls: type[StepPreparer]) -> type[StepPreparer]:
-    """Class decorator: instantiate and register a bundled step preparer.
+    """Class decorator: instantiate and register a step preparer.
 
     Each preparer module applies this to its ``StepPreparer`` subclass so
     the registry is populated at import time — no explicit dict entry.
     """
     instance = cls()
     name = instance.name
-    if name in _builtin_preparers:
+    if name in _decorated_preparers:
         raise ValueError(f"step preparer {name!r} is already registered")
-    _builtin_preparers[name] = instance
+    _decorated_preparers[name] = instance
     return cls

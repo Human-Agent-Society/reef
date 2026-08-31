@@ -49,6 +49,7 @@ def test_component_playbooks_name_the_live_registration_points() -> None:
     runtime_registry = (REPO_ROOT / "reef" / "runtime" / "registry.py").read_text(encoding="utf-8")
     route_registry = (REPO_ROOT / "reef" / "service" / "routes" / "__init__.py").read_text(encoding="utf-8")
 
-    assert "@register_kind" in playbooks and "def register_kind" in recipe_registry
+    assert "register_kind" in playbooks and "def register_kind" not in recipe_registry
+    assert "package.module:ClassName" in playbooks
     assert "@register_runtime_kind" in playbooks and "def register_runtime_kind" in runtime_registry
     assert "register_routes" in playbooks and "def register_routes" in route_registry

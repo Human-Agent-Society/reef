@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-RECIPE_SECTIONS = ("kind", "model", "evolution", "data")
+RECIPE_SECTIONS = ("implementation", "model", "evolution", "data")
 
 config = yaml.safe_load(Path("serve.yaml").read_text())
 recipe = {key: config[key] for key in RECIPE_SECTIONS}

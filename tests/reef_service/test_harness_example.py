@@ -1,4 +1,4 @@
-"""Guarantees of the bundled recipes/harness_evolve/examples/harness_evolve example, hermetic: the
+"""Guarantees of the recipes/harness_evolve/examples/harness_evolve cookbook example, hermetic: the
 model binding is stubbed, episodes never run, and the boot test drives the
 same serve.yaml materialization run.sh performs."""
 
@@ -13,7 +13,7 @@ from types import ModuleType
 import pytest
 import yaml
 
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBindingError
 from reef.recipe import load_recipe_config
@@ -147,7 +147,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "serve.yaml")
-    recipe_sections = {key: config[key] for key in ("kind", "model", "evolution", "data")}
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     # serve.yaml names the real binary; this run has no pi on PATH.
     recipe_sections["evolution"] = {**recipe_sections["evolution"], "binary": str(tmp_path / "fake-pi")}
     materialized = tmp_path / "harness_evolve.yaml"

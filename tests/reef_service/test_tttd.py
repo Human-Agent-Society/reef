@@ -6,11 +6,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from recipes.tttd import TTTDProcessor
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from recipes.tttd.preparer import TttdPreparer
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import GroupedRolloutReport
 from reef.train import ProcessorContext
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -79,7 +78,7 @@ def _processor(experiment_logger=None) -> TTTDProcessor:
                 "groups_per_step": 2,
                 "rollouts_per_group": 3,
             },
-            report_type=GroupedRolloutReport,
+            report_type=TTTDGroupedRolloutReport,
             experiment_logger=experiment_logger or _ExperimentLogger(),
         )
     )

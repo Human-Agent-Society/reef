@@ -46,16 +46,16 @@ Recipe
 ------
 
 The method a deployment runs. It binds a processor, a step preparer, a loss
-family, a runtime, and a surface. The base ``recipe`` kind records without
+family, a runtime, and a surface. The core ``recipe`` records without
 producing updates.
 
-Recipe kind
------------
+Recipe reference
+----------------
 
-The name Reef resolves from ``reef.recipe``. Bundled recipes register theirs
-with ``register_kind()``; a dotted ``package.module:ClassName`` selects a class
-Reef does not bundle, and a bare name may also resolve to a YAML preset under
-``REEF_RECIPE_CONFIG_DIR``.
+What ``reef.recipe`` selects. ``recipe`` is the core record-only implementation;
+a dotted ``package.module:ClassName`` selects an installed method class; any
+other bare name resolves only to a YAML preset under
+``REEF_RECIPE_CONFIG_DIR``. Reef has no global recipe-implementation registry.
 
 Artifact
 --------
@@ -145,7 +145,7 @@ SAO
 ---
 
 Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
-<https://arxiv.org/abs/2607.07508>`__), the bundled `sao <../user-guide/recipes/sao.rst>`__
+<https://arxiv.org/abs/2607.07508>`__), the cookbook `sao <../user-guide/recipes/sao.rst>`__
 recipe. One graded rollout drives one training step, with no comparison group
 and no slowest-sample barrier.
 
@@ -153,14 +153,14 @@ TTT-Discover
 ------------
 
 Test-time-training discover (`arXiv:2601.16175
-<https://arxiv.org/abs/2601.16175>`__), the bundled `tttd <../user-guide/recipes/tttd.rst>`__
+<https://arxiv.org/abs/2601.16175>`__), the cookbook `tttd <../user-guide/recipes/tttd.rst>`__
 recipe. A model specializes to one hard problem during the search; the search
 loop stays in the harness.
 
 OpenClaw-RL
 -----------
 
-The bundled `openclawrl <../user-guide/recipes/openclawrl.rst>`__ recipe (`arXiv:2603.10165
+The cookbook `openclawrl <../user-guide/recipes/openclawrl.rst>`__ recipe (`arXiv:2603.10165
 <https://arxiv.org/abs/2603.10165>`__). It trains an unmodified agent from live
 conversation traffic using a next-state binary reward, with no external grader
 and no session headers.

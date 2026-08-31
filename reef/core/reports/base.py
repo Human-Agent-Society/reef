@@ -14,8 +14,8 @@ The declaration is shared by every party that touches the wire:
 
 The report type is a floor, not a ceiling: parsing validates declared fields
 and ignores everything else, so producers may attach extra ``feedback`` and
-``metadata`` keys freely. Bundled concrete contracts live in this package;
-out-of-tree methods declare theirs in their own package.
+``metadata`` keys freely. Shared concrete contracts live in this package;
+methods declare specialized contracts in their own package.
 """
 
 from __future__ import annotations

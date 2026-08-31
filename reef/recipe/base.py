@@ -157,11 +157,10 @@ class WeightTrainingRecipe(Recipe):
     :meth:`training_spec` binds the data processor, step preparer, and backend
     loss family. Keeping that static machinery in one structured return value
     means the dataclass fields remain the recipe's instance configuration.
-    The driver resolves the loss family from ``REEF_TRAINING_RECIPE``, which
-    accepts a registered kind name (``sao``) or a dotted
-    ``package.module:ClassName`` reference to an unbundled recipe class — the
-    same spellings ``reef.recipe.registry.recipe_class_for`` resolves for
-    ``reef.recipe``.
+    The training driver receives its loss implementation independently through
+    ``REEF_TRAINING_LOSS``. Cookbook deployments should give both the recipe
+    and loss family explicit dotted references; Reef never infers one from a
+    globally registered method name.
 
     ``max_staleness`` is the shared stale-sample admission window. Zero keeps
     exact-version training; a positive value admits same-incarnation samples

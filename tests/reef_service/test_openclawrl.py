@@ -534,7 +534,7 @@ def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
 def test_retired_openclawrl_fields_are_accepted_and_ignored(caplog) -> None:
     from reef_service.runtime_stubs import StubTrainingRuntime
 
-    from reef import OpenClawRLRecipe
+    from recipes.openclawrl import OpenClawRLRecipe
 
     with caplog.at_level("WARNING"):
         recipe = OpenClawRLRecipe(StubTrainingRuntime(), prm_teacher_timeout_s=5.0)

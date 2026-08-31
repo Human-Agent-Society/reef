@@ -80,7 +80,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     if not path.exists():
-        raise DeployConfigError(f"config not found: {path}\n  pick: reef serve -c recipes/basic/<stack>.yaml")
+        raise DeployConfigError(f"config not found: {path}\n  pass a deployment stack with: reef serve -c <path>")
     with open(path) as handle:
         config = yaml.safe_load(handle) or {}
     return _deep_interp_env(config, os.environ)

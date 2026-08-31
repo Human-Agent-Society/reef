@@ -8,12 +8,11 @@ from pathlib import Path
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
-from recipes.openclawrl import OpenClawRLProcessor
+from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.sao import SAOProcessor, SAORecipe
-from recipes.tttd import TTTDProcessor
-from reef import OpenClawRLRecipe, TTTDRecipe
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor, TTTDRecipe
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import GroupedRolloutReport, ScoredRolloutReport
+from reef.core.reports import ScoredRolloutReport
 from reef.recipe import (
     Recipe,
     RecipeConfigError,
@@ -22,10 +21,8 @@ from reef.recipe import (
     WeightTrainingRecipe,
     WeightTrainingSpec,
     load_recipe_config,
-    register_kind,
 )
-from reef.recipe import registry as recipe_registry
-from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for, recipe_kinds
+from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime import InferenceProxyRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
@@ -46,77 +43,44 @@ def test_training_recipes_share_max_staleness(recipe_type) -> None:
         recipe_type(StubTrainingRuntime(), max_staleness=2)
 
 
-def test_recipe_registry_registers_recipe_kind(monkeypatch) -> None:
-    monkeypatch.setattr(recipe_registry, "_RECIPE_KINDS", {})
-
-    @register_kind("custom")
-    class CustomRecipe(Recipe):
-        pass
-
-    assert recipe_kinds() == ("custom",)
-    assert recipe_class_for("custom") is CustomRecipe
-
-
-def test_recipe_registry_rejects_duplicate_kind(monkeypatch) -> None:
-    monkeypatch.setattr(recipe_registry, "_RECIPE_KINDS", {})
-
-    @register_kind("duplicate")
-    class FirstRecipe(Recipe):
-        pass
-
-    with pytest.raises(ValueError, match="recipe kind 'duplicate' is already registered"):
-
-        @register_kind("duplicate")
-        class SecondRecipe(Recipe):
-            pass
-
-
-def test_recipe_kinds_include_registered_builtins() -> None:
-    # The bundled vocabulary: the base wiring-check kind and the bundled
-    # methods. Registration order is an import detail, not a contract.
-    assert set(recipe_kinds()) == {
-        "recipe",
-        "openclawrl",
-        "sao",
-        "tttd",
-        "harness_evolve",
-    }
+def test_recipe_class_resolver_has_no_method_short_names() -> None:
     assert recipe_class_for("recipe") is Recipe
-    assert recipe_class_for("sft") is None
+    assert recipe_class_for("sao") is None
+    assert recipe_class_for("tttd") is None
+    assert recipe_class_for("openclawrl") is None
+    assert recipe_class_for("harness_evolve") is None
 
 
-def test_builtin_weight_training_recipe_loss_family_mappings() -> None:
+def test_cookbook_weight_training_recipe_loss_family_mappings() -> None:
     mappings = {
-        kind: recipe_type.training_spec().loss_family
-        for kind in recipe_kinds()
-        if (recipe_type := recipe_class_for(kind)) is not None and issubclass(recipe_type, WeightTrainingRecipe)
+        recipe_type.__name__: recipe_type.training_spec().loss_family
+        for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe)
     }
 
     assert mappings == {
-        "openclawrl": "openclawrl",
-        "sao": "sao",
-        "tttd": "tttd",
+        "OpenClawRLRecipe": "openclawrl",
+        "SAORecipe": "sao",
+        "TTTDRecipe": "tttd",
     }
 
 
-def test_dotted_kind_resolves_an_unbundled_recipe_class() -> None:
+def test_dotted_reference_resolves_an_external_recipe_class() -> None:
     assert recipe_class_for("reef.recipe.base:Recipe") is Recipe
-    # Dotted kinds never enter the bundled vocabulary.
-    assert "reef.recipe.base:Recipe" not in recipe_kinds()
+    assert recipe_class_for("recipes.sao.recipe:SAORecipe") is SAORecipe
 
 
 @pytest.mark.parametrize(
-    ("kind", "match"),
+    ("reference", "match"),
     [
-        ("nowhere.to.be:Found", "cannot import recipe kind"),
-        ("reef.recipe.base:missing", "cannot import recipe kind"),
+        ("nowhere.to.be:Found", "cannot import recipe reference"),
+        ("reef.recipe.base:missing", "cannot import recipe reference"),
         ("reef.recipe.base:config_positive_int", "is not a Recipe class"),
         (":Recipe", "must be 'package.module:ClassName'"),
     ],
 )
-def test_dotted_kind_rejects_bad_references(kind: str, match: str) -> None:
+def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> None:
     with pytest.raises(RecipeConfigError, match=match):
-        recipe_class_for(kind)
+        recipe_class_for(reference)
 
 
 def test_recipe_registry_resolves_registered_recipe() -> None:
@@ -151,7 +115,7 @@ def test_recipe_registry_resolves_registered_recipe() -> None:
             "tttd",
             TTTDProcessor,
             "tttd",
-            GroupedRolloutReport,
+            TTTDGroupedRolloutReport,
         ),
     ],
 )
@@ -194,8 +158,8 @@ def test_build_rejects_an_unknown_step_preparer_before_any_training_step() -> No
 
 
 def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process() -> None:
-    # A service process never imports the Slime driver, so the bundled
-    # preparers must register from reef.train.algos alone for eager preparer
+    # A service process never imports the Slime driver, so the cookbook
+    # package must register its preparer when the dotted recipe is imported for eager preparer
     # resolution to accept "tttd" in the process the recipe is served from.
     # In-process tests cannot pin this (a sibling test may have imported the
     # driver for the whole session), hence the subprocess.
@@ -205,7 +169,7 @@ def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process(
             "-c",
             (
                 f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
-                "from reef import TTTDRecipe\n"
+                "from recipes.tttd import TTTDRecipe\n"
                 "from reef.records import RecordStore\n"
                 "from reef_service.runtime_stubs import StubTrainingRuntime\n"
                 "trainer = TTTDRecipe(StubTrainingRuntime(), groups_per_step=1, rollouts_per_group=2)"
@@ -255,9 +219,9 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
         ),
     ],
 )
-def test_bundled_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> None:
+def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> None:
     # Observable pin: a valid, assemblable two-turn episode is refused by the
-    # bundled recipes' processors — the report is terminal and released, not
+    # cookbook recipes' processors — the report is terminal and released, not
     # accepted as a candidate. (openclawrl is absent: it consumes no reports
     # at all — see test_openclawrl_recipe_ignores_reports.)
     trainer = recipe.build("math", RecordStore())
@@ -302,7 +266,7 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
 def test_recipe_factory_keeps_method_configuration_inside_recipe() -> None:
     runtime = StubTrainingRuntime()
     recipe = build_recipe(
-        "tttd",
+        "recipes.tttd.recipe:TTTDRecipe",
         {
             "REEF_TRAINER_URL": "http://trainer:8901",
             "REEF_TRAINER_TOKEN": "secret",
@@ -320,13 +284,13 @@ def test_recipe_factory_keeps_method_configuration_inside_recipe() -> None:
 
 def test_training_recipe_requires_its_runtime_environment() -> None:
     with pytest.raises(RecipeConfigError, match="requires a training runtime"):
-        build_recipe("tttd", {})
+        build_recipe("recipes.tttd.recipe:TTTDRecipe", {})
 
 
 def test_recipe_config_routes_sections_to_their_consumers(tmp_path) -> None:
     path = tmp_path / "openclawrl.yaml"
     path.write_text(
-        """kind: openclawrl
+        """implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
 data:
   batch_size: 4
 artifact:
@@ -337,24 +301,24 @@ model:
     )
 
     settings = load_recipe_config(path)
-    recipe = build_recipe(settings["kind"], {}, config=settings, runtime=StubTrainingRuntime())
+    recipe = build_recipe(settings["implementation"], {}, config=settings, runtime=StubTrainingRuntime())
 
     assert recipe.batch_size == 4
     assert recipe.checkpoint_strategy == EveryNVersions(3)
 
 
-def test_recipe_config_requires_kind(tmp_path) -> None:
+def test_recipe_config_requires_implementation(tmp_path) -> None:
     path = tmp_path / "recipes.yaml"
     path.write_text("data:\n  batch_size: 1\n")
 
-    with pytest.raises(RecipeConfigError, match="non-empty 'kind'"):
+    with pytest.raises(RecipeConfigError, match="non-empty 'implementation'"):
         load_recipe_config(path)
 
 
 def test_named_recipe_resolves_preset_from_filename(tmp_path) -> None:
     path = tmp_path / "thorough.yaml"
     path.write_text(
-        """kind: recipe
+        """implementation: recipe
 runtime:
   type: inference_proxy
   base_url: http://provider
@@ -373,7 +337,7 @@ model:
 def test_config_backed_training_recipe_requires_an_injected_runtime(tmp_path) -> None:
     path = tmp_path / "sao-qwen.yaml"
     path.write_text(
-        """kind: sao
+        """implementation: recipes.sao.recipe:SAORecipe
 model:
   path: Qwen/Qwen3.5-27B
 """
@@ -382,14 +346,14 @@ model:
         build_named_recipe("sao-qwen", config_directory=tmp_path)
 
 
-def test_named_recipe_without_config_directory_resolves_kinds_only() -> None:
+def test_named_recipe_without_config_directory_resolves_core_recipe_only() -> None:
     assert isinstance(build_named_recipe("recipe", {}), Recipe)
     with pytest.raises(UnknownScenarioRecipe, match="unknown scenario recipe 'thorough'"):
         build_named_recipe("thorough", {})
 
 
 def test_named_recipe_reads_the_config_directory_from_the_environment(tmp_path) -> None:
-    (tmp_path / "thorough.yaml").write_text("kind: recipe\nmodel:\n  path: Qwen/Qwen3.5-27B\n")
+    (tmp_path / "thorough.yaml").write_text("implementation: recipe\nmodel:\n  path: Qwen/Qwen3.5-27B\n")
 
     recipe = build_named_recipe("thorough", {"REEF_RECIPE_CONFIG_DIR": str(tmp_path)})
 
@@ -403,17 +367,17 @@ def test_instance_registry_is_a_closed_set() -> None:
         registry.resolve("recipe")
 
 
-def test_named_recipes_never_import_dotted_kinds() -> None:
+def test_named_recipes_never_import_implementation_references() -> None:
     with pytest.raises(RecipeConfigError, match="invalid recipe name"):
         build_named_recipe("reef.recipe.base:Recipe", {})
 
 
 def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "test-minimax-key")
-    # A local proxy preset: the bundled recipe kind pinned to a deployment's
+    # A local proxy preset: the core recipe pinned to a deployment's
     # own endpoint and model.
     (tmp_path / "local-proxy.yaml").write_text(
-        "kind: recipe\n"
+        "implementation: recipe\n"
         "runtime:\n"
         "  type: inference_proxy\n"
         "  base_url: http://127.0.0.1:30000\n"
@@ -428,10 +392,10 @@ def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     assert isinstance(local.runtime, InferenceProxyRuntime)
     assert local.runtime.model_path == "Qwen/Qwen3.6-27B"
 
-    # The hosted-provider shape (api_key_env) needs no bundled example: any
+    # The hosted-provider shape (api_key_env) needs no built-in example: any
     # directory of named YAMLs resolves the same way.
     (tmp_path / "hosted-proxy.yaml").write_text(
-        "kind: recipe\n"
+        "implementation: recipe\n"
         "runtime:\n"
         "  type: inference_proxy\n"
         "  base_url: https://api.minimax.io/anthropic\n"
@@ -447,7 +411,7 @@ def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     assert runtime.api_key == "test-minimax-key"
 
 
-def test_bundled_preparers_signal_their_recipes_loss_family() -> None:
+def test_cookbook_preparers_signal_their_recipes_loss_family() -> None:
     # The recipe's loss_family and the preparer's StepSignal.loss_family are
     # two strings; the bridge only compares them at the first training step.
     # Pin them here so a drift fails before any GPU spins up.
@@ -460,10 +424,7 @@ def test_bundled_preparers_signal_their_recipes_loss_family() -> None:
     first = PolicySample("i1", (5, 1), (1,), (-0.1,), 0.5)
     second = replace(first, source_agent_record_id="i2", reward=1.5)
     checked = set()
-    for kind in recipe_kinds():
-        recipe_type = recipe_class_for(kind)
-        if recipe_type is None or not issubclass(recipe_type, WeightTrainingRecipe):
-            continue
+    for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
         spec = recipe_type.training_spec()
         assert spec.processor is not None
         if spec.processor.output_schema is GroupedPolicyBatch:
@@ -471,7 +432,7 @@ def test_bundled_preparers_signal_their_recipes_loss_family() -> None:
         else:
             batch = PolicyBatch("b", (first, second))
         signal = resolve_preparer(spec.step_preparer)(batch, {})
-        assert signal.loss_family == spec.loss_family, kind
+        assert signal.loss_family == spec.loss_family, recipe_type.__name__
         assert resolve_loss_family(signal.loss_family).loss_family == spec.loss_family
-        checked.add(kind)
-    assert checked == {"openclawrl", "sao", "tttd"}
+        checked.add(recipe_type.__name__)
+    assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}

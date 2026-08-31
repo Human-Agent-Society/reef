@@ -316,7 +316,7 @@ def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillcl
 
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
-    through reef's config loader and build the dotted kind - selection
+    through reef's config loader and build the explicit implementation - selection
     always, batch_size 60, the seed composition plus the seed_skills pool."""
     from reef.records import RecordStore
     from reef.service.deploy.config import load_config
@@ -333,10 +333,10 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     monkeypatch.setenv("REEF_SC_SKILLS", str(skills))
     config = load_config(EXAMPLE_DIR / "skillclaw.yaml")
-    sections = {key: config[key] for key in ("kind", "model", "evolution", "data")}
-    assert sections["kind"] == "harness.skillclaw_recipe:SkillClawRecipe"
+    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    assert sections["implementation"] == "harness.skillclaw_recipe:SkillClawRecipe"
 
-    built = build_recipe(str(sections["kind"]), {}, config=sections, runtime=runtime())
+    built = build_recipe(str(sections["implementation"]), {}, config=sections, runtime=runtime())
     assert type(built).__name__ == "SkillClawRecipe"
     assert built.name == "skillclaw"
     assert isinstance(built.candidate_selector, AlwaysSelect)
