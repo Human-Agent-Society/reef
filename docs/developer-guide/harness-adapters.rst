@@ -54,6 +54,8 @@ To connect an agent that has no adapter yet:
 descriptor at load, and the two bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. A third-party adapter
 registers on the ``reef.harness_adapters`` entry-point group. ``version_check:
-true`` writes an update notice into the tree and ships for ``pi`` only, so an
-``opencode`` recipe that sets it refuses to boot. An evolved tree is
-adapter-specific: ``config`` node contents follow each adapter's schema.
+true`` writes an update prompt into the tree and ships for ``pi`` only. The
+prompt offers to run the update or skip in interactive mode and prints the
+instructions in headless mode. An ``opencode`` recipe that sets it refuses to
+boot. An evolved tree is adapter-specific: ``config`` node contents follow each
+adapter's schema.

@@ -26,22 +26,13 @@ The only difference is that, Reef constantly evaluates your agent behavior
 and improves the served harness and model weights in the backend. You keep getting
 better and better results without having to do anything.
 
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-hero-dark.svg">
-  <img src="docs/assets/readme-hero-light.svg" alt="An ordinary agent forgets its feedback; Reef uses feedback to grow a version chain instead, and new versions update the model or the harness." width="640">
-</picture>
-
 </div>
 
 
 ## How it works
 
 <div align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-loop-dark.svg">
-  <img src="docs/assets/readme-loop-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
-</picture>
+<img src="docs/assets/readme-loop-v2-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
 </div>
 
 Reef processes each learning cycle in four steps. The table also shows which
@@ -185,7 +176,10 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 Reef batches eligible reports according to the recipe configuration. When
 version checking is enabled, the adapter checks for a newer published version
-the next time it starts. The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
+the next time it starts. Interactive sessions offer **Update with …** and
+**Skip** before accepting input; choosing update runs the installer directly.
+Headless sessions print the instruction instead.
+The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
 describes the proposal, evaluation, and publication process.
 
 

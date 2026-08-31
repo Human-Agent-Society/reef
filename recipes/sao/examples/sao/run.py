@@ -2,7 +2,7 @@
 
 For each task, in order:
 
-    solve  — tide runs the task under our agent (six attempts, each an
+    solve  — reef-eval runs the task under our agent (six attempts, each an
              inference through Reef)
     verify — Harbor's isolated verifier scores every attempt
     learn  — the agent reports each score against its receipt; Reef's SAO
@@ -15,7 +15,7 @@ The ordering is the experiment: task N+1 measures what task N taught.
 import asyncio
 from pathlib import Path
 
-from tide import Lab
+from reef_eval import Lab
 
 MODEL = "reef"  # model name the agent sends; Reef's SGLang serves it
 

@@ -5,9 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reef-openclawrl-harness"
 version = "0.1.0"
-description = "Tide stream harness for the OpenClaw-RL GSM8K homework sessions"
-requires-python = ">=3.10"
-dependencies = ["reef-client"]
+description = "reef-eval stream harness for the OpenClaw-RL GSM8K homework sessions"
+requires-python = ">=3.12"
+dependencies = [
+    "reef-client",
+    "reef-eval[harbor]",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

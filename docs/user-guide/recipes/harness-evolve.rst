@@ -62,7 +62,7 @@ zero.
    evolution.binary | overrides the adapter's binary name
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
    evolution.models | auxiliary models for the method; each key read via its ``api_key_env``
-   evolution.version_check | appends the adapter's update notice, so a pulled tree reports when it is behind
+   evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured

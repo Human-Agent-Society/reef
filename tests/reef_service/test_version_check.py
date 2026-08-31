@@ -8,6 +8,8 @@ extension refuse boot with a config error naming them.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -71,10 +73,14 @@ def test_version_check_off_by_default_seeds_nothing() -> None:
     assert not any(options.get("id") == VERSION_CHECK_ENTRY_ID for options in recipe.seed)
 
 
-def test_the_notice_guards_come_first_and_the_install_command_matches_the_route() -> None:
+def test_the_notice_registers_a_startup_prompt_and_matches_the_install_route() -> None:
     text = ASSET.read_text(encoding="utf-8")
-    body = text.split("export default", 1)[1]
-    assert body.splitlines()[1].strip() == "if (process.env.PI_OFFLINE) return; // hermetic episodes stay silent"
+    assert 'pi.on("session_start"' in text
+    assert "checked || process.env.PI_OFFLINE" in text
+    assert "const updateOption = `Update with ${instruction}`" in text
+    assert '[updateOption, "Skip"]' in text
+    assert 'pi.exec("bash"' in text
+    assert "if (!ctx.hasUI)" in text
     assert "/reef/harness/install?adapter=pi" in text
     assert "| bash" in text
 
@@ -86,3 +92,79 @@ def test_the_notice_parses_as_plain_javascript(tmp_path: Path) -> None:
     module = tmp_path / "version_check.mjs"
     module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
     subprocess.run(["node", "--check", str(module)], check=True, capture_output=True)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+@pytest.mark.parametrize(
+    ("choose_update", "expected_kinds"),
+    [(True, ["select", "notify", "exec", "notify"]), (False, ["select"])],
+)
+def test_the_notice_prompts_before_start_and_honors_the_choice(
+    tmp_path: Path, choose_update: bool, expected_kinds: list[str]
+) -> None:
+    module = tmp_path / "version_check.mjs"
+    module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
+    agent_dir = tmp_path / "pi-agent"
+    agent_dir.mkdir()
+    (tmp_path / ".reef-harness-version").write_text(json.dumps({"artifact_version": "v1"}), encoding="utf-8")
+    runner = tmp_path / "runner.mjs"
+    runner.write_text(
+        """
+import versionCheck from "./version_check.mjs";
+
+let sessionStart;
+const events = [];
+versionCheck({
+  on(name, handler) {
+    if (name === "session_start") sessionStart = handler;
+  },
+  exec: async (command, args) => {
+    events.push({ kind: "exec", command, args });
+    return { stdout: "", stderr: "", code: 0, killed: false };
+  },
+});
+globalThis.fetch = async () => ({
+  ok: true,
+  json: async () => ({ versions: [{ artifact_version: "v1" }, { artifact_version: "v2" }] }),
+});
+await sessionStart(
+  { type: "session_start", reason: "startup" },
+  {
+    hasUI: true,
+    ui: {
+      select: async (title, options) => {
+        events.push({ kind: "select", title, options });
+        return process.env.TEST_CHOOSE_UPDATE === "1" ? options[0] : options[1];
+      },
+      notify: (message, type) => events.push({ kind: "notify", message, type }),
+    },
+  },
+);
+console.log(JSON.stringify(events));
+""".strip(),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PI_CODING_AGENT_DIR": str(agent_dir),
+        "REEF_SERVICE_URL": "http://reef:8900",
+        "REEF_SCENARIO": "code-repair",
+        "TEST_CHOOSE_UPDATE": "1" if choose_update else "0",
+    }
+    env.pop("PI_OFFLINE", None)
+
+    completed = subprocess.run(["node", str(runner)], check=True, capture_output=True, text=True, env=env)
+
+    events = json.loads(completed.stdout)
+    assert [event["kind"] for event in events] == expected_kinds
+    prompt = events[0]
+    assert prompt["options"][0].startswith("Update with curl -fsS ")
+    assert prompt["options"][1] == "Skip"
+    assert "Current: v1" in prompt["title"]
+    assert "Latest:  v2" in prompt["title"]
+    if choose_update:
+        execution = events[2]
+        assert execution["command"] == "bash"
+        assert "/reef/harness/install?adapter=pi" in execution["args"][1]
+        assert execution["args"][-3:] == ["code-repair", "http://reef:8900", ""]
+        assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."

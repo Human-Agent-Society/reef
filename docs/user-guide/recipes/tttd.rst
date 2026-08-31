@@ -137,7 +137,7 @@ not import a Reef client or construct report payloads.
 Run the example
 ---------------
 
-The example starts Ray, Slime, Megatron, SGLang, Reef, Tide, and the selected
+The example starts Ray, Slime, Megatron, SGLang, Reef, reef-eval, and the selected
 Harbor task on one machine. It requires Linux, NVIDIA GPUs, Docker, and the Reef
 training dependencies described in `Installation <../../getting-started/installation.rst>`__. Run the
 following commands from the repository root:
@@ -146,7 +146,7 @@ following commands from the repository root:
 
    git submodule update --init third_party/reef-client
    python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . "tide-eval[harbor]"
+   python -m pip install -e . "reef-eval[harbor]"
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
