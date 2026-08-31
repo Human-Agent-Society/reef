@@ -18,34 +18,22 @@ a change that needs to reach upward is in the wrong package:
 
 .. code:: mermaid
 
+   %%{init: {"flowchart": {"curve": "linear", "wrappingWidth": 480, "rankSpacing": 34}}}%%
    flowchart TD
        accTitle: Dependency direction between package layers
-       subgraph Methods["Methods in recipes/"]
-           direction LR
-           M["sao, tttd, openclawrl, harness_evolve<br/>recipe, processor, preparer"]
+       Methods("<b>METHOD PACKAGES</b> &nbsp; outside <code>reef/</code><br/><code>sao</code> · <code>tttd</code> · <code>openclawrl</code> · <code>harness_evolve</code>")
+
+       subgraph Reef["reef/"]
+           direction TB
+           Orchestration("<b>ORCHESTRATION</b><br/><code>service</code> · <code>scenario</code>")
+           Contracts("<b>CONTRACTS</b><br/><code>recipe</code> · <code>runtime</code> · <code>harness</code>")
+           Engines("<b>ENGINES &amp; STORAGE</b><br/><code>train</code> · <code>surface</code> · <code>artifact</code>")
+           Core(["<b>CORE</b><br/><code>core</code>"])
+
+           Orchestration --> Contracts --> Engines --> Core
        end
-       subgraph Orchestration["Orchestration"]
-           direction LR
-           Service["reef/service<br/>HTTP, assembly, lifecycle"]
-           Scenario["reef/scenario<br/>commit order, recovery"]
-       end
-       subgraph Contracts["Contracts"]
-           direction LR
-           Recipe["reef/recipe<br/>what a method implements"]
-           Runtime["reef/runtime<br/>inference and training"]
-           Harness["reef/harness<br/>descriptors, episodes"]
-       end
-       subgraph Engines["Engines and storage"]
-           direction LR
-           Train["reef/train<br/>trainer, processors, backends"]
-           Surfaces["reef/surface<br/>delivery of an artifact"]
-           Artifacts["reef/artifact<br/>bytes, repositories, versions"]
-       end
-       Core["reef/core: value types, wire shapes, errors"]
+
        Methods --> Orchestration
-       Orchestration --> Contracts
-       Contracts --> Engines
-       Engines --> Core
 
 Two edges skip a layer and are allowed: a method package binds ``reef/train``
 machinery directly, and ``reef/service`` imports ``reef/artifact`` to stream
