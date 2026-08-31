@@ -626,8 +626,17 @@ class TrainBridgeActorImpl:
             )
             if "scenario" in marker:
                 training_job["scenario"] = marker["scenario"]
+        ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed"}
         return {
-            "ok": self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed"},
+            "ok": ok,
+            # A publication failure with a durable UPDATING_WEIGHTS marker is
+            # replayable in place: ``update_serving_weights`` recovers the
+            # engines and republishes from the checkpoint. The bridge decides
+            # which failures are retryable so callers never re-derive it from
+            # phase and marker.
+            "recoverable": not ok
+            and self._phase == "weight_sync_failed"
+            and training_job.get("status") == "UPDATING_WEIGHTS",
             "start_rollout_id": self._next_rollout_id,
             "phase": self._phase,
             "colocate": self._colocate,
@@ -733,6 +742,16 @@ class TrainBridgeActorImpl:
             try:
                 if recovering:
                     self._manager_call("recover_updatable_engines")
+                    if self._ledger is not None:
+                        # The failed publication terminated every updatable
+                        # engine, so recovery restarted them from the frozen
+                        # base with no adapters resident. Align residency with
+                        # that — a slot leaked against the dead engine must
+                        # not read as exhausted capacity forever — and reload
+                        # the other scenarios' committed adapters before this
+                        # scenario's forced full publication.
+                        self._require_residency().reconcile((), self._adapter_engine)
+                        self._recover_scenario_adapters(marker)
                 self._pause_generation()
                 if self._ledger is not None:
                     # A restart between checkpoint and publication may have

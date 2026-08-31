@@ -194,10 +194,11 @@ class AdapterResidencyManager:
                 return name
             # A leaked slot still holds the engine's copy of exactly this
             # revision; reloading it in place reclaims the slot.
-            if slot is not None and not self._unload(slot, engine):
+            if slot is not None and (unload_error := self._unload(slot, engine)) is not None:
                 raise AdapterResidencyError(
-                    f"adapter {name!r} leaked in the engine and cannot be reloaded until the unload succeeds"
-                )
+                    f"adapter {name!r} leaked in the engine and cannot be reloaded until the unload "
+                    f"succeeds: {unload_error}"
+                ) from unload_error
             self._make_room(scenario, engine, supersede=supersede)
             slot = _Slot(name, scenario, version, self._next_order)
             self._next_order += 1
@@ -380,14 +381,17 @@ class AdapterResidencyManager:
                     f"engine adapter capacity {self._capacity} is exhausted and every resident adapter is "
                     f"protected (current, pinned, or in flight): {protected}; scenario {scenario!r} cannot activate"
                 )
-            if not self._unload(victim, engine):
+            if (unload_error := self._unload(victim, engine)) is not None:
                 # The engine refused to let go; the slot stays occupied and
                 # the caller sees exhaustion rather than a silent overcommit.
+                # The unload failure rides along: "capacity exhausted" alone
+                # would hide that the real event may be a dead engine.
                 self._counters["capacity_rejections"] += 1
                 raise AdapterCapacityExhausted(
-                    f"engine adapter capacity {self._capacity} is exhausted and evicting {victim.name!r} failed; "
-                    f"scenario {scenario!r} cannot activate until the leaked slot is reclaimed"
-                )
+                    f"engine adapter capacity {self._capacity} is exhausted and evicting {victim.name!r} "
+                    f"failed ({unload_error}); scenario {scenario!r} cannot activate until the leaked slot "
+                    f"is reclaimed"
+                ) from unload_error
             self._counters["evictions"] += 1
             self._note("evicted", victim.name, victim.scenario, f"for scenario {scenario!r}")
 
@@ -401,8 +405,8 @@ class AdapterResidencyManager:
         candidates.sort(key=lambda slot: (slot.state != "leaked", slot.order))
         return candidates[0]
 
-    def _unload(self, slot: _Slot, engine: AdapterEngine | None) -> bool:
-        """Drop ``slot`` from the engine and the table; False leaves it ``leaked``."""
+    def _unload(self, slot: _Slot, engine: AdapterEngine | None) -> Exception | None:
+        """Drop ``slot`` from the engine and the table; a returned failure leaves it ``leaked``."""
         try:
             if engine is not None:
                 engine.unload_adapter(slot.name)
@@ -411,13 +415,13 @@ class AdapterResidencyManager:
             slot.state = "leaked"
             self._note("leaked", slot.name, slot.scenario, str(exc))
             logger.warning("could not unload adapter %r; its engine slot leaks", slot.name, exc_info=True)
-            return False
+            return exc
         self._counters["unloads"] += 1
         self._slots.pop(slot.name, None)
         for scenario, name in list(self._current.items()):
             if name == slot.name:
                 self._current.pop(scenario, None)
-        return True
+        return None
 
     # -- Reconciliation --------------------------------------------------
 
@@ -434,7 +438,7 @@ class AdapterResidencyManager:
             for name in sorted(held - set(self._slots)):
                 stray = _Slot(name, scenario="", version="", order=-1)
                 self._slots[name] = stray
-                if self._unload(stray, engine):
+                if self._unload(stray, engine) is None:
                     self._counters["strays_unloaded"] += 1
                     self._note("stray_unloaded", name, "")
             lost = tuple(sorted(name for name in self._slots if name not in held and self._slots[name].order >= 0))
