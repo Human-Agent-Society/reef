@@ -123,13 +123,18 @@ From a Reef checkout:
 .. code:: bash
 
    export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
-   cd examples/harness_evolve
+   cd tutorials/harness_evolve
    ./run.sh
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
 them there to point at your own. The provider key is the one value it does
 not hold.
+
+`1_evolve_your_harness.ipynb
+<../../tutorials/harness_evolve/1_evolve_your_harness.ipynb>`__ is the same
+pass as a notebook, cell by cell, with the service managed as a subprocess;
+its committed outputs are a full local run on ollama with no GPU.
 
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is

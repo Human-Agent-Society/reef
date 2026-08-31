@@ -1,9 +1,12 @@
 harness_evolve
 ==============
 
-The cookbook recipe that updates text instead of weights. It proposes one
-edit to the agent's harness tree, runs the agent both ways on your tasks, and
-publishes the edit only if it wins.
+The harness half of Reef, built in: the general engine that evolves any kind
+of harness, carried by ``reef/train/cordis_backend/`` the way
+``slime_backend`` carries weights. It proposes one edit to the agent's harness
+tree, runs the agent both ways on your tasks, and publishes the edit only if
+it wins. The demo lives in ``tutorials/harness_evolve/``; the paper-backed
+reproduction on the same engine is ``recipes/skillclaw/``.
 
 `Evolve your harness <../evolve-your-harness.rst>`__ is the guide and the
 runnable example.
@@ -15,7 +18,7 @@ runnable example.
 | Signal      | one report with a finite ``score`` and exactly one         |
 |             | reference                                                  |
 +-------------+------------------------------------------------------------+
-| Package     | ``reef/train/cordis_backend/``                                   |
+| Package     | ``reef/train/cordis_backend/``                             |
 +-------------+------------------------------------------------------------+
 | Loss family | none (no weight training)                                  |
 +-------------+------------------------------------------------------------+
@@ -79,18 +82,22 @@ wired.
 Results
 -------
 
-`examples/harness_evolve
+`tutorials/harness_evolve
 <../../../tutorials/harness_evolve/README.md>`__ measured one
 end-to-end run in 63 s on Qwen3-8B: one failing task entered the window, the
 served model proposed a new skill beside the starter, the gate scored the
 candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties), and the tree published.
 
+The committed notebook run repeats the arc with no GPU at all: ollama
+``qwen2.5:7b`` on a Mac mini failed one task, the self proposer updated the
+seed skill, and the gate published on 1 win, 0 losses, 2 ties.
+
 SkillClaw
 ~~~~~~~~~
 
-`examples/skillclaw
+`recipes/skillclaw
 <../../../recipes/skillclaw/README.md>`__ is the
-larger worked instance: a full method package on the same mechanism. Each night,
+paper reproduction: a full method package on the same engine. Each night,
 ``propose`` makes one decision per skill group plus the no-skill bucket and maps
 them to a single composite mutation sequence. ``selection: always`` publishes
 every night that produces a proposal.

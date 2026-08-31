@@ -31,7 +31,7 @@ Pick by the signal your workload can produce.
 | Agent conversations without reports           | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | Feedback on individual requests, and failures | `harness_evolve <recipes/harness-evolve.rst>`__ | harness tree  | no         |
-| worth learning from                           |                                                 |               |            |
+| worth learning from                           | (built into Reef)                               |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | No feedback yet; record only                  | ``recipe``, the core record-only recipe         | nothing       | no         |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
