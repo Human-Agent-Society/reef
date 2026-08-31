@@ -210,7 +210,7 @@ def _validate_tracking_args(args: Any) -> None:
         raise RuntimeError("--wandb-key is not supported; use WANDB_API_KEY or the W&B credential store")
     if getattr(args, "use_wandb", False):
         raise RuntimeError(
-            "--use-wandb in training.slime_flags is not supported; use Reef's generic training.wandb config"
+            "--use-wandb in training.slime_flags is not supported; use Reef's observability.wandb config"
         )
 
 

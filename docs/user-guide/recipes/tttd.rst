@@ -305,12 +305,12 @@ Enable W&B tracking
 -------------------
 
 The example disables W&B in ``serve.yaml`` by default. Set
-``training.wandb.enabled`` to ``true`` before starting the stack, and provide a
+``observability.wandb.enabled`` to ``true`` before starting the stack, and provide a
 project and an optional entity:
 
 .. code:: yaml
 
-   training:
+   observability:
      wandb:
        enabled: true
        project: reef

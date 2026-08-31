@@ -159,9 +159,9 @@ curl -s -H "Authorization: Bearer reef-local" \
 The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask
 removed), `critic/explained_variance`, actor and critic `grad_norm`, and the
 asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
-`sao/effective_token_rate`. Set `training.wandb.enabled: true` in
+`sao/effective_token_rate`. Set `observability.wandb.enabled: true` in
 `serve.yaml` and export `WANDB_API_KEY` to keep them per committed step;
-`training.wandb.directory` is where the run files go.
+`observability.wandb.directory` is where the run files go.
 
 ### A larger model
 
@@ -246,7 +246,7 @@ batch is 128 over a full training run.
 
 The curve is the cumulative mean reward against scored rollouts, per arm,
 with the base rate as the dashed line. The runs predate Reef's experiment tracking, so no per-step W&B
-history exists for them. A new run with `training.wandb.enabled: true`
+history exists for them. A new run with `observability.wandb.enabled: true`
 records the step metrics that the TTT-Discover and OpenClaw-RL results keep
 (mean reward, response length, KL, step time).
 

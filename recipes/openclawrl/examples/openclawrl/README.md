@@ -160,7 +160,7 @@ The paths and names are constants at the top of `run.sh`: the models under
 tasks). For live W&B tracking, set the following:
 
 - `WANDB_API_KEY=...` is forwarded into the stack for live training curves
-  (also set `training.wandb.enabled: true` in `serve.yaml`) and starts
+  (also set `observability.wandb.enabled: true` in `serve.yaml`) and starts
   `results/learning_curve.py`, which logs the per-session verdicts into the same
   W&B group.
 

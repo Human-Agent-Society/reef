@@ -100,8 +100,8 @@ class ServiceSettings:
     artifact_cache_dir: str = ".reef/artifact-cache"
     agent_record_dir: str = ".reef/agent-record"
     allow_implicit_scenario_creation: bool = True
-    #: Deployment-level experiment provider settings. These are sourced from
-    #: ``training.wandb`` rather than the recipe-owned ``reef`` section.
+    #: Deployment-level experiment provider settings, sourced from
+    #: ``observability.wandb``.
     wandb_config: Mapping[str, Any] = field(default_factory=dict)
     training_settings: Mapping[str, Any] = field(default_factory=dict)
     #: Optional pre-publication checkpoint evaluator and selection plugin.
@@ -262,7 +262,7 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
         allow_implicit_scenario_creation=bool(
             _config_service_value(config, "reef", "allow_implicit_scenario_creation", default=True)
         ),
-        wandb_config=_config_service_mapping(config, "training", "wandb"),
+        wandb_config=_config_service_mapping(config, "observability", "wandb"),
         training_settings=_config_service_mapping(config, "training"),
         evaluation_settings=_config_optional_mapping(config, "evaluation"),
         recipe_settings=_reef_section(config),

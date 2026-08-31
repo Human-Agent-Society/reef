@@ -43,7 +43,7 @@ _METRIC_NAMESPACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
 @dataclass(frozen=True, slots=True)
 class WandbConfig:
-    """Validated first-class ``training.wandb`` configuration."""
+    """Validated first-class ``observability.wandb`` configuration."""
 
     enabled: bool = False
     project: str = "reef"
@@ -60,7 +60,7 @@ class WandbConfig:
         if value is None:
             return cls()
         if not isinstance(value, Mapping):
-            raise ValueError("training.wandb must be a mapping")
+            raise ValueError("observability.wandb must be a mapping")
         allowed = {
             "enabled",
             "project",
@@ -74,24 +74,24 @@ class WandbConfig:
         }
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
-            raise ValueError(f"unknown training.wandb settings: {', '.join(unknown)}")
+            raise ValueError(f"unknown observability.wandb settings: {', '.join(unknown)}")
 
-        enabled = _boolean(value.get("enabled", False), "training.wandb.enabled")
-        mode = _optional_string(value.get("mode"), "training.wandb.mode") or ("online" if enabled else "disabled")
+        enabled = _boolean(value.get("enabled", False), "observability.wandb.enabled")
+        mode = _optional_string(value.get("mode"), "observability.wandb.mode") or ("online" if enabled else "disabled")
         if mode not in {"online", "offline", "disabled"}:
-            raise ValueError("training.wandb.mode must be online, offline, or disabled")
+            raise ValueError("observability.wandb.mode must be online, offline, or disabled")
         return cls(
             enabled=enabled,
-            project=_optional_string(value.get("project"), "training.wandb.project") or "reef",
-            entity=_optional_string(value.get("entity"), "training.wandb.entity"),
-            group_prefix=_optional_string(value.get("group_prefix"), "training.wandb.group_prefix"),
-            name_prefix=_optional_string(value.get("name_prefix"), "training.wandb.name_prefix"),
+            project=_optional_string(value.get("project"), "observability.wandb.project") or "reef",
+            entity=_optional_string(value.get("entity"), "observability.wandb.entity"),
+            group_prefix=_optional_string(value.get("group_prefix"), "observability.wandb.group_prefix"),
+            name_prefix=_optional_string(value.get("name_prefix"), "observability.wandb.name_prefix"),
             tags=_tags(value.get("tags", ())),
             mode=mode,  # type: ignore[arg-type]
-            directory=_optional_string(value.get("directory"), "training.wandb.directory"),
+            directory=_optional_string(value.get("directory"), "observability.wandb.directory"),
             upload_checkpoints=_boolean(
                 value.get("upload_checkpoints", False),
-                "training.wandb.upload_checkpoints",
+                "observability.wandb.upload_checkpoints",
             ),
         )
 
@@ -584,11 +584,11 @@ def _optional_string(value: object, field: str) -> str | None:
 
 def _tags(value: object) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, Sequence):
-        raise ValueError("training.wandb.tags must be a list of strings")
+        raise ValueError("observability.wandb.tags must be a list of strings")
     tags: list[str] = []
     for item in value:
         if not isinstance(item, str) or not item.strip():
-            raise ValueError("training.wandb.tags must be a list of non-empty strings")
+            raise ValueError("observability.wandb.tags must be a list of non-empty strings")
         tags.append(item.strip())
     return tuple(dict.fromkeys(tags))
 

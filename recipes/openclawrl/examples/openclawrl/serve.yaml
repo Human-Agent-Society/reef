@@ -95,6 +95,18 @@ user_llm:
   port: "30001"
   served_name: qwen3-32b-user-llm
 
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: openclawrl        # produces group openclawrl/<scenario>
+    # name_prefix: openclawrl
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: /var/lib/reef/wandb
+    upload_checkpoints: false
+
 training:
   num_gpus: 5                          # ray-head GPU total (actor + rollout)
   cuda_visible_devices: "1,2,3,4,5"
@@ -107,16 +119,6 @@ training:
     min_free_space_fraction: 0.10
     policy: latest
   global_batch_size: 16
-  wandb:
-    enabled: false                     # omitted or false means no tracking
-    project: reef
-    # entity: your-team
-    # group_prefix: openclawrl        # produces group openclawrl/<scenario>
-    # name_prefix: openclawrl
-    tags: []
-    mode: online                       # online, offline, or disabled
-    directory: /var/lib/reef/wandb
-    upload_checkpoints: false
   # openclawrl runs the verbatim upstream top-K select objective; architecture
   # Reef derives architecture flags from the HF config.
   # --padded-vocab-size + the rope/swiglu/norm/GQA flags below: the
