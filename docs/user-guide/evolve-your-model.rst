@@ -176,8 +176,3 @@ is admitted the same way. It enters the version chain only if
 ``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
-
-See also
---------
-
-- `Architecture <../getting-started/architecture.rst#the-version-chain>`__: the update transaction and durability model.

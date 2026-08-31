@@ -151,9 +151,3 @@ Cookbook processors
 | ``recipes/openclawrl/processor.py``   | computed | a main turn whose next state the PRM scores ±1, or for which the | ``PolicyBatch``        |
 |                                       |          | teacher scored an accepted hindsight hint                        |                        |
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-
-See also
---------
-
-- `Write a recipe <write-a-recipe.rst>`__: a processor in a complete recipe.
-- `Loss families <loss-families.rst>`__: the numeric side, which lives in the preparer.

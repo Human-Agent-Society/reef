@@ -16,19 +16,10 @@ export type TocItem = {
   level: 2 | 3;
 };
 
-// Every page is exactly one kind of document, and the kind is part of the
-// navigation contract rather than something inferred from the section: a
-// tutorial teaches one path with no options, a how-to answers "how do I",
-// a concept explains, a reference describes. The chip above each page title
-// shows the kind, so a reader knows before the first paragraph whether to
-// expect steps, tables, or prose.
-export type PageKind = "Tutorial" | "How-to" | "Concept" | "Reference" | "Contributor guide";
-
 export type Doc = {
   slug: string;
   title: string;
   description: string;
-  kind: PageKind;
   content: string;
   sourcePath: string;
   toc: TocItem[];
@@ -37,7 +28,6 @@ export type Doc = {
 export type NavItem = {
   title: string;
   description: string;
-  kind: PageKind;
   href: string;
   slug: string;
 };
@@ -49,19 +39,17 @@ export type NavGroup = {
 
 const docsRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
 
-type NavSource = { file: string; kind: PageKind };
-
-const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<NavSource> }> = [
+const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<string> }> = [
   {
     // What Reef is, what to install, the loop every later page assumes, and
     // what is underneath it. Architecture sits last because it spends the
     // vocabulary quickstart.rst teaches. The first entry is where /docs lands.
     title: "Getting Started",
     files: [
-      { file: "getting-started/intro.rst", kind: "Concept" },
-      { file: "getting-started/installation.rst", kind: "How-to" },
-      { file: "getting-started/quickstart.rst", kind: "Tutorial" },
-      { file: "getting-started/architecture.rst", kind: "Concept" },
+      "getting-started/intro.rst",
+      "getting-started/installation.rst",
+      "getting-started/quickstart.rst",
+      "getting-started/architecture.rst",
     ],
   },
   {
@@ -69,51 +57,51 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<Nav
     // deployment running, and find out why it did not.
     title: "User Guide",
     files: [
-      { file: "user-guide/recipes.rst", kind: "Reference" },
-      { file: "user-guide/evolve-your-harness.rst", kind: "Tutorial" },
-      { file: "user-guide/evolve-your-model.rst", kind: "Tutorial" },
-      { file: "user-guide/recipes/sao.rst", kind: "Reference" },
-      { file: "user-guide/recipes/tttd.rst", kind: "Reference" },
-      { file: "user-guide/recipes/openclawrl.rst", kind: "Reference" },
-      { file: "user-guide/recipes/harness-evolve.rst", kind: "Reference" },
-      { file: "user-guide/operate.rst", kind: "How-to" },
-      { file: "user-guide/troubleshooting.rst", kind: "How-to" },
+      "user-guide/recipes.rst",
+      "user-guide/evolve-your-harness.rst",
+      "user-guide/evolve-your-model.rst",
+      "user-guide/recipes/sao.rst",
+      "user-guide/recipes/tttd.rst",
+      "user-guide/recipes/openclawrl.rst",
+      "user-guide/recipes/harness-evolve.rst",
+      "user-guide/operate.rst",
+      "user-guide/troubleshooting.rst",
     ],
   },
   {
     // Writing your own method against Reef's contracts.
     title: "Developer Guide",
     files: [
-      { file: "developer-guide/write-a-recipe.rst", kind: "Tutorial" },
-      { file: "developer-guide/write-a-harness-method.rst", kind: "Tutorial" },
-      { file: "developer-guide/harness-adapters.rst", kind: "Reference" },
-      { file: "developer-guide/loss-families.rst", kind: "Reference" },
-      { file: "developer-guide/surface.rst", kind: "Concept" },
-      { file: "developer-guide/processors.rst", kind: "Concept" },
+      "developer-guide/write-a-recipe.rst",
+      "developer-guide/write-a-harness-method.rst",
+      "developer-guide/harness-adapters.rst",
+      "developer-guide/loss-families.rst",
+      "developer-guide/surface.rst",
+      "developer-guide/processors.rst",
     ],
   },
   {
     title: "CLI Reference",
     files: [
-      { file: "reference/cli.rst", kind: "Reference" },
-      { file: "reference/configuration.rst", kind: "Reference" },
+      "reference/cli.rst",
+      "reference/configuration.rst",
     ],
   },
   {
     title: "API Reference",
     files: [
-      { file: "reference/http-api.rst", kind: "Reference" },
-      { file: "reference/python-api.rst", kind: "Reference" },
-      { file: "reference/glossary.rst", kind: "Reference" },
+      "reference/http-api.rst",
+      "reference/python-api.rst",
+      "reference/glossary.rst",
     ],
   },
   {
     title: "Contributing",
     files: [
-      { file: "contributing/codebase-structure.rst", kind: "Contributor guide" },
-      { file: "contributing/adding-components.rst", kind: "Contributor guide" },
-      { file: "contributing/development.rst", kind: "Contributor guide" },
-      { file: "contributing/testing.rst", kind: "Contributor guide" },
+      "contributing/codebase-structure.rst",
+      "contributing/adding-components.rst",
+      "contributing/development.rst",
+      "contributing/testing.rst",
     ],
   },
 ];
@@ -122,7 +110,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<Nav
 // does not merely go unlinked — it 404s. Adding a page under a section
 // directory now fails the build until it is placed in the reading order. Not
 // scanned: rfcs/ (design records, read in the repo).
-const navigated = new Set<string>(navigationSources.flatMap((group) => group.files.map((source) => source.file)));
+const navigated = new Set<string>(navigationSources.flatMap((group) => group.files));
 // Pages live in one directory per navigation section, so a page's path names
 // its section and the URL follows the path.
 const sectionDirectories = ["getting-started", "user-guide", "user-guide/recipes", "developer-guide", "reference", "contributing"];
@@ -428,7 +416,7 @@ function tableOfContents(html: string) {
   return items;
 }
 
-function loadDoc({ file: sourcePath, kind }: NavSource): Doc {
+function loadDoc(sourcePath: string): Doc {
   const source = readFileSync(join(docsRoot, sourcePath), "utf8");
   const content = compileRst(source, sourcePath);
   const title = heading(content, 1)?.title;
@@ -438,7 +426,6 @@ function loadDoc({ file: sourcePath, kind }: NavSource): Doc {
     slug: slugFromSourcePath(sourcePath),
     title,
     description,
-    kind,
     content,
     sourcePath,
     toc: tableOfContents(content),
@@ -450,13 +437,12 @@ const docsBySlug = new Map(docs.map((doc) => [doc.slug, doc]));
 
 export const navigation: NavGroup[] = navigationSources.map((group) => ({
   title: group.title,
-  items: group.files.map((source) => {
-    const doc = docsBySlug.get(slugFromSourcePath(source.file));
-    if (!doc) throw new Error(`Documentation page not found: ${source.file}`);
+  items: group.files.map((sourcePath) => {
+    const doc = docsBySlug.get(slugFromSourcePath(sourcePath));
+    if (!doc) throw new Error(`Documentation page not found: ${sourcePath}`);
     return {
       title: doc.title,
       description: doc.description,
-      kind: doc.kind,
       href: `/docs/${doc.slug}`,
       slug: doc.slug,
     };

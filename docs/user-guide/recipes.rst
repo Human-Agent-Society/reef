@@ -57,10 +57,3 @@ describes each spelling.
 
 Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
 ``checkpoint_every_n_versions`` is the shorter spelling in deployment YAML.
-
-See also
---------
-
-- `tttd <recipes/tttd.rst>`__ includes the cookbook TTT-Discover example,
-  formal circle-packing results, and recovery details.
-- `Write a recipe <../developer-guide/write-a-recipe.rst>`__: when none of them fits.

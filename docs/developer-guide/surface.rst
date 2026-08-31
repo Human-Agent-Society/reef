@@ -150,9 +150,3 @@ capability protocol only when no existing call site can express the consumer
 interaction. The package depends only on ``artifact/`` and ``core/``; it sees
 runtimes structurally, through the ``ServingRuntime`` and ``WeightRuntime``
 protocols, and never imports a concrete one.
-
-See also
---------
-
-- `Write a recipe <write-a-recipe.rst>`__: where ``build_surface`` fits.
-- `Harness adapters <harness-adapters.rst>`__: the client side of a file tree.

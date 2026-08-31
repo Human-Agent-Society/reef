@@ -208,8 +208,3 @@ Connect a different agent
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.
-
-See also
---------
-
-- `harness_evolve <recipes/harness-evolve.rst>`__: the recipe's full configuration.

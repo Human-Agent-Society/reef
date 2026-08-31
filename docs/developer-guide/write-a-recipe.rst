@@ -148,8 +148,3 @@ Reef never invents feedback. Use whatever already judges your agent; for the
 numeric ``score`` field, a consistent scale where higher is better. If you have
 no number, `Choosing a recipe <../user-guide/recipes.rst>`__ lists the methods that need
 none.
-
-See also
---------
-
-- `Adding components <../contributing/adding-components.rst>`__: bundling a recipe into Reef itself.

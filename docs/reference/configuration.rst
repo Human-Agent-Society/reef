@@ -247,8 +247,3 @@ Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
-
-See also
---------
-
-- `Choosing a recipe <../user-guide/recipes.rst>`__: what to put in ``reef.recipe``.

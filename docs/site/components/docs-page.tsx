@@ -24,10 +24,9 @@ export function DocsPage({ doc, navigation, previous, next }: { doc: Doc; naviga
       <Sidebar navigation={navigation} />
       <main className="docs-main">
         <div className="doc-context" aria-label="Breadcrumb">
-          <span className="doc-type" data-kind={doc.kind}>{doc.kind}</span>
           <Link href="/docs">Docs</Link>
           <ChevronRight size={13} aria-hidden="true" />
-          <span>{section}</span>
+          <span className="doc-section">{section}</span>
         </div>
         <article className="markdown-body">
           <ReStructuredText content={doc.content} sourcePath={doc.sourcePath} />

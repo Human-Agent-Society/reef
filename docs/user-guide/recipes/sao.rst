@@ -100,8 +100,3 @@ training steps with no stale drops, which is the acceptance criterion for the
 smoke. Every score is 0.0 because Qwen2.5-1.5B-Instruct does not solve these
 problems. The useful output is the per-step training metrics, exported from an
 offline W&B run.
-
-See also
---------
-
-- `Evolve your model <../evolve-your-model.rst>`__: running the deployment.

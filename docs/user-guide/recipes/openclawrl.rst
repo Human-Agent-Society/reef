@@ -120,9 +120,3 @@ student's preferences, with the work shown and the correct answer. The bold
 and list rates track the style the student rejects. From the curves we see both fall as training goes on, and
 the run reaches the paper's adaptation criterion (three passed sessions in
 a row) at session 14.
-
-See also
---------
-
-- `recipes/openclawrl/examples/openclawrl/README.md <../../../recipes/openclawrl/examples/openclawrl/README.md>`__ describes the homework sessions and the simulated student.
-- `Python API <../../reference/python-api.rst#computed-feedback>`__ documents the computed-feedback processor engine this recipe uses.
