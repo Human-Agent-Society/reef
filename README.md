@@ -185,7 +185,10 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 Reef batches eligible reports according to the recipe configuration. When
 version checking is enabled, the adapter checks for a newer published version
-the next time it starts. The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
+the next time it starts. Interactive sessions offer **Update with …** and
+**Skip** before accepting input; choosing update runs the installer directly.
+Headless sessions print the instruction instead.
+The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
 describes the proposal, evaluation, and publication process.
 
 
