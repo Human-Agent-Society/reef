@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.harness_evolve.processor import HarnessEvolveProcessor
+from reef.train.cordis_backend.processor import HarnessEvolveProcessor
 from reef.train.types import ProcessorContext, TraceBatch
 
 

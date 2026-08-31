@@ -23,10 +23,10 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.surface import Surface
 from reef.surface.skills import SkillValidator, create_skill_surface
+from reef.train.cordis_backend import HarnessEvolveRecipe
 
 from .catalog import SkillCatalogModule
 from .config import PUBLIC_SKILL_ROOT

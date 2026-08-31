@@ -18,9 +18,8 @@ from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
 from reef.harness.render import render_composition
 from reef.harness.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
-from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import RecipeConfigError
-from reef.train.cordis_backend import CordisBackend
+from reef.train.cordis_backend import CordisBackend, HarnessEvolveRecipe
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "version_check.ts"

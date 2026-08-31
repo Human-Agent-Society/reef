@@ -12,9 +12,9 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.render import render_composition
-from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.train.cordis_backend import HarnessEvolveRecipe
 
 
 class _Response(io.BytesIO):

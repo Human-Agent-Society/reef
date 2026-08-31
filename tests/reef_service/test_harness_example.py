@@ -15,12 +15,11 @@ import yaml
 
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBindingError
-from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import load_recipe_config
 from reef.records import RecordStore
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
-from reef.train.cordis_backend import Mutation
+from reef.train.cordis_backend import HarnessEvolveRecipe, Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 

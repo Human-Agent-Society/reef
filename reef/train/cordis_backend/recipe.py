@@ -21,7 +21,6 @@ from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.version_check import version_check_entry
-from reef.harness_evolve.processor import HarnessEvolveProcessor
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
@@ -30,6 +29,7 @@ from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.processor import HarnessEvolveProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin

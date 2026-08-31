@@ -30,7 +30,7 @@ from reef.train.types import PolicyBatch, TrainingBatch
 # not, while importing a selected cookbook package registers its preparer and
 # lazy loss-family reference in this test process.
 for _cookbook_package in (
-    "reef.harness_evolve",
+    "reef.train.cordis_backend",
     "recipes.openclawrl",
     "recipes.sao",
     "recipes.tttd",

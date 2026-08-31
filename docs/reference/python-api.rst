@@ -49,7 +49,7 @@ Recipe
 .. code:: python
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
-   from reef.harness_evolve import HarnessEvolveRecipe
+   from reef.train.cordis_backend import HarnessEvolveRecipe
 
 A recipe is one frozen dataclass binding a scenario to its serving and evolution
 behavior.
@@ -61,7 +61,7 @@ behavior.
    │   ├── SAORecipe                                        reef.sao
    │   ├── TTTDRecipe                                       reef.tttd
    │   └── OpenClawRLRecipe                                 reef.openclawrl
-   └── HarnessEvolveRecipe      harness surface + backend   reef.harness_evolve
+   └── HarnessEvolveRecipe      harness surface + backend   reef.train.cordis_backend
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the

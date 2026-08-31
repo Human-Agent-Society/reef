@@ -144,7 +144,7 @@ Cookbook processors
 |                                       |          | scenario's grid; the step is the group, ready only when every    |                        |
 |                                       |          | ``groups_per_step`` × ``rollouts_per_group`` slot is filled      |                        |
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``reef/harness_evolve/processor.py``| reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
+| ``reef/train/cordis_backend/processor.py``| reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
 |                                       |          | and a score inside ``[min_score, max_score]``; the recorded      |                        |
 |                                       |          | request is the sample, unmodified                                |                        |
 +---------------------------------------+----------+------------------------------------------------------------------+------------------------+

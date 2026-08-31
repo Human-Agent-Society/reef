@@ -27,13 +27,12 @@ from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError, load_descriptor
 from reef.harness.episode import EpisodeResult
 from reef.harness.render import render_composition
-from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import Recipe, RecipeRegistry
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
 from reef.service.install_script import composition_checksum, render_install_script
-from reef.train.cordis_backend import Mutation
+from reef.train.cordis_backend import HarnessEvolveRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 # The fake harness scores itself, as in test_harness_recipe.py: its

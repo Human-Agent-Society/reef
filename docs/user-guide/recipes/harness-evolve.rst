@@ -15,7 +15,7 @@ runnable example.
 | Signal      | one report with a finite ``score`` and exactly one         |
 |             | reference                                                  |
 +-------------+------------------------------------------------------------+
-| Package     | ``reef/harness_evolve/``                                   |
+| Package     | ``reef/train/cordis_backend/``                                   |
 +-------------+------------------------------------------------------------+
 | Loss family | none (no weight training)                                  |
 +-------------+------------------------------------------------------------+
