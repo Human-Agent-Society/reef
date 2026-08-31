@@ -11,9 +11,9 @@ Accepting records, replaying them after a restart, holding a batch until it is
 acknowledged, committing algorithm state, running the backend, and publishing
 the next version are Reef's job, not the method's.
 
-This page writes a **weight** recipe. To write a harness-evolution method —
-``propose``, ``evaluate``, and a selection policy against a fixed model — see
-`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__ instead.
+This page covers a **weight** recipe. For a harness-evolution method with
+``propose``, ``evaluate``, and a selection policy against a fixed model, see
+`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
 
 .. code:: mermaid
 
@@ -52,8 +52,9 @@ This page writes a **weight** recipe. To write a harness-evolution method —
        RESOLVE -->|"typed batch"| EVOLVE
        class JUDGE,BATCH,PREP,EVAL,SELECT user-owned
 
-The shaded steps are the method's. A processor *judges* each resolved unit — one
-record plus the reports that reference it: ``TRAIN`` batches it, ``WAIT`` holds
+The shaded steps are the method's. A processor *judges* each resolved unit. A
+unit consists of one record plus the reports that reference it. ``TRAIN``
+batches it, ``WAIT`` holds
 it until its remaining references land, ``NEVER`` drops it. After the backend
 runs, the method's evaluator measures the candidate and its selector decides
 whether it is published.
@@ -78,10 +79,10 @@ A weight recipe is four pieces plus the class that binds them.
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default selects whatever the backend produced
    recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the preparer (by dotted path), and the loss family
 
-`Python API <../reference/python-api.rst>`__ is the contract for each. ``recipes/sao/`` is
-the smallest bundled implementation and the one to read alongside it — four
-files, under 200 lines: ``recipe.py``, ``processor.py``, ``preparer.py``, and
-the ``slime/`` loss family.
+`Python API <../reference/python-api.rst>`__ is the contract for each.
+``recipes/sao/`` is the smallest bundled implementation and the one to read
+alongside this page. Its four files total fewer than 200 lines: ``recipe.py``,
+``processor.py``, ``preparer.py``, and the ``slime/`` loss family.
 
 Configure it
 ~~~~~~~~~~~~
@@ -115,8 +116,9 @@ loss family requires (`the mapping
 Gate a candidate
 ~~~~~~~~~~~~~~~~
 
-A runtime finishes training by exporting a candidate, and the recipe's ``candidate_evaluation``
-decides what happens to it. A harness recipe builds its evaluator in code:
+A runtime finishes training by exporting a candidate. The recipe's
+``candidate_evaluation`` decides what happens to it. A harness recipe builds
+its evaluator in code:
 
 .. code:: yaml
 
@@ -127,13 +129,13 @@ decides what happens to it. A harness recipe builds its evaluator in code:
        threshold: 0.8
 
 Reef calls the factory once per scenario with that opaque ``config`` and the
-scenario's training runtime, and the trainer runs the plugin between the
-backend step and publication — evaluate, then decide, in that order. A
-rejection leaves the previous version serving. The plugin contract —
-``evaluate``, ``decide``, the fail-closed rule, and idempotency by
-``candidate.candidate_id`` — is in `Python API
-<../reference/python-api.rst#candidate-evaluation>`__, and the section fields
-are in `Configuration <../reference/configuration.rst#the-evaluation-section>`__.
+scenario's training runtime. The trainer runs the plugin between the backend
+step and publication, calling ``evaluate`` before ``decide``. A rejection
+leaves the previous version serving. `Python API
+<../reference/python-api.rst#candidate-evaluation>`__ documents the plugin
+contract: ``evaluate``, ``decide``, the fail-closed rule,
+and idempotency by ``candidate.candidate_id``. The section fields are in
+`Configuration <../reference/configuration.rst#the-evaluation-section>`__.
 
 Where the feedback comes from
 -----------------------------
@@ -146,4 +148,4 @@ none.
 See also
 --------
 
-- `Adding components <../contributing/adding-components.rst>`__ — bundling a recipe into Reef itself.
+- `Adding components <../contributing/adding-components.rst>`__: bundling a recipe into Reef itself.

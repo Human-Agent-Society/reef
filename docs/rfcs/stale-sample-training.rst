@@ -14,7 +14,7 @@ Bounded stale-sample training without giving up the version fence
 1. Where the gate lives today
 -----------------------------
 
-Three pieces conspire, each individually reasonable:
+Three independently reasonable mechanisms combine to produce this behavior:
 
 1. **Provenance becomes the fence.**
    `ray_runtime.prepare_training_step <../../reef/runtime/adapters/ray_runtime.py>`__
@@ -27,17 +27,17 @@ Three pieces conspire, each individually reasonable:
    version and returns ``outcome="stale"`` on any difference.
 3. **The dispatcher discards.** On ``stale``,
    `dispatcher._process <../../reef/dispatcher.py>`__ calls ``reject_pending()``:
-   the reserved rollouts are dropped, not retried — correctly, because a retry
-   would carry the same producing version and fail the same comparison.
+   the reserved rollouts are dropped rather than retried. A retry would carry
+   the same producing version and fail the same comparison.
 
-The composite effect: a rollout is trainable **only** while the weights that
+As a result, a rollout is trainable **only** while the weights that
 produced it are still serving. The moment a commit publishes a new version,
-every in-flight rollout becomes garbage.
+every in-flight rollout becomes ineligible.
 
 .. _2-why-that-is-the-wrong-resting-point:
 
-2. Why that is the wrong resting point
---------------------------------------
+2. Why exact matching is too restrictive
+----------------------------------------
 
 The training path already owns how a sample is consumed. Staleness admission
 should only bound *which* producing versions reach that path; it should not
@@ -50,8 +50,8 @@ fencing from freshness admission while keeping ``max_staleness: 0`` inert.
 
 .. _3-proposal--split-the-fence-from-the-freshness-policy:
 
-3. Proposal — split the fence from the freshness policy
--------------------------------------------------------
+3. Proposal: split the fence from the freshness policy
+------------------------------------------------------
 
 ``expected_weight_version`` currently answers two different questions with one
 comparison:
@@ -144,8 +144,8 @@ On clean restart the bridge republishes the recovered checkpoint under its
 recorded serving token, so lag remains comparable after recovery. A genuinely
 new serving incarnation never compares equal and all
 older samples are dropped as cross-incarnation. The recovery-pair invariant,
-checkpoint retention, and the critic checkpoint are unaffected — none of them
-consume provenance.
+checkpoint retention, and the critic checkpoint are unaffected because none of
+them consume provenance.
 
 .. _43-what-does-not-change:
 

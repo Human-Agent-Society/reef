@@ -85,8 +85,9 @@ to ``/var/lib/reef``. Point them somewhere persistent.
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
 
-Recipe settings sit beside these in the same section — ``batch_size``,
-``min_score``, and whatever else the recipe declares with ``config_field``. Keys
+Recipe settings such as ``batch_size`` and ``min_score`` sit beside these in
+the same section, along with any others the recipe declares with
+``config_field``. Keys
 the service does not recognize are handed to the recipe.
 
 Recipe configuration
@@ -94,17 +95,17 @@ Recipe configuration
 
 A recipe is named three ways:
 
-- **A bundled kind** — ``recipe: sao``
-- **A dotted class** — ``recipe: "my_pkg.my_method:MyMethodRecipe"``
-- **A named preset** — ``recipe: my-preset``, resolved to ``my-preset.yaml``
+- **A bundled kind:** ``recipe: sao``
+- **A dotted class:** ``recipe: "my_pkg.my_method:MyMethodRecipe"``
+- **A named preset:** ``recipe: my-preset``, resolved to ``my-preset.yaml``
   under ``REEF_RECIPE_CONFIG_DIR``
 
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
 
-A preset is read as-is — ``${VAR}`` interpolates in a deployment config, never
-in a preset. A preset carries its own ``kind``, ``model``, ``data``, and — for
-harness evolution — ``evolution`` sections:
+A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
+in a preset. A preset carries its own ``kind``, ``model``, and ``data``
+sections. Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
@@ -154,8 +155,8 @@ Read by the weight-training stack. See `Evolve your model
    training.checkpoint_retention | storage-fraction bounds and the retention policy
    training.slime_flags | GPU layout, optimizer, sequence length, and loss settings, as one literal string
 
-Architecture flags — layer counts, hidden sizes — are auto-filled by Slime from
-``reef.model_path`` and do not belong in the config.
+Slime fills architecture flags such as layer counts and hidden sizes from
+``reef.model_path``. Do not put them in the config.
 
 The ``evaluation`` section
 --------------------------
@@ -215,7 +216,7 @@ store on the cluster.
 writes syncable data below ``directory`` for a later ``wandb sync``.
 ``disabled`` makes no calls even when ``enabled`` is true.
 
-Each scenario maps to one group — the scenario name, or
+Each scenario maps to a group named after the scenario or
 ``<group_prefix>/<scenario>``. Within it, Reef opens one run when the scenario
 binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
@@ -234,8 +235,8 @@ Those become ``recipe/*`` and ``processor/*``, each namespace on its own
 ``<namespace>/event`` axis. Only finite numeric values are sent.
 
 Durable commit metrics carry ``experiment/provider``, ``experiment/project``,
-``experiment/group``, and ``experiment/run_id`` — use them to open the run from
-a Reef version, and the run's ``reef/training_job_id`` to go the other way.
+``experiment/group``, and ``experiment/run_id``. Use them to open the run from
+a Reef version, and use the run's ``reef/training_job_id`` to go the other way.
 Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
@@ -244,4 +245,4 @@ the service log and never fail a training step or its commit.
 See also
 --------
 
-- `Choosing a recipe <../user-guide/recipes.rst>`__ — what to put in ``reef.recipe``.
+- `Choosing a recipe <../user-guide/recipes.rst>`__: what to put in ``reef.recipe``.

@@ -44,7 +44,8 @@ Reef closes that loop in the serving lifecycle for continual learning.
    Learn* :: a recipe — the learning method the deployment runs — releases a candidate learned version
    Publish :: an accepted candidate becomes the version being served
 
-Existing solutions and infras do not yet close that loop:
+Existing inference engines and RL frameworks cover parts of that loop, but not
+the whole thing:
 
 +-------------------------------------+------------------------+----------------------------+----------+
 | Ability                             | Inference engine       | RL training framework      | **Reef** |
@@ -71,16 +72,16 @@ configure picks one (composite version is a feature in the roadmap).
 **Model weights.** Reef runs the training step and hot-swaps the result into the
 serving engine. See `Evolve your model <../user-guide/evolve-your-model.rst>`__.
 
-**The harness tree** — the agent's rules, prompts, skills, and config, versioned
-as one object. Reef proposes an edit, runs the agent both ways on your tasks,
-and keeps the winner. See `Evolve your harness
+**The harness tree** is the agent's rules, prompts, skills, and config, versioned
+as one object. Reef proposes an edit, runs the current and proposed versions on
+your tasks, and keeps the winner. See `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__.
 
 What a call looks like
 ----------------------
 
-A deployment names one recipe — the method it runs — in its config, and every
-scenario it creates binds to that recipe:
+A deployment names one recipe in its config. Every scenario it creates binds
+to that recipe:
 
 .. code:: yaml
 

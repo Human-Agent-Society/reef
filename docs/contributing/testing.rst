@@ -14,7 +14,7 @@ Run the full suite
 Run it in the supported container environment. Many torch-dependent tests use
 ``pytest.importorskip`` and skip when torch is unavailable. Others, including
 ``tests/reef_service/test_slime_bridge.py``, import Slime and torch during
-collection — without the training dependencies, pytest cannot collect the full
+collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
 Run one area

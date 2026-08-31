@@ -38,9 +38,9 @@ publishes as a new version, pulled through ``GET /reef/harness``.
 Configuration
 -------------
 
-This kind never reads the flat ``reef.*`` section. Its configuration lives in a
-preset — ``<name>.yaml`` under ``REEF_RECIPE_CONFIG_DIR``, named by
-``reef.recipe`` in the deployment config (`Recipe configuration
+This kind never reads the flat ``reef.*`` section. Its configuration lives in
+``<name>.yaml`` under ``REEF_RECIPE_CONFIG_DIR``. The deployment config names
+that preset with ``reef.recipe`` (`Recipe configuration
 <../../reference/configuration.rst#recipe-configuration>`__). ``batch_size`` and
 ``max_score`` go under ``data:``; the rest goes under ``evolution:``.
 
@@ -90,10 +90,10 @@ SkillClaw
 
 `examples/skillclaw
 <../../../recipes/harness_evolve/examples/skillclaw/README.md>`__ is the
-larger worked instance: a full method package on the same mechanism. ``propose``
-is one sealed night — one decision per skill group plus the no-skill bucket —
-mapped to a single composite mutation sequence, and ``selection: always``
-publishes every non-skip night.
+larger worked instance: a full method package on the same mechanism. Each night,
+``propose`` makes one decision per skill group plus the no-skill bucket and maps
+them to a single composite mutation sequence. ``selection: always`` publishes
+every night that produces a proposal.
 
 It also shows the one extension point beyond the three slots. Its skill catalog
 must reach the model on every live request, so its recipe overrides
@@ -104,4 +104,4 @@ request path (`skillclaw_recipe.py
 See also
 --------
 
-- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__ — pulling, pinning, and installing a published tree.
+- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling, pinning, and installing a published tree.
