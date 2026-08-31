@@ -1345,20 +1345,20 @@ def test_driver_accepts_matching_reef_and_slime_objectives(loss_family, loss_typ
 
 
 @pytest.mark.unit
-def test_driver_requires_an_explicit_loss_environment() -> None:
+def test_driver_derives_the_loss_family_from_the_configured_recipe() -> None:
     from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.slime_backend.reef_adapters.driver import _resolve_loss_family
+    from reef.train.slime_backend.reef_adapters.driver import _resolve_training_recipe
 
-    assert _resolve_loss_family({"REEF_TRAINING_LOSS": "pg"}) == ("pg", None, resolve_loss_family("pg"))
-    # REEF_TRAINING_RECIPE is an informational label when the explicit loss is set.
-    assert _resolve_loss_family({"REEF_TRAINING_LOSS": "sft", "REEF_TRAINING_RECIPE": "custom_method"}) == (
-        "sft",
-        "custom_method",
-        resolve_loss_family("sft"),
+    recipe = "recipes.sao.recipe:SAORecipe"
+    assert _resolve_training_recipe({"reef": {"recipe": recipe}}) == (
+        "sao",
+        recipe,
+        resolve_loss_family("sao"),
     )
-    with pytest.raises(RuntimeError, match="REEF_TRAINING_LOSS is required"):
-        _resolve_loss_family({"REEF_TRAINING_RECIPE": "openclawrl"})
-    assert _resolve_loss_family({}) == (None, None, None)
+    with pytest.raises(RuntimeError, match=r"must define reef\.recipe"):
+        _resolve_training_recipe({})
+    with pytest.raises(RuntimeError, match="WeightTrainingRecipe"):
+        _resolve_training_recipe({"reef": {"recipe": "reef.recipe.base:Recipe"}})
 
 
 @pytest.mark.unit
@@ -1371,17 +1371,33 @@ def test_driver_stamps_a_dotted_family_reference_for_the_workers() -> None:
     _stamp_loss_family_reference(dotted, "toy_pkg.family:ToyAlgorithm")
     assert dotted.loss_family_ref == "toy_pkg.family:ToyAlgorithm"
 
-    bundled = SimpleNamespace(loss_family="pg")
-    _stamp_loss_family_reference(bundled, "pg")
-    assert not hasattr(bundled, "loss_family_ref")
+    cookbook = SimpleNamespace(loss_family="sao")
+    _stamp_loss_family_reference(cookbook, "sao")
+    assert cookbook.loss_family_ref == "recipes.sao.slime:SaoAlgorithm"
+
+    unreferenced = SimpleNamespace(loss_family="pg")
+    _stamp_loss_family_reference(unreferenced, "pg")
+    assert not hasattr(unreferenced, "loss_family_ref")
 
 
 @pytest.mark.unit
-def test_driver_rejects_unknown_loss_env() -> None:
-    from reef.train.slime_backend.reef_adapters.driver import _resolve_loss_family
+def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
 
-    with pytest.raises(RuntimeError, match="unsupported REEF_TRAINING_LOSS"):
-        _resolve_loss_family({"REEF_TRAINING_LOSS": "grpo"})
+    from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
+    from reef.train.slime_backend.reef_adapters.driver import _resolve_training_recipe
+
+    class UnknownLossRecipe(WeightTrainingRecipe):
+        @classmethod
+        def training_spec(cls):
+            return WeightTrainingSpec(step_preparer="unused", loss_family="grpo")
+
+    module = ModuleType("unknown_loss_recipe")
+    module.UnknownLossRecipe = UnknownLossRecipe
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    with pytest.raises(RuntimeError, match="declares unsupported loss family 'grpo'"):
+        _resolve_training_recipe({"reef": {"recipe": "unknown_loss_recipe:UnknownLossRecipe"}})
 
 
 @pytest.mark.unit

@@ -103,21 +103,15 @@ Copy a weight-training config as described in `Evolve your model
      recipe: "my_pkg.my_method:MyMethodRecipe"
      batch_size: 4
 
-   services:
-     - name: slime-driver
-       # ...command, readiness, and other environment settings...
-       env:
-         REEF_TRAINING_RECIPE: ${reef.recipe}  # label only
-         REEF_TRAINING_LOSS: my_pkg.my_method.loss:MyLossAlgorithm
-
 This fragment shows only the new keys; keep the model, storage, runtime, and
 ``services`` settings from the config you copied. Set
 ``training.global_batch_size`` to the same value, and add the driver flags your
 loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
-``REEF_TRAINING_LOSS`` is required: use a dotted reference so the driver and
-fresh workers import your loss implementation explicitly. Reference the recipe
-class directly; Reef has no global implementation registry.
+The driver reads the same ``reef.recipe`` value from the deployment config and
+gets the loss family from the class's ``training_spec()``. Do not repeat either
+value in the driver environment. Reef has no global recipe-implementation
+registry.
 
 .. code:: bash
 

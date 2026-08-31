@@ -203,8 +203,8 @@ def _build_slime_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _driver_tokens(config: dict) -> tuple[list[str], str, str]:
-    """Materialize the driver command, recipe label, and explicit loss reference."""
+def _driver_tokens(config: dict) -> tuple[list[str], str]:
+    """Materialize the driver command and deployment recipe reference."""
     from reef.service.deploy.config import interpolate_config
 
     services = {service["name"]: service for service in config["services"]}
@@ -212,11 +212,11 @@ def _driver_tokens(config: dict) -> tuple[list[str], str, str]:
     tokens = shlex.split(command)
     module = SLIME_DRIVER_MODULE
     assert module in tokens, f"slime-driver service must invoke {module}"
-    recipe = services["slime-driver"]["env"]["REEF_TRAINING_RECIPE"]
-    recipe = interpolate_config(config, recipe)
-    loss = services["slime-driver"]["env"]["REEF_TRAINING_LOSS"]
-    loss = interpolate_config(config, loss)
-    return tokens[tokens.index(module) + 1 :], recipe, loss
+    driver_env = services["slime-driver"].get("env") or {}
+    assert "REEF_TRAINING_RECIPE" not in driver_env
+    assert "REEF_TRAINING_LOSS" not in driver_env
+    recipe = config["reef"]["recipe"]
+    return tokens[tokens.index(module) + 1 :], recipe
 
 
 def _strip_sglang_flags(tokens: list[str]) -> list[str]:
@@ -241,18 +241,20 @@ def _parse_config(config_path: Path):
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
     from reef.service.deploy.config import load_config
-    from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.slime_backend.reef_adapters.driver import _driver_options, _retention_options
+    from reef.train.slime_backend.reef_adapters.driver import (
+        _driver_options,
+        _resolve_training_recipe,
+        _retention_options,
+    )
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_config(config_path)
-    tokens, recipe, loss = _driver_tokens(config)
-    assert recipe == config["reef"]["recipe"], "slime-driver env must run the configured recipe"
-    assert ":" in loss, "cookbook loss families must be explicit dotted references"
+    tokens, recipe = _driver_tokens(config)
+    _loss_family, resolved_recipe, spec = _resolve_training_recipe(config)
+    assert resolved_recipe == recipe
 
     _, tokens = _driver_options(tokens)
     _, tokens = _retention_options(tokens)
-    spec = resolve_loss_family(loss)
     options, tokens = spec.parse_driver_options(tokens)
     tokens = _strip_sglang_flags(tokens)
 

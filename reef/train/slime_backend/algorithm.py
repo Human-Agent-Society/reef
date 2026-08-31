@@ -245,8 +245,8 @@ class SlimeAlgorithm(ABC):
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         """Validate algorithm-specific backend args.
 
-        ``source`` is ``REEF_TRAINING_LOSS=<family>`` or
-        ``REEF_TRAINING_RECIPE=<recipe>`` — use it in error messages.
+        ``source`` identifies the configured ``reef.recipe`` — use it in error
+        messages.
         At minimum, ``pass`` if your algorithm has no specific requirements.
         """
 
@@ -368,7 +368,7 @@ class SlimeAlgorithm(ABC):
     # --- template methods (do not override) ---
 
     def validate_backend_args(self, args: Namespace, *, recipe: str | None = None) -> None:
-        source = f"REEF_TRAINING_RECIPE={recipe}" if recipe else f"REEF_TRAINING_LOSS={self.loss_family}"
+        source = f"reef.recipe={recipe}" if recipe else f"loss family {self.loss_family}"
         actual_loss = getattr(args, "loss_type", None)
         if actual_loss != self.loss_type:
             raise RuntimeError(f"{source} requires --loss-type {self.loss_type}, got {actual_loss!r}")

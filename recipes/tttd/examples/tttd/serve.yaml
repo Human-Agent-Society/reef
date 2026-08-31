@@ -138,8 +138,6 @@ services:
       RAY_ADDRESS: 127.0.0.1:6379
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
-      REEF_TRAINING_RECIPE: ${reef.recipe}
-      REEF_TRAINING_LOSS: recipes.tttd.slime:TttdAlgorithm
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
     depends_on: [ray-head]

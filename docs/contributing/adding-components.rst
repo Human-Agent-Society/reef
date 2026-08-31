@@ -40,8 +40,7 @@ Implementation
   construction belongs to the concrete integration.
 - A method with its own tensor objective adds a loss family in
   ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and names it for the training driver through
-  ``REEF_TRAINING_LOSS`` as a dotted reference;
+  ``objective.py``) and names it in the recipe's ``training_spec()``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_surface`` only when the produced artifact needs delivery

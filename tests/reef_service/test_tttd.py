@@ -124,7 +124,7 @@ def test_tttd_backend_contract_rejects_objective_drift(overrides, message) -> No
     values.update(overrides)
 
     with pytest.raises(RuntimeError, match=message):
-        tttd.validate_specific_args(SimpleNamespace(**values), "REEF_TRAINING_LOSS=tttd")
+        tttd.validate_specific_args(SimpleNamespace(**values), "reef.recipe=tttd")
 
 
 @pytest.mark.unit
@@ -134,7 +134,7 @@ def test_tttd_accepts_any_positive_kl_coef() -> None:
     tttd = resolve_loss_family("tttd")
     tttd.validate_specific_args(
         SimpleNamespace(compute_advantages_and_returns=True, kl_coef=0.2),
-        "REEF_TRAINING_LOSS=tttd",
+        "reef.recipe=tttd",
     )
 
 

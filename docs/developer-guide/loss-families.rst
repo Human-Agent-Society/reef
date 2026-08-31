@@ -28,11 +28,11 @@ Layout
      utils/          driver-side helpers, only when the wire row is custom
 
 A package ``__init__`` registers its family by reference
-(``register_loss_family_ref("<name>", "reef.<name>.slime:<Pkg>Algorithm")``);
+(``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
 ``loss_families.py`` imports the reference on first resolve so
 ``@register_loss_family`` runs at boot. An external family decorates its class
-the same way and is named as ``package.module:ClassName`` wherever a family is
-named (``REEF_TRAINING_LOSS``, a recipe's ``loss_family``). Resolving the
+the same way. The recipe names it in ``training_spec().loss_family``; the
+driver reads that binding after importing the configured recipe class. Resolving the
 reference imports the module, which registers the family; the driver also keeps
 the reference on ``args.loss_family_ref`` so each Megatron worker, whose
 registry starts empty, can import it too.
