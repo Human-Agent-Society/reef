@@ -387,6 +387,66 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
 
 
 @pytest.mark.unit
+def test_http_app_serve_only_inference_skips_record_and_receipt() -> None:
+    async def run() -> None:
+        payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
+
+        async def backend(artifact: Artifact, path: str, request_payload: dict) -> dict:
+            del artifact
+            assert path == "/v1/chat/completions"
+            assert request_payload == payload
+            return {"choices": [{"message": {"content": "hi"}}]}
+
+        dispatcher = build_default_dispatcher()
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "chat", "x-reef-capture": "false"},
+                json=payload,
+            )
+
+            assert response.status == 200
+            assert "x-reef-agent-record-id" not in response.headers
+            assert (await response.json())["choices"][0]["message"]["content"] == "hi"
+            assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
+        finally:
+            await client.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_http_app_rejects_invalid_capture_header_before_inference() -> None:
+    async def run() -> None:
+        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+            del artifact, path, payload
+            raise AssertionError("invalid capture control reached the backend")
+
+        dispatcher = build_default_dispatcher()
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "chat", "x-reef-capture": "sometimes"},
+                json={"model": "reef", "messages": []},
+            )
+
+            assert response.status == 400
+            assert await response.text() == "x-reef-capture must be 'true' or 'false'"
+        finally:
+            await client.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_artifact_proxy_backend_forwards_native_payload_unchanged() -> None:
     async def run() -> None:
         received = {}
@@ -521,6 +581,66 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "content", "terminal"),
+    [
+        (
+            "/v1/chat/completions",
+            b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n',
+            b"data: [DONE]\n\n",
+        ),
+        (
+            "/v1/messages",
+            b'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"text":"hello"}}\n\n',
+            b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ),
+    ],
+)
+def test_serve_only_sse_forwards_provider_terminal_without_capture(tmp_path, path, content, terminal) -> None:
+    async def run() -> None:
+        from aiohttp import web
+
+        received = {}
+
+        async def upstream(request):
+            received["payload"] = await request.json()
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(content)
+            await response.write(terminal)
+            return response
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post(path, upstream)
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+        dispatcher = build_default_dispatcher(local_artifact_dir=tmp_path / "local")
+        backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
+        await client.start_server()
+        try:
+            payload = {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+            response = await client.post(
+                path,
+                headers={"x-reef-scenario": "chat", "x-reef-capture": "false"},
+                json=payload,
+            )
+
+            assert response.status == 200
+            assert "x-reef-agent-record-id" not in response.headers
+            assert await response.read() == content + terminal
+            assert received["payload"] == payload
+            assert dispatcher.get_or_create_scenario("chat").records.replay("chat") == ()
+        finally:
+            await client.close()
+            await upstream_server.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path) -> None:
     async def run() -> None:
         import asyncio
@@ -608,6 +728,15 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             assert record.payload["response"]["complete"] is False
             assert record.payload["response"]["error"] == "upstream SSE ended without a terminal event"
+
+            serve_only = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "serve-only", "x-reef-capture": "false"},
+                json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+            assert "x-reef-agent-record-id" not in serve_only.headers
+            assert await serve_only.read() == content
+            assert dispatcher.get_or_create_scenario("serve-only").records.replay("serve-only") == ()
         finally:
             await client.close()
             await upstream_server.close()

@@ -41,14 +41,14 @@ def register_inference_routes(
                 "",
             )
             is_sse = "text/event-stream" in content_type.lower()
-            if not is_sse:
+            if not is_sse and pending.item is not None:
                 response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
             response = web.StreamResponse(status=upstream.status, headers=response_headers)
             body = bytearray()
             chat_identity: dict[str, Any] = {}
             complete = False
             error = None
-            record_attempted = False
+            settled = False
             try:
                 await response.prepare(request)
                 if is_sse:
@@ -71,17 +71,22 @@ def register_inference_routes(
                             await response.write(remainder)
                         error = "upstream SSE ended without a terminal event"
                     else:
-                        record_attempted = True
+                        settled = True
                         item = request_service.record_stream(
                             pending,
                             stream_record(upstream, bytes(body), complete=True),
                         )
-                        for frame in receipt_sse_events(
-                            request.path,
-                            chat_identity,
-                            terminal,
-                            item.agent_record_id,
-                        ):
+                        terminal_events = (
+                            receipt_sse_events(
+                                request.path,
+                                chat_identity,
+                                terminal,
+                                item.agent_record_id,
+                            )
+                            if item is not None
+                            else (terminal,)
+                        )
+                        for frame in terminal_events:
                             await response.write(frame)
                         complete = True
                 else:
@@ -96,16 +101,19 @@ def register_inference_routes(
                 raise
             finally:
                 if error is not None:
+                    stream_context = (
+                        f"record {pending.item.agent_record_id}" if pending.item is not None else "serve-only request"
+                    )
                     logger.warning(
-                        "stream for %s (record %s) ended early: %s",
+                        "stream for %s (%s) ended early: %s",
                         request.path,
-                        pending.item.agent_record_id,
+                        stream_context,
                         error,
                     )
                 try:
                     await upstream.close()
                 finally:
-                    if not record_attempted:
+                    if not settled:
                         request_service.record_stream(
                             pending,
                             stream_record(upstream, bytes(body), complete=complete, error=error),
@@ -118,7 +126,8 @@ def register_inference_routes(
             request.path,
             inference_backend,
         )
-        return web.json_response(response_payload, headers={"x-reef-agent-record-id": item.agent_record_id})
+        response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
+        return web.json_response(response_payload, headers=response_headers)
 
     app.router.add_post("/v1/chat/completions", inference)
     app.router.add_post("/v1/messages", inference)

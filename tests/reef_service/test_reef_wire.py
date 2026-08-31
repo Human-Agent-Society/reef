@@ -28,6 +28,26 @@ def test_parse_request_headers_is_case_insensitive_and_preserves_scenario() -> N
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("value", "capture"), [("true", True), (" FALSE ", False), ("TrUe", True)])
+def test_parse_inference_capture_header(value: str, capture: bool) -> None:
+    parsed = parse_request_headers(
+        {"x-reef-scenario": "chat", "X-Reef-Capture": value},
+        RequestType.INFERENCE,
+    )
+
+    assert parsed.capture is capture
+
+
+@pytest.mark.unit
+def test_parse_inference_capture_header_rejects_unknown_values() -> None:
+    with pytest.raises(HeaderError, match="x-reef-capture must be 'true' or 'false'"):
+        parse_request_headers(
+            {"x-reef-scenario": "chat", "x-reef-capture": "no"},
+            RequestType.INFERENCE,
+        )
+
+
+@pytest.mark.unit
 def test_agent_record_preserves_native_inference_payload() -> None:
     payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 

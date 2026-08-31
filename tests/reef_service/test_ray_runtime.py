@@ -1356,7 +1356,21 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         body = b"".join([chunk async for chunk in deferred.chunks])
         recorded = stream_record(deferred, body, complete=True)
         item = service.record_stream(deferred_pending, recorded)
+        assert item is not None
         assert item.payload["weight_version"] == "engine:0"
+        assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+        serve_only, serve_only_pending = await service.start_stream(
+            {"x-reef-scenario": "math", "x-reef-capture": "false"},
+            {"stream": True},
+            "/v1/chat/completions",
+            DeferredStreamingBackend(),
+        )
+        assert serve_only_pending.item is None
+        assert runtime.inference_admission_status == {"open": True, "active": 1}
+        serve_only_body = b"".join([chunk async for chunk in serve_only.chunks])
+        serve_only_response = stream_record(serve_only, serve_only_body, complete=True)
+        assert service.record_stream(serve_only_pending, serve_only_response) is None
         assert runtime.inference_admission_status == {"open": True, "active": 0}
 
         with pytest.raises(WeightVersionMismatch, match="atomic record_response"):

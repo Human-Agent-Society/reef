@@ -2,9 +2,9 @@
 
 ``RequestService`` normalizes typed Reef payloads, resolves the artifact
 version before every provider call so concurrent publication cannot change
-what gets recorded, stores each exchange as a record, and applies the
-scenario surface's request/response checks. No aiohttp types appear here;
-``reef.service.routes`` adapts these methods to HTTP.
+what gets served or recorded, optionally stores the exchange as a record, and
+applies the scenario surface's request/response checks. No aiohttp types appear
+here; ``reef.service.routes`` adapts these methods to HTTP.
 """
 
 from __future__ import annotations
@@ -88,7 +88,9 @@ class RequestPayloadNormalizer:
 
 @dataclass(frozen=True)
 class PendingInference:
-    item: AgentRecord
+    item: AgentRecord | None
+    payload: Mapping[str, Any]
+    scenario: str
     artifact_version: str | None
     admission: InferenceAdmissionHandle | None = None
     lease: InferenceLease | None = None
@@ -179,7 +181,7 @@ class RequestService:
         payload: dict[str, Any],
         path: str,
         backend: InferenceBackend | None = None,
-    ) -> tuple[dict[str, Any], AgentRecord]:
+    ) -> tuple[dict[str, Any], AgentRecord | None]:
         original_payload = dict(payload)
         retry_delay = self._retry_policy.initial_s
         loop = asyncio.get_running_loop()
@@ -217,6 +219,8 @@ class RequestService:
                     if prepared.surface.inference is not None:
                         prepared.surface.inference.verify_response(prepared.artifact, path, response)
                     self._stamp_durable_weight_version(prepared, payload, response)
+                    if not prepared.parsed.capture:
+                        return client_inference_response(response), None
                     item = await asyncio.to_thread(
                         self._accept,
                         prepared.parsed,
@@ -286,13 +290,20 @@ class RequestService:
                     if admission is not None:
                         admission.release()
             raise
+        record_payload = _with_tags(payload, prepared.parsed)
         pending = PendingInference(
-            item=AgentRecord.create(
-                scenario=prepared.parsed.scenario,
-                request_type=RequestType.INFERENCE,
-                payload=_with_tags(payload, prepared.parsed),
-                artifact_ref=prepared.artifact.ref,
+            item=(
+                AgentRecord.create(
+                    scenario=prepared.parsed.scenario,
+                    request_type=RequestType.INFERENCE,
+                    payload=record_payload,
+                    artifact_ref=prepared.artifact.ref,
+                )
+                if prepared.parsed.capture
+                else None
             ),
+            payload=record_payload,
+            scenario=prepared.parsed.scenario,
             artifact_version=prepared.parsed.artifact_version,
             admission=admission,
             lease=lease,
@@ -301,9 +312,10 @@ class RequestService:
         )
         return stream, pending
 
-    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
+    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord | None:
+        """Settle a stream and persist it only when capture is enabled."""
         try:
-            payload = dict(pending.item.payload)
+            payload = dict(pending.payload)
             # A token-native streaming backend fills record_response only when
             # the upstream generation finishes. Validate that final capture
             # here, after the route has drained the stream but before it can
@@ -320,6 +332,8 @@ class RequestService:
                         response,
                     )
                 self._stamp_durable_weight_version(pending.deferred_prepared, payload, response)
+            if pending.item is None:
+                return None
             item = replace(
                 pending.item,
                 payload={**payload, "response": dict(response)},
@@ -329,11 +343,12 @@ class RequestService:
                 artifact_version=pending.artifact_version,
             )
         except Exception:
-            logger.exception(
-                "dispatcher rejected the stream record for scenario %r (record %s)",
-                pending.item.scenario,
-                pending.item.agent_record_id,
-            )
+            if pending.item is not None:
+                logger.exception(
+                    "dispatcher rejected the stream record for scenario %r (record %s)",
+                    pending.scenario,
+                    pending.item.agent_record_id,
+                )
             raise
         finally:
             try:
