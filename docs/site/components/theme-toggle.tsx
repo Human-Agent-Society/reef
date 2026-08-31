@@ -3,13 +3,16 @@
 import { Moon, Sun, SunMoon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef } from "react";
 
-const MODES = ["auto", "light", "dark"] as const;
+// Click order matches the founder's personal-site toggle: an explicit dark,
+// then light, then back to following the OS. On a light-OS machine the first
+// click must visibly change the page; auto -> light would not.
+const MODES = ["auto", "dark", "light"] as const;
 type Mode = (typeof MODES)[number];
 
 const LABELS: Record<Mode, string> = {
-  auto: "Color theme: system. Switch to light.",
-  light: "Color theme: light. Switch to dark.",
-  dark: "Color theme: dark. Switch to system.",
+  auto: "Color theme: system. Switch to dark.",
+  dark: "Color theme: dark. Switch to light.",
+  light: "Color theme: light. Switch to system.",
 };
 
 function storedMode(): Mode {
@@ -56,7 +59,11 @@ export function ThemeToggle() {
   function cycleTheme() {
     const next = MODES[(MODES.indexOf(storedMode()) + 1) % MODES.length];
     try {
-      localStorage.setItem("reef-theme", next);
+      if (next === "auto") {
+        localStorage.removeItem("reef-theme");
+      } else {
+        localStorage.setItem("reef-theme", next);
+      }
     } catch {
       /* private browsing: the theme still applies for this page view */
     }
