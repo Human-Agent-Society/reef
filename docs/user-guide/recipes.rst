@@ -33,8 +33,6 @@ Pick by the signal your workload can produce.
 | Feedback on individual requests, and failures | `skillclaw <recipes/skillclaw.rst>`__           | harness tree  | no         |
 | worth learning from                           | (built into Reef)                               |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| No feedback yet; record only                  | ``recipe``, the core record-only recipe         | nothing       | no         |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
 
 How a recipe is selected
 ------------------------
