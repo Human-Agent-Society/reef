@@ -233,6 +233,17 @@ def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeE
     assert manager.status()["leaked"] == 0
 
 
+def test_a_failed_eviction_carries_the_engine_failure_as_its_cause(engine: FakeEngine) -> None:
+    # "Capacity exhausted" alone would hide the root event (e.g. a dead
+    # engine); the unload failure must ride along in the raised error.
+    manager = AdapterResidencyManager(capacity=1)
+    manager.activate("a", "a1", engine)
+    engine.fail_unload.add(adapter_name("a", "a1"))
+    with pytest.raises(AdapterCapacityExhausted, match="engine keeps") as excinfo:
+        manager.activate("a", "a2", engine, supersede=True)
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+
+
 def test_alias_routes_a_republished_version_through_the_resident_adapter(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager(capacity=1)
     name = manager.activate("a", "a1", engine)

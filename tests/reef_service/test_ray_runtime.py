@@ -1040,6 +1040,38 @@ def test_ray_runtime_rejects_an_unhealthy_training_group() -> None:
 
 
 @pytest.mark.unit
+def test_recovery_retries_a_failed_publication_instead_of_declaring_the_group_dead() -> None:
+    # A wedged rollout engine fails the publication fan-out: the bridge
+    # terminates its engines and reports itself unhealthy but recoverable —
+    # the durable UPDATING_WEIGHTS marker keeps the publication replayable.
+    class FailedPublicationHandle(DeferredWeightUpdateTrainGroupHandle):
+        def health(self) -> Mapping[str, Any]:
+            health = dict(super().health())
+            if self.status == "UPDATING_WEIGHTS":
+                health.update(ok=False, phase="weight_sync_failed", recoverable=True)
+            return health
+
+    handle = FailedPublicationHandle(status="UPDATING_WEIGHTS")
+    runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
+
+    runtime.reconcile_training_job(scenario_step=0)
+
+    assert handle.calls == ["update_weights"]
+    assert handle.status == "READY_TO_COMMIT"
+
+
+@pytest.mark.unit
+def test_a_failure_the_group_does_not_call_recoverable_is_still_unhealthy() -> None:
+    # An older bridge (no recoverable field) degrades to the strict behavior.
+    class DeadPublicationHandle(DeferredWeightUpdateTrainGroupHandle):
+        def health(self) -> Mapping[str, Any]:
+            return {**super().health(), "ok": False, "phase": "weight_sync_failed"}
+
+    with pytest.raises(RayRuntimeError, match=r"unhealthy.*weight_sync_failed"):
+        RayRuntime(train_group_handle=DeadPublicationHandle(status="COMPLETE"), inference_url="http://router")
+
+
+@pytest.mark.unit
 def test_colocated_completed_checkpoint_replay_reopens_admission() -> None:
     class CompletedReplay(DeferredWeightUpdateTrainGroupHandle):
         def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
