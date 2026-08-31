@@ -61,7 +61,7 @@ Run the example
 .. code:: bash
 
    cd recipes/sao/examples/sao
-   pip install -e . "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git"
+   pip install -e . "reef-eval[harbor]"
    ./run.sh
 
 The example runs three IMOAnswerBench problems in order. Each drives six

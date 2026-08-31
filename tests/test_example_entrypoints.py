@@ -39,7 +39,7 @@ REEF_EVAL_EXAMPLE_DIRS = (
 def test_reef_eval_examples_declare_their_runtime_dependency(example_dir: Path) -> None:
     project = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["requires-python"] == ">=3.12"
-    assert "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git" in project["dependencies"]
+    assert "reef-eval[harbor]" in project["dependencies"]
 
 
 def _install_harbor_protocol(monkeypatch) -> None:

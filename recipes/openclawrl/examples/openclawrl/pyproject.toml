@@ -9,7 +9,7 @@ description = "reef-eval stream harness for the OpenClaw-RL GSM8K homework sessi
 requires-python = ">=3.12"
 dependencies = [
     "reef-client",
-    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+    "reef-eval[harbor]",
 ]
 
 [tool.setuptools.packages.find]

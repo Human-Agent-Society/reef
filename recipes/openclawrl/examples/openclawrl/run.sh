@@ -58,7 +58,7 @@ fi
 
 echo "==> [2/2] streaming $TASKS as '$STREAM_NAME' (agent: harness:HermesStreamAgent)"
 REEF_TOKEN="$REEF_TOKEN" uvx \
-    --from "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git" \
+    --from "reef-eval[harbor]" \
     --with-editable "$PWD" \
     --with reef-client \
     reef-eval stream "$TASKS" --name "$STREAM_NAME" \

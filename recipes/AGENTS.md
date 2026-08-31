@@ -38,7 +38,7 @@ The example directory is **not** a Python package. There is no
 requires-python = ">=3.12"
 dependencies = [
     "reef-client",
-    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+    "reef-eval[harbor]",
 ]
 
 [tool.setuptools.packages.find]

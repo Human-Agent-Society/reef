@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 # also imports reef itself; run.sh supplies it from the repo via PYTHONPATH.
 dependencies = [
     "reef-client",
-    "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git",
+    "reef-eval[harbor]",
     "pyyaml",
 ]
 

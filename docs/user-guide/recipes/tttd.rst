@@ -146,7 +146,7 @@ following commands from the repository root:
 
    git submodule update --init third_party/reef-client
    python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . "reef-eval[harbor] @ git+https://github.com/Human-Agent-Society/reef-eval.git"
+   python -m pip install -e . "reef-eval[harbor]"
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
