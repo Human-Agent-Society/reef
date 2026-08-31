@@ -633,7 +633,7 @@ def solve() -> None:
     campaign's own day loop never goes through REEF Eval. A repeated solve with
     unchanged settings returns the stored row without re-running (REEF Eval's
     resume key)."""
-    from reef_eval import Lab  # solve-only dependency: pip install "reef-eval[harbor]"
+    from reef_eval import Lab  # solve-only dependency, declared in pyproject.toml
 
     run_dir = WORKDIR / "solve"
     run_dir.mkdir(parents=True, exist_ok=True)

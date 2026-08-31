@@ -143,7 +143,7 @@ byte.
 ```bash
 git submodule update --init third_party/reef-client
 pip install -e ./third_party/reef-client
-pip install -e . "reef-eval[harbor]"
+pip install -e .
 ```
 
 ```bash
