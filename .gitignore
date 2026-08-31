@@ -210,5 +210,6 @@ _examples_synced/
 .reef/
 
 # example run state
-recipes/*/examples/*/work/
+recipes/*/work/
+tutorials/*/work/
 recipes/basic/work/
