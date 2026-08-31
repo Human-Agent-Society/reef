@@ -26,7 +26,7 @@ What it does
 ------------
 
 SAO has no comparison group. A rollout enters training as soon as its score
-arrives, without waiting for siblings and without a barrier. Use it for a
+arrives without waiting for siblings and without a barrier. It can be used for a
 stream of tasks where each attempt gets its own score.
 
 .. flow::
@@ -41,36 +41,31 @@ How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``PolicySample``, and with the default ``batch_size`` of 1 each sample is its
+``PolicySample``. With the default ``batch_size`` of 1, each sample is its
 own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
-inside the training backend, so a payload that carries advantages is
-rejected.
+inside the training backend.
 
 The DIS ratio compares the current policy against the log-probabilities
 recorded when the rollout was generated. SAO therefore requires an inference
-backend that attaches engine-native tensors; Reef never re-tokenizes a
-completion to reconstruct them.
+backend that attaches engine-native tensors.
 
 Configuration
 -------------
 
 .. config::
 
-   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size``: each sample is its own data-parallel unit. Env ``REEF_SAO_BATCH_SIZE``.
-   max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
-
-An ``optimization:`` section is rejected outright. Clipping bounds, critic
-cadence, and GAE parameters belong to the backend, in ``training.slime_flags``.
+   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   max_staleness | 0 | accepted lag between the producing and serving version.
 
 Run the example
 ---------------
 
 The `example <../../../recipes/sao/examples/sao>`__ runs three IMOAnswerBench
 problems in order on a two-GPU stack. For each problem the agent makes six
-attempts through Reef, extracts the ``\boxed{}`` answer, checks it against
-the gold answer for a binary reward, and reports the result against its
+attempts through Reef, extracts the ``\boxed{}`` answer, then checks it against
+the gold answer for a binary reward and finally reports the result against its
 receipt. The next problem is served by the weights the previous one produced.
 
 .. code:: bash
