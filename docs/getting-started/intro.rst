@@ -10,7 +10,7 @@ the agent.
 Nothing about the agent has to change except the base URL it sends requests to.
 
 .. diagram::
-   :caption: An agent combines a harness and a model. Reef serves their connection and can improve either component.
+   :caption: Reef serves the model, loads new weights into the engine, and sends a new harness tree to the agent.
 
    <div class="fig-lane">
      <div class="fig-node">The harness<span class="fig-node-caption">runs the control loop, prompts, skills, tools, and config</span></div>
