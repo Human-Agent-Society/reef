@@ -37,11 +37,11 @@ from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
 from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
+from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
+from reef.train.cordis_backend.manifest import advance
+from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation, MutationError, Proposer, accepts_manifest
 from reef.train.evaluation.contracts import CandidateSelector, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.harness_backend.manifest import FailureManifest, FailureObservation
-from reef.train.harness_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
-from reef.train.harness_backend.manifest import advance
-from reef.train.harness_backend.strategies import EpisodeScorer, Mutation, MutationError, Proposer, accepts_manifest
 from reef.train.types import TraceBatch, TrainingBatch, TrainStepResult
 
 from .compose import Context, FiberState
@@ -104,7 +104,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class HarnessEvolveBackend(TrainingBackend):
+class CordisBackend(TrainingBackend):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies

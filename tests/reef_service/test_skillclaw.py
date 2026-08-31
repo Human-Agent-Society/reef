@@ -22,9 +22,9 @@ from reef.harness_evolve.processor import HarnessEvolveProcessor
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.train.cordis_backend import Mutation
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import AlwaysSelect
-from reef.train.harness_backend import Mutation
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.types import ProcessorContext, TraceSample
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "recipes" / "skillclaw"

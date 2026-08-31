@@ -1,4 +1,4 @@
-"""Guarantees of reef.train.harness_backend.compose, one test per ported guarantee."""
+"""Guarantees of reef.train.cordis_backend.compose, one test per ported guarantee."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ import sys
 
 import pytest
 
-from reef.train.harness_backend import compose
-from reef.train.harness_backend.compose import FiberState
+from reef.train.cordis_backend import compose
+from reef.train.cordis_backend.compose import FiberState
 
 if sys.version_info >= (3, 11):
     from builtins import ExceptionGroup
 else:
-    from reef.train.harness_backend.compose.events import _ExceptionGroup as ExceptionGroup
+    from reef.train.cordis_backend.compose.events import _ExceptionGroup as ExceptionGroup
 
 
 def test_effect_disposers_run_lifo() -> None:
@@ -61,7 +61,7 @@ def test_disposer_failure_logged_and_teardown_continues(caplog: pytest.LogCaptur
         yield bad
 
     fiber = root.plugin(apply)
-    with caplog.at_level(logging.ERROR, logger="reef.train.harness_backend.compose"):
+    with caplog.at_level(logging.ERROR, logger="reef.train.cordis_backend.compose"):
         fiber.dispose()
     assert log == ["early"]
     assert any("teardown continues" in record.message for record in caplog.records)

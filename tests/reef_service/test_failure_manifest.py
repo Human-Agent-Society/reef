@@ -14,15 +14,9 @@ import pytest
 from reef.artifact import LiveWeightArtifactRef
 from reef.harness.adapters import get_adapter
 from reef.scenario.commit_log import CommitLog, CommitRecord
-from reef.train.harness_backend import FailureManifest, FailureRecord, HarnessEvolveBackend, Mutation
-from reef.train.harness_backend.manifest import (
-    MANIFEST_KIND,
-    FailureObservation,
-    advance,
-    fingerprint,
-    normalize_cause,
-)
-from reef.train.harness_backend.strategies import Proposer, resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
+from reef.train.cordis_backend.manifest import MANIFEST_KIND, FailureObservation, advance, fingerprint, normalize_cause
+from reef.train.cordis_backend.strategies import Proposer, resolve_episode_scorer, resolve_proposer
 
 from .test_harness_recipe import MODEL, RULES, batch, evaluate, make_binary, run_backend_step
 
@@ -30,8 +24,8 @@ LAUNCH_CAUSE = "harness binary '/tmp/pytest-123/no-such-binary' not found"
 LAUNCH_FINGERPRINT = "75b82de293902cee"
 
 
-def backend(binary: str, propose) -> HarnessEvolveBackend:
-    return HarnessEvolveBackend(
+def backend(binary: str, propose) -> CordisBackend:
+    return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
         score_episode=resolve_episode_scorer(evaluate),

@@ -4,7 +4,7 @@
 ``evaluate`` are Python callables, named as dotted ``module:attribute``
 references in YAML or passed directly when registering from code; ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
-one selection decision), or ``None``. ``HarnessEvolveBackend`` owns the
+one selection decision), or ``None``. ``CordisBackend`` owns the
 mutation/render/episode/scoring phases; the recipe composes that evaluator
 and its selection policy into the candidate evaluator executed by ``Trainer``.
 """
@@ -29,10 +29,10 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
+from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
-from reef.train.harness_backend import EpisodeScorer, HarnessEvolveBackend, Proposer, ScoreComparisonSelector
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
 
 _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
@@ -238,7 +238,7 @@ class HarnessEvolveRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = HarnessEvolveBackend(
+        training_backend = CordisBackend(
             descriptor=get_adapter(self.adapter),
             propose=self.propose,
             score_episode=self.score_episode,

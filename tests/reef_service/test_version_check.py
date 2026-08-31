@@ -20,8 +20,8 @@ from reef.harness.render import render_composition
 from reef.harness.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness_evolve import HarnessEvolveRecipe
 from reef.recipe import RecipeConfigError
-from reef.train.harness_backend import HarnessEvolveBackend
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import CordisBackend
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "version_check.ts"
 
@@ -47,7 +47,7 @@ def test_version_check_seeds_the_shipped_extension_and_renders_it_byte_exact() -
 
 
 def test_version_check_entry_passes_the_backends_seed_validation() -> None:
-    HarnessEvolveBackend(
+    CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, model: None),
         score_episode=resolve_episode_scorer(lambda task, result: 0.0),

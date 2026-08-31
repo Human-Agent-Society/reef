@@ -5,8 +5,8 @@
 - ``processor`` — batches scored traces for the propose/evaluate/select
   loop.
 
-The backend that runs the loop (``HarnessEvolveBackend``) is the harness
-surface's training runtime, ``reef.train.harness_backend`` — shared
+The backend that runs the loop (``CordisBackend``) is the harness
+surface's training runtime, ``reef.train.cordis_backend`` — shared
 machinery, the counterpart of ``reef.train.slime_backend`` for weights.
 """
 

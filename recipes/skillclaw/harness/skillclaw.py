@@ -156,7 +156,7 @@ def _pool_mutations(incumbent: dict[str, str], evolved: dict[str, str]) -> Seque
     The sealed night only adds or rewrites ``skills/<name>/SKILL.md``
     entries, so the diff is creates and updates; there is no remove.
     """
-    from reef.train.harness_backend import Mutation  # lazy: this module imports without reef installed
+    from reef.train.cordis_backend import Mutation  # lazy: this module imports without reef installed
 
     mutations = []
     for name in sorted(evolved):

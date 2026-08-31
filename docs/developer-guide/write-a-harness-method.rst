@@ -57,7 +57,7 @@ This method adds a rules node the first time a batch contains a failure:
 
 .. code:: python
 
-   from reef.train.harness_backend import Mutation
+   from reef.train.cordis_backend import Mutation
 
    RULE = "State the final answer alone on the last line.\n"
    EXPECTED = {"[fib]": "2880067194370816120"}

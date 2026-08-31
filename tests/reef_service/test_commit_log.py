@@ -31,9 +31,9 @@ from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import RetentionDecision, Trainer
+from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
-from reef.train.harness_backend import HarnessEvolveBackend, ScoreComparisonSelector
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
@@ -742,7 +742,7 @@ class _HarnessEvolveTestRecipe(Recipe):
 
     These tests exercise commit-log/version-chain mechanics, not
     harness-evolution semantics specifically; they just need a concrete,
-    artifact-producing Recipe. Constructs HarnessEvolveBackend and
+    artifact-producing Recipe. Constructs CordisBackend and
     HarnessEvolveProcessor directly, the same shape
     HarnessEvolveRecipe.build() has, minus the config-boot layer these
     tests never touch (see tests/reef_service/test_harness_recipe.py for
@@ -763,7 +763,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build(self, scenario, records, *, algorithm_state=None) -> Trainer:
         from reef.harness_evolve.processor import HarnessEvolveProcessor
 
-        training_backend = HarnessEvolveBackend(
+        training_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
             score_episode=resolve_episode_scorer(self.evaluate),

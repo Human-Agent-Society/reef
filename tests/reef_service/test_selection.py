@@ -6,6 +6,7 @@ import pytest
 
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.train.backend import TrainingBackend
+from reef.train.cordis_backend import ScoreComparisonSelector
 from reef.train.evaluation import (
     AlwaysSelect,
     CandidateEvaluationPlugin,
@@ -16,7 +17,6 @@ from reef.train.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.train.harness_backend import ScoreComparisonSelector
 
 
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:

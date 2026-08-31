@@ -2,7 +2,7 @@
 
 The processor pairs reports with their inference records and batches the
 traces whose scores fall inside the configured window; the evolution backend
-(``HarnessEvolveBackend``) consumes the batch. Exercised directly rather
+(``CordisBackend``) consumes the batch. Exercised directly rather
 than through any Recipe wrapper.
 """
 

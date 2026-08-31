@@ -17,7 +17,7 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBindings
-from reef.train.harness_backend.manifest import FailureManifest
+from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TraceSample
 
 
@@ -59,7 +59,7 @@ class Proposer(ABC):
         ``__call__`` — given the current composition (as ``(kind, config)``
         pairs in tree order), a batch of trace samples, and the
         :class:`~reef.harness.model_binding.ModelBindings` the method may
-        call, return one :class:`~reef.train.harness_backend.Mutation`, a
+        call, return one :class:`~reef.train.cordis_backend.Mutation`, a
         sequence of them (one composite proposal, applied under one snapshot
         and settled by one selection decision), or ``None`` to skip.
 
@@ -69,7 +69,7 @@ class Proposer(ABC):
     deployment configured, and the method never needs to know where that is.
 
     ``manifest`` is the previous step's
-    :class:`~reef.train.harness_backend.FailureManifest`, or ``None`` when
+    :class:`~reef.train.cordis_backend.FailureManifest`, or ``None`` when
     no step has settled one yet. The keyword is only forwarded to callables
     whose signature names it, so pre-manifest proposers run unchanged.
     """

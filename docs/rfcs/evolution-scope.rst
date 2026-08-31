@@ -81,7 +81,7 @@ Conversely, the TTTD harness *does* contain genome that could evolve through
 Reef one day: the prompt template, the exploration constant, the
 ``search_value`` design, the two-phase prefill text. Evolving those from
 cross-run scores would be the same gated text-artifact loop
-``HarnessEvolveBackend`` runs today. The archive still would not move.
+``CordisBackend`` runs today. The archive still would not move.
 
 .. _3-axis-2--how-changes-are-accepted-a-per-backend-policy:
 
@@ -99,7 +99,7 @@ on the same version chain:
 |                      | playbook merges          |                      |
 |                      | (artifacts, §5)          |                      |
 +----------------------+--------------------------+----------------------+
-| Compare with current | ``HarnessEvolveBackend`` | the decision, then   |
+| Compare with current | ``CordisBackend`` | the decision, then   |
 | select when wins     |                          | the version chain    |
 | exceed losses        |                          |                      |
 +----------------------+--------------------------+----------------------+

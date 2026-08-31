@@ -149,7 +149,7 @@ allowed-confusables = ["α", "γ", "−"]
 # Test code: perf lint and strict class/branch shape rules add churn, not safety.
 "tests/**/*.py" = ["N806", "PERF", "RUF012", "SIM108"]
 # This function-local set is a constant used to describe a fixed protocol vocabulary.
-"reef/train/harness_backend/strategies.py" = ["N806"]
+"reef/train/cordis_backend/strategies.py" = ["N806"]
 # The Top-K objective follows the mathematical notation used in its derivation.
 "recipes/openclawrl/slime/objective.py" = ["N802", "N803", "N806"]
 

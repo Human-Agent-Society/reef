@@ -33,8 +33,8 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
 from reef.service.install_script import composition_checksum, render_install_script
-from reef.train.harness_backend import Mutation
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import Mutation
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition

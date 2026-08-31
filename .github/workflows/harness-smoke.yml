@@ -9,7 +9,7 @@ on:
   pull_request:
     paths:
       - "reef/harness/**"
-      - "reef/train/harness_backend/**"
+      - "reef/train/cordis_backend/**"
       - "tests/smoke/**"
       - ".github/workflows/harness-smoke.yml"
   workflow_dispatch:

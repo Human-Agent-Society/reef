@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import reef.train.harness_backend as reef_harness_backend
+import reef.train.cordis_backend as reef_cordis_backend
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -23,9 +23,9 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import RecipeRegistry, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.train.cordis_backend import CordisBackend, Mutation, MutationError, ScoreComparisonSelector
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
-from reef.train.harness_backend import HarnessEvolveBackend, Mutation, MutationError, ScoreComparisonSelector
-from reef.train.harness_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
 
@@ -111,8 +111,8 @@ def make_binary(tmp_path: Path) -> Path:
     return binary
 
 
-def backend(tmp_path: Path, propose, seed: tuple = ()) -> HarnessEvolveBackend:
-    return HarnessEvolveBackend(
+def backend(tmp_path: Path, propose, seed: tuple = ()) -> CordisBackend:
+    return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
         score_episode=resolve_episode_scorer(evaluate),
@@ -124,7 +124,7 @@ def backend(tmp_path: Path, propose, seed: tuple = ()) -> HarnessEvolveBackend:
 
 
 def run_backend_step(
-    backend: HarnessEvolveBackend,
+    backend: CordisBackend,
     trace_batch: TraceBatch,
     state,
 ) -> TrainStepResult:
@@ -366,7 +366,7 @@ def test_episode_scorer_failure_reverts_before_it_propagates(tmp_path: Path) -> 
     def broken_score(task, result):
         raise RuntimeError("episode scorer bug")
 
-    b = HarnessEvolveBackend(
+    b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
         score_episode=resolve_episode_scorer(broken_score),
@@ -463,7 +463,7 @@ def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # -Infinity, and a non-JSON reader would decode a wrong finite number.
     import json
 
-    b = HarnessEvolveBackend(
+    b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, model: Mutation("create", "r1", RULES)),
         score_episode=resolve_episode_scorer(evaluate),
@@ -478,7 +478,7 @@ def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
 
 
 def test_non_finite_episode_score_raises_and_reverts(tmp_path: Path) -> None:
-    b = HarnessEvolveBackend(
+    b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda nodes, samples, model: Mutation("create", "r1", RULES)),
         score_episode=resolve_episode_scorer(lambda task, result: float("nan")),
@@ -506,7 +506,7 @@ def test_seed_boots_the_composition_tree(tmp_path: Path) -> None:
 
     trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", RecordStore())
     b = trainer.training_backend
-    assert isinstance(b, HarnessEvolveBackend)
+    assert isinstance(b, CordisBackend)
     state = b.initial_state()
     assert state == {"steps": 0, "entries": [SEED_MODELS, SEED_SETTINGS]}
     run_backend_step(b, batch(), state)
@@ -818,13 +818,13 @@ def test_model_binding_reaches_episodes_but_never_the_published_tree(tmp_path: P
     the adapter's model_binding template, and the published artifact carries
     no provider: a client points its own harness at Reef."""
     seen: list[dict[str, str]] = []
-    original = reef_harness_backend.run_episode
+    original = reef_cordis_backend.run_episode
 
     def spy(descriptor, files, prompt, **kwargs):
         seen.append(dict(files))
         return original(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(reef_harness_backend, "run_episode", spy)
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
     b = backend(tmp_path, lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}))
     result = run_backend_step(b, batch(), b.initial_state())
 
@@ -866,7 +866,7 @@ def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path) -> None:
     descriptor = dataclasses.replace(get_adapter("pi"), model_binding={})
     with pytest.raises(ModelBindingError, match="declares no model_binding"):
-        HarnessEvolveBackend(
+        CordisBackend(
             descriptor=descriptor,
             propose=resolve_proposer(lambda n, s, m: None),
             score_episode=resolve_episode_scorer(evaluate),
