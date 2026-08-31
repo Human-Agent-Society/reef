@@ -701,8 +701,7 @@ body {
   font-size: 11px;
 }
 .doc-context a:hover { color: var(--brand-strong); }
-.doc-type {
-  margin-right: 5px;
+.doc-section {
   padding: 4px 8px;
   color: var(--brand-strong);
   border: 1px solid color-mix(in srgb, var(--brand) 25%, var(--border));
@@ -872,12 +871,10 @@ html[data-theme="dark"] {
   .home-table { font-size: 14px; }
 }
 
-/* Page brief and document-kind chip. The brief sits under the lede and answers
+/* Page brief. It sits under the lede and answers
    three questions before the first section: who the page is for, what to have
    ready, and what the reader has at the end. It reuses the callout geometry
-   so it reads as the page's own note, not a second heading. The chip tints
-   follow the kind so a tutorial and a reference page are told apart at the
-   breadcrumb, before the first paragraph. */
+   so it reads as the page's own note, not a second heading. */
 .markdown-body .page-brief {
   margin: -14px 0 40px;
   padding: 14px 18px;
@@ -904,10 +901,6 @@ html[data-theme="dark"] {
 .markdown-body .page-brief dd { margin: 0; color: var(--text); }
 .markdown-body .page-brief dd a { font-weight: 500; }
 .markdown-body .page-brief code, .markdown-body .page-brief .literal { background: color-mix(in srgb, var(--accent) 70%, transparent); }
-.doc-type[data-kind="Concept"] { color: var(--callout-note-ink); border-color: color-mix(in srgb, var(--callout-note-ink) 32%, var(--border)); background: var(--callout-note); }
-.doc-type[data-kind="Reference"], .doc-type[data-kind="Contributor guide"] { color: var(--muted); border-color: var(--border); background: color-mix(in srgb, var(--card) 70%, transparent); }
-.doc-type[data-kind="Tutorial"] { color: var(--callout-tip-ink); border-color: color-mix(in srgb, var(--callout-tip-ink) 32%, var(--border)); background: var(--callout-tip); }
-
 /* Expected-output blocks inside tutorials: the same code chrome, labeled so
    a reader can tell a command to type from the text they should see. */
 .markdown-body pre.language-console, .markdown-body pre.language-shellsession { position: relative; }

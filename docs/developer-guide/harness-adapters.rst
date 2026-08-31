@@ -57,9 +57,3 @@ registers on the ``reef.harness_adapters`` entry-point group. ``version_check:
 true`` writes an update notice into the tree and ships for ``pi`` only, so an
 ``opencode`` recipe that sets it refuses to boot. An evolved tree is
 adapter-specific: ``config`` node contents follow each adapter's schema.
-
-See also
---------
-
-- `Evolve your harness <../user-guide/evolve-your-harness.rst>`__: the loop that produces the tree.
-- `harness_evolve <../user-guide/recipes/harness-evolve.rst>`__: the recipe's configuration.

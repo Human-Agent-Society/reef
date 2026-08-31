@@ -415,12 +415,3 @@ Add tests for the program contract, invalid outputs, reward calculation, and
 task registration. ``tests/test_tttd_harness.py`` and
 ``tests/test_tttd_packing_tasks.py`` show how the shared harness hands programs
 to a task-specific judge.
-
-See also
---------
-
-- `The example README <../../../recipes/tttd/examples/tttd/README.md>`__ records
-  implementation details and paper fidelity.
-- `sao <sao.rst>`__ handles ungrouped feedback when each attempt trains alone.
-- `Architecture <../../getting-started/architecture.rst#evaluation>`__ describes
-  how Reef evaluates a candidate before accepting an update.

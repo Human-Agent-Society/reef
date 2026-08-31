@@ -144,9 +144,3 @@ Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher).
-
-See also
---------
-
-- `Python API <../reference/python-api.rst#step-preparer>`__: the signal side of the pair.
-- `Write a recipe <write-a-recipe.rst>`__: binding a family to a method.

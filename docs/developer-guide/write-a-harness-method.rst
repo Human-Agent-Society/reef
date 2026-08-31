@@ -186,8 +186,3 @@ regressed and at least one improved.
 
 Name it ``selection: my_pkg.policies:pareto_selection``. Publishing outside
 candidate selection breaks revert.
-
-See also
---------
-
-- `Python API <../reference/python-api.rst#harness-method>`__: the contract as a table.

@@ -100,8 +100,3 @@ must reach the model on every live request, so its recipe overrides
 ``build_surface``, the hook controlling how a published artifact reaches the
 request path (`skillclaw_recipe.py
 <../../../recipes/harness_evolve/examples/skillclaw/harness/skillclaw_recipe.py>`__).
-
-See also
---------
-
-- `HTTP API <../../reference/http-api.rst#harness-artifacts>`__: pulling, pinning, and installing a published tree.
