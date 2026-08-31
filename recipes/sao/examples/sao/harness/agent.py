@@ -47,7 +47,7 @@ GOLD_ANSWERS = {
 
 # Answer extraction and strict equivalence: the same rule the Harbor verifier
 # applies (harbor/imo-*/tests/grade.py), copied rather than imported because
-# the harness is installed on its own into tide's environment.
+# the harness is installed on its own into REEF Eval's environment.
 
 
 def _latex_to_float(expression: str) -> float | None:

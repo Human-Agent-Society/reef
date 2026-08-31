@@ -1,10 +1,10 @@
 # Examples
 
 Setup, once per example directory (installs the example's harness,
-`reef-client`, and [tide](https://github.com/Human-Agent-Society/tide-eval)):
+`reef-client`, and [REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval)):
 
 ```bash
-pip install -e . "tide-eval[harbor]"
+pip install -e . "reef-eval[harbor]"
 ```
 
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
@@ -41,7 +41,7 @@ Around those stacks, the loop on the Harbor task standard: a
 [Harbor](https://github.com/laude-institute/harbor) task (`harbor/`), a
 Harbor agent harness that records its model call through Reef and reports
 the verifier reward back at trial end (`harness/`), the loop written out
-(`run.py` — [tide](https://github.com/Human-Agent-Society/tide-eval)'s
+(`run.py` — [REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval)'s
 `Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
@@ -68,7 +68,7 @@ skill mutation over its own failing traffic, gated real episodes on three
 exact-answer coding tasks decide it, and the winning composition publishes
 for client pull via `GET /reef/harness`. Setup here is just
 `pip install reef-client`: the loop drives `reef_client` directly,
-no Harbor task or tide.
+no Harbor task or REEF Eval.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
@@ -82,10 +82,10 @@ from `GET /reef/harness`, and seals rounds for the preregistered gain
 criterion carried verbatim from the sealed campaign. Its `harbor/` is one
 WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
-one-episode tide smoke over it.
+one-episode REEF Eval smoke over it.
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
-personal-agent experiment as a tide task stream: a simulated student brings
+personal-agent experiment as a REEF Eval task stream: a simulated student brings
 72 GSM8K homework problems to a Hermes agent whose model calls go through
 reef, and the metric is the number of sessions before the agent's answers
 match the student's taste. The method (session correlation, PRM judging, the

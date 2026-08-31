@@ -9,7 +9,7 @@ session score), and writes:
 - ``/logs/verifier/reward.json``  — ``{"reward": <float>}``
 - ``/logs/verifier/reason.txt``   — the human-readable reason
 - ``/logs/verifier/submissions.jsonl`` — one ``{"t", "score"}`` line per
-  submission; tide ingests these as the trusted score-over-time curve.
+  submission; REEF Eval ingests these as the trusted score-over-time curve.
 """
 
 import json

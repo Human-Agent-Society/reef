@@ -21,7 +21,7 @@ tokens, and weights are not part of Reef training. The Reef-specific boundary
 is limited to the guidance call and the score report linked to that call.
 
 ```text
-harbor/                self-contained Tide/Harbor task definition
+harbor/                self-contained REEF Eval/Harbor task definition
   polyomino_packing/
     task.toml            metadata, timeouts, resource limits
     instruction.md       the problem prompt, shown to both models
@@ -42,7 +42,7 @@ harness/               agent harness (Guidance-TTT search + Reef adapter)
   run_controller.py      training barrier, LoRA qualification, paired resume
   harbor_agent.py        Harbor BaseAgent (imports the harbor package)
 serve.yaml             Reef + Ray + Slime/Megatron + SGLang stack config
-run.py                 one Tide episode owning the complete trajectory
+run.py                 one REEF Eval episode owning the complete trajectory
 run.sh                 starts the Reef training stack, then runs run.py
 pyproject.toml         makes the harness importable
 ```
@@ -147,7 +147,7 @@ request-level routing cannot override an account-level provider allowlist.
 ```bash
 git submodule update --init third_party/reef-client
 pip install -e ./third_party/reef-client
-pip install -e . "tide-eval[harbor]"
+pip install -e . "reef-eval[harbor]"
 ```
 
 The authoritative verifier is external: a FrontierCS checkout at the pinned
@@ -230,7 +230,7 @@ work/polyomino_packing/
   checkpoints/megatron/                Megatron checkpoints
   checkpoints/hf/                      published HF/LoRA checkpoints
   artifacts.git/, agent-record/        Reef artifact and record stores
-  lab/                                 tide trial rows
+  lab/                                 REEF Eval trial rows
   reef.log                             the stack's log
 ```
 
@@ -262,7 +262,7 @@ The tests cover strict parsing, summary-only code isolation, exact receipt
 linkage, executor skipping on malformed guidance, dynamic cardinalities,
 Discover-compatible PUCT/archive behavior, secret hygiene, the judge protocol
 client, the task contract, the training barrier and its LoRA qualification
-gate, the paired resume state, and the tide entrypoint's task dispatch.
+gate, the paired resume state, and the REEF Eval entrypoint's task dispatch.
 
 ## Credits and license
 

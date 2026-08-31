@@ -3,7 +3,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "tide/tttd-erdos"
+name = "reef-eval/tttd-erdos"
 description = "Find a step function that minimizes the Erdős minimum-overlap constant C₅. The agent writes a Python program whose run() returns (h_values, c5_bound, n_points); reward = 1/(ε+C₅)."
 
 [metadata]

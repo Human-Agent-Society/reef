@@ -2,7 +2,7 @@
 
 One episode:
 
-    solve  — tide runs the selected harbor/ task under our agent; every
+    solve  — REEF Eval runs the selected harbor/ task under our agent; every
              rollout is
              an inference through Reef, stamped with its step-grid
              coordinates
@@ -11,14 +11,14 @@ One episode:
              one complete step grid (8 groups x 64 rollouts), trains, and
              serves the updated weights
 
-``Lab.run`` is tide's one primitive: task in, trusted scored row out.
+``Lab.run`` is REEF Eval's one primitive: task in, trusted scored row out.
 """
 
 import asyncio
 import os
 from pathlib import Path
 
-from tide import Lab
+from reef_eval import Lab
 
 MODEL = "Qwen/Qwen3-8B"  # the model run.sh downloaded
 

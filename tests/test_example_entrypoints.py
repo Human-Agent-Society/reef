@@ -1,4 +1,4 @@
-"""Executable host-side contracts for the shipped Tide/Harbor examples."""
+"""Executable host-side contracts for the shipped REEF Eval/Harbor examples."""
 
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def _load_harness(monkeypatch, example: str):
         ),
     ],
 )
-def test_tide_entrypoint_dispatches_the_documented_workload(
+def test_reef_eval_entrypoint_dispatches_the_documented_workload(
     monkeypatch,
     capsys,
     example,
@@ -137,9 +137,9 @@ def test_tide_entrypoint_dispatches_the_documented_workload(
             calls.append((self.path, Path(task), agent, tags))
             return SimpleNamespace(rewards={"reward": 1.0}, tags={}, uri="file:///trial")
 
-    tide = ModuleType("tide")
-    tide.Lab = Lab
-    monkeypatch.setitem(sys.modules, "tide", tide)
+    reef_eval = ModuleType("reef_eval")
+    reef_eval.Lab = Lab
+    monkeypatch.setitem(sys.modules, "reef_eval", reef_eval)
     for key, value in {
         "REEF_SERVICE_URL": "http://127.0.0.1:8900",
         "REEF_SCENARIO": f"{example}-host-test",
@@ -168,9 +168,9 @@ def test_tide_entrypoint_dispatches_the_documented_workload(
 
 @pytest.mark.unit
 def test_tttd_entrypoint_rejects_an_unknown_task(monkeypatch) -> None:
-    tide = ModuleType("tide")
-    tide.Lab = object
-    monkeypatch.setitem(sys.modules, "tide", tide)
+    reef_eval = ModuleType("reef_eval")
+    reef_eval.Lab = object
+    monkeypatch.setitem(sys.modules, "reef_eval", reef_eval)
     monkeypatch.setenv("TTTD_TASK", "not-a-task")
 
     with pytest.raises(SystemExit, match=r"unknown TTTD_TASK.*circle_packing_32"):
@@ -186,9 +186,9 @@ def test_tttd_entrypoint_fails_when_harbor_reports_an_error(monkeypatch) -> None
         async def run(self, _task, _agent):
             return SimpleNamespace(rewards={}, tags={"error": "environment failed"}, uri="file:///failed-trial")
 
-    tide = ModuleType("tide")
-    tide.Lab = Lab
-    monkeypatch.setitem(sys.modules, "tide", tide)
+    reef_eval = ModuleType("reef_eval")
+    reef_eval.Lab = Lab
+    monkeypatch.setitem(sys.modules, "reef_eval", reef_eval)
 
     with pytest.raises(RuntimeError, match="Harbor trial failed: environment failed"):
         runpy.run_path(str(EXAMPLE_DIRS["tttd"] / "run.py"))

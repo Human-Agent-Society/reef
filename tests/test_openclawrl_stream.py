@@ -1,4 +1,4 @@
-"""OpenClaw-RL tide-stream example: student sidecar, tasks, harness."""
+"""OpenClaw-RL REEF Eval stream example: student sidecar, tasks, harness."""
 
 from __future__ import annotations
 
@@ -231,9 +231,9 @@ class TestStreamTasks:
                     modules = [node.module or ""]
                 for module in modules:
                     root = module.split(".")[0]
-                    assert root in sys.stdlib_module_names or root.startswith(
-                        allowed_prefixes
-                    ), f"{path.name} imports non-stdlib module {module!r}"
+                    assert root in sys.stdlib_module_names or root.startswith(allowed_prefixes), (
+                        f"{path.name} imports non-stdlib module {module!r}"
+                    )
 
 
 class TestHarness:
@@ -273,7 +273,7 @@ class TestHarness:
                 self.commands.append(command)
                 if "cat /agent/problem.json" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(problem), stderr="")
-                if "cat /tide/state/scenario" in command:
+                if "cat /reef-eval/state/scenario" in command:
                     return SimpleNamespace(return_code=0, stdout="", stderr="")
                 if "$JUDGE_URL/state" in command or "$JUDGE_URL/reply" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(next(states)), stderr="")
