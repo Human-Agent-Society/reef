@@ -73,21 +73,54 @@ const darkTheme = {
 // from the CSS variables at draw time so diagrams follow globals.css instead
 // of drifting when the palette changes.
 const paletteRoles: Record<string, string> = {
-  primaryColor: "--card",
-  mainBkg: "--card",
-  actorBkg: "--card",
-  edgeLabelBackground: "--background",
+  actorBkg: "--surface-raised",
+  edgeLabelBackground: "--card",
   tertiaryColor: "--accent",
   lineColor: "--muted",
   textColor: "--text",
   primaryTextColor: "--foreground",
   actorTextColor: "--foreground",
+  // Nodes sit on the figure's card, so they need their own raised surface and
+  // the page's hairline border; the fallback themes' green borders belong to a
+  // palette the site no longer uses.
+  primaryColor: "--surface-raised",
+  mainBkg: "--surface-raised",
+  nodeBorder: "--diagram-line",
+  primaryBorderColor: "--diagram-line",
+  // The group bands carry their title and their contents; an outline around
+  // them adds a third frame inside the figure's own card, and puts a rule
+  // exactly where the title sits.
+  clusterBkg: "--accent",
+  clusterBorder: "--accent",
+  // Sequence diagrams carried their own teal from the fallback theme, which
+  // reads as a second design next to a flowchart on the same page.
+  actorBorder: "--diagram-line",
+  actorLineColor: "--diagram-line",
+  signalColor: "--muted",
+  signalTextColor: "--text",
+  labelBoxBkgColor: "--accent",
+  labelBoxBorderColor: "--diagram-line",
+  labelTextColor: "--muted",
+  loopTextColor: "--text",
+  noteBkgColor: "--accent",
+  noteBorderColor: "--diagram-line",
+  noteTextColor: "--text",
+  activationBkgColor: "--accent",
+  activationBorderColor: "--diagram-line",
+  sequenceNumberColor: "--card",
 };
 
-function paletteOverrides(): Record<string, string> {
+// Mermaid ships Trebuchet MS as its default face. Left alone, every diagram
+// renders in a typeface the site uses nowhere else, which reads as a pasted-in
+// artifact rather than part of the page.
+const typographyRoles: Record<string, string> = {
+  fontFamily: "--font-sans",
+};
+
+function cssOverrides(roles: Record<string, string>): Record<string, string> {
   const style = getComputedStyle(document.documentElement);
   const overrides: Record<string, string> = {};
-  for (const [variable, cssVar] of Object.entries(paletteRoles)) {
+  for (const [variable, cssVar] of Object.entries(roles)) {
     const value = style.getPropertyValue(cssVar).trim();
     if (value) overrides[variable] = value;
   }
@@ -100,14 +133,20 @@ function renderDiagram(id: string, chart: string, dark: boolean) {
       startOnLoad: false,
       securityLevel: "strict",
       theme: "base",
-      themeVariables: { ...(dark ? darkTheme : lightTheme), ...paletteOverrides() },
+      themeVariables: {
+        ...(dark ? darkTheme : lightTheme),
+        fontSize: "13px",
+        ...cssOverrides({ ...paletteRoles, ...typographyRoles }),
+      },
       flowchart: {
         htmlLabels: true,
         useMaxWidth: true,
         curve: "basis",
-        nodeSpacing: 30,
-        rankSpacing: 42,
+        nodeSpacing: 24,
+        rankSpacing: 34,
         padding: 12,
+        diagramPadding: 4,
+        subGraphTitleMargin: { top: 0, bottom: 26 },
       },
       sequence: {
         useMaxWidth: true,
