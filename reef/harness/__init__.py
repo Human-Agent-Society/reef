@@ -5,7 +5,7 @@ node kinds of ``reef.harness.nodes``. ``reef.harness.render`` turns the
 tree into one harness's native files as described by an
 ``AdapterDescriptor``; ``reef.harness.episode`` runs one headless invocation
 inside an isolated, fully relocated root and collects its trajectory.
-Versioning — staging, publishing, commit log, version chain, recovery,
+Versioning — staging, publishing, commit log, release chain, recovery,
 and rollback — is handled by reef's native artifact stack
 (``reef.artifact``, ``reef.scenario.commit_protocol``), not here.
 

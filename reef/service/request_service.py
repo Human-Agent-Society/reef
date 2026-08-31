@@ -29,7 +29,7 @@ from reef.scenario.scenario import Scenario
 from reef.service.install_script import render_install_script
 from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
-from reef.surface.weights import WeightVersionMismatch, reported_weight_version, reported_weight_version_spans
+from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class RequestPayloadNormalizer:
 @dataclass(frozen=True)
 class PendingInference:
     item: AgentRecord
-    artifact_version: str | None
+    release_id: str | None
     admission: InferenceAdmissionHandle | None = None
     lease: InferenceLease | None = None
     deferred_prepared: PreparedInference | None = None
@@ -105,7 +105,7 @@ class PreparedInference:
     backend: InferenceBackend
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
-    #: must then carry the engine-confirmed weight version.
+    #: must then carry the engine-confirmed runtime load ID.
     durable: bool
     admission: InferenceAdmissionHandle | None = None
     #: Releases serving state the surface held for this attempt (an adapter
@@ -205,18 +205,18 @@ class RequestService:
                         "inference for scenario %r timed out after %d attempt(s) at artifact %r",
                         prepared.parsed.scenario,
                         attempt,
-                        prepared.artifact.ref.version,
+                        prepared.artifact.ref.release_id,
                     )
                     raise InferenceRetryTimeout(timeout_error) from exc
                 finally:
                     remaining_budget -= loop.time() - started
                 interrupted = _inference_aborted(response)
                 if not interrupted:
-                    # A completed response with invalid weight-version information is a
+                    # A completed response with invalid runtime-load-ID information is a
                     # backend contract error, not a retryable inference abort.
                     if prepared.surface.inference is not None:
                         prepared.surface.inference.verify_response(prepared.artifact, path, response)
-                    self._stamp_durable_weight_version(prepared, payload, response)
+                    self._stamp_durable_runtime_load_id(prepared, payload, response)
                     item = await asyncio.to_thread(
                         self._accept,
                         prepared.parsed,
@@ -228,11 +228,11 @@ class RequestService:
                 # Restart the request against the latest artifact and never record it.
                 logger.info(
                     "retrying backend-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
-                    "engine reported weight version %r",
+                    "engine reported runtime load ID %r",
                     prepared.parsed.scenario,
                     attempt,
-                    prepared.artifact.ref.version,
-                    reported_weight_version(response),
+                    prepared.artifact.ref.release_id,
+                    reported_runtime_load_id(response),
                 )
             finally:
                 prepared.release()
@@ -260,7 +260,7 @@ class RequestService:
             if record_response is not None:
                 if prepared.surface.inference is not None:
                     prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
-                self._stamp_durable_weight_version(prepared, payload, record_response)
+                self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                 # Buffered streaming backends have already finished model
                 # execution. Downstream client backpressure must not leave a
                 # stale admission handle across the colocated pause lifecycle.
@@ -271,8 +271,8 @@ class RequestService:
                     lease.release()
                     lease = None
             elif prepared.durable and not record_response_pending:
-                raise WeightVersionMismatch(
-                    "durable streaming inference requires an atomic record_response with serving weight versions"
+                raise RuntimeLoadMismatch(
+                    "durable streaming inference requires an atomic record_response with serving runtime load IDs"
                 )
         except BaseException:
             try:
@@ -293,7 +293,7 @@ class RequestService:
                 payload=_with_tags(payload, prepared.parsed),
                 artifact_ref=prepared.artifact.ref,
             ),
-            artifact_version=prepared.parsed.artifact_version,
+            release_id=prepared.parsed.release_id,
             admission=admission,
             lease=lease,
             deferred_prepared=prepared if record_response_pending else None,
@@ -319,14 +319,14 @@ class RequestService:
                         pending.path,
                         response,
                     )
-                self._stamp_durable_weight_version(pending.deferred_prepared, payload, response)
+                self._stamp_durable_runtime_load_id(pending.deferred_prepared, payload, response)
             item = replace(
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
             return self._dispatcher.accept_record(
                 item,
-                artifact_version=pending.artifact_version,
+                release_id=pending.release_id,
             )
         except Exception:
             logger.exception(
@@ -357,7 +357,7 @@ class RequestService:
         initial = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
             parsed.scenario,
-            artifact_version=parsed.artifact_version,
+            release_id=parsed.release_id,
         )
         if initial is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
@@ -390,7 +390,7 @@ class RequestService:
             raise
 
     @staticmethod
-    def _stamp_durable_weight_version(
+    def _stamp_durable_runtime_load_id(
         prepared: PreparedInference,
         payload: dict[str, Any],
         response: Mapping[str, Any],
@@ -398,20 +398,20 @@ class RequestService:
         """Record which engine weights answered a training-scenario request."""
         if not prepared.durable:
             return
-        spans = reported_weight_version_spans(response)
+        spans = reported_runtime_load_spans(response)
         if spans:
-            payload["weight_version_spans"] = [
-                {"start": span.start, "end": span.end, "weight_version": span.weight_version} for span in spans
+            payload["runtime_load_spans"] = [
+                {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id} for span in spans
             ]
-            versions = {span.weight_version for span in spans}
+            versions = {span.runtime_load_id for span in spans}
             if len(versions) == 1:
-                payload["weight_version"] = versions.pop()
+                payload["runtime_load_id"] = versions.pop()
             else:
-                payload.pop("weight_version", None)
+                payload.pop("runtime_load_id", None)
             return
-        if (version := reported_weight_version(response)) is None:
-            raise WeightVersionMismatch("durable training response reports no weight_version")
-        payload["weight_version"] = version
+        if (version := reported_runtime_load_id(response)) is None:
+            raise RuntimeLoadMismatch("durable training response reports no runtime_load_id")
+        payload["runtime_load_id"] = version
 
     def _prepare_inference(
         self,
@@ -421,7 +421,7 @@ class RequestService:
     ) -> PreparedInference:
         scenario = self._dispatcher.get_or_create_scenario(
             parsed.scenario,
-            artifact_version=parsed.artifact_version,
+            release_id=parsed.release_id,
         )
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
@@ -438,26 +438,26 @@ class RequestService:
             admission=admission,
         )
 
-    def harness_manifest(self, headers: Mapping[str, str], artifact_version: str | None = None) -> dict[str, Any]:
-        """The served tree plus its parent artifact version and gate metrics.
+    def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
+        """The served tree plus its parent release and gate metrics.
 
-        ``artifact_version`` addresses one catalog version instead of the
+        ``release_id`` addresses one catalog release instead of the
         serving head, so a consumer can pin or roll back by pulling an older
-        tree; an unknown or unrestorable version raises ArtifactNotFound
+        tree; an unknown or unrestorable release raises ArtifactNotFound
         naming it. The gate field carries the metrics of the training step
-        that published the served version, so a consumer can audit what a
+        that published the served release, so a consumer can audit what a
         pulled tree changed and why it was admitted before running it.
         Read-only: never creates a scenario.
         """
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, artifact_version)
+        return self._harness_manifest_for_scenario(scenario, release_id)
 
     @staticmethod
     def _harness_manifest_for_scenario(
         scenario: Scenario,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, gate = scenario.artifact_snapshot(artifact_version)
+        artifact, gate = scenario.artifact_snapshot(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no files")
@@ -465,17 +465,18 @@ class RequestService:
         if files is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no files")
         return {
-            "artifact_version": artifact.ref.version,
-            "parent_artifact_version": artifact.ref.parent_version,
+            "release_id": artifact.ref.release_id,
+            "parent_release_id": artifact.ref.parent_release_id,
+            "content_id": artifact.ref.content_id,
             "files": dict(files),
             "gate": gate,
         }
 
-    def harness_versions(self, headers: Mapping[str, str]) -> dict[str, Any]:
-        """The scenario's version catalog with per-version gate metrics, newest last.
+    def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
+        """The scenario's release catalog with per-release gate metrics, newest last.
 
-        The list side of the update channel: every committed version stays
-        addressable through the manifest read's ``artifact_version``, and each
+        The list side of the update channel: every committed release stays
+        addressable through the manifest read's ``release_id``, and each
         training row carries the metrics of the step that published it, so an
         update is a decision over numbers rather than a blind pull. Same
         read-only rules as ``harness_manifest``.
@@ -483,23 +484,23 @@ class RequestService:
         scenario = self._file_scenario(headers)
         return {
             "scenario": scenario.name,
-            "versions": list(reversed(scenario.versions())),
+            "releases": list(reversed(scenario.releases())),
         }
 
     def harness_install_script(
         self,
         headers: Mapping[str, str],
         adapter: str | None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> str:
         """A self-contained install script over one served manifest.
 
         The manifest side is adapter-agnostic files, addressed exactly like
-        ``harness_manifest`` (head by default, any catalog version through
-        ``artifact_version``); the named ``adapter`` contributes only its
+        ``harness_manifest`` (head by default, any catalog release through
+        ``release_id``); the named ``adapter`` contributes only its
         descriptor's install section, which the script uses to ensure the
         pinned binary through the vendor's own channel. An unknown adapter
-        raises ArtifactNotFound naming it, mirroring the unknown-version
+        raises ArtifactNotFound naming it, mirroring the unknown-release
         behavior; a known adapter whose descriptor declares no install
         section raises DescriptorError (HTTP 400) naming it. Unlike the other
         harness reads, a missing or empty scenario header creates a new,
@@ -513,13 +514,14 @@ class RequestService:
         scenario = self._file_scenario(
             headers,
             create_if_missing=True,
-            artifact_version=artifact_version,
+            release_id=release_id,
         )
-        manifest = self._harness_manifest_for_scenario(scenario, artifact_version)
+        manifest = self._harness_manifest_for_scenario(scenario, release_id)
         return render_install_script(
             descriptor=get_adapter(adapter),
             files=manifest["files"],
-            artifact_version=manifest["artifact_version"],
+            release_id=manifest["release_id"],
+            content_id=manifest["content_id"],
             scenario=scenario.name,
         )
 
@@ -528,7 +530,7 @@ class RequestService:
         headers: Mapping[str, str],
         *,
         create_if_missing: bool = False,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> Scenario:
         """Resolve a file-serving scenario, optionally creating a randomly named one."""
         normalized = {key.lower(): value.strip() for key, value in headers.items()}
@@ -544,7 +546,7 @@ class RequestService:
             scenario = self._dispatcher.get_or_create_scenario(
                 scenario_name,
                 recipe,
-                artifact_version,
+                release_id,
                 allow_implicit_creation=True,
             )
             if scenario is None:
@@ -554,7 +556,7 @@ class RequestService:
         parsed = self._require_inference(headers)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
-        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, None, parsed.artifact_version)
+        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, None, parsed.release_id)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
         if scenario.surface.files is None:
@@ -582,7 +584,7 @@ class RequestService:
         try:
             return self._dispatcher.accept_record(
                 item,
-                artifact_version=parsed.artifact_version,
+                release_id=parsed.release_id,
             )
         except Exception as exc:
             logger.warning(

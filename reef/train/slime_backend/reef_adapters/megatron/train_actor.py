@@ -117,24 +117,24 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         slots = self.adapter_slots
         return () if slots is None else slots.scenarios
 
-    def sync_serving_weight_version(self) -> str:
+    def sync_serving_runtime_load_id(self) -> str:
         """Stamp the updater's current version token on every engine, publishing nothing.
 
         A LoRA bridge that has not trained yet serves the frozen base; the
         engines still need Reef's canonical ``<incarnation>:<sequence>``
         token so rollouts carry an admissible producing version.
         """
-        version = str(self.weight_updater.weight_version)
+        version = str(self.weight_updater.runtime_load_id)
         if dist.get_rank() == 0:
             engines, *_ = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
-            ray.get([engine.set_weight_version.remote(version) for engine in engines])
+            ray.get([engine.set_runtime_load_id.remote(version) for engine in engines])
         dist.barrier(group=get_gloo_group())
         return version
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Make ``scenario``'s current adapter resident under ``lora_name``.
 
-        No serving-weight version changes: this re-registers an adapter the
+        No serving-runtime load ID changes: this re-registers an adapter the
         engine lost (restart), it is not a training publication.
         """
         self.activate_scenario(scenario)
@@ -185,11 +185,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             ]
         return rollout_data
 
-    def get_weight_version(self) -> str:
-        return str(self.weight_updater.exact_weight_version)
+    def get_runtime_load_id(self) -> str:
+        return str(self.weight_updater.exact_runtime_load_id)
 
-    def restore_weight_version_for_republication(self, weight_version: str) -> None:
-        self.weight_updater.restore_exact_weight_version(weight_version)
+    def restore_runtime_load_id_for_republication(self, runtime_load_id: str) -> None:
+        self.weight_updater.restore_exact_runtime_load_id(runtime_load_id)
 
     def pop_metrics(self) -> dict[str, float]:
         metrics = drain_worker_metrics()

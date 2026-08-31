@@ -75,7 +75,7 @@ to ``/var/lib/reef``. Point them somewhere persistent.
 
 .. config::
 
-   reef.artifact_repository | .reef/artifacts.git | the Git-backed version chain
+   reef.artifact_repository | .reef/artifacts.git | the Git-backed release chain
    reef.artifact_work_dir | .reef/artifact-work | materialization scratch
    reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
    reef.agent_record_dir | .reef/agent-record | the record store

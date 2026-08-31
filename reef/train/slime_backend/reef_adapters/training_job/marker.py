@@ -108,7 +108,7 @@ def read_marker(path: Path) -> dict[str, Any] | None:
     ):
         raise RuntimeError(f"training marker has no checkpoint: {path}")
     if value["status"] in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"} and (
-        not isinstance(value.get("weight_version"), str) or not value["weight_version"]
+        not isinstance(value.get("runtime_load_id"), str) or not value["runtime_load_id"]
     ):
         raise RuntimeError(f"invalid training marker: {path}")
     return value
@@ -159,7 +159,7 @@ def marker_result(marker: Mapping[str, Any], *, metrics: Mapping[str, Any] | Non
         merged_metrics.update(metrics)
     return TrainingJobResult(
         outcome="complete",
-        weight_version=str(marker["weight_version"]),
+        runtime_load_id=str(marker["runtime_load_id"]),
         checkpoint_path=str(marker["checkpoint_path"]),
         metrics=merged_metrics or None,
         training_job_id=str(marker["job_id"]),
@@ -170,7 +170,7 @@ def marker_checkpoint_result(marker: Mapping[str, Any]) -> TrainingJobResult:
     """Return a typed result for a job waiting on its serving-weight update."""
     return TrainingJobResult(
         outcome="checkpoint",
-        weight_version=str(marker.get("weight_version", "pending")),
+        runtime_load_id=str(marker.get("runtime_load_id", "pending")),
         checkpoint_path=str(marker["checkpoint_path"]),
         metrics=_marker_metrics(marker) or None,
         training_job_id=str(marker["job_id"]),

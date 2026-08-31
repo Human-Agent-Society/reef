@@ -173,14 +173,14 @@ class _ArtifactManifest:
     def write(
         self,
         *,
-        artifact_id: str,
-        parent_version: str | None,
+        content_id: str,
+        parent_release_id: str | None,
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> None:
         manifest = {
-            "artifact_id": artifact_id,
-            "parent_version": parent_version,
+            "content_id": content_id,
+            "parent_release_id": parent_release_id,
             "source": dict(source),
             "metadata": dict(metadata),
         }
@@ -199,16 +199,16 @@ class _ArtifactManifest:
     def artifact_ref(self, version: str) -> ArtifactRef:
         manifest = self.read(version)
         try:
-            artifact_id = manifest["artifact_id"]
-            if not isinstance(artifact_id, str):
-                raise TypeError("artifact_id must be a string")
-            parent_version = manifest.get("parent_version")
-            if parent_version is not None and not isinstance(parent_version, str):
-                raise TypeError("parent_version must be a string or null")
+            content_id = manifest["content_id"]
+            if not isinstance(content_id, str):
+                raise TypeError("content_id must be a string")
+            parent_release_id = manifest.get("parent_release_id")
+            if parent_release_id is not None and not isinstance(parent_release_id, str):
+                raise TypeError("parent_release_id must be a string or null")
             return ArtifactRef(
-                artifact_id=artifact_id,
-                version=self._workspace.fetch_version(version),
-                parent_version=parent_version,
+                content_id=content_id,
+                release_id=self._workspace.fetch_version(version),
+                parent_release_id=parent_release_id,
             )
         except (KeyError, TypeError) as exc:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}") from exc
@@ -271,26 +271,26 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             snapshot_download=snapshot_download,
         )
 
-    def resolve_version(self, version: str | None = None) -> ArtifactRef:
-        if version is None or version == "latest":
-            resolved_version = self._workspace.ls_remote("refs/reef/latest") or self._workspace.ls_remote(
-                "refs/reef/initial"
+    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        if release_id is None or release_id == "head":
+            resolved_release = self._workspace.ls_remote("refs/reef/head") or self._workspace.ls_remote(
+                "refs/reef/base"
             )
-            if resolved_version is None:
-                raise ArtifactNotFound("artifact repository has no latest version")
-            return self._manifest.artifact_ref(resolved_version)
-        selector = version.removeprefix("git+lfs://")
-        resolved_version = self._workspace.ls_remote(f"refs/reef/versions/{selector}")
-        if resolved_version is None:
+            if resolved_release is None:
+                raise ArtifactNotFound("artifact repository has no head release")
+            return self._manifest.artifact_ref(resolved_release)
+        selector = release_id.removeprefix("git+lfs://")
+        resolved_release = self._workspace.ls_remote(f"refs/reef/releases/{selector}")
+        if resolved_release is None:
             try:
-                resolved_version = self._workspace.fetch_version(selector)
+                resolved_release = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
-                raise ArtifactNotFound(f"artifact version does not exist: {version}") from exc
-        return self._manifest.artifact_ref(resolved_version)
+                raise ArtifactNotFound(f"release does not exist: {release_id}") from exc
+        return self._manifest.artifact_ref(resolved_release)
 
     def fork(
         self,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         *,
         metadata: Mapping[str, object] | None = None,
     ) -> ArtifactRef:
@@ -298,13 +298,13 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             existing = self._workspace.ls_remote(self.ref_name)
             if existing is not None:
                 return self._manifest.artifact_ref(existing)
-            selected = self.resolve_version(artifact_version)
-            self._workspace.checkout(selected.version)
-            self._workspace.fetch_lfs_objects(selected.version)
+            selected = self.resolve_release(release_id)
+            self._workspace.checkout(selected.release_id)
+            self._workspace.fetch_lfs_objects(selected.release_id)
             self._manifest.write(
-                artifact_id=f"artifact:{uuid.uuid4().hex}",
-                parent_version=selected.version,
-                source={"kind": "fork", "version": selected.version},
+                content_id=selected.content_id,
+                parent_release_id=selected.release_id,
+                source={"kind": "fork", "release_id": selected.release_id},
                 metadata=metadata or {},
             )
             commit = self._workspace.commit("fork scenario repository")
@@ -334,13 +334,13 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         return self._manifest.artifact_ref(version)
 
     def materialize(self, ref: ArtifactRef) -> Artifact:
-        destination = self.cache_dir / ref.version
+        destination = self.cache_dir / ref.release_id
         if destination.is_dir():
             return Artifact(ref, None, local_path=destination)
-        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.version}-", dir=self.cache_dir))
+        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.release_id}-", dir=self.cache_dir))
         checkout = temporary / "artifact"
         try:
-            self._workspace.clone_for_materialize(checkout, ref.version)
+            self._workspace.clone_for_materialize(checkout, ref.release_id)
             git_metadata = checkout / ".git"
             if git_metadata.is_dir():
                 shutil.rmtree(git_metadata)
@@ -352,11 +352,11 @@ class GitLFSRepositoryBackend(RepositoryBackend):
                 if not destination.is_dir():
                     raise
         except ArtifactPublicationError as exc:
-            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.version}: {exc}") from exc
+            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.release_id}: {exc}") from exc
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         if not destination.is_dir():
-            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.version}")
+            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.release_id}")
         return Artifact(ref, None, local_path=destination)
 
     def publish(
@@ -369,28 +369,28 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
         with self._workspace.lock:
             current = self._workspace.ls_remote(self.ref_name)
-            if current != expected_parent.version:
-                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.version}")
-            self._workspace.checkout(expected_parent.version)
+            if current != expected_parent.release_id:
+                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.release_id}")
+            self._workspace.checkout(expected_parent.release_id)
             self._workspace.replace_tree(artifact.local_path)
             self._workspace.write_lfs_attributes()
             self._manifest.write(
-                artifact_id=f"artifact:{uuid.uuid4().hex}",
-                parent_version=expected_parent.version,
+                content_id=artifact.ref.content_id,
+                parent_release_id=expected_parent.release_id,
                 source={"kind": "training"},
                 metadata=artifact.metadata,
             )
             commit = self._workspace.commit("publish artifact")
             try:
                 self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.version}",
+                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
                     f"{commit}:{self.ref_name}",
-                    f"+{commit}:refs/reef/latest",
+                    f"+{commit}:refs/reef/head",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
-                if current != expected_parent.version:
-                    raise ArtifactConflict(f"repository advanced from {expected_parent.version}") from exc
+                if current != expected_parent.release_id:
+                    raise ArtifactConflict(f"repository advanced from {expected_parent.release_id}") from exc
                 raise
             return self._manifest.artifact_ref(commit)
 
@@ -403,12 +403,12 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         source = parse_artifact_source(artifact_source)
         if isinstance(source, GitVersionSource):
             version = self._workspace.fetch_version(source.version)
-            self._workspace.push(f"+{version}:refs/reef/latest")
+            self._workspace.push(f"+{version}:refs/reef/head")
             return self._manifest.artifact_ref(version)
-        existing = self._workspace.ls_remote("refs/reef/initial")
+        existing = self._workspace.ls_remote("refs/reef/base")
         if existing is not None:
-            if self._workspace.ls_remote("refs/reef/latest") is None:
-                self._workspace.push(f"{existing}:refs/reef/latest")
+            if self._workspace.ls_remote("refs/reef/head") is None:
+                self._workspace.push(f"{existing}:refs/reef/head")
             return self._manifest.artifact_ref(existing)
         downloaded = download_huggingface_snapshot(
             source,
@@ -419,8 +419,8 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             self._workspace.replace_tree(downloaded.local_path)
             self._workspace.write_lfs_attributes()
             self._manifest.write(
-                artifact_id="initial",
-                parent_version=None,
+                content_id=f"content:{uuid.uuid4().hex}",
+                parent_release_id=None,
                 source={
                     "kind": "huggingface",
                     "name": source.model_name,
@@ -430,8 +430,8 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             )
             commit = self._workspace.commit("import bootstrap artifact")
             self._workspace.push(
-                f"{commit}:refs/reef/initial",
-                f"{commit}:refs/reef/latest",
+                f"{commit}:refs/reef/base",
+                f"{commit}:refs/reef/head",
             )
             return self._manifest.artifact_ref(commit)
 
@@ -443,48 +443,48 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             existing = self._bootstrap_ref()
             if existing is not None:
                 return existing
-            raise ArtifactSourceError("artifact repository has refs but no initial or latest version")
+            raise ArtifactSourceError("artifact repository has refs but no base or head release")
         with self._workspace.lock:
             self._workspace.orphan_checkout()
             self._manifest.write(
-                artifact_id="initial",
-                parent_version=None,
+                content_id=f"content:{uuid.uuid4().hex}",
+                parent_release_id=None,
                 source={"kind": "empty"},
                 metadata={},
             )
             commit = self._workspace.commit("initialize artifact repository")
             try:
-                self._workspace.push(f"{commit}:refs/reef/initial")
-                initial = commit
+                self._workspace.push(f"{commit}:refs/reef/base")
+                base = commit
             except ArtifactPublicationError:
-                winner = self._workspace.ls_remote("refs/reef/initial")
+                winner = self._workspace.ls_remote("refs/reef/base")
                 if winner is None:
                     raise
-                initial = winner
-            return self._manifest.artifact_ref(self._restore_latest(initial))
+                base = winner
+            return self._manifest.artifact_ref(self._restore_head(base))
 
     def _bootstrap_ref(self) -> ArtifactRef | None:
-        initial = self._workspace.ls_remote("refs/reef/initial")
-        latest = self._workspace.ls_remote("refs/reef/latest")
-        if initial is not None:
-            return self._manifest.artifact_ref(latest or self._restore_latest(initial))
-        if latest is not None:
-            return self._manifest.artifact_ref(latest)
+        base = self._workspace.ls_remote("refs/reef/base")
+        head = self._workspace.ls_remote("refs/reef/head")
+        if base is not None:
+            return self._manifest.artifact_ref(head or self._restore_head(base))
+        if head is not None:
+            return self._manifest.artifact_ref(head)
         return None
 
-    def _restore_latest(self, initial: str) -> str:
-        latest = self._workspace.ls_remote("refs/reef/latest")
-        if latest is not None:
-            return latest
-        self._workspace.fetch_version(initial)
+    def _restore_head(self, base: str) -> str:
+        head = self._workspace.ls_remote("refs/reef/head")
+        if head is not None:
+            return head
+        self._workspace.fetch_version(base)
         try:
-            self._workspace.push(f"{initial}:refs/reef/latest")
-            return initial
+            self._workspace.push(f"{base}:refs/reef/head")
+            return base
         except ArtifactPublicationError:
-            latest = self._workspace.ls_remote("refs/reef/latest")
-            if latest is None:
+            head = self._workspace.ls_remote("refs/reef/head")
+            if head is None:
                 raise
-            return latest
+            return head
 
     def _open_repository(self) -> None:
         self._workspace.open_repository()

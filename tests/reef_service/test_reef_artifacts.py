@@ -8,7 +8,7 @@ from reef.artifact import (
     Artifact,
     ArtifactConflict,
     ArtifactRef,
-    ArtifactVersionChain,
+    ArtifactReleaseChain,
     CachedRepositoryBackendFactory,
     GitVersionSource,
     HuggingFaceSource,
@@ -26,9 +26,9 @@ def test_live_weight_artifact_ref_specializes_the_generic_identity() -> None:
     durable = ArtifactRef("artifact-1", "checkpoint-1", None)
     live = LiveWeightArtifactRef("artifact-2", "live-2", "checkpoint-1", "engine:2")
 
-    assert not hasattr(durable, "weight_version")
+    assert not hasattr(durable, "runtime_load_id")
     assert isinstance(live, ArtifactRef)
-    assert live.weight_version == "engine:2"
+    assert live.runtime_load_id == "engine:2"
     with pytest.raises(ValueError, match="non-empty"):
         LiveWeightArtifactRef("artifact-3", "live-3", "checkpoint-1", "")
 
@@ -52,20 +52,20 @@ def test_artifact_is_the_process_local_artifact_coordinator(tmp_path: Path) -> N
     initial.mkdir()
 
     backend = InMemoryRepositoryBackend("math", initial)
-    repository = Repository(backend, backend.resolve_version())
+    repository = Repository(backend, backend.resolve_release())
     artifact = repository.materialize(repository.fork())
 
     assert not hasattr(artifact.ref, "scenario")
 
 
 @pytest.mark.unit
-def test_artifact_version_chain_owns_heads_staging_and_publication(tmp_path: Path) -> None:
+def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     (initial / "model.txt").write_text("base")
     backend = InMemoryRepositoryBackend("math", initial)
-    base = backend.resolve_version()
-    fork = backend.fork(base.version)
+    base = backend.resolve_release()
+    fork = backend.fork(base.release_id)
     repository = Repository(
         backend,
         base,
@@ -73,13 +73,13 @@ def test_artifact_version_chain_owns_heads_staging_and_publication(tmp_path: Pat
         checkpoint_artifact=fork,
         local_dir=tmp_path / "local",
     )
-    chain = ArtifactVersionChain(repository, process_id="worker")
+    chain = ArtifactReleaseChain(repository, process_id="worker")
 
-    expected, live = chain.prepare_live(step=1, weight_version="engine-1")
+    expected, live = chain.prepare_live(step=1, runtime_load_id="engine-1")
     assert expected == fork
     assert chain.current == fork
-    assert live.version == "live:worker:engine-1:1"
-    assert live.parent_version == fork.version
+    assert live.release_id == "live:worker:engine-1:1"
+    assert live.parent_release_id == fork.release_id
 
     chain.advance(live, expected=expected)
     assert chain.current == live
@@ -93,7 +93,7 @@ def test_artifact_version_chain_owns_heads_staging_and_publication(tmp_path: Pat
 
     assert chain.current == published
     assert chain.checkpoint == published
-    assert published.parent_version == fork.version
+    assert published.parent_release_id == fork.release_id
 
 
 @pytest.mark.unit
@@ -104,12 +104,12 @@ def test_in_memory_repository_forks_materializes_and_publishes(tmp_path: Path) -
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     math_backend = backend_factory("math")
     code_backend = backend_factory("code")
-    code_initial_ref = code_backend.resolve_version()
+    code_initial_ref = code_backend.resolve_release()
 
     math = math_backend.fork()
     code = code_backend.fork()
 
-    assert math.version != code.version
+    assert math.release_id != code.release_id
     assert math_backend.fork() == math
     assert math_backend.materialize(math).local_path.joinpath("model.txt").read_text() == "base"
 
@@ -121,19 +121,19 @@ def test_in_memory_repository_forks_materializes_and_publishes(tmp_path: Path) -
         expected_parent=math,
     )
 
-    assert published.parent_version == math.version
+    assert published.parent_release_id == math.release_id
     assert math_backend.current() == published
     assert math_backend.materialize(published).local_path.joinpath("model.txt").read_text() == "trained"
     assert code_backend.current() == code
 
     # Each scenario keeps its own latest; math's publish does not leak into code.
     # code has forked but not published, so its latest is still its own bootstrap.
-    assert code_backend.resolve_version() == code_initial_ref
-    assert math_backend.resolve_version() == published
+    assert code_backend.resolve_release() == code_initial_ref
+    assert math_backend.resolve_release() == published
     # A fresh backend bootstraps from the same source but has its own storage.
     from_initial_backend = backend_factory("from-initial")
     from_initial = from_initial_backend.fork()
-    assert from_initial.parent_version == from_initial_backend.resolve_version().version
+    assert from_initial.parent_release_id == from_initial_backend.resolve_release().release_id
     assert from_initial_backend.materialize(from_initial).local_path.joinpath("model.txt").read_text() == "base"
 
     with pytest.raises(ArtifactConflict):
@@ -181,7 +181,7 @@ def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Pa
     backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
     repository = Repository(
         backend,
-        backend.resolve_version(),
+        backend.resolve_release(),
         local_dir=tmp_path / "serving",
     )
     checkpoint = repository.fork()
@@ -196,7 +196,7 @@ def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Pa
     )
     (candidate_dir / "model.txt").write_text("mutated")
 
-    assert staged.ref.version.startswith("local:")
+    assert staged.ref.release_id.startswith("local:")
     lazy = Artifact(staged.ref, repository)
     assert lazy.materialize().local_path.joinpath("model.txt").read_text() == "trained"
 
@@ -216,7 +216,7 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
     initial = tmp_path / "initial"
     initial.mkdir()
     backend = InMemoryRepositoryBackend("skills", initial, root=tmp_path / "repository")
-    repository = Repository(backend, backend.resolve_version(), local_dir=tmp_path / "serving")
+    repository = Repository(backend, backend.resolve_release(), local_dir=tmp_path / "serving")
     checkpoint = repository.fork()
     candidate = tmp_path / "candidate"
     candidate.mkdir()

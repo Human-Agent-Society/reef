@@ -301,7 +301,7 @@ class _FakeRolloutManager:
         self.timeline = timeline if timeline is not None else []
         self.prepare_external_train_data = _RemoteMethod(self._prepare)
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
-        self.get_weight_versions = _RemoteMethod(
+        self.get_runtime_load_ids = _RemoteMethod(
             lambda: self.versions if self.versions is not None else [self.version]
         )
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
@@ -325,7 +325,7 @@ class _FakeRank:
     def __init__(self, version="v1", metrics=None):
         self.version = version
         self.metrics = {} if metrics is None else metrics
-        self.get_weight_version = _RemoteMethod(lambda: self.version)
+        self.get_runtime_load_id = _RemoteMethod(lambda: self.version)
         self.pop_metrics = _RemoteMethod(lambda: self.metrics)
 
 
@@ -347,16 +347,16 @@ class _FakeGroup:
     def async_pop_rank0_metrics(self):
         return self._actor_handlers[0].pop_metrics.remote()
 
-    def async_get_rank0_weight_version(self):
-        return self._actor_handlers[0].get_weight_version.remote()
+    def async_get_rank0_runtime_load_id(self):
+        return self._actor_handlers[0].get_runtime_load_id.remote()
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         self.update_calls += 1
         self.update_generation_management.append(manage_generation)
         self.update_force_full.append(force_full)
 
-    def restore_weight_version_for_republication(self, weight_version):
-        self.republication_calls.append(weight_version)
+    def restore_runtime_load_id_for_republication(self, runtime_load_id):
+        self.republication_calls.append(runtime_load_id)
 
     def save_model(self, rollout_id, force_sync=False):
         self.save_calls.append((rollout_id, force_sync))
@@ -386,7 +386,7 @@ def _durable_actor(tmp_path):
     group = _DurableGroup(template)
     actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager(["packed"]), save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1", parent_version="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
     return actor, group, payload
 
 
@@ -427,9 +427,9 @@ def _sao_durable_actor(
         "rollout_ids": list(range(len(rows))),
         "loss": "sao",
         "rollout_id": 0,
-        "expected_weight_version": serving_version,
+        "expected_runtime_load_id": serving_version,
         "max_staleness": max_staleness,
-        "producing_weight_versions": list(producing_versions),
+        "producing_runtime_load_ids": list(producing_versions),
     }
     return actor, group, manager, payload
 
@@ -464,9 +464,9 @@ def _loss_family_durable_actor(
         "rollout_ids": [0],
         "loss": loss_family,
         "rollout_id": 0,
-        "expected_weight_version": serving_version,
+        "expected_runtime_load_id": serving_version,
         "max_staleness": 2,
-        "producing_weight_versions": [producing_version],
+        "producing_runtime_load_ids": [producing_version],
     }
     if loss_family == "openclawrl":
         payload["samples"] = [
@@ -520,11 +520,11 @@ def test_bridge_health_reports_start_rollout_id() -> None:
 
 
 @pytest.mark.unit
-def test_bridge_reports_the_serving_weight_version() -> None:
+def test_bridge_reports_the_serving_runtime_load_id() -> None:
     group = _FakeGroup()
     actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager([]), save_hf_template=None)
 
-    assert actor.serving_weight_version() == "v1"
+    assert actor.serving_runtime_load_id() == "v1"
 
 
 @pytest.mark.unit
@@ -552,7 +552,7 @@ def test_bridge_packs_with_rollout_manager_then_passes_list_of_boxes(tmp_path, m
     monkeypatch.setattr(bridge.ray, "get", fake_ray_get)
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1", parent_version="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -575,7 +575,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
     manager = _FakeRolloutManager(["packed"], timeline=timeline)
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template, colocate=True)
     payload = _payload(loss="tttd", advantages=[0.25, -0.25, 0.0])
-    payload.update(rollout_id=0, expected_weight_version="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -612,20 +612,20 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 def test_bridge_checkpoint_requires_save_template() -> None:
     actor = bridge.TrainBridgeActorImpl(_FakeGroup(), _FakeRolloutManager([]), save_hf_template=None)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     with pytest.raises(RuntimeError, match="save_hf"):
         _execute_and_update_weights(actor, payload)
 
 
-JOB_ID = "1b22759ac7997c7704bc7d2a5f19ef55a6f0f48147238df9fbdb7fe400f0618d"
+JOB_ID = "0956bba7f3b4ab2e268625c28e716cdd589bbf0d7b3a787b00311267aa0ff2e7"
 
 
 @pytest.mark.unit
 def test_durable_bridge_is_idempotent_and_rejects_stale_samples(tmp_path) -> None:
     actor, group, payload = _durable_actor(tmp_path)
-    stale = {**payload, "expected_weight_version": "old"}
-    assert _execute_and_update_weights(actor, stale) == TrainingJobResult(outcome="stale", weight_version="v1")
+    stale = {**payload, "expected_runtime_load_id": "old"}
+    assert _execute_and_update_weights(actor, stale) == TrainingJobResult(outcome="stale", runtime_load_id="v1")
 
     first = _execute_and_update_weights(actor, payload)
     assert first.outcome == "complete"
@@ -642,7 +642,7 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     manager = _FakeRolloutManager(["packed"])
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     checkpoint = actor.execute_training_job(payload)
 
@@ -675,7 +675,7 @@ def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
     manager = _FakeRolloutManager(["packed"])
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
     terminated: list[str] = []
 
@@ -711,7 +711,7 @@ def test_bridge_admits_bounded_sao_lag_and_persists_exact_metrics(tmp_path) -> N
 
 
 @pytest.mark.unit
-def test_bridge_admits_and_preserves_mixed_token_weight_versions(tmp_path) -> None:
+def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     group._actor_handlers[0].version = "engine:7"
@@ -730,13 +730,13 @@ def test_bridge_admits_and_preserves_mixed_token_weight_versions(tmp_path) -> No
         "rollout_ids": [0],
         "loss": "sft",
         "rollout_id": 0,
-        "expected_weight_version": "engine:7",
+        "expected_runtime_load_id": "engine:7",
         "max_staleness": 2,
-        "producing_weight_versions": [None],
-        "producing_weight_version_spans": [
+        "producing_runtime_load_ids": [None],
+        "producing_runtime_load_spans": [
             [
-                {"start": 0, "end": 1, "weight_version": "engine:6"},
-                {"start": 1, "end": 3, "weight_version": "engine:7"},
+                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+                {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
             ]
         ],
     }
@@ -746,7 +746,7 @@ def test_bridge_admits_and_preserves_mixed_token_weight_versions(tmp_path) -> No
     assert result.outcome == "complete"
     assert result.metrics["staleness/samples_fresh"] == 0
     assert result.metrics["staleness/samples_admitted_stale"] == 1
-    assert manager.calls[0]["producing_weight_version_spans"] == payload["producing_weight_version_spans"]
+    assert manager.calls[0]["producing_runtime_load_spans"] == payload["producing_runtime_load_spans"]
 
 
 @pytest.mark.unit
@@ -762,13 +762,13 @@ def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_
         "rollout_ids": [0],
         "loss": "sft",
         "rollout_id": 0,
-        "expected_weight_version": "engine:7",
+        "expected_runtime_load_id": "engine:7",
         "max_staleness": 0,
-        "producing_weight_versions": [None],
-        "producing_weight_version_spans": [
+        "producing_runtime_load_ids": [None],
+        "producing_runtime_load_spans": [
             [
-                {"start": 0, "end": 1, "weight_version": "engine:6"},
-                {"start": 1, "end": 2, "weight_version": "engine:7"},
+                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+                {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
             ]
         ],
     }
@@ -812,8 +812,8 @@ def test_bridge_enforces_the_inclusive_max_staleness_boundary(
     )
     if max_staleness == 0:
         payload.pop("max_staleness")
-        payload.pop("producing_weight_versions")
-        payload["expected_weight_version"] = producing_version
+        payload.pop("producing_runtime_load_ids")
+        payload["expected_runtime_load_id"] = producing_version
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -851,10 +851,10 @@ def test_bridge_admits_bounded_lag_for_every_cookbook_loss_family(tmp_path, loss
     [
         ("engine:0", "policy_lag_exceeded", [3]),
         ("other:3", "cross_incarnation", None),
-        ("engine:4", "future_producing_weight_version", [-1]),
-        ("malformed", "malformed_producing_weight_version", None),
-        ("engine:01", "malformed_producing_weight_version", None),
-        (None, "missing_producing_weight_version", None),
+        ("engine:4", "future_producing_runtime_load_id", [-1]),
+        ("malformed", "malformed_producing_runtime_load_id", None),
+        ("engine:01", "malformed_producing_runtime_load_id", None),
+        (None, "missing_producing_runtime_load_id", None),
     ],
 )
 def test_bridge_drops_inadmissible_sao_provenance_without_consuming_rollout(
@@ -893,7 +893,7 @@ def test_bridge_classifies_each_sao_sample_in_a_mixed_version_batch(tmp_path) ->
     assert result.outcome == "complete"
     assert result.metrics["staleness/samples_fresh"] == 1
     assert result.metrics["staleness/samples_admitted_stale"] == 1
-    assert manager.calls[0]["producing_weight_versions"] == ["engine:3", "engine:1"]
+    assert manager.calls[0]["producing_runtime_load_ids"] == ["engine:3", "engine:1"]
 
 
 @pytest.mark.unit
@@ -913,11 +913,11 @@ def test_bridge_drops_heterogeneous_samples_in_exact_mode(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_sao_row_weight_version_must_match_the_shared_training_payload(tmp_path) -> None:
+def test_sao_row_runtime_load_id_must_match_the_shared_training_payload(tmp_path) -> None:
     actor, group, manager, payload = _sao_durable_actor(tmp_path)
-    payload["producing_weight_versions"] = ["engine:2"]
+    payload["producing_runtime_load_ids"] = ["engine:2"]
 
-    with pytest.raises(ValueError, match="row weight versions do not match"):
+    with pytest.raises(ValueError, match="row runtime load IDs do not match"):
         _execute_and_update_weights(actor, payload)
 
     assert not group.train_calls
@@ -948,7 +948,7 @@ def test_enabled_sao_job_replays_after_fence_and_window_changes(tmp_path) -> Non
         actor,
         {
             **payload,
-            "expected_weight_version": "engine:4",
+            "expected_runtime_load_id": "engine:4",
             "max_staleness": 1,
         },
     )
@@ -962,7 +962,7 @@ def test_enabled_sao_job_replays_after_fence_and_window_changes(tmp_path) -> Non
 def test_enabled_sao_execution_fence_still_rejects_fresh_job(tmp_path) -> None:
     actor, group, _, payload = _sao_durable_actor(tmp_path)
 
-    result = _execute_and_update_weights(actor, {**payload, "expected_weight_version": "engine:2"})
+    result = _execute_and_update_weights(actor, {**payload, "expected_runtime_load_id": "engine:2"})
 
     assert result.outcome == "stale"
     assert result.metrics["staleness/drop_reason"] == "execution_fence_mismatch"
@@ -1026,7 +1026,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
         source_megatron=str(source_megatron),
     )
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1", parent_version="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     first = _execute_and_update_weights(actor, payload)
     assert first.training_job_id is not None
@@ -1067,13 +1067,13 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
     if status == "RUNNING":
         marker.pop("checkpoint_path")
     elif status == "COMPLETE":
-        marker["weight_version"] = "v1"
+        marker["runtime_load_id"] = "v1"
     if checkpoint_exists:
         checkpoint.mkdir()
     write_marker(tmp_path / ".reef-latest-job.json", marker)
     group = _DurableGroup(template)
     payload = _payload(loss="sft")
-    payload.update(rollout_id=0, expected_weight_version="v1", parent_version="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
@@ -1106,7 +1106,7 @@ def test_unacknowledged_head_committed_marker_is_not_commit_proof(tmp_path) -> N
             "job_id": JOB_ID,
             "rollout_id": 0,
             "checkpoint_path": str(checkpoint),
-            "weight_version": "engine:1",
+            "runtime_load_id": "engine:1",
         },
     )
 
@@ -1120,7 +1120,7 @@ def test_marker_transition_cannot_skip_the_weight_update_phase(tmp_path) -> None
     marker = {"status": "CHECKPOINT", "job_id": JOB_ID, "rollout_id": 0}
 
     with pytest.raises(RuntimeError, match=r"CHECKPOINT.*READY_TO_COMMIT"):
-        transition_marker(path, marker, "READY_TO_COMMIT", weight_version="engine:1")
+        transition_marker(path, marker, "READY_TO_COMMIT", runtime_load_id="engine:1")
 
     assert marker["status"] == "CHECKPOINT"
     assert not path.exists()
@@ -1155,11 +1155,11 @@ def test_weight_update_recovery_converges_disagreeing_engines_before_startup_val
     assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
     assert group.update_force_full == [True]
     assert actor.health()["training_job"]["status"] == "READY_TO_COMMIT"
-    assert actor.serving_weight_version() == "engine:3"
+    assert actor.serving_runtime_load_id() == "engine:3"
 
 
 @pytest.mark.unit
-def test_complete_marker_republishes_checkpoint_with_its_original_weight_version(tmp_path) -> None:
+def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_id(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     checkpoint = Path(template.format(rollout_id=0))
     checkpoint.mkdir()
@@ -1171,18 +1171,18 @@ def test_complete_marker_republishes_checkpoint_with_its_original_weight_version
             "job_id": JOB_ID,
             "rollout_id": 0,
             "checkpoint_path": str(checkpoint),
-            "weight_version": recovered_version,
+            "runtime_load_id": recovered_version,
         },
     )
     manager = _FakeRolloutManager(["packed"])
     group = _DurableGroup(template)
 
-    def restore_weight_version(weight_version):
-        group.republication_calls.append(weight_version)
-        group._actor_handlers[0].version = weight_version
-        manager.version = weight_version
+    def restore_runtime_load_id(runtime_load_id):
+        group.republication_calls.append(runtime_load_id)
+        group._actor_handlers[0].version = runtime_load_id
+        manager.version = runtime_load_id
 
-    group.restore_weight_version_for_republication = restore_weight_version
+    group.restore_runtime_load_id_for_republication = restore_runtime_load_id
 
     actor = bridge.TrainBridgeActorImpl(
         group,
@@ -1194,8 +1194,8 @@ def test_complete_marker_republishes_checkpoint_with_its_original_weight_version
 
     assert group.republication_calls == [recovered_version]
     assert group.update_calls == 1
-    assert actor.serving_weight_version() == recovered_version
-    assert read_marker(tmp_path / ".reef-latest-job.json")["weight_version"] == recovered_version
+    assert actor.serving_runtime_load_id() == recovered_version
+    assert read_marker(tmp_path / ".reef-latest-job.json")["runtime_load_id"] == recovered_version
 
     payload = {
         "samples": [
@@ -1213,9 +1213,9 @@ def test_complete_marker_republishes_checkpoint_with_its_original_weight_version
         "rollout_ids": [0],
         "loss": "sao",
         "rollout_id": 1,
-        "expected_weight_version": recovered_version,
+        "expected_runtime_load_id": recovered_version,
         "max_staleness": 2,
-        "producing_weight_versions": ["checkpoint-incarnation:1"],
+        "producing_runtime_load_ids": ["checkpoint-incarnation:1"],
     }
     result = _execute_and_update_weights(actor, payload)
 
@@ -1224,22 +1224,22 @@ def test_complete_marker_republishes_checkpoint_with_its_original_weight_version
 
 
 @pytest.mark.unit
-def test_serving_republication_preserves_current_weight_version() -> None:
+def test_serving_republication_preserves_current_runtime_load_id() -> None:
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
 
-    def restore_weight_version(weight_version):
-        group.republication_calls.append(weight_version)
-        group._actor_handlers[0].version = weight_version
-        manager.version = weight_version
+    def restore_runtime_load_id(runtime_load_id):
+        group.republication_calls.append(runtime_load_id)
+        group._actor_handlers[0].version = runtime_load_id
+        manager.version = runtime_load_id
 
-    group.restore_weight_version_for_republication = restore_weight_version
+    group.restore_runtime_load_id_for_republication = restore_runtime_load_id
 
     assert actor.republish_serving() == "v1"
     assert group.republication_calls == ["v1"]
     assert group.update_calls == 1
-    assert actor.serving_weight_version() == "v1"
+    assert actor.serving_runtime_load_id() == "v1"
 
 
 @pytest.mark.unit
@@ -1257,7 +1257,7 @@ def test_bridge_marker_rejects_unsafe_checkpoint_path(tmp_path, kind) -> None:
             "job_id": JOB_ID,
             "rollout_id": 0,
             "checkpoint_path": "" if kind == "empty" else str(link),
-            "weight_version": "v1",
+            "runtime_load_id": "v1",
         },
     )
 

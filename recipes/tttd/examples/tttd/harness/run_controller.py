@@ -42,13 +42,13 @@ class TTTDRunIdentity:
 class ScenarioTrainingFailure:
     step: int
     reason: str
-    artifact_versions: tuple[str, ...]
+    release_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
 class ScenarioTrainingStatus:
     scenario_step: int
-    weight_version: str | None
+    runtime_load_id: str | None
     batch_ready: bool
     failed_steps: tuple[ScenarioTrainingFailure, ...] = ()
 
@@ -106,9 +106,9 @@ class ReefTrainingStatusClient:
         step = value.get("scenario_step")
         if not isinstance(step, int) or isinstance(step, bool) or step < 0:
             raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid scenario_step {step!r}")
-        weight_version = value.get("current_weight_version")
-        if weight_version is not None and (not isinstance(weight_version, str) or not weight_version):
-            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid weight version {weight_version!r}")
+        runtime_load_id = value.get("current_runtime_load_id")
+        if runtime_load_id is not None and (not isinstance(runtime_load_id, str) or not runtime_load_id):
+            raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid runtime load ID {runtime_load_id!r}")
         processor = value.get("processor")
         failed_values = processor.get("failed_steps", []) if isinstance(processor, Mapping) else []
         if not isinstance(failed_values, list):
@@ -119,7 +119,7 @@ class ReefTrainingStatusClient:
                 raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid processor failure")
             failed_step = failure.get("step")
             reason = failure.get("reason")
-            versions = failure.get("artifact_versions")
+            versions = failure.get("release_ids")
             if (
                 not isinstance(failed_step, int)
                 or isinstance(failed_step, bool)
@@ -134,12 +134,12 @@ class ReefTrainingStatusClient:
                 ScenarioTrainingFailure(
                     step=failed_step,
                     reason=reason,
-                    artifact_versions=tuple(versions),
+                    release_ids=tuple(versions),
                 )
             )
         return ScenarioTrainingStatus(
             scenario_step=step,
-            weight_version=weight_version,
+            runtime_load_id=runtime_load_id,
             batch_ready=value.get("batch_ready") is True,
             failed_steps=tuple(failed_steps),
         )
@@ -179,7 +179,7 @@ class TTTDRunStateStore:
         self,
         *,
         next_step: int,
-        previous_weight_version: str | None,
+        previous_runtime_load_id: str | None,
         archive: Mapping[str, Any],
     ) -> None:
         self._write(
@@ -188,7 +188,7 @@ class TTTDRunStateStore:
                 "identity": asdict(self.identity),
                 "phase": "pending",
                 "next_step": next_step,
-                "previous_weight_version": previous_weight_version,
+                "previous_runtime_load_id": previous_runtime_load_id,
                 "archive": dict(archive),
             }
         )
@@ -197,18 +197,18 @@ class TTTDRunStateStore:
         self,
         *,
         next_step: int,
-        weight_version: str,
+        runtime_load_id: str,
         archive: Mapping[str, Any],
     ) -> None:
-        if not weight_version:
-            raise ValueError("committed TTTD state requires a weight version")
+        if not runtime_load_id:
+            raise ValueError("committed TTTD state requires a runtime load ID")
         self._write(
             {
                 "format_version": STATE_FORMAT_VERSION,
                 "identity": asdict(self.identity),
                 "phase": "committed",
                 "next_step": next_step,
-                "weight_version": weight_version,
+                "runtime_load_id": runtime_load_id,
                 "archive": dict(archive),
             }
         )
@@ -237,7 +237,7 @@ class TTTDRunOutcome:
     results: tuple[Any, ...]
     start_step: int
     next_step: int
-    weight_version: str | None
+    runtime_load_id: str | None
 
 
 class TTTDRunController:
@@ -267,7 +267,7 @@ class TTTDRunController:
     def run(self, total_steps: int) -> TTTDRunOutcome:
         if total_steps < 1:
             raise ValueError("total_steps must be positive")
-        next_step, weight_version = self._restore()
+        next_step, runtime_load_id = self._restore()
         start_step = next_step
         if next_step > total_steps:
             raise TTTDRunStateError(
@@ -280,15 +280,15 @@ class TTTDRunController:
             if before is None:
                 if step != 0:
                     raise TTTDRunStateError(f"Reef has no status for resumed TTTD step {step}")
-                previous_weight_version = None
+                previous_runtime_load_id = None
             else:
                 if before.scenario_step != step:
                     raise TTTDRunStateError(
                         f"Reef is at scenario step {before.scenario_step}, but the PUCT archive expects {step}"
                     )
-                previous_weight_version = before.weight_version
+                previous_runtime_load_id = before.runtime_load_id
 
-            self._emit({"event": "tttd_step_started", "step": step, "weight_version": previous_weight_version})
+            self._emit({"event": "tttd_step_started", "step": step, "runtime_load_id": previous_runtime_load_id})
             results = tuple(self.harness.run_step(step))
             expected_rollouts = (
                 self.state_store.identity.groups_per_step * self.state_store.identity.rollouts_per_group
@@ -298,16 +298,16 @@ class TTTDRunController:
             archive = self.harness.archive.state_dict()
             self.state_store.save_pending(
                 next_step=step + 1,
-                previous_weight_version=previous_weight_version,
+                previous_runtime_load_id=previous_runtime_load_id,
                 archive=archive,
             )
-            committed = self._wait_for_step(step + 1, previous_weight_version)
+            committed = self._wait_for_step(step + 1, previous_runtime_load_id)
             self.state_store.save_committed(
                 next_step=step + 1,
-                weight_version=committed.weight_version,
+                runtime_load_id=committed.runtime_load_id,
                 archive=archive,
             )
-            weight_version = committed.weight_version
+            runtime_load_id = committed.runtime_load_id
             all_results.extend(results)
             candidates = self.harness.archive.candidates
             self._emit(
@@ -315,7 +315,7 @@ class TTTDRunController:
                     "event": "tttd_step_committed",
                     "step": step,
                     "next_step": step + 1,
-                    "weight_version": weight_version,
+                    "runtime_load_id": runtime_load_id,
                     "archive_size": len(candidates),
                     "archive_best_reward": max(candidate.reward for candidate in candidates),
                 }
@@ -325,7 +325,7 @@ class TTTDRunController:
             results=tuple(all_results),
             start_step=start_step,
             next_step=total_steps,
-            weight_version=weight_version,
+            runtime_load_id=runtime_load_id,
         )
 
     def _restore(self) -> tuple[int, str | None]:
@@ -336,52 +336,52 @@ class TTTDRunController:
                 raise TTTDRunStateError(
                     f"Reef scenario is already at step {current.scenario_step}, but no PUCT state exists"
                 )
-            return 0, None if current is None else current.weight_version
+            return 0, None if current is None else current.runtime_load_id
 
         self.harness.archive.load_state_dict(saved["archive"])
         next_step = int(saved["next_step"])
         if saved["phase"] == "pending":
-            previous = saved.get("previous_weight_version")
+            previous = saved.get("previous_runtime_load_id")
             if previous is not None and not isinstance(previous, str):
-                raise TTTDRunStateError("pending TTTD state has an invalid previous weight version")
+                raise TTTDRunStateError("pending TTTD state has an invalid previous runtime load ID")
             committed = self._wait_for_step(next_step, previous)
             self.state_store.save_committed(
                 next_step=next_step,
-                weight_version=committed.weight_version,
+                runtime_load_id=committed.runtime_load_id,
                 archive=saved["archive"],
             )
-            return next_step, committed.weight_version
+            return next_step, committed.runtime_load_id
 
-        expected_version = saved.get("weight_version")
+        expected_version = saved.get("runtime_load_id")
         if not isinstance(expected_version, str) or not expected_version:
-            raise TTTDRunStateError("committed TTTD state has no weight version")
+            raise TTTDRunStateError("committed TTTD state has no runtime load ID")
         current = self._wait_for_current_step(next_step)
-        if not isinstance(current.weight_version, str) or not current.weight_version:
-            raise TTTDRunStateError(f"Reef restored step {next_step} without a serving weight version")
-        if current.weight_version != expected_version:
+        if not isinstance(current.runtime_load_id, str) or not current.runtime_load_id:
+            raise TTTDRunStateError(f"Reef restored step {next_step} without a serving runtime load ID")
+        if current.runtime_load_id != expected_version:
             # Serving versions are engine-session scoped. A restarted runtime
             # republishes the checkpoint under a new version while preserving
             # Reef's durable scenario step, which is the cross-session fence.
             self.state_store.save_committed(
                 next_step=next_step,
-                weight_version=current.weight_version,
+                runtime_load_id=current.runtime_load_id,
                 archive=saved["archive"],
             )
             self._emit(
                 {
-                    "event": "tttd_weight_version_rebound",
+                    "event": "tttd_runtime_load_id_rebound",
                     "step": next_step,
-                    "previous_weight_version": expected_version,
-                    "weight_version": current.weight_version,
+                    "previous_runtime_load_id": expected_version,
+                    "runtime_load_id": current.runtime_load_id,
                 }
             )
-        return next_step, current.weight_version
+        return next_step, current.runtime_load_id
 
     def _wait_for_current_step(
         self,
         expected_step: int,
         *,
-        previous_weight_version: str | None = None,
+        previous_runtime_load_id: str | None = None,
     ) -> ScenarioTrainingStatus:
         deadline = time.monotonic() + self.train_timeout_s
         last: ScenarioTrainingStatus | None = None
@@ -393,14 +393,14 @@ class TTTDRunController:
                 if failure is not None:
                     raise TTTDRunStateError(
                         f"TTTD step {failure.step} failed ({failure.reason}); "
-                        f"artifact versions={list(failure.artifact_versions)!r}"
+                        f"releases={list(failure.release_ids)!r}"
                     )
                 if last.scenario_step > expected_step:
                     raise TTTDRunStateError(
                         f"Reef advanced to step {last.scenario_step}, beyond PUCT step {expected_step}"
                     )
                 if last.scenario_step == expected_step and (
-                    previous_weight_version is None or last.weight_version != previous_weight_version
+                    previous_runtime_load_id is None or last.runtime_load_id != previous_runtime_load_id
                 ):
                     # Reef commits the durable scenario head before the runtime
                     # acknowledges that commit and refreshes its public serving
@@ -416,14 +416,14 @@ class TTTDRunController:
     def _wait_for_step(
         self,
         expected_step: int,
-        previous_weight_version: str | None,
+        previous_runtime_load_id: str | None,
     ) -> ScenarioTrainingStatus:
         current = self._wait_for_current_step(
             expected_step,
-            previous_weight_version=previous_weight_version,
+            previous_runtime_load_id=previous_runtime_load_id,
         )
-        if not isinstance(current.weight_version, str) or not current.weight_version:
-            raise TTTDRunStateError(f"Reef committed step {expected_step} without a serving weight version")
+        if not isinstance(current.runtime_load_id, str) or not current.runtime_load_id:
+            raise TTTDRunStateError(f"Reef committed step {expected_step} without a serving runtime load ID")
         return current
 
 

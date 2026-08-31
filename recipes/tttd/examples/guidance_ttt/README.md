@@ -242,7 +242,7 @@ size changed. `STEPS` is the final total, not an additional count.
 Reef's inference-admission controller holds requests across serving-weight
 updates until the corresponding artifact head is committed, so no
 recipe-specific publication barrier is needed between steps. A complete step
-spanning multiple artifact versions is reported as an explicit invariant
+spanning multiple releases is reported as an explicit invariant
 failure instead of leaving the run waiting for a training step that cannot
 occur.
 

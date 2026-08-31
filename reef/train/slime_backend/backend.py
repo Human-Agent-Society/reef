@@ -153,7 +153,7 @@ class SlimeTrainingBackend(TrainingBackend):
             return TrainStepResult(
                 state=prepared.state,
                 metrics=metrics,
-                source_weight_version=candidate.current_weight_version,
+                source_runtime_load_id=candidate.current_runtime_load_id,
             )
         activated = self._runtime.activate_candidate(candidate)
         if activated.candidate_id != candidate.candidate_id:
@@ -161,10 +161,10 @@ class SlimeTrainingBackend(TrainingBackend):
         return TrainStepResult(
             state=prepared.state,
             metrics=metrics,
-            weight_version=activated.weight_version,
+            runtime_load_id=activated.runtime_load_id,
             checkpoint_path=candidate.checkpoint_path,
             training_job_id=candidate.training_job_id,
-            source_weight_version=candidate.current_weight_version,
+            source_runtime_load_id=candidate.current_runtime_load_id,
         )
 
     def abort_step(self, prepared: PreparedStep) -> None:

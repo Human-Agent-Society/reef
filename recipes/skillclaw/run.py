@@ -216,12 +216,12 @@ class RunService:
         """Committed pool versions beyond the bootstrap, the night counter.
 
         Every completed step appends a training commit row - a skipped night
-        included - so the counter is the distinct artifact versions those
+        included - so the counter is the distinct releases those
         rows introduced, not the row count.
         """
-        versions = self.dispatcher.list_versions(self.scenario)
-        baseline = {row["artifact_version"] for row in versions if row.get("operation") != "training"}
-        trained = {row["artifact_version"] for row in versions if row.get("operation") == "training"}
+        versions = self.dispatcher.list_releases(self.scenario)
+        baseline = {row["release_id"] for row in versions if row.get("operation") != "training"}
+        trained = {row["release_id"] for row in versions if row.get("operation") == "training"}
         return len(trained - baseline)
 
     def training_step(self) -> int:

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reef"
-version = "0.3.0"
+version = "0.4.0"
 description = "A framework-agnostic runtime for continuously improving agents"
 readme = "README.md"
 license = "Apache-2.0"

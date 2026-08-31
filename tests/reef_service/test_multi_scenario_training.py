@@ -26,7 +26,7 @@ class AdapterRuntime(RecordingRuntime):
     def concurrent_training_scenarios(self) -> bool:
         return True
 
-    def serving_adapter_version(self, scenario: str) -> str | None:
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return self.adapter_versions.get(scenario)
 
     def train_candidate(self, payload):
@@ -35,7 +35,7 @@ class AdapterRuntime(RecordingRuntime):
 
     def activate_candidate(self, candidate):
         activated = super().activate_candidate(candidate)
-        self.adapter_versions[self.scenarios[-1]] = activated.weight_version
+        self.adapter_versions[self.scenarios[-1]] = activated.runtime_load_id
         return activated
 
 
@@ -84,13 +84,13 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
         assert math.scenario_step == 1 and code.scenario_step == 2
-        assert math.current_artifact_ref().weight_version == "w1"
-        assert code.current_artifact_ref().weight_version == "w3"
+        assert math.current_artifact_ref().runtime_load_id == "w1"
+        assert code.current_artifact_ref().runtime_load_id == "w3"
 
         status = dispatcher.training_status
         assert set(status["scenarios"]) == {"math", "code"}
-        assert status["scenarios"]["math"]["adapter_weight_version"] == "w1"
-        assert status["scenarios"]["code"]["adapter_weight_version"] == "w3"
+        assert status["scenarios"]["math"]["adapter_runtime_load_id"] == "w1"
+        assert status["scenarios"]["code"]["adapter_runtime_load_id"] == "w3"
 
         # Each scenario's surface routes to its own adapter revision.
         payload = {"messages": []}

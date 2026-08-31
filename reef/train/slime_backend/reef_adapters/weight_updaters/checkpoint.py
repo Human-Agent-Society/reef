@@ -36,11 +36,11 @@ class ReefUpdateWeightFromDisk(SynchronizedWeightUpdateMixin, UpdateWeightFromDi
     def __init__(
         self,
         *args: Any,
-        weight_version_incarnation: str | None = None,
+        runtime_load_id_incarnation: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self._initialize_weight_version(weight_version_incarnation)
+        self._initialize_runtime_load_id(runtime_load_id_incarnation)
 
     @torch.no_grad()
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False) -> None:
@@ -72,11 +72,11 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
     def __init__(
         self,
         *args: Any,
-        weight_version_incarnation: str | None = None,
+        runtime_load_id_incarnation: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self._initialize_weight_version(weight_version_incarnation)
+        self._initialize_runtime_load_id(runtime_load_id_incarnation)
 
     def connect_rollout_engines(
         self,
@@ -154,7 +154,7 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
                 [
                     engine.update_weights_from_disk.remote(
                         model_path=model_path,
-                        weight_version=str(self.weight_version),
+                        runtime_load_id=str(self.runtime_load_id),
                     )
                     for engine in self.rollout_engines
                 ]
@@ -204,14 +204,14 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
         self._raise_synchronized_update_error(local_error, phase="capture delta baseline")
 
         def finish_base() -> None:
-            ray.get([engine.set_weight_version.remote(str(self.weight_version)) for engine in self.rollout_engines])
+            ray.get([engine.set_runtime_load_id.remote(str(self.runtime_load_id)) for engine in self.rollout_engines])
             logger.info(
                 "[disk delta] captured baseline snapshot of %d tensors from %s",
                 len(self._snapshot),
                 self.args.hf_checkpoint,
             )
 
-        self._run_rank_zero_action(finish_base, phase="initialize rollout weight version")
+        self._run_rank_zero_action(finish_base, phase="initialize rollout runtime load ID")
 
     def _publish(self) -> None:
         local_error: BaseException | None = None
@@ -282,7 +282,7 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
                 [
                     engine.update_weights_from_disk.remote(
                         model_path=self.args.update_weight_local_checkpoint_dir,
-                        weight_version=str(self.weight_version),
+                        runtime_load_id=str(self.runtime_load_id),
                     )
                     for engine in self.rollout_engines
                 ]

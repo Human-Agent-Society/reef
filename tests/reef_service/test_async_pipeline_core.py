@@ -52,7 +52,7 @@ class DurableRuntime(TrainingRuntime):
     def inference_backend(self):
         return None
 
-    def serving_weight_version(self):
+    def serving_runtime_load_id(self):
         return self.serving_version
 
     def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
@@ -61,7 +61,7 @@ class DurableRuntime(TrainingRuntime):
             "rollout_id": scenario_step,
             "loss": step_preparer,
             "source": sample.source_agent_record_id,
-            "expected_weight_version": sample.weight_version,
+            "expected_runtime_load_id": sample.runtime_load_id,
         }
         return PreparedTrainingStep(
             action="train",
@@ -75,7 +75,7 @@ class DurableRuntime(TrainingRuntime):
         existing = self.completed.get(rollout_id)
         if existing is not None:
             return existing
-        if payload["expected_weight_version"] != self.serving_version:
+        if payload["expected_runtime_load_id"] != self.serving_version:
             raise StaleCandidate(self.stale_metrics)
         if self.block_storage:
             self.started.set()
@@ -91,8 +91,7 @@ class DurableRuntime(TrainingRuntime):
             candidate_id=job_id,
             training_job_id=job_id,
             checkpoint_path=str(checkpoint),
-            current_version=self.serving_version,
-            current_weight_version=self.serving_version,
+            current_runtime_load_id=self.serving_version,
             training_metrics=self.complete_metrics or {},
         )
         self.completed[rollout_id] = candidate
@@ -103,9 +102,9 @@ class DurableRuntime(TrainingRuntime):
         return candidate
 
     def activate_candidate(self, candidate):
-        weight_version = self.candidate_versions[candidate.candidate_id]
-        self.serving_version = weight_version
-        return ActivatedModel(candidate.candidate_id, weight_version)
+        runtime_load_id = self.candidate_versions[candidate.candidate_id]
+        self.serving_version = runtime_load_id
+        return ActivatedModel(candidate.candidate_id, runtime_load_id)
 
     def reject_candidate(self, candidate, decision):
         del candidate, decision
@@ -127,14 +126,14 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
         return ref
 
 
-def _training(weight_version: str) -> dict:
-    return {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": [-0.2], "weight_version": weight_version}
+def _training(runtime_load_id: str) -> dict:
+    return {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": [-0.2], "runtime_load_id": runtime_load_id}
 
 
 class ImmediateBackend(InferenceBackend):
     async def inference(self, artifact, path, payload):
         assert payload["return_meta_info"] is True
-        return {"metadata": {"weight_version": "v0"}}
+        return {"metadata": {"runtime_load_id": "v0"}}
 
 
 class RecordingExperimentTracker:
@@ -195,7 +194,7 @@ def start_dispatcher(tmp_path: Path):
         dispatcher.close()
 
 
-def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", weight_version: str = "v0") -> None:
+def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str = "v0") -> None:
     dispatcher.get_or_create_scenario("math", "test_policy")
     inference_id = f"inference-{suffix}"
     records = (
@@ -203,7 +202,7 @@ def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", weight_version: str 
             scenario="math",
             request_type=RequestType.INFERENCE,
             agent_record_id=inference_id,
-            payload={"response": {"training": _training(weight_version)}},
+            payload={"response": {"training": _training(runtime_load_id)}},
         ),
         AgentRecord.create(
             scenario="math",
@@ -242,7 +241,7 @@ def test_empty_checkpoint_result_fails_closed() -> None:
     # name its exported checkpoint cannot be constructed at all -- it can never
     # reach the commit protocol and be published as a durable version.
     with pytest.raises(ValueError, match="must report the checkpoint path"):
-        TrainingJobResult(outcome="complete", weight_version="v1", checkpoint_path="")
+        TrainingJobResult(outcome="complete", runtime_load_id="v1", checkpoint_path="")
 
 
 @pytest.mark.unit
@@ -291,7 +290,7 @@ def test_inference_resolves_while_lost_ack_publication_blocks(start_dispatcher) 
             1,
         )
     )
-    assert response["metadata"]["weight_version"] == item.payload["weight_version"] == "v0"
+    assert response["metadata"]["runtime_load_id"] == item.payload["runtime_load_id"] == "v0"
     BlockingLostAckBackend.release.set()
     _wait_for_step(dispatcher, 1)
     assert len(runtime.calls) == 1
@@ -304,7 +303,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
     monkeypatch.setattr(
         scenario.repository,
         "resolve",
-        lambda ref: pytest.fail(f"unexpected inference materialization: {ref.version}"),
+        lambda ref: pytest.fail(f"unexpected inference materialization: {ref.release_id}"),
     )
 
     response = asyncio.run(
@@ -316,11 +315,11 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
         )
     )
 
-    assert response["metadata"]["weight_version"] == "v0"
+    assert response["metadata"]["runtime_load_id"] == "v0"
 
 
 @pytest.mark.unit
-def test_two_jobs_form_one_deterministic_version_chain(start_dispatcher) -> None:
+def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
     runtime, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
     _wait_for_step(dispatcher, 1)
@@ -331,7 +330,7 @@ def test_two_jobs_form_one_deterministic_version_chain(start_dispatcher) -> None
 
     assert [call["rollout_id"] for call in runtime.calls] == [0, 1]
     assert [call["source"] for call in runtime.calls] == ["inference-1", "inference-2"]
-    assert scenario.current_artifact_ref().parent_version == first.version
+    assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):
         dispatcher.get_or_create_scenario("other", "test_policy")
 
@@ -345,7 +344,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
-    committed = scenario.metrics_for_version(scenario.current_artifact_ref().version)
+    committed = scenario.metrics_for_version(scenario.current_artifact_ref().release_id)
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["outcome"] == "select"
@@ -363,7 +362,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     _wait_for_step(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     produced = scenario.current_artifact_ref()
-    committed = scenario.metrics_for_version(produced.version)
+    committed = scenario.metrics_for_version(produced.release_id)
 
     assert committed is not None
     assert committed["experiment/provider"] == "test"
@@ -374,12 +373,12 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "SlimeTrainingBackend"
     assert event.context.backend_config == {"runtime": "slime", "step_preparer": "sft"}
-    assert event.context.source_artifact_ref.version == produced.parent_version
+    assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced
     assert event.metrics["train/loss"] == pytest.approx(0.25)
     assert event.training_job_id == "job-0"
-    assert event.source_weight_version == "v0"
-    assert event.produced_weight_version == "job:job-0"
+    assert event.source_runtime_load_id == "v0"
+    assert event.produced_runtime_load_id == "job:job-0"
     assert scenario.trainer.processor.experiment_logger is tracker.loggers["math"]
     scenario.trainer.processor.experiment_logger.log({"accepted": 1}, namespace="processor")
     assert tracker.loggers["math"].logged == [
@@ -394,8 +393,8 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
         "staleness/samples_dropped": 1,
         "staleness/drop_reason": "policy_lag_exceeded",
         "staleness/source_agent_record_ids": ["inference-1"],
-        "staleness/producing_weight_versions": ["v0"],
-        "staleness/serving_weight_version": "v2",
+        "staleness/producing_runtime_load_ids": ["v0"],
+        "staleness/serving_runtime_load_id": "v2",
         "staleness/drop_policy_lags": [2],
     }
     runtime, dispatcher = start_dispatcher(serving_version="v2", stale_metrics=stale_metrics)

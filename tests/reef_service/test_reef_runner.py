@@ -46,14 +46,14 @@ def test_client_methods_send_scenario_headers(monkeypatch, method: str, path: st
             path,
             payload,
             recipe="tttd",
-            artifact_version="checkpoint-v42",
+            extra_headers={"x-reef-release-id": "checkpoint-v42"},
         )
     else:
         result = getattr(client, method)(
             "math",
             payload,
             recipe="tttd",
-            artifact_version="checkpoint-v42",
+            extra_headers={"x-reef-release-id": "checkpoint-v42"},
         )
 
     request = captured[0]
@@ -62,7 +62,7 @@ def test_client_methods_send_scenario_headers(monkeypatch, method: str, path: st
     assert request.headers["X-reef-scenario"] == "math"
     assert "X-reef-request-type" not in request.headers
     assert request.headers["X-reef-recipe"] == "tttd"
-    assert request.headers["X-reef-artifact-version"] == "checkpoint-v42"
+    assert request.headers["X-reef-release-id"] == "checkpoint-v42"
     assert request.headers["Authorization"] == "Bearer secret"
     assert json.loads(request.data) == payload
 

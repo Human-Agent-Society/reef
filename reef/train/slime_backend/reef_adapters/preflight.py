@@ -17,8 +17,8 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import Checkpoi
 MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
 REEF_ROLLOUT_DATA_KEYS = (
-    "producing_weight_version_spans",
-    "producing_weight_versions",
+    "producing_runtime_load_spans",
+    "producing_runtime_load_ids",
 )
 
 
@@ -56,7 +56,7 @@ def configure_sglang_runtime(args) -> None:
     Disjoint/PD weight updates preserve each active request's private KV state.
     Colocated regular engines retract instead, because their KV allocation
     must leave the GPU during training, and recompute it after publication. A
-    shared radix-cache entry has no weight-version identity, so Reef disables
+    shared radix-cache entry has no runtime-load-ID identity, so Reef disables
     cross-request prefix reuse. SGLang's native plugin hook installs Reef's
     token metadata and colocated suspension policy inside each scheduler.
     """

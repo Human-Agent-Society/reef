@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from reef.core.artifact_ref import WeightVersionSpan
+from reef.core.artifact_ref import RuntimeLoadSpan
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class PolicySample:
       declared".
     * ``rollout_created_at`` — wall-clock time the rollout was recorded, so a
       backend can report queue age (train time - created at). With
-      ``weight_version`` (the producing version, from the serving
+      ``runtime_load_id`` (the producing version, from the serving
       ``artifact_ref``) it also gives policy lag.
     * ``turn_count`` — number of ordered inference calls represented by this
       sample. Values greater than one mark a multi-turn trajectory. This is
@@ -61,14 +61,14 @@ class PolicySample:
     loss_mask: tuple[int, ...]
     rollout_log_probs: tuple[float, ...]
     reward: float
-    weight_version: str | None = None
+    runtime_load_id: str | None = None
     action_mask: tuple[int, ...] = ()
     rollout_created_at: float | None = None
     turn_count: int = 1
     topk_indices: tuple[tuple[int, ...], ...] = ()
     topk_log_probs: tuple[tuple[float, ...], ...] = ()
     extras: Mapping[str, Any] = field(default_factory=dict)
-    weight_version_spans: tuple[WeightVersionSpan, ...] = ()
+    runtime_load_spans: tuple[RuntimeLoadSpan, ...] = ()
 
     @property
     def is_multi_turn(self) -> bool:

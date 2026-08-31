@@ -1,4 +1,4 @@
-from reef.core.artifact_ref import WeightVersionSpan
+from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.train.types.batches import (
     GroupedPolicyBatch,
     PolicyBatch,
@@ -30,12 +30,12 @@ __all__ = [
     "PolicySample",
     "PreparedCommit",
     "ProcessorContext",
+    "RuntimeLoadSpan",
     "SavedArtifactPublication",
     "TraceBatch",
     "TraceSample",
     "TrainStepResult",
     "TrainingBatch",
-    "WeightVersionSpan",
     "policy_row_violation",
     "policy_samples",
 ]

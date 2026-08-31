@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class ReefSGLangEngine(SGLangEngine):
-    """Bound weight-update requests and synchronize scheduler weight versions."""
+    """Bound weight-update requests and synchronize scheduler runtime load IDs."""
 
     _get_current_node_ip_and_free_port = staticmethod(reef_node_ip_and_free_port)
 
@@ -80,9 +80,9 @@ class ReefSGLangEngine(SGLangEngine):
 
     def _register_to_router(self, server_args_dict):
         # Fail closed before the router can admit work to a scheduler that did
-        # not load Reef's weight-version plugin.
+        # not load Reef's runtime-load-ID plugin.
         if self.worker_type != "encoder":
-            self._sync_scheduler_weight_version(self.get_weight_version())
+            self._sync_scheduler_runtime_load_id(self.get_runtime_load_id())
         return super()._register_to_router(server_args_dict)
 
     def _make_request(
@@ -109,7 +109,7 @@ class ReefSGLangEngine(SGLangEngine):
             ) from exc
         return response.json()
 
-    def get_weight_version(self):
+    def get_runtime_load_id(self):
         """Read the supported model-info endpoint instead of Slime's deprecated route."""
         if self.node_rank != 0:
             return None
@@ -118,23 +118,23 @@ class ReefSGLangEngine(SGLangEngine):
             timeout=min(30.0, self._weight_update_timeout_s()),
         )
         response.raise_for_status()
-        version = response.json().get("weight_version")
+        version = response.json().get("runtime_load_id")
         if not isinstance(version, str) or not version:
-            raise RuntimeError("SGLang model_info reports no weight_version")
+            raise RuntimeError("SGLang model_info reports no runtime_load_id")
         return version
 
-    def _sync_scheduler_weight_version(self, weight_version: str | None) -> None:
+    def _sync_scheduler_runtime_load_id(self, runtime_load_id: str | None) -> None:
         if self.node_rank != 0:
             return
-        if not isinstance(weight_version, str) or not weight_version:
-            raise RuntimeError("SGLang model_info must report a non-empty weight_version")
+        if not isinstance(runtime_load_id, str) or not runtime_load_id:
+            raise RuntimeError("SGLang model_info must report a non-empty runtime_load_id")
         updated = self._make_request(
             "set_internal_state",
-            {"server_args": {"weight_version": weight_version}},
+            {"server_args": {"runtime_load_id": runtime_load_id}},
         )
         if not isinstance(updated, list) or not updated or any(value is not True for value in updated):
             raise RuntimeError(
-                "SGLang scheduler rejected weight-version synchronization; install and enable Reef's SGLang plugin"
+                "SGLang scheduler rejected runtime-load-ID synchronization; install and enable Reef's SGLang plugin"
             )
 
     def flush_cache(self):
@@ -156,13 +156,13 @@ class ReefSGLangEngine(SGLangEngine):
             time.sleep(1)
         raise TimeoutError("Timeout while flushing cache.")
 
-    def set_weight_version(self, weight_version: str):
-        version = str(weight_version)
+    def set_runtime_load_id(self, runtime_load_id: str):
+        version = str(runtime_load_id)
         result = self._make_request(
-            "update_weight_version",
+            "update_runtime_load_id",
             {"new_version": version, "abort_all_requests": False},
         )
-        self._sync_scheduler_weight_version(version)
+        self._sync_scheduler_runtime_load_id(version)
         return result
 
     def load_lora_adapter_from_tensors(
@@ -218,15 +218,15 @@ class ReefSGLangEngine(SGLangEngine):
         self,
         model_path: str,
         load_format: str | None = None,
-        weight_version: str | None = None,
+        runtime_load_id: str | None = None,
         files: list[str] | None = None,
         flush_cache: bool = False,
     ):
         payload: dict[str, Any] = {"model_path": model_path, "flush_cache": flush_cache}
         if load_format is not None:
             payload["load_format"] = load_format
-        if weight_version is not None:
-            payload["weight_version"] = weight_version
+        if runtime_load_id is not None:
+            payload["runtime_load_id"] = runtime_load_id
         if files is not None:
             payload["files"] = files
         return self._make_request("update_weights_from_disk", payload)

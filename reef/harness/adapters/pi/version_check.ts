@@ -21,14 +21,14 @@ export default function versionCheck(pi) {
     let pinned;
     try {
       // harness_pull and the install script write the sidecar at the tree root.
-      pinned = JSON.parse(readFileSync(join(agentDir, "..", ".reef-harness-version"), "utf8")).artifact_version;
+      pinned = JSON.parse(readFileSync(join(agentDir, "..", ".reef-harness-release"), "utf8")).release_id;
     } catch {
       return; // no sidecar: this tree did not come through the channel
     }
     let response;
     const token = process.env.REEF_TOKEN;
     try {
-      response = await fetch(`${serviceUrl}/reef/harness/versions`, {
+      response = await fetch(`${serviceUrl}/reef/harness/releases`, {
         headers: {
           "x-reef-scenario": scenario,
           ...(token ? { authorization: `Bearer ${token}` } : {}),
@@ -38,9 +38,9 @@ export default function versionCheck(pi) {
       return; // the notice must never break the harness
     }
     if (!response.ok) return;
-    const { versions } = await response.json();
-    const head = versions[versions.length - 1];
-    if (!head || head.artifact_version === pinned) return;
+    const { releases } = await response.json();
+    const head = releases[releases.length - 1];
+    if (!head || head.release_id === pinned) return;
 
     const instruction =
       `curl -fsS -H 'x-reef-scenario: ${scenario}' ` +
@@ -50,7 +50,7 @@ export default function versionCheck(pi) {
     const title =
       "Reef harness update available\n\n" +
       `Current: ${pinned}\n` +
-      `Latest:  ${head.artifact_version}`;
+      `Latest:  ${head.release_id}`;
 
     if (!ctx.hasUI) {
       console.error(`${title}\n\nUpdate with:\n  ${instruction}`);

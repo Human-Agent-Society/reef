@@ -28,28 +28,32 @@ class _InMemoryStorage:
         self.lock = Lock()
         self.refs: dict[str, ArtifactRef] = {}
         self.paths: dict[str, Path] = {}
-        self.latest = self.copy_artifact(source, parent_version=None, artifact_id="initial")
+        self.head = self.copy_artifact(
+            source,
+            parent_release_id=None,
+            content_id=f"content:{uuid.uuid4().hex}",
+        )
 
     def copy_artifact(
         self,
         source: Path,
         *,
-        parent_version: str | None,
-        artifact_id: str | None = None,
+        parent_release_id: str | None,
+        content_id: str | None = None,
     ) -> ArtifactRef:
-        version = uuid.uuid4().hex
-        destination = self.root / version
+        release_id = uuid.uuid4().hex
+        destination = self.root / release_id
         try:
             shutil.copytree(source, destination)
         except OSError as exc:
             raise ArtifactPublicationError(f"failed to copy artifact into repository from {source}: {exc}") from exc
         ref = ArtifactRef(
-            artifact_id=artifact_id or f"artifact:{version}",
-            version=version,
-            parent_version=parent_version,
+            content_id=content_id or f"content:{release_id}",
+            release_id=release_id,
+            parent_release_id=parent_release_id,
         )
-        self.refs[version] = ref
-        self.paths[version] = destination
+        self.refs[release_id] = ref
+        self.paths[release_id] = destination
         return ref
 
 
@@ -81,30 +85,28 @@ class InMemoryRepositoryBackend(RepositoryBackend):
             root,
         )
 
-    def resolve_version(self, version: str | None = None) -> ArtifactRef:
-        if version is None or version == "latest":
-            return self._storage.latest
-        ref = self._storage.refs.get(version)
+    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
+        if release_id is None or release_id == "head":
+            return self._storage.head
+        ref = self._storage.refs.get(release_id)
         if ref is not None:
             return ref
-        for candidate in self._storage.refs.values():
-            if candidate.artifact_id == version:
-                return candidate
-        raise ArtifactNotFound(f"artifact version does not exist: {version}")
+        raise ArtifactNotFound(f"release does not exist: {release_id}")
 
     def fork(
         self,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         *,
         metadata: Mapping[str, object] | None = None,
     ) -> ArtifactRef:
         with self._storage.lock:
             if self._current is not None:
                 return self._current
-            selected = self.resolve_version(artifact_version)
+            selected = self.resolve_release(release_id)
             ref = self._storage.copy_artifact(
-                self._storage.paths[selected.version],
-                parent_version=selected.version,
+                self._storage.paths[selected.release_id],
+                parent_release_id=selected.release_id,
+                content_id=selected.content_id,
             )
             self._current = ref
             self._metadata = dict(metadata or {})
@@ -121,9 +123,9 @@ class InMemoryRepositoryBackend(RepositoryBackend):
         return self._current
 
     def materialize(self, ref: ArtifactRef) -> Artifact:
-        path = self._storage.paths.get(ref.version)
+        path = self._storage.paths.get(ref.release_id)
         if path is None or not path.is_dir():
-            raise ArtifactMaterializationError(f"artifact version does not exist: {ref.version}")
+            raise ArtifactMaterializationError(f"release does not exist: {ref.release_id}")
         return Artifact(ref, None, local_path=path)
 
     def publish(
@@ -136,17 +138,18 @@ class InMemoryRepositoryBackend(RepositoryBackend):
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
         with self._storage.lock:
             current = self.current()
-            if current.version != expected_parent.version:
+            if current.release_id != expected_parent.release_id:
                 raise ArtifactConflict(
-                    f"repository is at {current.version}, not expected parent {expected_parent.version}"
+                    f"repository is at {current.release_id}, not expected parent {expected_parent.release_id}"
                 )
             ref = self._storage.copy_artifact(
                 artifact.local_path,
-                parent_version=current.version,
+                parent_release_id=current.release_id,
+                content_id=artifact.ref.content_id,
             )
             self._current = ref
             self._metadata = dict(artifact.metadata)
-            self._storage.latest = ref
+            self._storage.head = ref
             return ref
 
 

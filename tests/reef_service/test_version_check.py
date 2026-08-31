@@ -106,7 +106,7 @@ def test_the_notice_prompts_before_start_and_honors_the_choice(
     module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
     agent_dir = tmp_path / "pi-agent"
     agent_dir.mkdir()
-    (tmp_path / ".reef-harness-version").write_text(json.dumps({"artifact_version": "v1"}), encoding="utf-8")
+    (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "v1"}), encoding="utf-8")
     runner = tmp_path / "runner.mjs"
     runner.write_text(
         """
@@ -125,7 +125,7 @@ versionCheck({
 });
 globalThis.fetch = async () => ({
   ok: true,
-  json: async () => ({ versions: [{ artifact_version: "v1" }, { artifact_version: "v2" }] }),
+  json: async () => ({ releases: [{ release_id: "v1" }, { release_id: "v2" }] }),
 });
 await sessionStart(
   { type: "session_start", reason: "startup" },

@@ -27,7 +27,7 @@ class _TTTDRow:
     """One accepted rollout: the assembled sample plus its producing version."""
 
     sample: PolicySample
-    artifact_version: str | None
+    release_id: str | None
 
 
 class TTTDProcessor(ReportedFeedbackProcessor):
@@ -40,7 +40,7 @@ class TTTDProcessor(ReportedFeedbackProcessor):
     group — its barrier is the ``decide_group`` rule, its (group, rollout)
     coordinates are candidate slots (a retried report at an occupied
     coordinate is terminal; the first durable report wins), and a step whose
-    reports span artifact versions is discarded wholesale with every row
+    reports span releases is discarded wholesale with every row
     released.
 
     Constant-reward groups are removed only after the complete step is
@@ -101,9 +101,9 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         #    group, (group, rollout) is the slot — a retry at an occupied
         #    slot is terminal, the first durable report wins.
         inference = context.inferences[0]
-        artifact_version = inference.artifact_ref.version if inference.artifact_ref is not None else None
+        release_id = inference.artifact_ref.release_id if inference.artifact_ref is not None else None
         return ReportDecision.train(
-            _TTTDRow(sample, artifact_version),
+            _TTTDRow(sample, release_id),
             group_key=parsed.step,
             slot=(parsed.group, parsed.rollout),
         )
@@ -114,12 +114,12 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         expected_count = self.groups_per_step * self.rollouts_per_group
         if len(candidates) != expected_count:
             return GroupDecision.INCOMPLETE
-        # 2. A step whose reports span artifact versions is discarded
+        # 2. A step whose reports span releases is discarded
         #    wholesale — mixed-version rewards are not comparable.
         versions = {
-            candidate.value.artifact_version
+            candidate.value.release_id
             for candidate in candidates
-            if candidate.value.artifact_version is not None
+            if candidate.value.release_id is not None
         }
         if len(versions) <= 1:
             return GroupDecision.READY
@@ -129,7 +129,7 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         ordered_versions = tuple(sorted(versions))
         self._failed_step_versions[step] = ordered_versions
         logger.error(
-            "TTTD step %d failed because its %d reports span artifact versions %s",
+            "TTTD step %d failed because its %d reports span releases %s",
             step,
             expected_count,
             list(ordered_versions),
@@ -142,8 +142,8 @@ class TTTDProcessor(ReportedFeedbackProcessor):
             "failed_steps": [
                 {
                     "step": step,
-                    "reason": "mixed_artifact_versions",
-                    "artifact_versions": list(versions),
+                    "reason": "mixed_release_ids",
+                    "release_ids": list(versions),
                 }
                 for step, versions in sorted(self._failed_step_versions.items())
             ]

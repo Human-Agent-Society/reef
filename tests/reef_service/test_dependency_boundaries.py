@@ -99,8 +99,8 @@ def test_core_package_does_not_depend_on_artifacts() -> None:
         assert _imports_of(imported, "reef.artifact") == [], name
 
 
-def test_artifact_version_chain_does_not_depend_on_scenario_or_trainer() -> None:
-    module = importlib.import_module("reef.artifact.version_chain")
+def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
+    module = importlib.import_module("reef.artifact.release_chain")
     tree = ast.parse(inspect.getsource(module))
 
     imported = _imported_modules(tree, package="reef.artifact")

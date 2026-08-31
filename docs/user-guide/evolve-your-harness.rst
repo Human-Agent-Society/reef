@@ -140,7 +140,7 @@ mutation.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
-published artifact version, the gate metrics, and the evolved ``SKILL.md``,
+published release, the gate metrics, and the evolved ``SKILL.md``,
 then stops the service.
 
 Watch it learn
@@ -157,12 +157,12 @@ still running:
      http://127.0.0.1:8900/reef/harness            # 404 until a step publishes
    curl -sS -H "Authorization: Bearer reef-local" \
      -H "x-reef-scenario: harness-evolve-demo" \
-     http://127.0.0.1:8900/reef/harness/versions
+     http://127.0.0.1:8900/reef/harness/releases
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B. The run has succeeded when one
 task fails, the failing report opens the window, one evolve step runs, and
-``GET /reef/harness`` stops returning 404. ``/reef/harness/versions`` then
+``GET /reef/harness`` stops returning 404. ``/reef/harness/releases`` then
 shows a published version.
 
 If ``/reef/harness`` still returns 404 after a few minutes, the run has

@@ -36,7 +36,7 @@ def test_current_files_returns_the_manifest(tmp_path) -> None:
     service = _service(tmp_path, recipe=_HarnessRecipe(), skill_text="Always check units.")
     manifest = service.harness_manifest({"x-reef-scenario": "delivery"})
     assert manifest["files"] == {"skills/SKILL.md": "Always check units."}
-    assert manifest["artifact_version"]
+    assert manifest["release_id"]
 
 
 def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path, monkeypatch) -> None:

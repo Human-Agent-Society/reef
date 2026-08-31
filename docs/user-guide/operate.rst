@@ -1,7 +1,7 @@
 Operate a deployment
 ====================
 
-What to check while a deployment runs, how to read and steer its version chain, how to keep an eye on training, and what survives a restart.
+What to check while a deployment runs, how to read and steer its release chain, how to keep an eye on training, and what survives a restart.
 
 .. page::
    :for: whoever runs a Reef deployment
@@ -18,26 +18,26 @@ Check health and status
    curl -f "$REEF_URL/healthz"
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" "$REEF_URL/reef/status"
 
-``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, the weight version being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. It is the first place to look when requests keep being served by an old version.
+``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, the runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. It is the first place to look when requests keep being served by an old version.
 
 The service and every process ``reef serve`` started write logs under ``run_dir`` (``/tmp/reef-stack/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
 
-Read the version chain
+Read the release chain
 ----------------------
 
 .. code:: bash
 
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
-     "$REEF_URL/reef/scenarios/code-repair/versions"
+     "$REEF_URL/reef/scenarios/code-repair/releases"
 
-Newest first. Each row names the version, its parent, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. A version can be live (``artifact_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (a Git LFS commit).
+Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Content can be live (``content_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (``content_kind: saved_artifact``, a Git LFS commit).
 
-For harness scenarios, ``GET /reef/harness/versions`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?version=<id>`` returns any listed tree.
+For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree.
 
 Pin a version
 -------------
 
-A client that must keep answering from one version sends ``x-reef-artifact-version: <id>`` with its requests. Pinning is per request and changes nothing on the server; a pin that conflicts with the scenario's binding is refused with 409.
+A client that must keep answering from one version sends ``x-reef-release-id: <id>`` with its requests. Pinning is per request and changes nothing on the server; a pin that conflicts with the scenario's binding is refused with 409.
 
 Roll back
 ---------
@@ -46,10 +46,10 @@ Roll back
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"artifact_version": "<id>"}' \
+     -d '{"release_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/rollback"
 
-Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints. Live weight versions that were never checkpointed cannot be restored, and the bundled Ray/Slime runtime does not implement checkpoint restoration, so rollback currently applies to harness artifacts; for weights, redeploy from the checkpoint you want.
+Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints. Live runtime load IDs that were never checkpointed cannot be restored, and the bundled Ray/Slime runtime does not implement checkpoint restoration, so rollback currently applies to harness artifacts; for weights, redeploy from the checkpoint you want.
 
 Set the checkpoint cadence
 --------------------------

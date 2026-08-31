@@ -115,8 +115,8 @@ class ReefRolloutManagerImpl:
         server = self._get_updatable_server()
         return [] if server is None else list(server.engines)
 
-    def get_weight_versions(self):
-        return ray.get([engine.get_weight_version.remote() for engine in self.updatable_rollout_engines])
+    def get_runtime_load_ids(self):
+        return ray.get([engine.get_runtime_load_id.remote() for engine in self.updatable_rollout_engines])
 
     def inference_url(self) -> str | None:
         """The SGLang router URL slime bound, once the servers are up.

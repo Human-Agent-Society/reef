@@ -89,7 +89,7 @@ def _build_payload(
         "rollout_ids": list(schedule.rollout_ids),
         "loss": loss_family,
         # The batch row behind every wire row, so the runtime layer can attach
-        # per-row provenance (producing weight versions) in the same order —
+        # per-row provenance (producing runtime load IDs) in the same order —
         # a schedule may repeat (epochs) and reorder (shuffle) rows. Consumed
         # and removed before the payload leaves the runtime.
         "source_rows": list(schedule.row_indices),

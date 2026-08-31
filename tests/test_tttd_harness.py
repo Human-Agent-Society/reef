@@ -197,19 +197,19 @@ class _Client:
         self.index = 0
         self.reports = []
 
-    def inference_with_record(self, scenario, path, payload, *, recipe=None, artifact_version=None):
-        assert (scenario, path, recipe, artifact_version) == (
+    def inference_with_record(self, scenario, path, payload, *, recipe=None, extra_headers=None):
+        assert (scenario, path, recipe, extra_headers) == (
             "discovery",
             "/v1/chat/completions",
             "tttd",
-            "checkpoint-v1",
+            {"x-reef-release-id": "checkpoint-v1"},
         )
         self.index += 1
         content = "bad" if self.index == 2 else f"```python\n{self.index}\n```"
         return {"choices": [{"message": {"content": content}}]}, f"agent-record-{self.index}"
 
-    def report(self, scenario, payload, *, recipe=None, artifact_version=None):
-        self.reports.append((scenario, payload, recipe, artifact_version))
+    def report(self, scenario, payload, *, recipe=None, extra_headers=None):
+        self.reports.append((scenario, payload, recipe, extra_headers))
         return {}
 
 
@@ -220,7 +220,7 @@ def test_reef_harness_reports_each_result_against_exact_inference():
         _scorer(),
         "Improve the number.",
         scenario="discovery",
-        artifact_version="checkpoint-v1",
+        release_id="checkpoint-v1",
         model="reef",
         groups_per_step=1,
         rollouts_per_group=3,

@@ -58,7 +58,7 @@ def test_list_scenarios_shows_loaded_bindings(tmp_path) -> None:
     rows = dispatcher.list_scenarios()
     names = [row["scenario"] for row in rows]
     assert names == ["a", "b"]
-    assert all(row["loaded"] and row["recipe"] == "recipe" and row["artifact_version"] for row in rows)
+    assert all(row["loaded"] and row["recipe"] == "recipe" and row["release_id"] for row in rows)
 
 
 def test_list_scenarios_empty_when_nothing_exists(tmp_path) -> None:

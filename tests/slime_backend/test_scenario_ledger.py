@@ -1,4 +1,4 @@
-"""Per-scenario publication history behind the engine-global weight version."""
+"""Per-scenario publication history behind the engine-global runtime load ID."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
-from reef.train.slime_backend.reef_adapters.weight_version import WeightVersion
+from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 
 
 def test_lag_counts_only_the_scenarios_own_publications(tmp_path: Path) -> None:
@@ -16,11 +16,11 @@ def test_lag_counts_only_the_scenarios_own_publications(tmp_path: Path) -> None:
     ledger.record_publication("b", "inc:3", "adapter-b-3")
     ledger.record_publication("a", "inc:4", "adapter-a-4")
     # A rollout produced at inc:3 trails one publication of a (inc:4) and none of b.
-    assert ledger.lag("a", WeightVersion.parse("inc:3")) == 1
-    assert ledger.lag("b", WeightVersion.parse("inc:3")) == 0
-    assert ledger.lag("a", WeightVersion.parse("inc:1")) == 2
-    assert ledger.lag("never-published", WeightVersion.parse("inc:1")) == 0
-    assert ledger.lag("a", WeightVersion.parse("other:9")) is None
+    assert ledger.lag("a", RuntimeLoadId.parse("inc:3")) == 1
+    assert ledger.lag("b", RuntimeLoadId.parse("inc:3")) == 0
+    assert ledger.lag("a", RuntimeLoadId.parse("inc:1")) == 2
+    assert ledger.lag("never-published", RuntimeLoadId.parse("inc:1")) == 0
+    assert ledger.lag("a", RuntimeLoadId.parse("other:9")) is None
 
 
 def test_ledger_round_trips_and_protects_latest_checkpoints(tmp_path: Path) -> None:
@@ -39,7 +39,7 @@ def test_ledger_round_trips_and_protects_latest_checkpoints(tmp_path: Path) -> N
     assert reloaded.protected_rollouts() == {1, 2}
     assert reloaded.adapter("a") == "adapter-a-3" and reloaded.last_publication("b") == "inc:2"
     assert reloaded.status()["a"] == {
-        "weight_version": "inc:3",
+        "runtime_load_id": "inc:3",
         "adapter": "adapter-a-3",
         "publications": 2,
         "rollout_id": 2,

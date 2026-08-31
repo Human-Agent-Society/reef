@@ -61,7 +61,7 @@ def _sao_inference(
     loss_mask: tuple[int, ...] = (1, 1, 1),
     action_mask: tuple[int, ...] | None = None,
     rollout_log_probs: tuple[float, ...] = (-0.1, -0.2, -0.3),
-    weight_version: str | None = "slime-v3",
+    runtime_load_id: str | None = "slime-v3",
 ) -> AgentRecord:
     payload: dict[str, Any] = {
         "tokens": list(tokens),
@@ -72,12 +72,12 @@ def _sao_inference(
         payload["action_mask"] = list(action_mask)
     artifact_ref = (
         LiveWeightArtifactRef(
-            artifact_id="math",
-            version=weight_version,
-            parent_version=None,
-            weight_version=weight_version,
+            content_id="math",
+            release_id=runtime_load_id,
+            parent_release_id=None,
+            runtime_load_id=runtime_load_id,
         )
-        if weight_version
+        if runtime_load_id
         else None
     )
     return AgentRecord.create(
@@ -170,17 +170,17 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     # No explicit action mask -> the whole response is one action.
     assert sample.action_mask == sample.loss_mask
     # Provenance rides through for policy-lag / queue-age reporting.
-    assert sample.weight_version == "slime-v3"
+    assert sample.runtime_load_id == "slime-v3"
     assert sample.rollout_created_at is not None
 
 
 @pytest.mark.unit
-def test_processor_reads_weight_version_from_the_payload_when_ref_is_not_live() -> None:
+def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live() -> None:
     # Rollouts served before the first training commit carry a plain checkpoint
     # ArtifactRef (kind="artifact"), not a LiveWeightArtifactRef; their producing
-    # version lives only in payload["weight_version"], set by the durable serve
+    # version lives only in payload["runtime_load_id"], set by the durable serve
     # path. The sample must still record its producing version, or prepare_training_step rejects
-    # the whole batch ("requires one recorded producing weight version") and no
+    # the whole batch ("requires one recorded producing runtime load ID") and no
     # SAO step ever runs.
     inference = AgentRecord.create(
         scenario="math",
@@ -189,7 +189,7 @@ def test_processor_reads_weight_version_from_the_payload_when_ref_is_not_live() 
             "tokens": [5, 1, 2, 3],
             "loss_mask": [1, 1, 1],
             "rollout_log_probs": [-0.1, -0.2, -0.3],
-            "weight_version": "slime-v7",
+            "runtime_load_id": "slime-v7",
         },
         agent_record_id="i1",
         artifact_ref=None,
@@ -200,7 +200,7 @@ def test_processor_reads_weight_version_from_the_payload_when_ref_is_not_live() 
 
     batch = processor.build_batch()
 
-    assert batch.samples[0].weight_version == "slime-v7"
+    assert batch.samples[0].runtime_load_id == "slime-v7"
 
 
 @pytest.mark.unit
@@ -360,7 +360,7 @@ class _StubTrainingRuntime(TrainingRuntime):
     def inference_backend(self):
         return None
 
-    def serving_weight_version(self):
+    def serving_runtime_load_id(self):
         return self._served_version
 
     def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
@@ -372,7 +372,7 @@ class _StubTrainingRuntime(TrainingRuntime):
             **prepared.payload,
             "rollout_id": scenario_step,
             "reward": sample.reward,
-            "expected_weight_version": sample.weight_version,
+            "expected_runtime_load_id": sample.runtime_load_id,
         }
         return PreparedTrainingStep(
             action="train",
@@ -386,7 +386,7 @@ class _StubTrainingRuntime(TrainingRuntime):
         existing = self.completed.get(rollout_id)
         if existing is not None:
             return existing
-        if payload["expected_weight_version"] != self._served_version:
+        if payload["expected_runtime_load_id"] != self._served_version:
             raise StaleCandidate
         self.jobs.append(dict(payload))
         job_id = f"job-{rollout_id}"
@@ -396,8 +396,7 @@ class _StubTrainingRuntime(TrainingRuntime):
             candidate_id=job_id,
             training_job_id=job_id,
             checkpoint_path=str(checkpoint),
-            current_version=self._served_version,
-            current_weight_version=self._served_version,
+            current_runtime_load_id=self._served_version,
             # A real SAO backend reports its schedule cadence and async
             # provenance here; the shapes are asserted in test_sao_bridge.
             training_metrics={"sao/critic_updates": 2, "sao/actor_trained": 1},
@@ -484,7 +483,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
 
         _wait_for_step(dispatcher, 1)
 
-        assert runtime.serving_weight_version() == "slime-v3"
+        assert runtime.serving_runtime_load_id() == "slime-v3"
         assert runtime.activations == []
         assert len(runtime.rejections) == 1
         candidate, decision = runtime.rejections[0]
@@ -500,11 +499,11 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
 
 
 @pytest.mark.integration
-def test_sao_train_step_swaps_the_served_weight_version(tmp_path) -> None:
+def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     # The paper's async claim: after a step, the version an inference would
     # freeze IS the freshly-synced one, not the pre-train head. Force a live
     # step (checkpoint_every_n high) so the head stays a LiveWeightArtifactRef
-    # whose weight_version is observable.
+    # whose runtime_load_id is observable.
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
@@ -516,7 +515,7 @@ def test_sao_train_step_swaps_the_served_weight_version(tmp_path) -> None:
     )
     try:
         pre_head = dispatcher.get_or_create_scenario("math", recipe="sao").repository.require_current_artifact()
-        assert runtime.serving_weight_version() == "slime-v3"
+        assert runtime.serving_runtime_load_id() == "slime-v3"
 
         dispatcher.accept_record(_sao_inference("i1"), recipe="sao")
         dispatcher.accept_record(_sao_report("r1", "i1", 0.9), recipe="sao")
@@ -527,9 +526,9 @@ def test_sao_train_step_swaps_the_served_weight_version(tmp_path) -> None:
         # and it actually moved off the pre-train head (guards against a
         # constant stub).
         assert isinstance(head, LiveWeightArtifactRef)
-        assert head.weight_version == "slime-v4"
-        assert head.version != pre_head.version
-        assert runtime.serving_weight_version() == "slime-v4"
+        assert head.runtime_load_id == "slime-v4"
+        assert head.release_id != pre_head.release_id
+        assert runtime.serving_runtime_load_id() == "slime-v4"
     finally:
         dispatcher.close()
 
@@ -582,7 +581,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
         # Training resumes at the next rollout and advances past the recovered
         # step. The serving version already moved to slime-v4 on the first step.
-        second.accept_record(_sao_inference("i2", weight_version="slime-v4"), recipe="sao")
+        second.accept_record(_sao_inference("i2", runtime_load_id="slime-v4"), recipe="sao")
         second.accept_record(_sao_report("r2", "i2", 0.5), recipe="sao")
         _wait_for_step(second, 2)
         assert second.get_or_create_scenario("math").trainer.state == {"steps": 2}

@@ -1,7 +1,7 @@
 """Runtime-global residency of scenario-owned adapters on one shared base model.
 
 One serving engine holds one base model and a finite number of loaded LoRA
-adapters. Several scenarios may each evolve an independent adapter version chain on
+adapters. Several scenarios may each evolve an independent adapter runtime load chain on
 that engine, so the capacity accounting cannot live with any single scenario:
 two scenarios with private residency windows would overcommit the same slots
 and evict each other's current revision. :class:`AdapterResidencyManager` is
@@ -71,11 +71,11 @@ class ResidentAdapter:
 
     name: str
     scenario: str
-    version: str
-    #: Every artifact version served by this adapter. A rollback republishes
-    #: the same bytes under a new version, which aliases here instead of
+    runtime_load_id: str
+    #: Every runtime load served by this adapter. A rollback republishes
+    #: the same bytes under a new runtime_load_id, which aliases here instead of
     #: consuming a second slot.
-    versions: tuple[str, ...]
+    runtime_load_ids: tuple[str, ...]
     order: int
     state: ResidentState
     current: bool
@@ -88,13 +88,13 @@ class ResidentAdapter:
 
 
 class _Slot:
-    __slots__ = ("in_flight", "name", "order", "pinned", "scenario", "state", "version", "versions")
+    __slots__ = ("in_flight", "name", "order", "pinned", "runtime_load_id", "runtime_load_ids", "scenario", "state")
 
-    def __init__(self, name: str, scenario: str, version: str, order: int) -> None:
+    def __init__(self, name: str, scenario: str, runtime_load_id: str, order: int) -> None:
         self.name = name
         self.scenario = scenario
-        self.version = version
-        self.versions: list[str] = [version]
+        self.runtime_load_id = runtime_load_id
+        self.runtime_load_ids: list[str] = [runtime_load_id]
         self.order = order
         self.state: ResidentState = "active"
         self.pinned = False
@@ -169,13 +169,13 @@ class AdapterResidencyManager:
     def activate(
         self,
         scenario: str,
-        version: str,
+        runtime_load_id: str,
         engine: AdapterEngine | None,
         *,
         payload: Any = None,
         supersede: bool = False,
     ) -> str:
-        """Make ``version`` the revision ``scenario`` serves; return its engine name.
+        """Make ``runtime_load_id`` the revision ``scenario`` serves; return its engine name.
 
         Loads the adapter first and advances the scenario's current pointer
         only after the engine confirms the load, so a failure leaves the
@@ -185,8 +185,8 @@ class AdapterResidencyManager:
         request can reach it (generation paused).
         """
         _require_scenario(scenario)
-        _require_version(version)
-        name = adapter_name(scenario, version)
+        _require_runtime_load_id(runtime_load_id)
+        name = adapter_name(scenario, runtime_load_id)
         with self._lock:
             slot = self._slots.get(name)
             if slot is not None and slot.state == "active":
@@ -200,7 +200,7 @@ class AdapterResidencyManager:
                     f"succeeds: {unload_error}"
                 ) from unload_error
             self._make_room(scenario, engine, supersede=supersede)
-            slot = _Slot(name, scenario, version, self._next_order)
+            slot = _Slot(name, scenario, runtime_load_id, self._next_order)
             self._next_order += 1
             self._slots[name] = slot
             try:
@@ -224,7 +224,7 @@ class AdapterResidencyManager:
         """Free one slot for an adapter ``scenario`` is about to load out of band.
 
         The training path publishes through its own transport (tensors
-        pushed from the trainer, under a version it only knows once the
+        pushed from the trainer, under a runtime_load_id it only knows once the
         publication completes) and then :meth:`register` the result. The
         eviction policy is :meth:`activate`'s.
         """
@@ -232,7 +232,7 @@ class AdapterResidencyManager:
         with self._lock:
             self._make_room(scenario, engine, supersede=supersede)
 
-    def register(self, scenario: str, version: str) -> str:
+    def register(self, scenario: str, runtime_load_id: str) -> str:
         """Record an adapter the engine already holds as ``scenario``'s current revision.
 
         Pairs with :meth:`make_room` for loads the manager did not drive.
@@ -241,8 +241,8 @@ class AdapterResidencyManager:
         confirmed it holds exactly these bytes.
         """
         _require_scenario(scenario)
-        _require_version(version)
-        name = adapter_name(scenario, version)
+        _require_runtime_load_id(runtime_load_id)
+        name = adapter_name(scenario, runtime_load_id)
         with self._lock:
             slot = self._slots.get(name)
             if slot is None:
@@ -255,7 +255,7 @@ class AdapterResidencyManager:
                         self._capacity,
                         len(self._slots) + 1,
                     )
-                slot = _Slot(name, scenario, version, self._next_order)
+                slot = _Slot(name, scenario, runtime_load_id, self._next_order)
                 self._next_order += 1
                 self._slots[name] = slot
                 self._counters["loads"] += 1
@@ -287,23 +287,23 @@ class AdapterResidencyManager:
         self._counters["load_cleanups"] += 1
         self._note("load_cleanup", name, scenario)
 
-    def alias(self, scenario: str, version: str) -> str:
-        """Serve ``version`` through the adapter ``scenario`` currently holds.
+    def alias(self, scenario: str, runtime_load_id: str) -> str:
+        """Serve ``runtime_load_id`` through the adapter ``scenario`` currently holds.
 
         Rollback republishes an older revision's bytes as a new artifact
-        version. The engine already holds those bytes under the source name,
-        so the new version routes there instead of loading a duplicate.
+        runtime_load_id. The engine already holds those bytes under the source name,
+        so the new runtime_load_id routes there instead of loading a duplicate.
         """
         _require_scenario(scenario)
-        if not version:
-            raise ValueError("adapter alias requires a non-empty artifact version")
+        if not runtime_load_id:
+            raise ValueError("adapter alias requires a non-empty runtime load")
         with self._lock:
             name = self._current.get(scenario)
             slot = self._slots.get(name) if name is not None else None
             if slot is None or slot.state != "active":
-                raise AdapterNotActive(f"scenario {scenario!r} has no active adapter to alias version {version!r} to")
-            if version not in slot.versions:
-                slot.versions.append(version)
+                raise AdapterNotActive(f"scenario {scenario!r} has no active adapter to alias runtime load {runtime_load_id!r} to")
+            if runtime_load_id not in slot.runtime_load_ids:
+                slot.runtime_load_ids.append(runtime_load_id)
             return slot.name
 
     def release_scenario(self, scenario: str) -> None:
@@ -313,20 +313,20 @@ class AdapterResidencyManager:
 
     # -- Routing ---------------------------------------------------------
 
-    def resolve(self, scenario: str, version: str) -> ResidentAdapter:
-        """The active adapter serving ``version`` for ``scenario``; fail closed otherwise."""
+    def resolve(self, scenario: str, runtime_load_id: str) -> ResidentAdapter:
+        """The active adapter serving ``runtime_load_id`` for ``scenario``; fail closed otherwise."""
         with self._lock:
-            slot = self._slot_for(scenario, version)
+            slot = self._slot_for(scenario, runtime_load_id)
             return self._describe(slot)
 
-    def lease(self, scenario: str, version: str) -> AdapterLease:
+    def lease(self, scenario: str, runtime_load_id: str) -> AdapterLease:
         """Resolve and protect the adapter for one in-flight request."""
         with self._lock:
-            slot = self._slot_for(scenario, version)
+            slot = self._slot_for(scenario, runtime_load_id)
             slot.in_flight += 1
             return AdapterLease(self, slot.name)
 
-    def _slot_for(self, scenario: str, version: str) -> _Slot:
+    def _slot_for(self, scenario: str, runtime_load_id: str) -> _Slot:
         current_name = self._current.get(scenario)
         if current_name is None:
             raise AdapterNotActive(
@@ -335,9 +335,9 @@ class AdapterResidencyManager:
         slot = self._slots.get(current_name)
         if slot is None or slot.state != "active":
             raise AdapterNotActive(f"adapter {current_name!r} for scenario {scenario!r} is not active in the engine")
-        if version not in slot.versions:
+        if runtime_load_id not in slot.runtime_load_ids:
             raise AdapterNotActive(
-                f"scenario {scenario!r} serves adapter revision {slot.version!r}, not the requested {version!r}"
+                f"scenario {scenario!r} serves adapter revision {slot.runtime_load_id!r}, not the requested {runtime_load_id!r}"
             )
         return slot
 
@@ -349,22 +349,22 @@ class AdapterResidencyManager:
 
     # -- Pinning ---------------------------------------------------------
 
-    def pin(self, scenario: str, version: str) -> None:
+    def pin(self, scenario: str, runtime_load_id: str) -> None:
         """Protect a resident revision from eviction until :meth:`unpin`."""
         with self._lock:
-            slot = self._resident_slot(scenario, version)
+            slot = self._resident_slot(scenario, runtime_load_id)
             slot.pinned = True
 
-    def unpin(self, scenario: str, version: str) -> None:
+    def unpin(self, scenario: str, runtime_load_id: str) -> None:
         with self._lock:
-            slot = self._resident_slot(scenario, version)
+            slot = self._resident_slot(scenario, runtime_load_id)
             slot.pinned = False
 
-    def _resident_slot(self, scenario: str, version: str) -> _Slot:
+    def _resident_slot(self, scenario: str, runtime_load_id: str) -> _Slot:
         for slot in self._slots.values():
-            if slot.scenario == scenario and version in slot.versions:
+            if slot.scenario == scenario and runtime_load_id in slot.runtime_load_ids:
                 return slot
-        raise AdapterNotActive(f"scenario {scenario!r} has no resident adapter for version {version!r}")
+        raise AdapterNotActive(f"scenario {scenario!r} has no resident adapter for runtime_load_id {runtime_load_id!r}")
 
     # -- Capacity --------------------------------------------------------
 
@@ -436,7 +436,7 @@ class AdapterResidencyManager:
         held = set(engine_names)
         with self._lock:
             for name in sorted(held - set(self._slots)):
-                stray = _Slot(name, scenario="", version="", order=-1)
+                stray = _Slot(name, scenario="", runtime_load_id="", order=-1)
                 self._slots[name] = stray
                 if self._unload(stray, engine) is None:
                     self._counters["strays_unloaded"] += 1
@@ -476,11 +476,11 @@ class AdapterResidencyManager:
                 if not entry.scenario:
                     continue
                 block = scenarios.setdefault(entry.scenario, {"current": None, "resident": []})
-                block["resident"].append(entry.version)
+                block["resident"].append(entry.runtime_load_id)
                 if entry.current:
-                    # The served version is the newest alias; the adapter name
+                    # The served runtime_load_id is the newest alias; the adapter name
                     # still says which revision's bytes the engine holds.
-                    block["current"] = {"version": entry.versions[-1], "adapter": entry.name}
+                    block["current"] = {"runtime_load_id": entry.runtime_load_ids[-1], "adapter": entry.name}
             return {
                 "capacity": self._capacity,
                 "resident": len(resident),
@@ -501,8 +501,8 @@ class AdapterResidencyManager:
         return ResidentAdapter(
             name=slot.name,
             scenario=slot.scenario,
-            version=slot.version,
-            versions=tuple(slot.versions),
+            runtime_load_id=slot.runtime_load_id,
+            runtime_load_ids=tuple(slot.runtime_load_ids),
             order=slot.order,
             state=slot.state,
             current=self._current.get(slot.scenario) == slot.name,
@@ -516,9 +516,9 @@ def _require_scenario(scenario: str) -> None:
         raise ValueError("adapter residency requires a non-empty scenario name")
 
 
-def _require_version(version: str) -> None:
-    if not isinstance(version, str) or not version:
-        raise ValueError("adapter residency requires a non-empty adapter version")
+def _require_runtime_load_id(runtime_load_id: str) -> None:
+    if not isinstance(runtime_load_id, str) or not runtime_load_id:
+        raise ValueError("adapter residency requires a non-empty runtime_load_id")
 
 
 __all__ = [

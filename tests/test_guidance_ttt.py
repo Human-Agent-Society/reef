@@ -73,8 +73,8 @@ class _ReefClient:
         self.inferences: list[dict] = []
         self.reports: list[dict] = []
 
-    def inference_with_record(self, scenario, path, payload, *, recipe=None, artifact_version=None):
-        assert (scenario, path, recipe, artifact_version) == (
+    def inference_with_record(self, scenario, path, payload, *, recipe=None, release_id=None):
+        assert (scenario, path, recipe, release_id) == (
             "guidance-smoke",
             "/v1/chat/completions",
             "tttd",
@@ -86,8 +86,8 @@ class _ReefClient:
         content = "malformed guidance" if index == 0 else f"<guidance>improve strategy {index}</guidance>"
         return {"choices": [{"message": {"content": content}}]}, f"receipt-{index}"
 
-    def report(self, scenario, payload, *, recipe=None, artifact_version=None):
-        assert (scenario, recipe, artifact_version) == ("guidance-smoke", "tttd", None)
+    def report(self, scenario, payload, *, recipe=None, release_id=None):
+        assert (scenario, recipe, release_id) == ("guidance-smoke", "tttd", None)
         with self._lock:
             self.reports.append(payload)
         return {}
@@ -429,15 +429,15 @@ def test_training_wait_fails_when_tttd_reports_the_expected_step_failure() -> No
         failed_steps=[
             {
                 "step": 1,
-                "reason": "mixed_artifact_versions",
-                "artifact_versions": ["artifact-old", "artifact-new"],
+                "reason": "mixed_release_ids",
+                "release_ids": ["artifact-old", "artifact-new"],
             }
         ],
     )
 
     with pytest.raises(
         RuntimeError,
-        match=r"step 1 failed \(mixed_artifact_versions\).*artifact-old.*artifact-new",
+        match=r"step 1 failed \(mixed_release_ids\).*artifact-old.*artifact-new",
     ):
         wait_for_training_step(
             health=lambda: _bridge_health(completed_train_steps=0, last_train_rollout_id=None, phase="serving"),
@@ -706,7 +706,7 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
                 "phase": "serving",
                 "completed_train_steps": 1,
                 "last_train_rollout_id": 0,
-                "weight_version": "guidance:1",
+                "runtime_load_id": "guidance:1",
                 "last_train_metrics": {
                     "train/grad_norm": 0.5,
                     "train/global_batch_size": 2,

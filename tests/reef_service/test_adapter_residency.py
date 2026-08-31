@@ -52,7 +52,7 @@ def test_activation_loads_then_advances_the_scenario_current(engine: FakeEngine)
     assert name == adapter_name("a", "v1")
     assert engine.loaded == [name] and engine.payloads == ["bytes-of-v1"]
     current = manager.current("a")
-    assert current is not None and current.version == "v1" and current.current and current.protected
+    assert current is not None and current.runtime_load_id == "v1" and current.current and current.protected
 
 
 def test_two_scenarios_with_the_same_revision_label_do_not_collide(engine: FakeEngine) -> None:
@@ -71,8 +71,8 @@ def test_load_failure_leaves_the_incumbent_active_and_no_phantom_slot(engine: Fa
     engine.fail_load.add(adapter_name("a", "v2"))
     with pytest.raises(AdapterResidencyError, match="could not load"):
         manager.activate("a", "v2", engine)
-    assert manager.current("a").version == "v1"
-    assert [entry.version for entry in manager.resident()] == ["v1"]
+    assert manager.current("a").runtime_load_id == "v1"
+    assert [entry.runtime_load_id for entry in manager.resident()] == ["v1"]
     assert manager.status()["counters"]["load_failures"] == 1
 
 
@@ -84,8 +84,8 @@ def test_eviction_is_oldest_unprotected_first_across_scenarios(engine: FakeEngin
     # Full. Activating b2 must evict a1 (oldest unprotected), never b1 or a2.
     manager.activate("b", "b2", engine)
     assert engine.unloaded == [adapter_name("a", "a1")]
-    assert manager.current("a").version == "a2"
-    assert manager.current("b").version == "b2"
+    assert manager.current("a").runtime_load_id == "a2"
+    assert manager.current("b").runtime_load_id == "b2"
     assert manager.status()["counters"]["evictions"] == 1
 
 
@@ -97,7 +97,7 @@ def test_capacity_exhaustion_fails_closed_when_every_slot_is_protected(engine: F
         manager.activate("c", "c1", engine)
     assert engine.unloaded == []
     assert manager.current("c") is None
-    assert manager.current("a").version == "a1" and manager.current("b").version == "b1"
+    assert manager.current("a").runtime_load_id == "a1" and manager.current("b").runtime_load_id == "b1"
     assert manager.status()["counters"]["capacity_rejections"] == 1
 
 
@@ -110,7 +110,7 @@ def test_supersede_lets_a_paused_scenario_evict_its_own_current_revision(engine:
         manager.activate("a", "a2", engine)
     manager.activate("a", "a2", engine, supersede=True)
     assert engine.unloaded == [adapter_name("a", "a1")]
-    assert manager.current("a").version == "a2" and manager.current("b").version == "b1"
+    assert manager.current("a").runtime_load_id == "a2" and manager.current("b").runtime_load_id == "b1"
     # A peer's current revision is still never the victim.
     with pytest.raises(AdapterCapacityExhausted):
         manager.activate("c", "c1", engine, supersede=True)
@@ -142,7 +142,7 @@ def test_make_room_then_register_accounts_for_an_out_of_band_load(engine: FakeEn
     name = manager.register("a", "a2")
     assert name == adapter_name("a", "a2")
     assert engine.loaded == [adapter_name("a", "a1"), adapter_name("b", "b1")], "register loads nothing"
-    assert manager.current("a").version == "a2"
+    assert manager.current("a").runtime_load_id == "a2"
     assert manager.resolve("a", "a2").name == name
     status = manager.status()
     assert status["resident"] == 2 and status["counters"]["loads"] == 3
@@ -155,7 +155,7 @@ def test_make_room_refuses_when_every_slot_is_protected(engine: FakeEngine) -> N
     manager.activate("a", "a1", engine)
     with pytest.raises(AdapterCapacityExhausted):
         manager.make_room("b", engine, supersede=True)
-    assert engine.unloaded == [] and manager.current("a").version == "a1"
+    assert engine.unloaded == [] and manager.current("a").runtime_load_id == "a1"
 
 
 def test_register_reclaims_a_leaked_slot_the_engine_reloaded(engine: FakeEngine) -> None:
@@ -168,7 +168,7 @@ def test_register_reclaims_a_leaked_slot_the_engine_reloaded(engine: FakeEngine)
     assert manager.status()["leaked"] == 1
     # The trainer republished a1 in place (its transport upserts by name).
     manager.register("a", "a1")
-    assert manager.status()["leaked"] == 0 and manager.current("a").version == "a1"
+    assert manager.status()["leaked"] == 0 and manager.current("a").runtime_load_id == "a1"
     assert manager.status()["recent_actions"][-1]["action"] == "reclaimed"
 
 
@@ -225,7 +225,7 @@ def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeE
     status = manager.status()
     assert status["leaked"] == 1 and status["resident"] == 2
     assert status["counters"]["unload_failures"] == 1
-    assert manager.current("a").version == "a2"
+    assert manager.current("a").runtime_load_id == "a2"
     # Once the engine lets go, the leaked slot is reclaimed before any live one.
     engine.fail_unload.clear()
     manager.activate("a", "a3", engine)
@@ -297,7 +297,7 @@ def test_status_is_bounded_and_per_scenario(engine: FakeEngine) -> None:
     manager.activate("b", "b1", engine)
     status = manager.status()
     assert status["capacity"] == 3 and status["resident"] == 3 and status["protected"] == 2
-    assert status["scenarios"]["a"]["current"] == {"version": "a2", "adapter": adapter_name("a", "a2")}
+    assert status["scenarios"]["a"]["current"] == {"runtime_load_id": "a2", "adapter": adapter_name("a", "a2")}
     assert status["scenarios"]["a"]["resident"] == ["a1", "a2"]
     assert status["scenarios"]["b"]["resident"] == ["b1"]
 
@@ -310,7 +310,7 @@ def test_capacity_and_names_must_be_well_formed(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager()
     with pytest.raises(ValueError, match="scenario"):
         manager.activate("", "v1", engine)
-    with pytest.raises(ValueError, match="version"):
+    with pytest.raises(ValueError, match="runtime_load_id"):
         manager.register("a", "")
 
 
@@ -347,13 +347,13 @@ def test_ambiguous_load_timeout_is_cleaned_up_and_the_retry_succeeds() -> None:
         manager.activate("a", "v2", engine)
     # Deterministic outcome: Reef counts no slot, and the engine was told to
     # drop the name, so neither side holds v2 after the ambiguous attempt.
-    assert manager.current("a").version == "v1"
+    assert manager.current("a").runtime_load_id == "v1"
     assert name not in engine.resident
     counters = manager.status()["counters"]
     assert counters["load_failures"] == 1 and counters["load_cleanups"] == 1
     engine.ambiguous.clear()
     assert manager.activate("a", "v2", engine) == name
-    assert manager.current("a").version == "v2" and name in engine.resident
+    assert manager.current("a").runtime_load_id == "v2" and name in engine.resident
     assert [entry["action"] for entry in manager.status()["recent_actions"]] == ["load_failed", "load_cleanup"]
 
 

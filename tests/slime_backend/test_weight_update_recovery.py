@@ -366,7 +366,7 @@ def test_failed_distributed_fanout_poisons_the_rollout_lock(monkeypatch: pytest.
     )
     updater._group_name = "group"
     updater._model_update_groups = object()
-    updater.weight_version_incarnation = "engine"
+    updater.runtime_load_id_incarnation = "engine"
     updater.weight_update_sequence = 4
     updater.rollout_engines = [object()]
     tensors = [("weight", object())]
@@ -414,7 +414,7 @@ def test_force_full_uses_complete_disk_checkpoint_and_rebuilds_snapshot(
     updater.model = []
     updater.model_name = "model"
     updater.quantization_config = None
-    updater.weight_version_incarnation = "engine"
+    updater.runtime_load_id_incarnation = "engine"
     updater.weight_update_sequence = 6
     updater.rollout_engines = [
         types.SimpleNamespace(
@@ -439,7 +439,7 @@ def test_force_full_uses_complete_disk_checkpoint_and_rebuilds_snapshot(
     assert events[2] == (
         "activate",
         (),
-        {"model_path": "/local/weights", "weight_version": "engine:7"},
+        {"model_path": "/local/weights", "runtime_load_id": "engine:7"},
     )
     assert updater._snapshot == {}
     assert updater._baseline_captured is True
@@ -463,7 +463,7 @@ def test_rank_zero_delta_weight_update_failure_poisons_transport(
     updater = object.__new__(module.ReefUpdateWeightFromDiskDelta)
     updater._post_write_hook = None
     updater._version_dir = "/weights/v7"
-    updater.weight_version_incarnation = "engine"
+    updater.runtime_load_id_incarnation = "engine"
     updater.weight_update_sequence = 7
     updater.args = types.SimpleNamespace(update_weight_local_checkpoint_dir="/local/weights")
     updater.rollout_engines = [types.SimpleNamespace(pull_weights=RemoteMethod("pull"))]

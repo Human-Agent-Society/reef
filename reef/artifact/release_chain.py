@@ -1,4 +1,4 @@
-"""Artifact-only operations for one ordered chain of immutable versions."""
+"""Artifact-only operations for one ordered chain of immutable releases."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from reef.artifact.repository import Repository
 from reef.core.errors import ReefError
 
 
-class VersionNotRestorable(ReefError):
-    """An artifact version has identity but no durable bytes to restore."""
+class ReleaseNotRestorable(ReefError):
+    """A release has identity but no durable bytes to restore."""
 
 
-class ArtifactVersionChain:
+class ArtifactReleaseChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
     This layer knows nothing about scenarios, trainers, commit logs, or
@@ -45,14 +45,14 @@ class ArtifactVersionChain:
     def resolve(self, ref: ArtifactRef) -> Artifact:
         return self._repository.resolve(ref)
 
-    def prepare_live(self, *, step: int, weight_version: str) -> tuple[ArtifactRef, LiveWeightArtifactRef]:
+    def prepare_live(self, *, step: int, runtime_load_id: str) -> tuple[ArtifactRef, LiveWeightArtifactRef]:
         """Build a live child of the durable checkpoint without moving a head."""
         expected = self.current
         ref = LiveWeightArtifactRef(
-            artifact_id=f"live:{uuid.uuid4().hex}",
-            version=f"live:{self._process_id}:{weight_version}:{step}",
-            parent_version=self.checkpoint.version,
-            weight_version=weight_version,
+            content_id=f"weights:{uuid.uuid4().hex}",
+            release_id=f"live:{self._process_id}:{runtime_load_id}:{step}",
+            parent_release_id=self.checkpoint.release_id,
+            runtime_load_id=runtime_load_id,
         )
         return expected, ref
 
@@ -79,4 +79,4 @@ class ArtifactVersionChain:
         self._repository.discard(artifact)
 
 
-__all__ = ["ArtifactVersionChain", "VersionNotRestorable"]
+__all__ = ["ArtifactReleaseChain", "ReleaseNotRestorable"]

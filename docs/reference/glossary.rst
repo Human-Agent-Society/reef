@@ -7,10 +7,10 @@ method implements.
 Scenario
 --------
 
-One workload: its records, training state, and version chain, isolated from
+One workload: its records, training state, and release chain, isolated from
 every other scenario. The first request carrying a new ``x-reef-scenario``
 creates it and permanently binds its recipe. The request may also bind a
-starting artifact version.
+starting release.
 
 Agent
 -----
@@ -23,7 +23,7 @@ Agent record
 ------------
 
 One stored exchange, either an inference call or a report, with its id, scenario,
-request type, payload, and, for inference, the artifact version that served it.
+request type, payload, and, for inference, the release that served it.
 The record store lives under ``agent_record_dir``.
 
 Receipt
@@ -31,7 +31,7 @@ Receipt
 
 The id of a stored inference record, returned in ``x-reef-agent-record-id`` or,
 for a stream, as ``reef.agent_record_id`` in the terminal SSE metadata. It names
-the exchange *and* the artifact version that produced it. Reports quote receipts
+the exchange *and* the release that produced it. Reports quote receipts
 in ``references``.
 
 Report
@@ -67,22 +67,36 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The versioned thing: a model checkpoint or a harness tree. An ``ArtifactRef``
-identifies one version. Between
-checkpoints a live weight artifact exists only in engine memory; a durable one
-stores its bytes in Git.
+The selected content: a model checkpoint, live weights, or a harness tree.
+``content_id`` identifies those contents independently of when or why Reef
+published them.
 
-Version chain
+Release
+-------
+
+One accepted publication decision in a scenario. ``release_id`` identifies the
+link in the scenario history and ``parent_release_id`` identifies its parent.
+Rollback therefore creates a new release that can point to the same
+``content_id`` as an older release; history is appended, never rewound.
+
+Content ID
+----------
+
+The identity of the bytes or logical model state selected by a release. Equal
+``content_id`` values mean equal selected content even when the ``release_id``
+values differ, such as after rollback or republication.
+
+Release chain
 -------------
 
-A scenario's history of accepted updates, each version carrying its parent. A
-durable version can be restored when its surface and runtime support rollback.
+A scenario's history of accepted updates, each release carrying its parent. A
+durable release can be restored when its surface and runtime support rollback.
 
 Candidate selection
 -------------------
 
 The decision whether a produced update should replace the current served
-version. A ``CandidateEvaluator`` measures the candidate, a
+release. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
 ``CandidateEvaluationPlugin`` implements both. The docs also call this the
 gate. Every recipe carries the plugin as ``candidate_evaluation``. It is
@@ -176,19 +190,19 @@ The cookbook `openclawrl <../user-guide/recipes/openclawrl.rst>`__ recipe (`arXi
 conversation traffic using a next-state binary reward, with no external grader
 and no session headers.
 
-Weight version
+Runtime load ID
 --------------
 
-An engine-scoped ``<incarnation>:<sequence>`` token naming the weights that
-produced a span of generated tokens. Distinct from the artifact version, which
-names a link in the scenario's chain: between checkpoints many weight versions
-can share one artifact version, and a restart invalidates the token but not the
-chain.
+An engine-scoped ``<incarnation>:<sequence>`` token naming the concrete weight
+load that produced a span of generated tokens. It is a serving fence, not a
+publication or content identity. Reloading the same ``content_id`` can produce
+a new runtime load ID, while rollback can create a new ``release_id`` for old
+content. A restart invalidates runtime load IDs but not the release chain.
 
 Staleness
 ---------
 
-The accepted lag between the version that produced a sample and the version
+The accepted lag between the runtime load that produced a sample and the load
 currently serving, configured by ``max_staleness``. Zero requires a sample to
 train against the weights that generated it.
 

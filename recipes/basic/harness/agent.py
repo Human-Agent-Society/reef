@@ -69,13 +69,13 @@ class HarborAgent(BaseAgent):
             raise RuntimeError(f"writing {ANSWER_PATH} failed: {result.stderr}")
 
         meta = response.get("metadata") or response.get("meta_info") or {}
-        weight_version = meta.get("weight_version")  # only a training runtime reports one
+        runtime_load_id = meta.get("runtime_load_id")  # only a training runtime reports one
         # The receipt: report.py grades the verifier reward against it.
         context.metadata = {
             **(context.metadata or {}),
             "reef": {
                 "agent_record_ids": [receipt],
-                "weight_versions": [weight_version] if weight_version else [],
+                "runtime_load_ids": [runtime_load_id] if runtime_load_id else [],
             },
         }
         context.n_input_tokens = response["usage"]["prompt_tokens"]

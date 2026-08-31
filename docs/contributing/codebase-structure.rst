@@ -81,7 +81,7 @@ import a concrete integration.
 | ``reef/artifact/``  | artifact bytes, repositories,                            | commit policy or delivery                  |
 |                      | materialization, version heads                           | behavior                                   |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the version chain           |
+| ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                      | episodes, trajectories                                   |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``recipes/``         | one method per package: recipe, processor, preparer,     | shared machinery, or another method        |

@@ -8,7 +8,7 @@ Bounded stale-sample training without giving up the version fence
    This historical RFC predates the issue-based RFC process and will be removed
    in a future cleanup.
 
-   Today every training job is fenced to the exact serving weight version that
+   Today every training job is fenced to the exact serving runtime load ID that
    produced its rollouts; anything older is discarded. That fence makes
    version lag zero **by construction**. This RFC adds one shared, bounded
    staleness window: keep the fence's correctness job (serving identity at
@@ -25,12 +25,12 @@ Three independently reasonable mechanisms combine to produce this behavior:
 
 1. **Provenance becomes the fence.**
    `ray_runtime.prepare_training_step <../../reef/runtime/adapters/ray_runtime.py>`__
-   collects the batch's producing weight versions, requires exactly one, and
-   stamps it as the job's ``expected_weight_version``. The samples' *provenance*
+   collects the batch's producing runtime load IDs, requires exactly one, and
+   stamps it as the job's ``expected_runtime_load_id``. The samples' *provenance*
    is promoted into the job's *identity*.
 2. **The bridge rejects mismatch.**
    `bridge._run_train_step <../../reef/train/slime_backend/reef_adapters/bridge.py>`__
-   compares ``expected_weight_version`` against the currently published serving
+   compares ``expected_runtime_load_id`` against the currently published serving
    version and returns ``outcome="stale"`` on any difference.
 3. **The dispatcher discards.** On ``stale``,
    `dispatcher._process <../../reef/dispatcher.py>`__ calls ``reject_pending()``:
@@ -60,7 +60,7 @@ fencing from freshness admission while keeping ``max_staleness: 0`` inert.
 3. Proposal: split the fence from the freshness policy
 ------------------------------------------------------
 
-``expected_weight_version`` currently answers two different questions with one
+``expected_runtime_load_id`` currently answers two different questions with one
 comparison:
 
 +----------------------+-----------------------+----------------------+
@@ -83,10 +83,10 @@ comparison:
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 With the window enabled, ``prepare_training_step`` stamps
-``expected_weight_version`` from the runtime's own ``serving_weight_version()`` at
+``expected_runtime_load_id`` from the runtime's own ``serving_runtime_load_id()`` at
 preparation time instead of from the samples. The bridge's exact-match check
 still catches the race it exists for (the serving version moved between
-preparation and execution). A parallel ``producing_weight_versions`` list in the
+preparation and execution). A parallel ``producing_runtime_load_ids`` list in the
 shared training payload retains each sample's provenance. At ``W = 0``, Reef
 keeps the old producing-version fence and does not add a serving probe.
 

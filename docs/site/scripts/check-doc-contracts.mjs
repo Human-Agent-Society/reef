@@ -157,7 +157,7 @@ const glossaryTerms = [
   "Recipe reference",
   "Loss family",
   "Preparer",
-  "Version chain",
+  "Release chain",
   "Artifact",
   "Surface",
   "Harness",
