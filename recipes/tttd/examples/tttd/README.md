@@ -155,6 +155,10 @@ rollouts, one optimizer step, thinking enabled, two GPUs. Nothing has to be
 exported first except `TTTD_TASK` — `run.py`, `harness/harbor_agent.py`, and
 `serve.yaml` each write out the values they use.
 
+We recommend allocating at least 256 GiB of host memory to the reference
+8 × 64 setup. With less memory, reduce evaluator concurrency or request a
+larger allocation to avoid stalls or termination.
+
 ### Another problem, or a smaller grid
 
 `harbor/circle_packing_26` and `harbor/circle_packing_32` are bundled as well.
