@@ -26,22 +26,13 @@ The only difference is that, Reef constantly evaluates your agent behavior
 and improves the served harness and model weights in the backend. You keep getting
 better and better results without having to do anything.
 
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-hero-dark.svg">
-  <img src="docs/assets/readme-hero-light.svg" alt="An ordinary agent forgets its feedback; Reef uses feedback to grow a version chain instead, and new versions update the model or the harness." width="640">
-</picture>
-
 </div>
 
 
 ## How it works
 
 <div align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-loop-dark.svg">
-  <img src="docs/assets/readme-loop-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
-</picture>
+<img src="docs/assets/readme-loop-v2-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
 </div>
 
 Reef processes each learning cycle in four steps. The table also shows which
