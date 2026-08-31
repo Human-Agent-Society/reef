@@ -34,10 +34,16 @@ The example directory is **not** a Python package. There is no
 `pyproject.toml` declares it:
 
 ```toml
+[project]
+dependencies = ["reef-client", "reef-eval[harbor]"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["harness*"]
 ```
+
+Only examples that do not use REEF Eval (for example, a direct
+`reef_client` campaign driver) should omit `reef-eval[harbor]`.
 
 `run.sh` installs it into REEF Eval's ephemeral environment with
 `--with-editable "$PWD"`.

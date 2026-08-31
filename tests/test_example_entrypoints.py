@@ -12,6 +12,11 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
+    import tomli as tomllib
+
 
 ROOT = Path(__file__).resolve().parents[1]
 # An example lives beside its method under recipes/<method>/examples/; the
@@ -22,6 +27,18 @@ EXAMPLE_DIRS = {
     "tttd": ROOT / "recipes" / "tttd" / "examples" / "tttd",
     "guidance_ttt": ROOT / "recipes" / "tttd" / "examples" / "guidance_ttt",
 }
+REEF_EVAL_EXAMPLE_DIRS = (
+    *EXAMPLE_DIRS.values(),
+    ROOT / "recipes" / "harness_evolve" / "examples" / "skillclaw",
+    ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("example_dir", REEF_EVAL_EXAMPLE_DIRS, ids=lambda path: path.name)
+def test_reef_eval_examples_declare_their_runtime_dependency(example_dir: Path) -> None:
+    project = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert "reef-eval[harbor]" in project["dependencies"]
 
 
 def _install_harbor_protocol(monkeypatch) -> None:

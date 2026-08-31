@@ -7,7 +7,7 @@ name = "reef-basic-harness"
 version = "0.1.0"
 description = "Minimal Harbor agent harness that talks to a Reef service"
 requires-python = ">=3.10"
-dependencies = ["reef-client"]
+dependencies = ["reef-client", "reef-eval[harbor]"]
 
 [tool.setuptools.packages.find]
 where = ["."]

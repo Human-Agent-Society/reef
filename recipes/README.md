@@ -1,10 +1,11 @@
 # Examples
 
-Setup, once per example directory (installs the example's harness,
-`reef-client`, and [REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval)):
+Setup, once per example directory (installs the example's harness and its
+declared dependencies, including `reef-client` and, where used,
+[REEF Eval](https://github.com/Human-Agent-Society/reef/tree/main/reef-eval)):
 
 ```bash
-pip install -e . "reef-eval[harbor]"
+pip install -e .
 ```
 
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
