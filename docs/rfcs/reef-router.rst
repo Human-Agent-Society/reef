@@ -32,7 +32,7 @@ Routing cannot change the bound scenario.
 
    Reef scenario B ──▶ SR entrypoint B ──▶ SR recipe B ──▶ roles {stable, candidate}
            ▲
-           └──────── route, fallback, and replay must stay inside this boundary
+           └──────── route, fallback, and replay must stay in this scenario
 
 The gateway binds each authenticated tenant to one Reef scenario. The scenario
 remains Reef's isolated workload: its records, training state, and version
@@ -46,7 +46,7 @@ Motivation
 A scenario already isolates records, trainer state, and artifact versions.
 Routing one scenario into another would break that ownership model and could
 mix tenant traffic or training data. Semantic Router owns model-choice policy;
-Reef enforces the scenario boundary and records the resulting execution.
+Reef enforces scenario isolation and records the resulting execution.
 Canary, shadow, and student/teacher policies should be reusable rather than
 copied into every client or harness.
 
@@ -79,7 +79,7 @@ Non-goals
 Proposal
 --------
 
-Isolation boundary
+Scenario isolation
 ~~~~~~~~~~~~~~~~~~
 
 Each routed ingress is bound to one scenario. The reference deployment runs
@@ -118,7 +118,7 @@ One Semantic Router process per scenario is not required. Routing recipes
 scope model eligibility and policy, while the process, canonical
 configuration, providers, management API, replay backend, and metrics endpoint
 remain shared and operator-only. This is logical isolation, not a process
-security boundary. Deployments requiring hard tenant isolation use separate
+security guarantee. Deployments requiring hard tenant isolation use separate
 Envoy, Semantic Router, Reef, and runtime stacks. Semantic Router aliases are
 process-wide, so the bridge names each one ``<scenario>/<role>``, for example
 ``tenant-a/student``. Reef validates the scenario prefix, role, and resolved
@@ -165,7 +165,7 @@ Architecture
      - Select a healthy replica for the resolved provider model.
 
 Reef adds no competing policy engine. Semantic Router owns policy; Reef owns
-the scenario boundary and the auditable execution contract.
+scenario isolation and the auditable execution contract.
 
 Routing decision
 ~~~~~~~~~~~~~~~~
@@ -322,8 +322,8 @@ state, but it may not re-route. A normal Reef pause/update does not abort or
 re-route the request; token-level serving version spans remain authoritative
 when generation crosses a weight update.
 
-Trust boundary
-~~~~~~~~~~~~~~
+Trust model
+~~~~~~~~~~~
 
 .. code:: python
 
@@ -427,7 +427,7 @@ artifacts, requires a separate RFC.
 This remains compatible with recipe-declared report contracts: those schemas
 validate their declared fields while preserving additional report metadata.
 
-Failure boundary
+Failure handling
 ~~~~~~~~~~~~~~~~
 
 .. code:: mermaid
@@ -719,10 +719,10 @@ Alternatives considered
    * - Alternative
      - Why not
    * - Router selects a Reef scenario
-     - Crosses the tenant boundary and can mix records, policy, or training
+     - Breaks tenant isolation and can mix records, policy, or training
        data.
    * - One Semantic Router recipe for all scenarios
-     - Allows policy, state, and fallback behavior to cross scenario boundaries.
+     - Allows policy, state, and fallback behavior to escape their scenarios.
    * - Build another Reef policy engine
      - Duplicates Semantic Router and still needs an Envoy bridge.
    * - Route directly to workers

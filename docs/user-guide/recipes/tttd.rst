@@ -200,9 +200,9 @@ because the packing tasks need a longer context on the same GPUs.
    TTTD_TASK=circle_packing_26 ./run.sh
 
 The judges run each submitted program in a subprocess and recompute the returned
-quantity. The circle-packing judges verify the circle count, square boundaries,
-pairwise non-overlap, and finite values before summing the radii. They do not use
-the sum reported by the generated program.
+quantity. The circle-packing judges verify the circle count, ensure every circle
+stays inside the square, check pairwise non-overlap and finite values, and then
+sum the radii. They do not use the sum reported by the generated program.
 
 Configure a trajectory
 ----------------------
@@ -259,9 +259,9 @@ about the global optima.
    :alt: Verified circle configurations for Packing 26 and Packing 32
 
 The saved programs were executed again before the configurations were plotted.
-The replay checked the circle count, finite values, square boundaries, and every
-pairwise distance with a tolerance of ``1e-12``. Floating point summation changed
-the recorded values by less than ``1.2e-12``.
+The replay checked the circle count, finite values, whether every circle stayed
+inside the square, and every pairwise distance with a tolerance of ``1e-12``.
+Floating point summation changed the recorded values by less than ``1.2e-12``.
 
 Best solution found so far
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -413,8 +413,8 @@ when that contract changes.
 
 Add tests for the program contract, invalid outputs, reward calculation, and
 task registration. ``tests/test_tttd_harness.py`` and
-``tests/test_tttd_packing_tasks.py`` show the boundary between the shared harness
-and a task-specific judge.
+``tests/test_tttd_packing_tasks.py`` show how the shared harness hands programs
+to a task-specific judge.
 
 See also
 --------

@@ -22,8 +22,8 @@ The ``runtime`` dependency group installs the reviewed training-runtime commit.
 Keep ``--no-deps`` in this command because GPU development uses the
 CUDA-compatible dependencies already installed in the container.
 
-Package boundaries
-------------------
+Package responsibilities
+------------------------
 
 - The ``slime`` extra installs the Python-side dependencies used by
   ``reef/train/slime_backend/``; the ``runtime`` dependency group pins the

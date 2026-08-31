@@ -1,7 +1,7 @@
-.. _the-evolution-boundary--what-reef-updates-and-what-it-doesnt:
+.. _the-evolution-scope--what-reef-updates-and-what-it-doesnt:
 
-The evolution boundary: what Reef updates, and what it doesn't
-===============================================================
+The evolution scope: what Reef updates, and what it doesn't
+============================================================
 
 :Status: Deprecated
 
@@ -15,7 +15,7 @@ The evolution boundary: what Reef updates, and what it doesn't
    harness produces while executing a fixed algorithm, and it stays on the
    harness side. Whether an
    update is gated before publishing is a separate, per-backend risk policy, not
-   what decides the boundary.
+   what decides where the state belongs.
 
 .. _1-the-question:
 
@@ -31,13 +31,13 @@ Several methods raise the same design question:
 - GEPA evolves prompts by keeping a candidate frontier. Should that live in
   Reef or outside it?
 
-The presence of a gate cannot determine this boundary because **no update is
+The presence of a gate cannot answer this question because **no update is
 guaranteed to be an improvement**. A PPO step can regress. The
 ``openclawrl`` and ``sao`` algorithms
 publish every batch with no gate at all, and their safety net is not a gate but
 the version chain: every publish is a commit, receipts tie each outcome to the
 exact version that produced it, and rollback restores any earlier one. Gating
-therefore cannot be the boundary criterion. The boundary depends on two
+therefore cannot be the placement rule. Placement depends on two
 orthogonal axes.
 
 .. _2-axis-1--what-changes-this-decides-where-the-code-lives:
@@ -163,10 +163,10 @@ Reef because that loop reads records and publishes artifacts. One method can
 have both: TTTD's search harness runs outside while its grouped training step
 runs inside. They exchange receipts and reports.
 
-.. _5-what-the-boundary-unlocks:
+.. _5-what-this-split-unlocks:
 
-5. What the boundary unlocks
-----------------------------
+5. What this split unlocks
+--------------------------
 
 1. **Ungated continual publishing for harness artifacts** (unlocks ACE,
    `arXiv:2510.04618 <https://arxiv.org/abs/2510.04618>`__). Structurally

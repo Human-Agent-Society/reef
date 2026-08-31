@@ -53,7 +53,7 @@ Surrounding changes
   ``tests/reef_service/test_reef_recipes.py`` and
   ``tests/reef_service/test_recipe_config_fields.py``.
 - Add method behavior tests under ``tests/reef_service/``. Add an integration
-  contract when the method crosses a backend boundary.
+  contract when the method calls into a concrete backend.
 - Put every runnable configuration beside its method under
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
@@ -95,7 +95,7 @@ Tests and documentation
 - Put service-facing lifecycle and wire contracts in ``tests/reef_service/``.
 - Prove that importing backend-neutral Reef modules does not import the
   framework. Extend ``tests/reef_service/test_dependency_boundaries.py`` when
-  a new boundary is introduced.
+  a new package dependency rule is added.
 - Update the ``reef/train`` package docstring, the Integration API,
   deployment guidance, and the configuration reference.
 
@@ -149,7 +149,7 @@ Add a service route
 
 Routes adapt HTTP to transport-independent behavior. The ``reef/service``
 package docstring and `HTTP API <../reference/http-api.rst>`__ define the
-current request boundary.
+current request contract.
 
 - Add or extend a module in ``reef/service/routes/`` with a
   ``register_*_routes`` function.
@@ -164,8 +164,8 @@ current request boundary.
 - Add route and service tests under ``tests/reef_service/``. Update the wire
   guide for a public endpoint; the docs contract check requires the guide to
   name every registered route.
-- Treat removal, incompatible payload changes, and authentication-boundary
-  changes as public API changes requiring an RFC and contract tests.
+- Treat removal, incompatible payload changes, and changes to authentication
+  rules as public API changes requiring an RFC and contract tests.
 
 Add a harness adapter
 ---------------------
@@ -197,9 +197,9 @@ Definition of done
 For every playbook:
 
 - the implementation is in the owning package and does not reverse an
-  existing dependency boundary;
+  existing package dependency;
 - registration happens through the documented registry or entry point;
-- focused unit and contract tests cover the new boundary;
+- focused unit and contract tests cover the new interface;
 - configuration, package data, and dependencies are declared at their
   repository-level homes;
 - user, operator, and contributor documentation describe the public change;

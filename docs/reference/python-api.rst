@@ -102,7 +102,7 @@ Common members
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...)`` | ``Trainer``                 | construct the scenario trainer |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_surface(scenario)``                       | ``Surface``                 | the delivery boundary for one  |
+| ``build_surface(scenario)``                       | ``Surface``                 | the delivery contract for one  |
 |                                                   |                             | named scenario                 |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_artifact_validator()``                    | ``ArtifactValidator``       | artifact admission, enforced   |
