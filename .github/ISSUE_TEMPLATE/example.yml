@@ -1,0 +1,73 @@
+name: Runnable example
+description: Propose a maintained recipe, demo, or reference deployment
+title: "[Example] "
+labels: ["type: example", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Examples are maintained user-facing paths, not one-off experiment
+        scripts. Describe the audience, clean-checkout workflow, expected
+        result, validation, and long-term dependency cost.
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Examples
+        - Packaging or deployment
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: textarea
+    id: audience
+    attributes:
+      label: Audience and user journey
+      description: Who will run this example, and what complete workflow should it teach?
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Clean-checkout workflow
+      description: Describe installation, configuration, commands, required services or hardware, and the expected result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation and acceptance criteria
+      description: Explain how CI, a smoke lane, or retained evidence will prove that the documented path still works.
+    validations:
+      required: true
+
+  - type: textarea
+    id: maintenance
+    attributes:
+      label: Dependencies and maintenance
+      description: List external projects, models, providers, images, credentials, licenses, and expected ownership.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing examples and issues for an equivalent workflow.
+          required: true
+        - label: This is intended as a maintained user-facing path rather than a one-off experiment script.
+          required: true
+        - label: The proposed workflow does not require committing credentials, private data, or sensitive prompts.
+          required: true

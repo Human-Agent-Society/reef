@@ -1,0 +1,6 @@
+[submodule "third_party/cordis"]
+	path = third_party/cordis
+	url = https://github.com/cordiverse/cordis.git
+[submodule "third_party/reef-client"]
+	path = third_party/reef-client
+	url = https://github.com/Human-Agent-Society/reef-client.git

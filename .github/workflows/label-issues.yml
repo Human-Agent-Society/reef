@@ -1,0 +1,52 @@
+name: label new issues
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  primary-area:
+    if: github.repository == 'Human-Agent-Society/reef'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Apply the selected primary area
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const body = context.payload.issue.body || "";
+            const match = body.match(/### Primary area\s*\n+\s*([^\n]+)/i);
+            if (!match) {
+              core.info("No structured primary area found; leaving routing to triage");
+              return;
+            }
+
+            const selected = match[1].trim();
+            const labelsBySelection = {
+              "Core and scenario lifecycle": "area: core",
+              "Service, API, or CLI": "area: service",
+              "Training and runtime": "area: training",
+              "Artifact management": "area: artifacts",
+              "Versioning, lineage, or rollback": "area: versioning",
+              "Observability, metrics, or tracing": "area: observability",
+              "Harness, recipes, or surfaces": "area: harness",
+              "Documentation": "area: docs",
+              "Examples": "area: examples",
+              "Packaging or deployment": "area: packaging",
+              "CI and developer tooling": "area: ci",
+            };
+            const label = labelsBySelection[selected];
+            if (!label) {
+              core.info(`No automatic area label for selection: ${selected}`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: context.issue.number,
+              labels: [label],
+            });

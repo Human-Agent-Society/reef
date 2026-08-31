@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 268 80" role="img" aria-labelledby="title">
+  <title id="title">Reef</title>
+  <g fill="none" stroke="#0d9488" stroke-linecap="round" stroke-linejoin="round" stroke-width="3.5">
+    <path d="M14 23.5c2.5 0 4 2.5 7 2.5s5.5-4.5 8.5-4.5S35.5 26 38.5 26s6-4.5 9-4.5c2.5 0 4 2 6.5 2"/>
+    <path d="M14 36.5c2.5 0 4 2.5 7 2.5s5.5-4.5 8.5-4.5S35.5 39 38.5 39s6-4.5 9-4.5c2.5 0 4 2 6.5 2"/>
+    <path d="M14 49.5c2.5 0 4 2.5 7 2.5s5.5-4.5 8.5-4.5S35.5 52 38.5 52s6-4.5 9-4.5c2.5 0 4 2 6.5 2"/>
+  </g>
+  <text x="78" y="53" fill="#102725" font-family="Arial, Helvetica, sans-serif" font-size="38" font-weight="700" letter-spacing="7">REEF</text>
+</svg>

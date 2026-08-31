@@ -1,0 +1,77 @@
+# The pi coding agent, driven headless per episode.
+#
+# PI_CODING_AGENT_DIR relocates the whole composition root (settings.json,
+# models.json, AGENTS.md, prompts/, skills/, extensions/), so nothing is
+# rendered into a project-local .pi/ and the trust gate never fires.
+# PI_OFFLINE kills all startup network work and PI_SKIP_VERSION_CHECK pins
+# the self-updater; both keep episodes deterministic and hermetic.
+name: pi
+binary: pi
+# The vendor's install channel at the pinned version; consumed by the
+# GET /reef/harness/install script, never by episode runs.
+install:
+  kind: npm
+  package: "@earendil-works/pi-coding-agent"
+  version: "0.84.2"
+  binary_path: "node_modules/.bin/pi"
+argv: ["--mode", "json", "-p", "{prompt}"]
+env:
+  PI_CODING_AGENT_DIR: "{root}/pi-agent"
+  PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
+  PI_OFFLINE: "1"
+  PI_SKIP_VERSION_CHECK: "1"
+files:
+  config:
+    primary:
+      path: "pi-agent/settings.json"
+      defaults: {}
+    models:
+      path: "pi-agent/models.json"
+      defaults: {}
+  rules: "pi-agent/AGENTS.md"
+  agent_command: "pi-agent/prompts/{name}.md"
+  skill: "pi-agent/skills/{name}/SKILL.md"
+  code_extension: "pi-agent/extensions/{name}.ts"
+trajectory:
+  format: pi-session-jsonl
+  path: "sessions"
+cleanup_whitelist:
+  - "sessions/**"
+  # pi's boot persists a credential store and a model-registry store beside
+  # the rendered config (observed on the real 0.84.2 binary; the smoke test
+  # in tests/smoke/test_real_pi.py guards this): episode state, not residue.
+  - "pi-agent/auth.json"
+  - "pi-agent/models-store.json"
+quirks: reef.harness.adapters.pi.quirks
+# How to point pi at a model endpoint, per API dialect. Reef renders the set
+# matching its model binding's api into evaluation episodes; the served tree
+# never carries a provider.
+model_binding:
+  openai:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-completions
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+    - target: primary
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+  anthropic:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: anthropic-messages
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}"
+            models:
+              - id: "{model}"
+    - target: primary
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef

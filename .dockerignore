@@ -1,0 +1,24 @@
+.git
+.github
+.pytest_cache
+**/__pycache__
+**/*.pyc
+.claude
+.agents
+imgs
+docs
+*.egg-info
+results
+ckpts
+wandb
+.env
+.venv
+venv
+outputs
+local
+**/*.pkl
+**/*.out
+
+# Example runtime state (reef serve work dirs; may be root-owned from container runs)
+examples/*/work
+examples/*/work-*

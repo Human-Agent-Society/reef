@@ -1,0 +1,36 @@
+{
+  "name": "reef-docs",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build --webpack",
+    "check:docs": "node scripts/check-doc-links.mjs && node scripts/check-doc-contracts.mjs",
+    "start": "next start",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "@shikijs/langs": "4.4.3",
+    "github-slugger": "^2.0.0",
+    "html-react-parser": "^6.1.7",
+    "lucide-react": "^1.33.0",
+    "mermaid": "^11.17.0",
+    "next": "^16.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "rst-compiler": "^0.5.9",
+    "shiki": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/compat": "^2.1.0",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "eslint": "^10.8.1",
+    "eslint-config-next": "^16.3.1",
+    "typescript": "^5.8.3"
+  },
+  "overrides": {
+    "postcss": "^8.5.26"
+  }
+}

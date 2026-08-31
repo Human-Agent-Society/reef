@@ -1,0 +1,312 @@
+"""Server-side rendering of the one-command harness install script.
+
+``GET /reef/harness/install`` answers with a self-contained POSIX sh
+script: the composition files ride inline as quoted heredocs, so running
+the script makes no reef callback and carries no token. The binary's bytes
+never come from reef: the script checks the locally installed binary
+against the descriptor's pinned version and, only on absence or mismatch,
+runs the vendor's own install command. Before writing, the script removes
+the files a previous install's sidecar recorded that the new composition
+lacks, exactly like the stdlib client pull, so installing an older version
+never leaves a newer version's files behind. After writing, the script
+verifies a sha256 over the sorted relative paths, byte lengths, and file
+bytes against the value baked in at render time, and records the pulled
+version in the same sidecar the stdlib client pull writes. Rerunning when
+everything already matches writes nothing at all, not even the sidecar,
+and says "already current".
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Mapping
+from pathlib import PurePosixPath
+
+from reef.harness.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+
+#: Client-side bookkeeping file, byte-identical to what the stdlib client
+#: pull writes; must match ``reef_client.client.HARNESS_VERSION_SIDECAR``.
+HARNESS_VERSION_SIDECAR = ".reef-harness-version"
+
+
+def composition_checksum(files: Mapping[str, str]) -> str:
+    """sha256 over the sorted relative paths, byte lengths, and file bytes.
+
+    The stream is, for each path in sorted order, the utf-8 path plus one
+    newline plus the decimal byte length plus one newline plus the file
+    bytes. The length frame makes the stream injective: without it, moving
+    bytes across a file boundary could leave the concatenation unchanged.
+    The script's ``compose_stream`` function reproduces exactly this stream
+    with ``printf``, ``wc -c``, and ``cat``.
+    """
+    digest = hashlib.sha256()
+    for relative in sorted(files):
+        content = files[relative].encode("utf-8")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\n")
+        digest.update(str(len(content)).encode("ascii"))
+        digest.update(b"\n")
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def _heredoc_delimiter(content: str) -> str:
+    """A heredoc delimiter that provably never occurs in ``content``.
+
+    Derived from the content's own hash and checked by substring search:
+    the candidate lengthens while it still occurs, and when even the full
+    digest occurs the digest is re-hashed until a free candidate exists.
+    ``content`` is finite, so the search terminates.
+    """
+    digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    while True:
+        for length in range(12, len(digest) + 1):
+            candidate = f"REEF_EOF_{digest[:length]}"
+            if candidate not in content:
+                return candidate
+        digest = hashlib.sha256(digest.encode("ascii")).hexdigest()
+
+
+def _double_quoted(path: str) -> str:
+    """Escape ``path`` for interpolation inside a double-quoted string."""
+    return path.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+
+def _single_quoted(text: str) -> str:
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def _write_file_block(target: str, content: str) -> str:
+    """Shell that writes ``content`` byte-exact to ``$DEST/target``.
+
+    Single-quoted heredocs expand nothing, so hostile composition text
+    (backticks, dollars, quotes, naive EOF lines) lands verbatim. A heredoc
+    body always ends with a newline; content without a trailing newline
+    goes through command substitution, which strips exactly that one added
+    newline (the content itself then has no trailing newline to lose), and
+    ``printf '%s'`` writes the rest untouched.
+    """
+    delimiter = _heredoc_delimiter(content)
+    opener = f"<<{_single_quoted(delimiter)}"
+    redirect = f'"$DEST/{_double_quoted(target)}"'
+    if content.endswith("\n"):
+        return f"cat > {redirect} {opener}\n{content}{delimiter}\n"
+    return f"printf '%s' \"$(cat {opener}\n{content}\n{delimiter}\n)\" > {redirect}\n"
+
+
+def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
+    """The env var and compose subdirectory that point the binary at the composition.
+
+    The compose directory is the parent of the primary config target's path
+    (e.g. ``pi-agent`` for pi, ``opencode`` for opencode). The env var is the
+    one whose value is ``{root}/<compose_dir>`` — the entry that relocates
+    the binary's whole composition at the episode root, and the only env
+    entry the user-facing wrapper needs (session/state dirs use the binary's
+    own defaults outside episodes).
+    """
+    compose_dir = str(PurePosixPath(descriptor.config_targets["primary"].path).parent)
+    marker = f"{{root}}/{compose_dir}"
+    for key, value in descriptor.env.items():
+        if value == marker:
+            return key, compose_dir
+    raise DescriptorError(
+        f"adapter {descriptor.name!r} has no env var pointing at {compose_dir!r} "
+        f"(expected an entry with value {marker!r})"
+    )
+
+
+def _wrapper_lines(
+    descriptor: AdapterDescriptor,
+    env_var: str,
+    compose_dir: str,
+    artifact_version: str,
+    scenario: str,
+) -> list[str]:
+    """The reef-<adapter> wrapper: a capture proxy + report command.
+
+    Written inside the install script's ``else`` branch (only when the
+    composition changed), after the checksum verifies and before the sidecar.
+    The wrapper calls ``reef_client.harness_wrapper``, which starts a local
+    proxy between the agent binary and Reef — capturing receipts so
+    ``reef-<adapter> report`` can report without manual receipt handling.
+    """
+    wrapper_name = f"reef-{descriptor.name}"
+    return [
+        f"    # Write the {wrapper_name} wrapper: capture proxy + report command.",
+        '    BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"',
+        f'    COMPOSE_ABS="$(mkdir -p "$DEST/{_double_quoted(compose_dir)}" && cd "$DEST/{_double_quoted(compose_dir)}" && pwd)"',
+        f'    cat > "$DEST/{_double_quoted(wrapper_name)}" <<REEF_WRAPPER_EOF',
+        "#!/bin/sh",
+        f"# {wrapper_name}: run {descriptor.binary} with the reef-evolved composition.",
+        f"# Generated by reef harness install (adapter {descriptor.name}, version {artifact_version}).",
+        f'# Usage: {wrapper_name} -p "fix the bug"     # run the agent (receipts captured)',
+        f'#        {wrapper_name} report --score 0 --feedback "..."  # report last run\'s receipts',
+        'export REEF_HARNESS_BINARY="$BINARY_ABS"',
+        'export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"',
+        f'export REEF_HARNESS_SCENARIO="{_double_quoted(scenario)}"',
+        f'export REEF_HARNESS_ADAPTER="{_double_quoted(descriptor.name)}"',
+        f'export REEF_HARNESS_ENV_VAR="{_double_quoted(env_var)}"',
+        'exec python3 -m reef.harness.harness_wrapper "\\$@"',
+        "REEF_WRAPPER_EOF",
+        f'    chmod +x "$DEST/{_double_quoted(wrapper_name)}"',
+        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH.",
+        '    mkdir -p "$HOME/.local/bin"',
+        f'    ln -sf "$DEST/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        '    case ":$PATH:" in',
+        '        *":$HOME/.local/bin:"*) ;;',
+        f"        *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
+        "    esac",
+    ]
+
+
+def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) -> list[str]:
+    """The vendor-delegating install step: check the pin, else npm install."""
+    pin = _single_quoted(f"{install.package}@{install.version}")
+    return [
+        f"# Ensure the pinned binary ({install.package}@{install.version}) via the vendor's channel.",
+        'installed=""',
+        'if [ -x "$BINARY" ]; then',
+        '    installed="$("$BINARY" --version 2>/dev/null || true)"',
+        "fi",
+        'case " $installed " in',
+        f'    *" {install.version} "*)',
+        f'        echo "reef: {descriptor.binary} {install.version} already installed"',
+        "        ;;",
+        "    *)",
+        '        mkdir -p "$PREFIX"',
+        f'        npm install --prefix "$PREFIX" {pin}',
+        "        ;;",
+        "esac",
+        "",
+        "# Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.",
+        (
+            "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
+            'python3 -m pip install --quiet --user reef-client "reef @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+        ),
+    ]
+
+
+def render_install_script(
+    *,
+    descriptor: AdapterDescriptor,
+    files: Mapping[str, str],
+    artifact_version: str,
+    scenario: str = "",
+) -> str:
+    """The complete install script for one adapter and one served manifest.
+
+    The manifest side (``files``, ``artifact_version``) is adapter-agnostic;
+    the descriptor contributes the binary's vendor install path. ``scenario``
+    is baked into the wrapper so ``reef-<adapter> report`` knows which
+    scenario to report to. Raises ``DescriptorError`` when the descriptor
+    declares no install section and ``ValueError`` when a composition path is
+    absolute or escapes the destination through a ``..`` part, the same rule
+    the stdlib client pull applies to served paths.
+    """
+    install = descriptor.install
+    if install is None:
+        raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
+    env_var, compose_dir = _compose_env_var(descriptor)
+    wrapper_name = f"reef-{descriptor.name}"
+    for relative in files:
+        if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
+            raise ValueError(f"composition path {relative!r} escapes the destination")
+    ordered = sorted(files)
+    checksum = composition_checksum(files)
+    sidecar_text = json.dumps({"artifact_version": artifact_version, "files": ordered}, indent=2) + "\n"
+    sidecar_checksum = hashlib.sha256(sidecar_text.encode("utf-8")).hexdigest()
+    # The composition paths a prune run keeps, as one case alternation; the
+    # render charset contains no glob or quote characters, so each quoted
+    # path is a literal case pattern. An empty composition keeps nothing.
+    keep = "|".join(_single_quoted(relative) for relative in ordered) or "''"
+    directories = sorted(
+        {str(parent) for relative in ordered if (parent := PurePosixPath(relative).parent) != PurePosixPath(".")}
+    )
+    lines = [
+        "#!/bin/sh",
+        f"# Reef harness install: adapter {descriptor.name}, composition version {artifact_version}.",
+        "# Self contained: the composition files ride inline below and the harness",
+        "# binary comes from the vendor's own channel; running this script calls no",
+        "# reef route and carries no token. Inspect freely, then run:",
+        "#     sh install.sh [DEST] [PREFIX]",
+        "set -eu",
+        "",
+        'DEST="${1:-./reef-harness}"',
+        f'PREFIX="${{2:-$HOME/.local/share/reef-harness/{descriptor.name}}}"',
+        f'BINARY="$PREFIX/{_double_quoted(install.binary_path)}"',
+        f'CHECKSUM="{checksum}"',
+        f'SIDECAR_CHECKSUM="{sidecar_checksum}"',
+        "",
+        "if command -v sha256sum >/dev/null 2>&1; then",
+        "    sha256() { sha256sum | cut -d' ' -f1; }",
+        "elif command -v shasum >/dev/null 2>&1; then",
+        "    sha256() { shasum -a 256 | cut -d' ' -f1; }",
+        "else",
+        "    echo 'reef: neither sha256sum nor shasum found' >&2",
+        "    exit 1",
+        "fi",
+        "",
+        *_ensure_binary_lines(descriptor, install),
+        "",
+        "# The checksum stream, as baked into CHECKSUM: each sorted relative path,",
+        "# its byte length, then its bytes, newline separated. The unquoted wc",
+        "# substitution word-splits away the padding BSD wc prints.",
+        "compose_stream() {",
+        "    :",
+        *(
+            line
+            for relative in ordered
+            for line in (
+                f"    printf '%s\\n' {_single_quoted(relative)}",
+                f"    printf '%s\\n' $(wc -c < \"$DEST/{_double_quoted(relative)}\")",
+                f'    cat "$DEST/{_double_quoted(relative)}"',
+            )
+        ),
+        "}",
+        "",
+        'mkdir -p "$DEST"',
+        *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
+        "",
+        "# A rerun on a current machine writes nothing at all, not even the sidecar.",
+        'current=""',
+        'sidecar=""',
+        "if "
+        + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_VERSION_SIDECAR, *ordered))
+        + "; then",
+        '    current="$(compose_stream | sha256)"',
+        f'    sidecar="$(sha256 < "$DEST/{HARNESS_VERSION_SIDECAR}")"',
+        "fi",
+        'if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then',
+        '    echo "reef: composition already current"',
+        "else",
+        "    # Prune the files a previous install's sidecar recorded that this",
+        "    # composition lacks, exactly like the stdlib client pull. The sidecar",
+        "    # is json.dumps at indent 2, so every file entry is one four-space",
+        "    # indented quoted line.",
+        f'    if [ -f "$DEST/{HARNESS_VERSION_SIDECAR}" ]; then',
+        '        sed -n \'s/^    "\\(.*\\)",\\{0,1\\}$/\\1/p\' "$DEST/' + HARNESS_VERSION_SIDECAR + '" |',
+        "            while IFS= read -r old; do",
+        '                case "$old" in',
+        f"                    {keep}) ;;",
+        '                    *) rm -f "$DEST/$old" ;;',
+        "                esac",
+        "            done",
+        "    fi",
+        *(_write_file_block(relative, files[relative]).rstrip("\n") for relative in ordered),
+        '    written="$(compose_stream | sha256)"',
+        '    if [ "$written" != "$CHECKSUM" ]; then',
+        '        echo "reef: composition checksum mismatch: $written != $CHECKSUM" >&2',
+        "        exit 1",
+        "    fi",
+        *_wrapper_lines(descriptor, env_var, compose_dir, artifact_version, scenario),
+        "    # The same sidecar the stdlib client pull writes: pulled version and file list.",
+        _write_file_block(HARNESS_VERSION_SIDECAR, sidecar_text).rstrip("\n"),
+        "fi",
+        "",
+        f'echo "run:     $DEST/{wrapper_name}"',
+        'echo "binary:  $BINARY"',
+        'echo "harness: $DEST"',
+        "",
+    ]
+    return "\n".join(lines)

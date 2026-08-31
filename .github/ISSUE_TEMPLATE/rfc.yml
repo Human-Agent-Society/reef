@@ -1,0 +1,81 @@
+name: RFC discussion
+description: Start discussion for a substantial project or architecture decision
+title: "[RFC] "
+labels: [enhancement, RFC, "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This issue is the discussion entry point, not the decision record.
+        If maintainers agree that an RFC is appropriate, submit a separate
+        RFC-only pull request using `docs/rfcs/0000-template.rst`.
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Packaging or deployment
+        - Project-wide policy
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision to make
+      description: State the smallest durable project decision that needs agreement.
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and evidence
+      description: Describe the problem, affected users, current limitations, and supporting evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Cover compatibility, persistence, security, operations, performance, and maintenance where relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options considered
+      description: Summarize plausible approaches and their trade-offs. A preferred option is not required yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: ownership
+    attributes:
+      label: Implementation and long-term ownership
+      description: Who could implement, review, operate, and maintain the result?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues, pull requests, and RFCs for this decision.
+          required: true
+        - label: I read the RFC process and understand that discussion is not acceptance.
+          required: true
+        - label: I have not combined the RFC discussion with an implementation pull request.
+          required: true

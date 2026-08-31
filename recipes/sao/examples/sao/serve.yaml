@@ -1,0 +1,127 @@
+# SAO functional-smoke config for recipes/sao/examples/sao/run.sh.
+#
+# SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) trains one
+# rollout at a time with no comparison group: batch_size 1 means the dispatcher
+# runs a full train step the moment a rollout's score arrives. The value model
+# computes advantages in-backend via skip-observation GAE, so reef ships no
+# advantages and the family turns Slime's advantage pass on itself. The critic
+# actor colocates on the actor GPUs (fractional placement), so the GPU budget
+# is the same as a critic-free run: actor + rollout.
+#
+# Reduced-model smoke: 2 GPUs, Qwen2.5-1.5B-Instruct. Scale seq-length,
+# model, and GPU counts up for a real run; the objective settings below are the
+# paper's reasoning-domain values and do not change with model size.
+#
+# Started by run.sh; state under ./work.
+
+# The stack's pid and log files. Without this they land in the shared
+# /tmp/reef-stack, beside every other example's.
+run_dir: work/stack
+
+reef:
+  host: 127.0.0.1
+  model_path: ~/models/Qwen2.5-1.5B-Instruct
+  port: 8900
+  recipe: sao
+  token: reef-local
+  batch_size: 1                        # MUST equal training.global_batch_size
+  max_staleness: 18
+  checkpoint_every_n_versions: 1
+  ray_address: 127.0.0.1:${training.ray_port}
+  ray_namespace: reef
+  ray_actor_name: reef-train-bridge
+  # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
+  # actor step, a checkpoint save, and a weight publish, so it outlasts an
+  # inference request by a wide margin. Match the bridge ceiling instead of
+  # the client default to avoid a stale RUNNING marker.
+  train_timeout_s: 14400
+  # SAO's DIS ratio uses the rollout log-probabilities as its behaviour proxy,
+  # so the rollout must be captured token-natively from the engine. Reef never
+  # re-tokenizes a completion to reconstruct policy tensors.
+  inference_backend_factory: >-
+    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  artifact_repository: work/artifacts.git
+  artifact_work_dir: work/artifact-work
+  artifact_cache_dir: work/artifact-cache
+  agent_record_dir: work/agent-record
+
+training:
+  num_gpus: 2                          # ray-head GPU total (actor+critic colocated, rollout)
+  cuda_visible_devices: "0,1"
+  ray_port: 6379
+  ray_dashboard_port: 8265
+  sglang_port: "30000"
+  checkpoint_dir: work/checkpoints
+  global_batch_size: 1
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: sao               # produces group sao/<scenario>
+    # name_prefix: sao
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: work/wandb
+    upload_checkpoints: false
+  # SAO objective as slime flags: --use-critic creates the value-model group;
+  # the algorithm spec sets --custom-advantage-function-path (skip-observation
+  # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)
+  # automatically. --eps-clip / --eps-clip-high are the mask's bounds.
+  # Reef derives architecture flags from the HF config.
+  slime_flags: >-
+    --padded-vocab-size=151936
+    --position-embedding-type=rope
+    --swiglu --disable-bias-linear --add-qkv-bias
+    --normalization=RMSNorm
+    --actor-num-nodes=1 --actor-num-gpus-per-node=1 --rollout-num-gpus=1
+    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=2
+    --tensor-model-parallel-size=1 --pipeline-model-parallel-size=1
+    --seq-length=4096 --rollout-max-response-len=2048
+    --optimizer=adam --lr=1e-6 --lr-decay-style=constant
+    --loss-type=policy_loss --use-rollout-logprobs
+    --use-critic
+    --eps-clip=0.3 --eps-clip-high=5.0
+    --critic-steps-per-actor=2
+    --sao-length-adaptive-lambda --sao-lambda-alpha=1.5
+    --gamma=1.0 --lambd=1.0
+    --entropy-coef=0.0 --n-samples-per-prompt=1
+
+services:
+  - name: ray-head
+    command: >-
+      ray start --head --port=${training.ray_port}
+      --dashboard-host=0.0.0.0 --dashboard-port=${training.ray_dashboard_port}
+      --num-gpus=${training.num_gpus} --disable-usage-stats --block
+    ready: ray health-check --address=127.0.0.1:${training.ray_port}
+    cuda: ${training.cuda_visible_devices}
+
+  - name: slime-driver
+    command: >-
+      python -m reef.train.slime_backend.reef_adapters.driver
+      --megatron-to-hf-mode bridge
+      --hf-checkpoint=${reef.model_path}
+      --load=${training.checkpoint_dir}/megatron
+      --save=${training.checkpoint_dir}/megatron
+      --save-interval=100
+      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
+      --sglang-router-port=${training.sglang_port}
+      --num-rollout=100000000
+      --rollout-batch-size=${training.global_batch_size}
+      --global-batch-size=${training.global_batch_size}
+      --micro-batch-size=1
+      ${training.slime_flags}
+    ready: test -f "$REEF_BRIDGE_READY_FILE"
+    ready_timeout: 900
+    env:
+      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
+      REEF_RAY_NAMESPACE: reef
+      REEF_RAY_ACTOR_NAME: reef-train-bridge
+      REEF_TRAINING_RECIPE: ${reef.recipe}
+    depends_on: [ray-head]
+
+  - name: reef
+    command: python3 -m reef.service
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    env:
+      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
+    depends_on: [slime-driver]

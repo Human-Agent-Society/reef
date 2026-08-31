@@ -1,0 +1,29 @@
+[
+  {
+    "event_id": "evt_existing_001",
+    "title": "Weekly Team Standup",
+    "start_time": "2026-03-17T09:00:00Z",
+    "end_time": "2026-03-17T09:30:00Z",
+    "attendees": ["me@company.com", "team@company.com"],
+    "location": "Online",
+    "recurring": true
+  },
+  {
+    "event_id": "evt_existing_002",
+    "title": "1:1 with Director Chen",
+    "start_time": "2026-03-19T14:00:00Z",
+    "end_time": "2026-03-19T15:00:00Z",
+    "attendees": ["me@company.com", "director.chen@company.com"],
+    "location": "Director's Office",
+    "recurring": false
+  },
+  {
+    "event_id": "evt_conflict_zm",
+    "title": "Client Call - Acme Corp",
+    "start_time": "2026-03-19T11:30:00Z",
+    "end_time": "2026-03-19T12:30:00Z",
+    "attendees": ["zhangmin@company.com", "acme-contact@external.com"],
+    "location": "Online",
+    "recurring": false
+  }
+]

@@ -1,0 +1,39 @@
+# The outer reef training stack: one container running `reef serve` against
+# serve.yaml, with the GPUs, host networking and mounts it needs. The 72
+# task environments have their own compose files under harbor-tasks/.
+#
+# run.sh exports the values below and brings this up; nothing here is a
+# credential except REEF_TOKEN, which run.sh mints per run into $RUN_DIR/token.
+services:
+  reef:
+    image: ${REEF_IMAGE}
+    container_name: reef-openclawrl
+    command: reef serve -c /workspace/Reef/${REEF_CONFIG}
+    # Host networking: the per-task containers reach reef on the machine's IP,
+    # and slime binds the training engines' router to that same IP.
+    network_mode: host
+    ipc: host
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+      - ${RUN_DIR}:/var/lib/reef
+      - ${REEF_ROOT}:/workspace/Reef
+    environment:
+      REEF_TOKEN: ${REEF_TOKEN}
+      REEF_INFERENCE_HOST: ${HOST_IP}
+      PYTHONPATH: /workspace/Reef:/root/Megatron-LM
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:28900/healthz"]
+      interval: 10s
+      timeout: 5s
+      # The full stack boots in ~6 minutes on B200s; 120 x 10s is the ceiling.
+      retries: 120
+      start_period: 30s

@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"01a00b16-935d-7428-9c70-6988b1353c1d","timestamp":"2026-08-16T15:00:24.029Z","cwd":"/work/session-capture"}
+{"type":"model_change","id":"b56f6922","parentId":null,"timestamp":"2026-08-16T15:00:24.061Z","provider":"vllm","modelId":"deepseek-v4-flash"}
+{"type":"thinking_level_change","id":"f645ca18","parentId":"b56f6922","timestamp":"2026-08-16T15:00:24.061Z","thinkingLevel":"off"}
+{"type":"message","id":"93708431","parentId":"f645ca18","timestamp":"2026-08-16T15:00:24.071Z","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly the word READY"}],"timestamp":1786892424070}}
+{"type":"message","id":"4c13b115","parentId":"93708431","timestamp":"2026-08-16T15:00:24.265Z","message":{"role":"assistant","content":[{"type":"text","text":"READY"}],"api":"openai-completions","provider":"vllm","model":"deepseek-v4-flash","usage":{"input":1633,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":1636,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1786892424098,"responseId":"chatcmpl-b25178b291375281","rawStopReason":"stop"}}

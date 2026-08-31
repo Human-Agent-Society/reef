@@ -1,0 +1,5 @@
+# The student sidecar comes from the shared openclawrl-user-sim image, built by
+# run.sh from user_sim/ and tagged with that directory's content hash. When
+# user_sim/ changes, re-stamp the tag in every task (run.sh prints the command).
+FROM openclawrl-user-sim:000dc08106b3
+COPY problem.json /judge/

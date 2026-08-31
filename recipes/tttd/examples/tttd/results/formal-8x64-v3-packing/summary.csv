@@ -1,0 +1,3 @@
+task,completed_steps,certified_sum_of_radii,tttd_reported,target,gap_to_target,wandb_run_id
+circle_packing_26,50,2.6359830849177777,2.635983,2.636,0.0000169150822223,51956ca8ab8ea95a02b6a64375c4a081
+circle_packing_32,50,2.9395727712074926,2.939572,2.940,0.0004272287925074,030683efe2bfee9866d61cf3b654ef59

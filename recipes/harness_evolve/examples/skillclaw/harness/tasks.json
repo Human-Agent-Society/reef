@@ -1,0 +1,325 @@
+{
+  "pin": "1e32bacb904335881de26766defeda3475757c6a",
+  "categories": {
+    "01_Productivity_Flow": 10,
+    "02_Code_Intelligence": 12,
+    "03_Social_Interaction": 6,
+    "04_Search_Retrieval": 11,
+    "05_Creative_Synthesis": 11,
+    "06_Safety_Alignment": 10
+  },
+  "tasks": {
+    "01_Productivity_Flow": [
+      {
+        "id": "01_Productivity_Flow_task_10_pdf_digest",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_10_pdf_digest.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_1_arxiv_digest",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_1_arxiv_digest.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "01_Productivity_Flow_task_2_table_tex_download",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_2_table_tex_download.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_3_bibtex",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_3_bibtex.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_4_2022_conference_papers",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_4_2022_conference_papers.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "01_Productivity_Flow_task_5_wikipedia_biography",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_5_wikipedia_biography.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_6_calendar_scheduling",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_6_calendar_scheduling.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_7_openmmlab_contributors",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_7_openmmlab_contributors.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "01_Productivity_Flow_task_8_real_image_category",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_8_real_image_category.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "01_Productivity_Flow_task_9_scp_crawl",
+        "file": "tasks/01_Productivity_Flow/01_Productivity_Flow_task_9_scp_crawl.md",
+        "timeout_seconds": 1200
+      }
+    ],
+    "02_Code_Intelligence": [
+      {
+        "id": "02_Code_Intelligence_task_10_acad_homepage_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_10_acad_homepage_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_11_resume_homepage_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_11_resume_homepage_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_12_connect_the_dots_hard_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_12_connect_the_dots_hard_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_1_sam3_inference",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_1_sam3_inference.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_2_sam3_debug",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_2_sam3_debug.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_3_jigsaw_puzzle_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_3_jigsaw_puzzle_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_4_jigsaw_puzzle_medium_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_4_jigsaw_puzzle_medium_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_5_jigsaw_puzzle_hard_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_5_jigsaw_puzzle_hard_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_6_benchmark_vlmeval_ocrbench_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_6_benchmark_vlmeval_ocrbench_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_7_connect_the_dots_medium_img_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_7_connect_the_dots_medium_img_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_8_link_a_pix_color_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_8_link_a_pix_color_zh.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "02_Code_Intelligence_task_9_link_a_pix_color_easy_zh",
+        "file": "tasks/02_Code_Intelligence/02_Code_Intelligence_task_9_link_a_pix_color_easy_zh.md",
+        "timeout_seconds": 1200
+      }
+    ],
+    "03_Social_Interaction": [
+      {
+        "id": "03_Social_Interaction_task_1_meeting_negotiation",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_1_meeting_negotiation.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "03_Social_Interaction_task_2_chat_action_extraction",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_2_chat_action_extraction.md",
+        "timeout_seconds": 300
+      },
+      {
+        "id": "03_Social_Interaction_task_3_chat_multi_step_reasoning",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_3_chat_multi_step_reasoning.md",
+        "timeout_seconds": 360
+      },
+      {
+        "id": "03_Social_Interaction_task_4_chat_thread_consolidation",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_4_chat_thread_consolidation.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "03_Social_Interaction_task_5_chat_escalation_routing",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_5_chat_escalation_routing.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "03_Social_Interaction_task_6_chat_cross_dept_update_zh",
+        "file": "tasks/03_Social_Interaction/03_Social_Interaction_task_6_chat_cross_dept_update_zh.md",
+        "timeout_seconds": 600
+      }
+    ],
+    "04_Search_Retrieval": [
+      {
+        "id": "04_Search_Retrieval_task_10_tomllib_trace",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_10_tomllib_trace.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "04_Search_Retrieval_task_11_fuzzy_repo_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_11_fuzzy_repo_search.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "04_Search_Retrieval_task_1_google_scholar_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_1_google_scholar_search.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "04_Search_Retrieval_task_2_conflicting_handling",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_2_conflicting_handling.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "04_Search_Retrieval_task_3_constraint_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_3_constraint_search.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "04_Search_Retrieval_task_4_efficient_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_4_efficient_search.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "04_Search_Retrieval_task_5_fuzzy_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_5_fuzzy_search.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "04_Search_Retrieval_task_6_excel_with_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_6_excel_with_search.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "04_Search_Retrieval_task_7_location_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_7_location_search.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "04_Search_Retrieval_task_8_paper_affiliation_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_8_paper_affiliation_search.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "04_Search_Retrieval_task_9_artwork_search",
+        "file": "tasks/04_Search_Retrieval/04_Search_Retrieval_task_9_artwork_search.md",
+        "timeout_seconds": 600
+      }
+    ],
+    "05_Creative_Synthesis": [
+      {
+        "id": "05_Creative_Synthesis_task_10_social_poster_multi_crop",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_10_social_poster_multi_crop.md",
+        "timeout_seconds": 300
+      },
+      {
+        "id": "05_Creative_Synthesis_task_11_video_en_to_zh_dub",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_11_video_en_to_zh_dub.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_1_match_report",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_1_match_report.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_2_goal_highlights",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_2_goal_highlights.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_3_product_poster",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_3_product_poster.md",
+        "timeout_seconds": 900
+      },
+      {
+        "id": "05_Creative_Synthesis_task_4_video_notes",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_4_video_notes.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_5_product_launch_video_to_json",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_5_product_launch_video_to_json.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_6_clothing_outfit_to_model_image",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_6_clothing_outfit_to_model_image.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "05_Creative_Synthesis_task_7_paper_to_poster",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_7_paper_to_poster.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "05_Creative_Synthesis_task_8_repo_to_homepage",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_8_repo_to_homepage.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "05_Creative_Synthesis_task_9_repo_to_slides",
+        "file": "tasks/05_Creative_Synthesis/05_Creative_Synthesis_task_9_repo_to_slides.md",
+        "timeout_seconds": 600
+      }
+    ],
+    "06_Safety_Alignment": [
+      {
+        "id": "06_Safety_Alignment_task_10_malicious_skill",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_10_malicious_skill.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_1_file_overwrite",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_1_file_overwrite.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_2_leaked_api",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_2_leaked_api.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_3_leaked_api_pswd",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_3_leaked_api_pswd.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_4_authority",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_4_authority.md",
+        "timeout_seconds": 1200
+      },
+      {
+        "id": "06_Safety_Alignment_task_5_risk_os_operation",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_5_risk_os_operation.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_6_prompt_injection",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_6_prompt_injection.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_7_skill_injection",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_7_skill_injection.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_8_malicious_comments",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_8_malicious_comments.md",
+        "timeout_seconds": 600
+      },
+      {
+        "id": "06_Safety_Alignment_task_9_misinformation",
+        "file": "tasks/06_Safety_Alignment/06_Safety_Alignment_task_9_misinformation.md",
+        "timeout_seconds": 600
+      }
+    ]
+  }
+}

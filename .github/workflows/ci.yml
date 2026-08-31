@@ -1,0 +1,270 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Validate community automation
+        run: python .github/scripts/check_community_files.py
+      - name: Validate GitHub Actions workflows
+        run: |
+          archive=actionlint_1.7.12_linux_amd64.tar.gz
+          curl --fail --location --silent --show-error \
+            --output "$archive" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/$archive
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $archive" \
+            | sha256sum --check --strict
+          tar --extract --gzip --file "$archive" actionlint
+          ./actionlint
+      - run: pipx run pre-commit run --all-files --show-diff-on-failure
+      # Keep this explicit in CI as well as pre-commit: TYPE_CHECKING and new
+      # Callable-based object state are architectural policy violations.
+      - name: Enforce Python design policy
+        run: python .github/scripts/check_python_design.py
+      - name: Ban assert and del in Reef source
+        run: python .github/scripts/check_python_statements.py
+      # Type check the service package, including its training-runtime adapters.
+      # huggingface_hub is a declared core dependency (pyproject.toml);
+      # without it installed mypy degrades its call sites to Any.
+      - run: python -m pip install mypy aiohttp pyyaml huggingface_hub
+      - run: python -m mypy
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # sync with requires-python and classifiers in pyproject.toml
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      # huggingface_hub is a declared core dependency (pyproject.toml); the
+      # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
+      # OPD teacher-client tests, and ray for the slime bridge suites; keeping
+      # them here avoids expanding Reef's minimal service dependencies.
+      - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub numpy ray httpx
+      # Install the pinned training runtime without its GPU dependencies: the
+      # tests need it importable, not its GPU stack, and the
+      # full requirements pull CUDA torch and the nvidia wheels, which
+      # exhausts the runner disk and trips the checkpoint free-space floor.
+      - run: python -m pip install --no-deps --group runtime
+      # reef-client is a separate distribution (Human-Agent-Society/reef-client);
+      # install the submodule pin so coordinated protocol changes are tested
+      # before the matching client release reaches PyPI.
+      - run: python -m pip install ./third_party/reef-client
+      # Exercise the CPU-only Megatron LoRA helpers without making Torch a
+      # dependency of the Reef wheel. Production Torch remains owned by the
+      # Slime image.
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      # Directory-driven selection: run everything under tests/ so a new suite
+      # cannot be silently dropped from CI. Nothing is ignored today — what
+      # genuinely needs Megatron carries its own importorskip and reports as
+      # skipped; any future exception must be an explicit --ignore here with a
+      # comment saying why.
+      # test_sao_parity.py deliberately runs: it needs torch but not Megatron
+      # (it installs its own cp_size=1 mpu shim), so the CPU-torch step above
+      # is enough. It is the only gate that pins SAO's hard-mask semantics,
+      # which share the pg_clipfrac key with PPO's clamp counter.
+      # Keep Git-LFS tests independent of host-level Git configuration.
+      - run: >
+          python -m pytest tests
+          --cov=reef --cov-report=term --cov-report=xml
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # sync with requires-python and classifiers in pyproject.toml
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m pip install build twine
+      # Full build (sdist, then wheel from the sdist) validates the sdist is
+      # complete too; twine check validates the metadata. reef-client is a
+      # separate distribution installed from the matching submodule pin below.
+      - run: python -m build
+      - run: python -m twine check dist/*
+      - run: python -m pip install ./third_party/reef-client
+      - run: python -m pip install dist/reef-[0-9]*.whl
+      - name: Check distribution and dependency boundaries
+        working-directory: ${{ runner.temp }}
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import os
+          from importlib.metadata import distribution
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+          from packaging.utils import canonicalize_name
+
+          reef = distribution("reef")
+          assert reef.metadata["Name"] == "reef"
+          # The protocol client is its own distribution and stays
+          # dependency-free: harnesses cannot take the reef wheel's deps.
+          client = distribution("reef-client")
+          assert not (client.requires or ()), client.requires
+          requirements = [Requirement(value) for value in reef.requires or ()]
+          core = {
+              canonicalize_name(requirement.name)
+              for requirement in requirements
+              if requirement.marker is None
+          }
+          assert core == {"aiohttp", "huggingface-hub", "pyyaml", "reef-client"}, core
+          slime = {
+              canonicalize_name(requirement.name)
+              for requirement in requirements
+              if requirement.marker is not None
+              and requirement.marker.evaluate({"extra": "slime"})
+          }
+          assert slime == {
+              "e2b",
+              "httpx",
+              "memray",
+              "omegaconf",
+              "peft",
+              "pillow",
+              "pylatexenc",
+              "qwen-vl-utils",
+              "ray",
+              "safetensors",
+              "sglang-router",
+              "tensorboard",
+              "transformers",
+              "wandb",
+          }, slime
+
+          # The training runtime is a separate distribution: the Reef wheel
+          # ships the adapter package, not the runtime itself.
+          assert importlib.util.find_spec("reef.train.slime_backend") is not None
+          assert importlib.util.find_spec("reef.train.slime") is None
+          for module in ("megatron", "ray", "sglang", "torch", "transformers"):
+              assert importlib.util.find_spec(module) is None, module
+
+          source_root = Path(os.environ["GITHUB_WORKSPACE"])
+          expected_backend_files = {
+              str(path.relative_to(source_root))
+              for path in (
+                  source_root / "reef" / "train" / "slime_backend"
+              ).rglob("*")
+              if path.suffix in {".cu", ".md", ".py"}
+          }
+          expected_backend_files.add("reef/train/__init__.py")
+          installed_files = {str(path) for path in reef.files or ()}
+          assert expected_backend_files <= installed_files
+          PY
+      # Run outside the repo so `import reef` resolves to the installed wheel,
+      # not the source tree. Proves the wheel is complete: modules import,
+      # bundled recipes register, no named configs ship, entrypoint answers.
+      - run: |
+          python -c "
+          import importlib.util, pathlib
+          import reef, reef.service.deploy
+          import reef_client
+          import reef.recipe as rp
+          from reef.recipe.registry import recipe_kinds
+          assert importlib.util.find_spec('reef.train.slime_backend') is not None
+          assert recipe_kinds(), 'no bundled recipes registered'
+          leftover = sorted(p.name for p in (pathlib.Path(rp.__file__).parent / 'configs').glob('*.yaml'))
+          assert not leftover, f'named recipe configs are deployment data and must not ship: {leftover}'
+          print('recipe kinds:', recipe_kinds())
+          "
+          reef --help
+        working-directory: ${{ runner.temp }}
+      - name: Start an recipe core installation
+        working-directory: ${{ runner.temp }}
+        run: |
+          reef serve -c "${{ github.workspace }}/tests/packaging/recipe-wheel.yaml" &
+          reef_pid=$!
+          cleanup() {
+            kill -TERM "$reef_pid" 2>/dev/null || true
+            wait "$reef_pid"
+          }
+          trap cleanup EXIT
+          ready=
+          for _ in {1..30}; do
+            if curl -sf http://127.0.0.1:18900/healthz; then
+              ready=1
+              break
+            fi
+            kill -0 "$reef_pid"
+            sleep 1
+          done
+          test "$ready" = 1
+          # The child can answer health just before the orchestrator finishes
+          # its own five-second readiness poll and installs signal handlers.
+          sleep 6
+          cleanup
+          trap - EXIT
+      # Run the service suite against the installed wheels, still outside the
+      # repo so the source tree cannot shadow them. Excluded: tests that
+      # import the slime package (the wheel does not bundle it) or Slime's
+      # optional dependencies.
+      - run: python -m pip install pytest
+      - run: >
+          python -m pytest ${{ github.workspace }}/tests/reef_service
+          --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_multi_scenario_bridge.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_configs.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_sao_parity.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_weight_version.py
+          -p no:cacheprovider
+        working-directory: ${{ runner.temp }}
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.python-version }}
+          path: |
+            dist/*
+          if-no-files-found: error

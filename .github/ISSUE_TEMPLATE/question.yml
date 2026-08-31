@@ -1,0 +1,58 @@
+name: Usage question
+description: Ask a focused question that the documentation and existing issues do not answer
+title: "[Question] "
+labels: [question, "status: needs-triage"]
+body:
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Documentation
+        - Examples
+        - Packaging or deployment
+        - CI and developer tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What are you trying to accomplish?
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What you tried
+      description: Include the relevant documentation, commands, configuration, and observed result.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the Reef version or commit and any relevant runtime, provider, model, OS, or accelerator details.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched the documentation and open and closed issues first.
+          required: true
+        - label: I removed credentials, tokens, private data, and sensitive prompts.
+          required: true

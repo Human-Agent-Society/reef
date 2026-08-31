@@ -1,0 +1,83 @@
+name: Feature proposal
+description: Propose a focused capability after checking existing issues and RFCs
+title: "[Feature] "
+labels: [enhancement, "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem before the implementation. Large public-interface,
+        persistence, trust-boundary, topology, recipe, or training-backend
+        changes may need an RFC before implementation begins.
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Documentation
+        - Examples
+        - Packaging or deployment
+        - CI and developer tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Who experiences the problem, and what can they not do today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_cases
+    attributes:
+      label: Concrete use cases
+      description: Give representative examples, workloads, or user journeys.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_outcome
+    attributes:
+      label: Proposed outcome
+      description: Describe the externally observable capability, not only an internal implementation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+      description: What can users do today, and why is it insufficient?
+    validations:
+      required: true
+
+  - type: textarea
+    id: maintenance
+    attributes:
+      label: Compatibility and maintenance
+      description: Describe API, data, deployment, dependency, security, or long-term ownership implications.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues, pull requests, and RFCs for related work.
+          required: true
+        - label: I described the problem and use cases without assuming one implementation.
+          required: true
+        - label: I have not started a large implementation that still needs project-direction approval.
+          required: true

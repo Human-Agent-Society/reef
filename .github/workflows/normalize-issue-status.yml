@@ -1,0 +1,47 @@
+name: keep one issue lifecycle status
+
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  normalize:
+    if: >-
+      github.repository == 'Human-Agent-Society/reef' &&
+      !github.event.issue.pull_request &&
+      startsWith(github.event.label.name, 'status: ')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Remove obsolete lifecycle labels
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const selected = context.payload.label.name;
+            const lifecycle = new Set([
+              "status: needs-triage",
+              "status: needs-reproduction",
+              "status: waiting-author",
+              "status: confirmed",
+              "status: ready",
+              "status: blocked",
+            ]);
+            if (!lifecycle.has(selected)) {
+              core.info(`${selected} is not an exclusive lifecycle label`);
+              return;
+            }
+
+            const issue = { ...context.repo, issue_number: context.issue.number };
+            const labels = await github.paginate(
+              github.rest.issues.listLabelsOnIssue,
+              { ...issue, per_page: 100 },
+            );
+            for (const label of labels) {
+              if (lifecycle.has(label.name) && label.name !== selected) {
+                await github.rest.issues.removeLabel({ ...issue, name: label.name });
+              }
+            }

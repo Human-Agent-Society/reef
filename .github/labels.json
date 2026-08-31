@@ -1,0 +1,217 @@
+[
+  {
+    "name": "area: ci",
+    "color": "6f42c1",
+    "description": "Repository automation, continuous integration, and developer tooling"
+  },
+  {
+    "name": "area: core",
+    "color": "5319e7",
+    "description": "Core contracts and scenario lifecycle"
+  },
+  {
+    "name": "area: docs",
+    "color": "0075ca",
+    "description": "User and developer documentation"
+  },
+  {
+    "name": "area: examples",
+    "color": "0e8a16",
+    "description": "Examples, recipes, and reference deployments"
+  },
+  {
+    "name": "area: harness",
+    "color": "1d76db",
+    "description": "Harness integration, recipes, and evolution surfaces"
+  },
+  {
+    "name": "area: packaging",
+    "color": "c5def5",
+    "description": "Packages, containers, deployment, and vendored integrations"
+  },
+  {
+    "name": "area: service",
+    "color": "0052cc",
+    "description": "Service APIs, deployment, and command-line interfaces"
+  },
+  {
+    "name": "area: training",
+    "color": "d93f0b",
+    "description": "Training execution, runtimes, algorithms, and pipeline reliability"
+  },
+  {
+    "name": "area: artifacts",
+    "color": "c2e0c6",
+    "description": "Artifact storage, metadata, retention, publication, and recovery"
+  },
+  {
+    "name": "area: versioning",
+    "color": "006b75",
+    "description": "Version identity, lineage, activation, promotion, and rollback"
+  },
+  {
+    "name": "area: observability",
+    "color": "fbca04",
+    "description": "Metrics, logs, traces, experiment tracking, and operational diagnostics"
+  },
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "Reproducible incorrect or unexpected behavior"
+  },
+  {
+    "name": "documentation",
+    "color": "0075ca",
+    "description": "Documentation correction or improvement"
+  },
+  {
+    "name": "enhancement",
+    "color": "a2eeef",
+    "description": "New capability or improvement to existing behavior"
+  },
+  {
+    "name": "performance",
+    "color": "f9d0c4",
+    "description": "Latency, throughput, memory, utilization, or scalability work"
+  },
+  {
+    "name": "question",
+    "color": "d876e3",
+    "description": "Focused usage question not answered by current documentation"
+  },
+  {
+    "name": "security",
+    "color": "b60205",
+    "description": "Public follow-up for a security change; vulnerabilities stay private"
+  },
+  {
+    "name": "dependencies",
+    "color": "0366d6",
+    "description": "Dependency and toolchain updates"
+  },
+  {
+    "name": "RFC",
+    "color": "d4c5f9",
+    "description": "Request for comments on a substantial project decision"
+  },
+  {
+    "name": "roadmap",
+    "color": "0052cc",
+    "description": "Time-bounded direction and coordinated outcomes across project areas"
+  },
+  {
+    "name": "type: tests",
+    "color": "bfdadc",
+    "description": "Test-only or primarily test infrastructure changes"
+  },
+  {
+    "name": "type: task",
+    "color": "bfdadc",
+    "description": "Maintainer-approved project planning or implementation task"
+  },
+  {
+    "name": "type: experiment",
+    "color": "bfd4f2",
+    "description": "Empirical evaluation, benchmark, or research reproduction"
+  },
+  {
+    "name": "type: example",
+    "color": "0e8a16",
+    "description": "Runnable user-facing example, recipe, or reference deployment"
+  },
+  {
+    "name": "status: needs-triage",
+    "color": "fbca04",
+    "description": "Needs an initial maintainer decision and routing"
+  },
+  {
+    "name": "status: needs-reproduction",
+    "color": "e4e669",
+    "description": "Needs a minimal reproduction or independent confirmation"
+  },
+  {
+    "name": "status: waiting-author",
+    "color": "d4c5f9",
+    "description": "Cannot progress until the author supplies requested information"
+  },
+  {
+    "name": "status: confirmed",
+    "color": "0e8a16",
+    "description": "Maintainers reproduced or otherwise validated the reported problem"
+  },
+  {
+    "name": "status: ready",
+    "color": "2da44e",
+    "description": "Scope is agreed and the issue is ready for implementation"
+  },
+  {
+    "name": "status: blocked",
+    "color": "b60205",
+    "description": "Cannot progress until an external decision or dependency is resolved"
+  },
+  {
+    "name": "status: keep-open",
+    "color": "0e8a16",
+    "description": "Exempt from automated stale handling"
+  },
+  {
+    "name": "ci: gpu-required",
+    "color": "5319e7",
+    "description": "Needs validation in a supported accelerator environment before merge"
+  },
+  {
+    "name": "priority: p0",
+    "color": "b60205",
+    "description": "Active incident, severe regression, or release-blocking problem"
+  },
+  {
+    "name": "priority: p1",
+    "color": "d93f0b",
+    "description": "High-impact work that maintainers intend to prioritize"
+  },
+  {
+    "name": "priority: p2",
+    "color": "fbca04",
+    "description": "Normal-priority accepted work"
+  },
+  {
+    "name": "priority: p3",
+    "color": "c5def5",
+    "description": "Useful backlog work without a current delivery commitment"
+  },
+  {
+    "name": "good first issue",
+    "color": "7057ff",
+    "description": "Small, well-scoped work suitable for a first contribution"
+  },
+  {
+    "name": "help wanted",
+    "color": "008672",
+    "description": "Maintainers welcome an external contributor to request assignment"
+  },
+  {
+    "name": "duplicate",
+    "color": "cfd3d7",
+    "description": "Already tracked by another issue or pull request"
+  },
+  {
+    "name": "invalid",
+    "color": "e4e669",
+    "description": "Does not contain a valid or actionable report"
+  },
+  {
+    "name": "wontfix",
+    "color": "ffffff",
+    "description": "Not planned because of scope, direction, or maintenance cost"
+  },
+  {
+    "name": "KIV",
+    "color": "d4c5f9",
+    "description": "Keep in view; deferred pending a clearer need"
+  },
+  {
+    "name": "stale",
+    "color": "ededed",
+    "description": "Inactive and awaiting confirmation that the work remains relevant"
+  }
+]

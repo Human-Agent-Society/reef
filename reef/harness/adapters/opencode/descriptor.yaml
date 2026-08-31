@@ -1,0 +1,76 @@
+# opencode, driven headless per episode.
+#
+# OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
+# suppresses global config seeding; the XDG overrides relocate data, cache,
+# and state so sessions land inside the episode root. Permissions
+# auto-reject in `opencode run` without --auto, so --auto is part of the
+# canonical invocation. The config defaults pin the benchmarking traps:
+# autoupdate off, sharing off, permissions allowed (episodes are isolated
+# roots).
+name: opencode
+binary: opencode
+# The vendor's install channel at the pinned version; consumed by the
+# GET /reef/harness/install script, never by episode runs.
+install:
+  kind: npm
+  package: "opencode-ai"
+  version: "1.18.18"
+  binary_path: "node_modules/.bin/opencode"
+argv: ["run", "--format", "json", "--auto", "{prompt}"]
+env:
+  OPENCODE_CONFIG_DIR: "{root}/opencode"
+  XDG_CONFIG_HOME: "{root}/xdg-config"
+  XDG_DATA_HOME: "{root}/xdg-data"
+  XDG_CACHE_HOME: "{root}/xdg-cache"
+  XDG_STATE_HOME: "{root}/xdg-state"
+files:
+  config:
+    primary:
+      path: "opencode/opencode.json"
+      defaults:
+        autoupdate: false
+        share: "disabled"
+        permission:
+          "*": "allow"
+  rules: "opencode/AGENTS.md"
+  agent_command: "opencode/command/{name}.md"
+  skill: "opencode/skill/{name}/SKILL.md"
+  code_extension: "opencode/plugin/{name}.ts"
+trajectory:
+  format: opencode-storage-json
+  path: "xdg-data/opencode/storage"
+cleanup_whitelist:
+  - "xdg-data/**"
+  - "xdg-cache/**"
+  - "xdg-state/**"
+  - "xdg-config/**"
+quirks: reef.harness.adapters.opencode.quirks
+# How to point opencode at a model endpoint, per API dialect (its
+# custom-provider config shape). Reef renders the set matching its model
+# binding's api into evaluation episodes; the served tree never carries a
+# provider.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        provider:
+          reef:
+            npm: "@ai-sdk/openai-compatible"
+            options:
+              baseURL: "{base_url}/v1"
+              apiKey: "{api_key}"
+            models:
+              "{model}": {}
+        model: "reef/{model}"
+  anthropic:
+    - target: primary
+      data:
+        provider:
+          reef:
+            npm: "@ai-sdk/anthropic"
+            options:
+              baseURL: "{base_url}/v1"
+              apiKey: "{api_key}"
+            models:
+              "{model}": {}
+        model: "reef/{model}"

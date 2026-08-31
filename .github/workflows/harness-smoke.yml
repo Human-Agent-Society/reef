@@ -1,0 +1,52 @@
+name: harness-smoke
+
+# Runs the real pinned pi binary through render, run_episode, and the
+# trajectory reader against a stub model server (tests/smoke/test_real_pi.py):
+# the guard against a pi release changing a format the hermetic fakes only
+# imitate. Non-blocking: not in the required check set until stable.
+
+on:
+  pull_request:
+    paths:
+      - "reef/harness/**"
+      - "reef/train/harness_backend/**"
+      - "tests/smoke/**"
+      - ".github/workflows/harness-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  real-pi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: python -m pip install ./third_party/reef-client
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
+      - run: python -m pytest tests/smoke/test_real_pi.py
+        env:
+          REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
+          REEF_REAL_PI_SESSION_OUT: ${{ runner.temp }}/real-pi-session.jsonl
+      # The raw session the episode wrote: the refresh source for the
+      # hermetic fixture at tests/reef_service/data/pi_session_real/.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-pi-session
+          path: ${{ runner.temp }}/real-pi-session.jsonl
+          if-no-files-found: error

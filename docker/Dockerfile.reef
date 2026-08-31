@@ -1,0 +1,151 @@
+# check=skip=UndefinedVar
+# UndefinedVar is skipped because PYTHONPATH comes from the slimerl/slime base
+# image, which docker build --check cannot see without pulling the base.
+# TTT-as-a-Service image — built ON TOP of slime's published training image.
+#
+# The base (slimerl/slime) ships the full serving + RL-training stack:
+# CUDA 12.9, torch 2.11, slime-patched sglang, Megatron-Core, flash-attention,
+# ray. Reef installs its reviewed runtime pin over the image copy — including
+# its own SGLang revision, whose adapter receiver every LoRA deployment needs
+# — and keeps all Reef-specific behavior in its own adapter package.
+#
+# One image serves every role (pick by command):
+#   sglang         python -m sglang.launch_server --model-path <M> ...
+#   reef           python -m reef.service (internal config-driven child)
+#   ray-head       ray start --head --block ...
+#   slime-training python -m reef.train.slime_backend.reef_adapters.driver ...
+#   basic-example  python -m recipes.basic
+#   tests          pytest tests/reef_service -q
+#
+# Build:   docker build -f docker/Dockerfile.reef -t reef .
+# Deploy:  reef serve -c recipes/basic/local-sglang.yaml
+#          (sglang + reef; see docker/README.md for other demos)
+#
+# NOTE: Qwen3.5 hybrid (linear-attention) models produced garbage at tp>1 on
+# sglang v0.5.9 (upstream #20763; fixed by #19070, merged 2026-02-25 — one day
+# after the v0.5.9 tag). The SGLANG_COMMIT pinned below contains the fix, so
+# tp>1 is expected to work; it has not yet been re-validated on this image.
+
+ARG SLIME_IMAGE_TAG=latest
+FROM slimerl/slime:${SLIME_IMAGE_TAG} AS reef-common
+
+WORKDIR /workspace/Reef
+
+# On top of the base:
+#  * transformers==5.12.1 — first release line with the qwen3_5 architecture,
+#    and the last before qwen3_asr (which collides with the base sglang's own
+#    qwen3_asr registration: newer transformers make sglang fail at import)
+#  * peft                 — LoRA adapters for the HF trainer backend
+# (torchao in the base is already >=0.16, which peft's LoRA dispatch requires)
+RUN pip install --no-cache-dir "transformers==5.12.1" peft
+
+# opencode CLI — AI coding agent available inside the container.
+# Pinned GitHub release, x86_64 build (verified against the base image).
+# Kept above COPY so repo changes don't bust this layer's cache.
+ARG OPENCODE_VERSION=1.18.4
+RUN curl -fsSL "https://github.com/sst/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-x64.tar.gz" \
+      | tar -xzf - -C /usr/local/bin \
+    && opencode --version
+
+# The reviewed SGLang pin, replacing the base image's copy. It carries the
+# serving-native LoRA receiver Reef's adapter publication targets: the tensor
+# and distributed adapter routes and the weight-version plugin hooks. This is
+# in the common layer because LoRA is a runtime option on any weight-training
+# recipe, not a property of one example — a deployment that passes
+# --megatron-lora-rank fails its schema preflight before GPU startup on an
+# SGLang without these routes. Kept above COPY so repo changes don't re-clone.
+ARG SGLANG_COMMIT=f7ea06e1e519c569c1d6cb7e1c7b1128cbdbc39f
+# Newer slimerl/slime bases ship their own sglang checkout at /opt/sglang;
+# clear it so the clone of Reef's reviewed pin replaces it instead of
+# colliding with it (observed 2026-08-24 on slimerl/slime:latest).
+RUN rm -rf /opt/sglang && \
+    git clone --filter=blob:none https://github.com/sgl-project/sglang.git /opt/sglang && \
+    cd /opt/sglang && \
+    git checkout "${SGLANG_COMMIT}" && \
+    pip install -e "python[all]" --no-deps
+
+COPY . .
+
+# Replace the image's Slime distribution with Reef's exact pin. Keep
+# the base image's CUDA-matched dependency set by resolving neither package's
+# dependencies here.
+RUN pip uninstall -y slime reef && \
+    pip install --no-cache-dir --no-deps --group runtime && \
+    pip install -e . --no-deps && \
+    pip install reef-client --no-deps
+
+# An earlier layer's dependency resolution can leave numpy 2.x debris behind
+# after pip downgrades (dist-info says 1.26.4 while 2.x submodules such as
+# numpy/_core survive in the package dir), which breaks every compiled
+# consumer at import time with "numpy._core.multiarray failed to import";
+# observed on a fresh 2026-08-03 build. Purge to a clean tree.
+RUN pip uninstall -y numpy && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/numpy \
+           /usr/local/lib/python3.12/dist-packages/numpy.libs \
+           /usr/local/lib/python3.12/dist-packages/numpy-* && \
+    pip install --no-cache-dir "numpy==1.26.4" scipy && \
+    python -c "import numpy, scipy.linalg; assert numpy.__version__ == '1.26.4', numpy.__version__"
+
+# Prepend the pinned SGLang, /workspace/Reef, and the base image's Megatron-LM
+# source checkout (megatron.training is NOT pip-installed; the base ships it at
+# /root/Megatron-LM without exporting PYTHONPATH as an ENV, so the
+# ${PYTHONPATH:+...} preserve-trick expands to nothing at build time and the
+# Slime driver dies on `import megatron.training` — verified 2026-07-28 on
+# slimerl/slime:latest).
+ENV PYTHONPATH=/opt/sglang/python:/workspace/Reef:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
+    PYTHONUNBUFFERED=1 \
+    SGLANG_DISABLE_CUDNN_CHECK=1
+
+# The slime driver's first import chain (sglang server args -> transformers ->
+# scipy) is exactly where a broken compiled stack surfaces at runtime; walking
+# it here turns that class of drift into a build failure.
+RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg"
+
+# Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
+# applies (reef_adapters/megatron/lora.py) and the HF export that publishes
+# adapters. Earlier slime bases bundled it; newer ones do not (observed
+# 2026-08-24). The base pins Megatron-LM 1dcf0dafa (megatron-core 0.16.0rc0,
+# still true of slimerl/slime:latest on 2026-08-25), which bounds the Bridge
+# release:
+#  * 0.4.2 is the newest that imports against this tree, needing only
+#    `parse_hybrid_pattern` (added upstream in core 0.17); the backport below
+#    appends it to the module verbatim when the tree lacks it.
+#  * 0.5.x moved its providers onto Megatron-LM's `megatron.training.models`
+#    package (core >= 0.18) and cannot import here.
+# 0.4.2 knows Qwen3_5ForConditionalGeneration; reef overrides that
+# registration with a bridge for the layout slime builds
+# (reef_adapters/megatron/bridges/qwen3_5.py), which is what makes Qwen3.5
+# LoRA work. --no-deps because Bridge's newer dependency pins
+# (fast-hadamard-transform et al.) neither build here nor matter for LoRA.
+RUN MCORE_SSM=/root/Megatron-LM/megatron/core/ssm/mamba_hybrid_layer_allocation.py && \
+    if ! grep -q "def parse_hybrid_pattern" "$MCORE_SSM"; then \
+        cat docker/patch/mcore_parse_hybrid_pattern.py >> "$MCORE_SSM"; \
+    fi && \
+    pip install --no-cache-dir --no-deps "megatron-bridge==0.4.2" && \
+    python -c "from megatron.core.ssm.mamba_hybrid_layer_allocation import parse_hybrid_pattern; \
+               assert parse_hybrid_pattern('M*M*/MM/MM').mtp_num_depths == 2; \
+               from megatron.bridge.peft.lora import LoRA; \
+               from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping"
+
+# Optional TTT-Discover target. It adds only the generated-program solver
+# dependencies used by recipes/tttd/examples/tttd/deployments/qwen3_8b_lora; LoRA serving
+# itself is in the common layer above.
+#
+# The experiment guide supplies the qualified SLIME_IMAGE_TAG digest at build
+# time, so deployments can advance that base independently of the default
+# Reef image after running their own GPU qualification.
+FROM reef-common AS tttd
+
+RUN pip install --no-cache-dir cvxpy && \
+    python -c "import cvxpy, numpy; assert numpy.__version__ == '1.26.4', numpy.__version__"
+
+CMD ["bash", "-c", "echo 'reef TTT-Discover image. Run python -m recipes.tttd.examples.tttd.deployments.qwen3_8b_lora.cluster'"]
+
+# Keep this target last so `docker build -f docker/Dockerfile.reef .` retains
+# the repository's default image behavior.
+FROM reef-common AS reef
+
+CMD ["bash", "-c", "echo 'reef image. Commands:' && \
+  echo '  sglang: python -m sglang.launch_server --model-path <MODEL> --tp 1 --port 30000' && \
+  echo '  reef:   reef serve -c recipes/basic/<stack>.yaml' && \
+  echo 'or a method stack from recipes/<method>/examples/'"]

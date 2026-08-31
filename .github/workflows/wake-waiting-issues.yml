@@ -1,0 +1,38 @@
+name: wake issues when the author replies
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  wake:
+    if: >-
+      github.repository == 'Human-Agent-Society/reef' &&
+      !github.event.issue.pull_request &&
+      github.event.issue.state == 'open' &&
+      github.event.comment.user.login == github.event.issue.user.login &&
+      contains(github.event.issue.labels.*.name, 'status: waiting-author')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Return the issue to triage
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const issue = { ...context.repo, issue_number: context.issue.number };
+            try {
+              await github.rest.issues.removeLabel({
+                ...issue,
+                name: "status: waiting-author",
+              });
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            await github.rest.issues.addLabels({
+              ...issue,
+              labels: ["status: needs-triage"],
+            });

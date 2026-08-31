@@ -1,0 +1,28 @@
+schema_version = "1.4"
+
+artifacts = []
+
+[task]
+name = "tide/tttd-erdos"
+description = "Find a step function that minimizes the Erdős minimum-overlap constant C₅. The agent writes a Python program whose run() returns (h_values, c5_bound, n_points); reward = 1/(ε+C₅)."
+
+[metadata]
+category = "autoresearch"
+author_name = "Reef"
+difficulty = "hard"
+tags = ["reef", "tttd", "erdos", "discovery"]
+
+[agent]
+# One Harbor trial owns the complete multi-step TTT trajectory.
+timeout_sec = 604800.0
+
+[verifier]
+timeout_sec = 1200.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 2
+memory_mb = 16384
+storage_mb = 10240
+network_mode = "allowlist"
+allowed_hosts = ["judge"]

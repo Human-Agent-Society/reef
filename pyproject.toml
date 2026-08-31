@@ -1,0 +1,213 @@
+[build-system]
+requires = [
+    "setuptools >= 84.0.0",
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef"
+version = "0.3.0"
+description = "A framework-agnostic runtime for continuously improving agents"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Human-Agent-Society" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+# Reef core dependencies. Keep this list free of training and GPU packages:
+# `pip install reef` must support the base `recipe` configuration on CPU.
+dependencies = [
+    "aiohttp",
+    "huggingface_hub",
+    "pyyaml",
+    "reef-client>=0.2.0",
+]
+
+[project.optional-dependencies]
+# Provider-neutral experiment tracking. Non-Slime training backends can opt in
+# without installing the Slime/GPU dependency stack.
+wandb = [
+    "wandb>=0.29.0",
+]
+# Python-side dependencies used by the Slime backend. The runtime source pin
+# lives in the `runtime` dependency group below.
+# torch / SGLang / Megatron-Core / FlashAttention remain supplied by the
+# supported slimerl/slime GPU image because their versions are CUDA-specific.
+slime = [
+    "e2b",
+    "httpx[http2]",
+    "memray",
+    "omegaconf",
+    "peft",
+    "pillow",
+    "pylatexenc",
+    "qwen_vl_utils",
+    "ray[default]",
+    "safetensors",
+    "sglang-router>=0.3.2",
+    "tensorboard",
+    "transformers",
+    "wandb>=0.29.0",
+]
+# Local dev toolchain: `pip install -e .[dev]`. Versions of the lint
+# tools stay in sync with .pre-commit-config.yaml revs.
+dev = [
+    "mypy",
+    "pre-commit",
+    "pytest",
+    "ruff==0.16.5",
+]
+
+[dependency-groups]
+# Source-installed runtime pins used by development, CI, and images. Keeping
+# them out of package metadata lets GPU environments install them with
+# `--no-deps` without replacing their CUDA-matched dependency stack.
+runtime = [
+    "slime @ git+https://github.com/THUDM/slime.git@41014d1f29e201137fdffce737bb8bac65bc5219",
+]
+
+[project.urls]
+Homepage = "https://github.com/Human-Agent-Society/reef"
+
+[project.scripts]
+reef = "reef.cli:main"
+
+[project.entry-points."sglang.srt.plugins"]
+reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
+
+[tool.setuptools]
+include-package-data = true
+
+# reef-client is now a separate repo (Human-Agent-Society/reef-client) and a
+# declared dependency; the reef wheel must not ship its source.
+# `reef` is the shared machinery; `recipes` holds the bundled methods that
+# `reef/__init__` imports to register their kinds. A method's `examples/`
+# (and the method-less `recipes/basic`) are runnable harnesses, not library
+# code, and never ship.
+[tool.setuptools.packages.find]
+include = ["reef", "reef.*", "recipes", "recipes.*"]
+exclude = ["recipes.basic", "recipes.basic.*", "recipes.*.examples", "recipes.*.examples.*"]
+
+[tool.setuptools.package-data]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts"]
+
+[tool.isort]
+profile = "black"  # black-compatible
+line_length = 119  # should match black parameters
+ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
+py_version = 310  # python 3.10 as a target version
+sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
+default_section = "THIRDPARTY"
+known_first_party = ["reef", "recipes"]
+known_third_party = ["megatron", "wandb", "ray", "transformers"]
+src_paths = ["reef", "recipes"]
+# Files no formatter touches (vendored benchmark content, saved result programs)
+# are listed once, in .pre-commit-config.yaml's top-level `exclude`.
+
+
+[tool.black]
+line_length = 119
+
+[tool.ruff]
+target-version = "py310"  # sync with requires-python in [project]
+line-length = 119  # sync with [tool.black] and [tool.isort]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "B",       # flake8-bugbear
+    "UP",      # pyupgrade
+    "C4",      # flake8-comprehensions
+    "SIM",     # flake8-simplify
+    "PIE",     # flake8-pie
+    "ISC",     # flake8-implicit-str-concat
+    "RSE",     # flake8-raise
+    "RET",     # flake8-return
+    "PERF",    # perflint
+    "LOG",     # flake8-logging
+    "N",       # pep8-naming
+    "RUF",     # ruff
+]
+ignore = [
+    # E402: module-import-not-at-top-of-file
+    "E402",
+    # E501: line too long - black handles wrapping; long strings and URLs stay readable
+    "E501",
+    # N818: existing public exception names omit an Error suffix; renaming them would break callers
+    "N818",
+]
+# Math notation in the RL objective docstrings: SAO's alpha/gamma, and the
+# true minus sign used alongside other Unicode math (∇, π, Â) in the SAO loss
+# derivation. Other Greek symbols (theta, pi, epsilon, lambda, delta) are not
+# flagged; these three only trip RUF002/003 because they have ASCII lookalikes.
+allowed-confusables = ["α", "γ", "−"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test code: perf lint and strict class/branch shape rules add churn, not safety.
+"tests/**/*.py" = ["N806", "PERF", "RUF012", "SIM108"]
+# This function-local set is a constant used to describe a fixed protocol vocabulary.
+"reef/train/harness_backend/strategies.py" = ["N806"]
+# The Top-K objective follows the mathematical notation used in its derivation.
+"recipes/openclawrl/slime/objective.py" = ["N802", "N803", "N806"]
+
+[tool.mypy]
+# Reef's training adapters are checked with the rest of the package; the
+# runtime remains a separately installed distribution.
+files = ["reef"]
+python_version = "3.10"  # sync with requires-python in [project]
+ignore_missing_imports = true
+
+# The training runtime and its GPU dependencies do not ship type information
+# with Reef.
+[[tool.mypy.overrides]]
+module = ["slime.*", "slime_plugins.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["reef"]
+# Reef-authored training control flow counts toward the CPU coverage gate. These
+# four modules execute only inside a live Megatron/CUDA worker; their useful
+# validation is the GPU integration suite, not import-only CPU mocks.
+omit = [
+    "reef/train/slime_backend/reef_adapters/megatron/hf_export.py",
+    "reef/train/slime_backend/reef_adapters/megatron/model_provider.py",
+    "reef/train/slime_backend/reef_adapters/megatron/train_actor.py",
+    "reef/train/slime_backend/reef_adapters/weight_updaters/*",
+]
+
+[tool.coverage.report]
+skip_empty = true
+precision = 1
+# Floor just under the 82 percent baseline: prevents silent decay while the
+# team decides a real target.
+fail_under = 80
+
+[tool.pytest.ini_options]
+# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
+# -vv will also display tests with duration = 0.00s
+addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
+testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
+# directories to ignore when discovering tests
+norecursedirs = [
+    "examples",
+    "*.egg",
+    ".*",
+    "_darcs",
+    "build",
+    "CVS",
+    "dist",
+    "venv",
+    "{arch}",
+]
+# markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
+markers = [
+    "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
+    "integration: marks test checking the elements when integrated into subsystems (deselect with '-m \"not integration\"')",
+    "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",
+]

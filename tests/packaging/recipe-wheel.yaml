@@ -1,0 +1,22 @@
+# Installed-wheel smoke config: Reef proxies to a deliberately unreachable
+# provider, but startup and /healthz need only the core distribution.
+run_dir: .reef/run
+
+reef:
+  host: 127.0.0.1
+  port: 18900
+  recipe: recipe
+  token: package-smoke
+  artifact_repository: .reef/artifacts.git
+  artifact_work_dir: .reef/artifact-work
+  artifact_cache_dir: .reef/artifact-cache
+  agent_record_dir: .reef/agent-record
+
+services:
+  - name: reef
+    command: python -m reef.service
+    ready: curl -sf http://127.0.0.1:18900/healthz
+    ready_timeout: 30
+    env:
+      REEF_UPSTREAM_URL: https://example.invalid
+      REEF_MODEL_PATH: package-smoke

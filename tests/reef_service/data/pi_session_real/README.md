@@ -1,0 +1,3 @@
+# Real pi session fixture
+
+`session.jsonl` is a real pi 0.84.2 session (version 3 stream), captured from a live run of one headless episode; machine paths in its JSON string values were neutralized to `/work/session-capture` and nothing else was changed. It keeps the hermetic trajectory-reader tests honest against bytes the real binary wrote, not a hand-written imitation. To refresh it after a pi upgrade, replace the file with the `real-pi-session` artifact of the `harness-smoke` workflow (the smoke test captures the raw session file of its episode) and re-neutralize any machine paths the same way.

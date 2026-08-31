@@ -1,0 +1,72 @@
+default_language_version:
+  python: python3
+
+ci:
+  autofix_prs: true
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit suggestions'
+  autoupdate_schedule: quarterly
+
+# The one list of files no formatter or linter touches. Vendored benchmark
+# content stays byte identical to its upstream pin; saved TTTD result programs
+# are published as produced. CI lints by running pre-commit over all files, so
+# this exclude is the enforced boundary — the tools' pyproject sections carry
+# no copy of it.
+exclude: |
+  (?x)^recipes/(
+    harness_evolve/examples/skillclaw/harbor/(environment/workspace/|tests/grade\.py)
+    |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
+    |tttd/examples/tttd/results/.*/best_solution\.py
+  )
+
+repos:
+  - repo: local
+    hooks:
+      - id: python-design-policy
+        name: Check Python design policy
+        entry: python .github/scripts/check_python_design.py
+        language: system
+        pass_filenames: false
+      - id: python-statement-policy
+        name: Ban assert and del in Reef source
+        entry: python .github/scripts/check_python_statements.py
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: requirements-txt-fixer
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.7
+    hooks:
+      - id: ruff-check
+        args: [ --fix ]
+
+  - repo: https://github.com/PyCQA/autoflake
+    rev: v2.0.2
+    hooks:
+      - id: autoflake
+        args: [--remove-all-unused-imports, --in-place]
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args:
+          - "--profile=black"        # match Black style
+          - "--filter-files"         # skip gitignored files
+        additional_dependencies: []
+
+  - repo: https://github.com/psf/black
+    rev: 24.3.0
+    hooks:
+      - id: black
+        name: Format code
+        additional_dependencies: ['click==8.0.2']

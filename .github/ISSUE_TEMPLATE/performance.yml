@@ -1,0 +1,84 @@
+name: Performance report
+description: Report a reproducible serving, training, harness, or resource regression
+title: "[Performance] "
+labels: [performance, "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Performance reports need a reproducible workload and comparable
+        measurements. Remove credentials, private data, provider tokens, and
+        sensitive prompts from commands, logs, and artifacts.
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Packaging or deployment
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Reef version/commit, OS, Python, hardware, accelerator stack, runtime, provider, and model.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workload
+    attributes:
+      label: Reproducible workload
+      description: Provide the smallest complete command, configuration, input shape, concurrency, and warm-up procedure.
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurements
+    attributes:
+      label: Measurements
+      description: Include repeated results, units, variance, and the exact measurement method.
+      placeholder: |
+        Baseline: commit ..., 123 requests/s, p95 45 ms
+        Current: commit ..., 98 requests/s, p95 67 ms
+        Runs: 5 after 2 warm-up iterations
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected performance or regression boundary
+      description: State the expected result and why the difference is material.
+    validations:
+      required: true
+
+  - type: textarea
+    id: profile
+    attributes:
+      label: Profiles and diagnostics
+      description: Attach sanitized profiles, traces, utilization data, or links to reproducible artifacts.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched open and closed issues for the same performance problem.
+          required: true
+        - label: I compared equivalent configurations and documented all material differences.
+          required: true
+        - label: I removed credentials, private data, and sensitive prompts from all evidence.
+          required: true

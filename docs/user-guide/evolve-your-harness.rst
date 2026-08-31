@@ -1,0 +1,214 @@
+Evolve your harness
+===================
+
+A harness is everything around the model: rules, prompt templates, skills,
+config, extension code. Harness evolution improves that text while the model
+weights stay fixed. Reef needs no GPU for this. The model stays a fixed
+endpoint, hosted or local, and the served agent stays online throughout.
+
+Reef supplies the mechanism: it snapshots the tree, applies a mutation, runs
+the paired episodes, and publishes or reverts. You supply two Python
+callables, ``propose`` (which edit to try) and ``evaluate`` (how an episode
+scored). `Write a harness method <../developer-guide/write-a-harness-method.rst>`__ documents the
+contract.
+
+The harness tree
+----------------
+
+Reef stores the whole text side of one agent in a single versioned object
+called the tree. A tree is a flat list of entries, and each entry has three
+fields: ``id`` is unique within the tree, ``name`` selects one of the node
+kinds below, and ``config`` holds that kind's own fields. For the named kinds
+(``agent_command``, ``skill``, ``code_extension``), ``config.name`` is the
+file name the entry renders to. Five kinds are registered in
+`reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
+
++--------------------+----------------------------------------------------------+
+| ``name``           | Renders as                                               |
++====================+==========================================================+
+| ``config``         | a JSON object deep-merged into one of the agent's config |
+|                    | files                                                    |
++--------------------+----------------------------------------------------------+
+| ``rules``          | text appended to the agent's rules file                  |
++--------------------+----------------------------------------------------------+
+| ``agent_command``  | a named prompt template                                  |
++--------------------+----------------------------------------------------------+
+| ``skill``          | a named ``SKILL.md``                                     |
++--------------------+----------------------------------------------------------+
+| ``code_extension`` | a named code file the harness loads in process           |
++--------------------+----------------------------------------------------------+
+
+The table describes what each kind contains. Where each kind is written is
+decided by an adapter, which maps every kind to a concrete file for one agent.
+Reef bundles two adapters, ``pi`` and ``opencode``, each for a third-party
+coding agent CLI. With the ``pi`` adapter, ``GET /reef/harness`` serves:
+
+.. code:: text
+
+   pi-agent/
+     settings.json             <- config, target "primary"
+     models.json               <- config, target "models"
+     AGENTS.md                 <- rules
+     prompts/<name>.md         <- agent_command
+     skills/<name>/SKILL.md    <- skill
+     extensions/<name>.ts      <- code_extension
+
+The loop
+--------
+
+.. flow::
+   :loop: publish the winner, or restore the snapshot
+
+   Batch :: scored reports the score window kept
+   ``propose`` :: one mutation, or ``None``
+   Episodes* :: candidate vs current, on your tasks
+   Verdict :: publish a new version, or revert
+
+No evolution runs while traffic flows. A report whose score is at or below
+``max_score`` enters the *window*; the default for harness evolution keeps
+only failures. When ``batch_size`` such reports have accumulated, one step
+runs the loop once. Both keys live under ``data:`` in the recipe config.
+
+Most of a step's cost is the evaluation. Every task runs twice, once against
+the candidate tree and once against the current one, which makes
+``2 x len(tasks)`` headless episodes. Each episode renders one side into a
+throwaway root, runs the agent binary with the task as its prompt under a
+600 s timeout, reads the trajectory back, and deletes the root.
+
+The throwaway root contains nothing except the rendered tree: a fresh working
+directory and a fresh ``HOME``, with no repository and no files from your
+machine. A task must therefore state the whole problem in its prompt. A task
+that refers to files the episode cannot see fails on both sides, which ties
+the comparison and publishes nothing.
+
+The edge cases resolve conservatively. A ``None`` proposal skips the step. An
+episode that could not run ranks below every real score, so a candidate
+cannot win on a crash, and when both sides fail the step is a tie. When the
+verdict is a rejection, Reef restores the snapshot it took before the
+mutation. Every verdict is recorded in the scenario's commit log together
+with its mutation and both score vectors.
+
+.. note::
+
+   Paired episodes currently run batched by side: all episodes of one tree
+   first, then all of the other. Anything that drifts during the run, such as
+   upstream load or a rate limit, therefore affects one side of the pair more
+   than the other and skews the comparison.
+
+When it fits
+------------
+
+Harness evolution fits when the bottleneck is in the text, for example a
+prompt that mishandles a task family, a missing skill, or a config default
+that is wrong for the deployment. It also fits when there is no weight access
+because the model is a closed endpoint, and when iteration speed matters,
+since a step needs only one service and one harness binary. It does not fit
+when the model itself cannot do the task.
+
+Before you start
+----------------
+
+- ``pip install reef-client`` — the loop driver imports it.
+- An OpenAI-compatible endpoint serving the model under test, hosted or local.
+  ``REEF_UPSTREAM_URL`` takes no ``/v1`` suffix.
+- The ``pi`` binary on ``PATH``, or named by ``REEF_PI_BINARY``
+  (``npm i -g @earendil-works/pi-coding-agent@0.84.2``).
+
+Run the example
+---------------
+
+From a Reef checkout:
+
+.. code:: bash
+
+   export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
+   cd examples/harness_evolve
+   ./run.sh
+
+``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
+suffix), the model (``qwen3-8b``), and the service token as literals; edit
+them there to point at your own. The provider key is the one value it does
+not hold.
+
+``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
+``run.py``: three exact-answer coding tasks go through Reef, each reply is
+graded, and every result is reported against its receipt. Only failures enter
+the window, so the first failing report triggers one evolve step. In this
+example the served model is its own proposer, and it answers with one skill
+mutation.
+
+The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
+service up only while ``run.py`` runs. When the loop finishes, it prints the
+published artifact version, the gate metrics, and the evolved ``SKILL.md``,
+then stops the service.
+
+Watch it learn
+--------------
+
+To follow the same step live, from a second terminal while ``run.sh`` is
+still running:
+
+
+.. code:: bash
+
+   curl -sS -H "Authorization: Bearer reef-local" \
+     -H "x-reef-scenario: harness-evolve-demo" \
+     http://127.0.0.1:8900/reef/harness            # 404 until a step publishes
+   curl -sS -H "Authorization: Bearer reef-local" \
+     -H "x-reef-scenario: harness-evolve-demo" \
+     http://127.0.0.1:8900/reef/harness/versions
+
+One step is six episodes, three tasks on each of the two trees, and the
+reference run finished in 63 s on Qwen3-8B. The run has succeeded when one
+task fails, the failing report opens the window, one evolve step runs, and
+``GET /reef/harness`` stops returning 404. ``/reef/harness/versions`` then
+shows a published version.
+
+If ``/reef/harness`` still returns 404 after a few minutes, the run has
+failed. A missing model server or a missing ``pi`` binary does not fail at
+config time. Instead every episode fails, both sides tie, no candidate ever
+wins, and the route stays 404. Confirm that the endpoint answers and that
+``pi --version`` runs before suspecting the recipe.
+
+A model that answers all three tasks correctly also leaves the route at 404,
+because nothing fails, so nothing batches and no step runs. ``run.py`` prints
+``every task passed: nothing batched, no evolve step runs`` when that
+happens.
+
+Install the published tree
+--------------------------
+
+Clients pull an evolved harness the way they install any coding agent:
+
+.. code:: bash
+
+   curl -fsS -H "Authorization: Bearer reef-local" \
+     -H "x-reef-scenario: harness-evolve-demo" \
+     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
+
+   reef-pi -p "fix the failing test in auth.py"
+   reef-pi report --score 0 --feedback "missed the empty-token case"
+
+The script installs the pinned agent, writes the tree, and puts a
+``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH. The wrapper keeps
+the receipts from a run, so ``report`` only needs the result. Pinning,
+rollback, and the raw manifest routes are in `HTTP API
+<../reference/http-api.rst#harness-artifacts>`__.
+
+Write a method
+--------------
+
+Reef ships no proposer and no episode scorer. You supply ``propose``,
+``evaluate``, and optionally a selection policy; `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ documents the contract, with worked examples.
+
+Connect a different agent
+-------------------------
+
+`Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
+how to connect an agent that has no adapter yet.
+
+See also
+--------
+
+- `harness_evolve <recipes/harness-evolve.rst>`__ — the recipe's full configuration.

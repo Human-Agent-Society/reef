@@ -1,0 +1,18 @@
+version = "1.0"
+
+[metadata]
+benchmark = "openclawrl-gsm8k-stream"
+domain = "gsm8k_homework"
+session_index = 20
+license_note = "GSM8K via Gen-Verse/OpenClaw-RL (MIT); problems (c) OpenAI GSM8K"
+
+[verifier]
+timeout_sec = 300.0
+
+[agent]
+timeout_sec = 900.0
+network_mode = "allowlist"
+allowed_hosts = ["judge"]
+
+[environment]
+build_timeout_sec = 1800.0

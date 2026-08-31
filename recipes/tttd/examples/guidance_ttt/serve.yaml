@@ -1,0 +1,155 @@
+# Colocated Qwen3-8B LoRA stack (tttd recipe) for summary-only Guidance-TTT.
+# The cardinalities and sequence limits below are deployment inputs, not
+# algorithm constants; harness/harbor_agent.py holds the same values so a
+# qualification and a full run cannot silently disagree.
+
+run_dir: work/polyomino_packing/stack
+ready_timeout: 3600
+
+reef:
+  host: 127.0.0.1
+  model_path: work/model
+  port: 8900
+  recipe: tttd
+  token: reef-local
+  groups_per_step: 2
+  rollouts_per_group: 4
+  checkpoint_every_n_versions: 2
+  ray_address: 127.0.0.1:6379
+  ray_namespace: reef
+  ray_actor_name: reef-train-bridge
+  inference_timeout_s: 7200
+  train_timeout_s: 7200
+  inference_backend_factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  artifact_repository: work/polyomino_packing/artifacts.git
+  artifact_work_dir: work/polyomino_packing/artifact-work
+  artifact_cache_dir: work/polyomino_packing/artifact-cache
+  agent_record_dir: work/polyomino_packing/agent-record
+
+training:
+  num_gpus: 2
+  cuda_visible_devices: "0,1"
+  # The grid and model limits. harness/harbor_agent.py reads these same keys,
+  # so the harness and the stack cannot disagree about the step it is running.
+  steps: 1
+  max_tokens: 8192
+  seq_length: 12288
+  lora_rank: 32
+  tensor_parallel_size: 2
+  checkpoint_dir: work/polyomino_packing/checkpoints
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: guidance-ttt      # produces group guidance-ttt/<scenario>
+    # name_prefix: guidance-ttt
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: work/polyomino_packing/wandb
+    upload_checkpoints: false
+
+services:
+  - name: ray-head
+    command: >-
+      ray start --head --node-ip-address=127.0.0.1 --port=6379
+      --include-dashboard=false --num-cpus=32
+      --num-gpus=${training.num_gpus} --disable-usage-stats --block
+    ready: ray health-check --address=127.0.0.1:6379
+    cuda: ${training.cuda_visible_devices}
+
+  - name: slime-driver
+    command: >-
+      python -m reef.train.slime_backend.reef_adapters.driver
+      --hf-checkpoint=${reef.model_path}
+      --load=${training.checkpoint_dir}/megatron
+      --ref-load=${reef.model_path}
+      --save=${training.checkpoint_dir}/megatron
+      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
+      --save-interval=${reef.checkpoint_every_n_versions}
+      --megatron-to-hf-mode=bridge
+      --num-rollout=${training.steps}
+      --rollout-batch-size=${reef.groups_per_step}
+      --n-samples-per-prompt=${reef.rollouts_per_group}
+      --global-batch-size=8
+      --disable-rollout-global-dataset
+      --actor-num-nodes=1
+      --actor-num-gpus-per-node=${training.num_gpus}
+      --rollout-num-gpus=${training.num_gpus}
+      --rollout-num-gpus-per-engine=1
+      --num-gpus-per-node=${training.num_gpus}
+      --colocate
+      --tensor-model-parallel-size=${training.tensor_parallel_size}
+      --pipeline-model-parallel-size=1
+      --context-parallel-size=1
+      --expert-model-parallel-size=1
+      --expert-tensor-parallel-size=1
+      --padded-vocab-size=151936
+      --position-embedding-type=rope
+      --rotary-base=1000000
+      --swiglu
+      --disable-bias-linear
+      --normalization=RMSNorm
+      --group-query-attention
+      --qk-layernorm
+      --seq-length=${training.seq_length}
+      --use-dynamic-batch-size
+      --max-tokens-per-gpu=12288
+      --recompute-granularity=full
+      --recompute-method=uniform
+      --recompute-num-layers=1
+      --megatron-lora-rank=${training.lora_rank}
+      --megatron-lora-alpha=32
+      --megatron-lora-dropout=0
+      --megatron-lora-target-modules
+      linear_qkv linear_proj linear_fc1 linear_fc2
+      --check-lora-weight-equal
+      --verify-lora-base-weights
+      --optimizer=adam
+      --lr=4e-5
+      --lr-decay-style=constant
+      --override-opt-param-scheduler
+      --weight-decay=0
+      --adam-beta1=0.9
+      --adam-beta2=0.95
+      --adam-eps=1e-8
+      --clip-grad=0
+      --loss-type=custom_loss
+      --custom-loss-function-path=recipes.tttd.slime.objective.tttd_loss
+      --use-rollout-logprobs
+      --advantage-estimator=grpo
+      --kl-coef=0.1
+      --custom-advantage-function-path=recipes.tttd.slime.objective.tttd_advantages
+      --entropy-coef=0
+      --rollout-temperature=1
+      --rollout-max-response-len=8192
+      --rollout-max-context-len=12288
+      --sglang-context-length=12288
+      --sglang-router-port=30000
+      --sglang-mem-fraction-static=0.5
+      --sglang-disable-prefill-cuda-graph
+      --sglang-cuda-graph-max-bs-decode=8
+      --train-env-vars='{"PYTORCH_CUDA_ALLOC_CONF":"max_split_size_mb:512"}'
+      --log-probs-chunk-size=1024
+      --attention-dropout=0
+      --hidden-dropout=0
+      --accumulate-allreduce-grads-in-fp32
+      --attention-softmax-in-fp32
+      --attention-backend=flash
+    ready: test -f "$REEF_BRIDGE_READY_FILE"
+    env:
+      RAY_ADDRESS: 127.0.0.1:6379
+      REEF_RAY_NAMESPACE: reef
+      REEF_RAY_ACTOR_NAME: reef-train-bridge
+      REEF_TRAINING_RECIPE: tttd
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      NCCL_NVLS_ENABLE: "0"
+    depends_on: [ray-head]
+    cuda: ${training.cuda_visible_devices}
+
+  - name: reef
+    command: python -m reef.service
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready_timeout: 120
+    env:
+      RAY_ADDRESS: 127.0.0.1:6379
+    depends_on: [slime-driver]

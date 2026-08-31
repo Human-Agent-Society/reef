@@ -1,0 +1,32 @@
+# External provider inference — no GPU, no local model.
+# One process: reef (serve), proxying to an HTTP provider.
+#
+# Start the configured service with
+# `reef serve -c recipes/basic/external-provider.yaml`.
+# The provider is named below; edit it there rather than exporting it. The two
+# values this file cannot carry are read from the environment at launch time:
+# the service credential and the provider's key.
+#   export REEF_TOKEN=$(openssl rand -hex 16)
+#   export REEF_UPSTREAM_API_KEY=sk-...
+
+reef:
+  host: 0.0.0.0
+  port: 8900
+  recipe: recipe
+  # The service credential. Use `tokens: [...]` instead to accept several
+  # at once, e.g. while rotating.
+  token: ${REEF_TOKEN}
+  # The OpenAI-compatible provider (no /v1 suffix), its credential, and the
+  # model to request. Reef is the only party that ever sees these.
+  upstream_url: https://api.openai.com
+  upstream_api_key: ${REEF_UPSTREAM_API_KEY}
+  upstream_model: gpt-4o
+  inference_timeout_s: 300
+  artifact_work_dir: .reef/artifact-work
+  artifact_cache_dir: .reef/artifact-cache
+  agent_record_dir: .reef/agent-record
+
+services:
+  - name: reef
+    command: python -m reef.service
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz

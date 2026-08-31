@@ -1,0 +1,72 @@
+# The recipe the campaign driver boots: run.py loads this file, builds
+# the dotted kind below, and serves it from its own embedded Reef service
+# (task containers reach that service through Docker's host gateway, and
+# every /v1 request they make carries the served pool's catalog).
+#
+# ${REEF_*} values interpolate from the environment through reef's config
+# loader; run.sh exports the defaults and REEF_SC_SKILLS (the benchmark's
+# shipped skills library) after materializing the WildClawBench checkout.
+
+# The method package's own recipe class: harness_evolve plus the
+# catalog-injecting delivery surface (harness/skillclaw_recipe.py, imported
+# from this directory - the driver runs with it as the working directory).
+kind: harness.skillclaw_recipe:SkillClawRecipe
+
+model:
+  path: ${REEF_MODEL}
+
+evolution:
+  adapter: pi
+  # The method module in the harness/ package: propose is the sealed night
+  # flow (one decision per skill group plus the no-skill bucket) mapped to
+  # one composite mutation sequence; evaluate grades the probe episodes.
+  propose: harness.skillclaw:propose
+  evaluate: harness.skillclaw:evaluate
+  # The SkillClaw regime: every non-skip night publishes; the probe episode
+  # scores are recorded in the ledger, never gating. The next day's traffic
+  # judges the pool.
+  selection: always
+  # The harness binary the probe episodes run headless, from the environment.
+  binary: ${REEF_PI_BINARY}
+  # Three exact-answer probe tasks. Each prefix keys the expected answer
+  # in harness/skillclaw.py's answer table; each prompt pins the format the
+  # grader checks (the answer alone on the last line).
+  tasks:
+    - >-
+      [sieve] Write and mentally run a prime sieve: how many primes are
+      below 100000? Reply with the count as a plain integer alone on the
+      last line.
+    - >-
+      [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly
+      (memoize, do not approximate). Reply with the value as a plain
+      integer alone on the last line.
+    - |-
+      [csv] Compute the median of the value column in this csv:
+      id,value
+      1,12
+      2,47
+      3,3
+      4,88
+      5,21
+      6,56
+      7,9
+      8,74
+      9,30
+      Reply with the median as a plain integer alone on the last line.
+  # The bootstrap pool: one skill node per <name>/SKILL.md under this
+  # directory - the benchmark's shipped skills library, the sealed
+  # campaign's day-one pool. Empty (unset) seeds no skills.
+  seed_skills: ${REEF_SC_SKILLS}
+  # The first-boot composition carries no provider: the driver (run.py)
+  # hands the recipe its model binding, which reef renders into each probe
+  # episode and passes to propose. The served pool never names an endpoint.
+  seed: []
+
+data:
+  # The night step wiring: the day is the batch. Every report batches -
+  # SkillClaw's night reads the whole day, failures and passes, so the
+  # window opens all the way (the config field's default 0.0 would batch failures
+  # only) - and the day's last report triggers the night, so batch_size is
+  # the frozen task count: 60 at the paper setting.
+  batch_size: 60
+  max_score: .inf

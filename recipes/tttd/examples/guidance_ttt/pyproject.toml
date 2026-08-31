@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-guidance-ttt-harness"
+version = "0.1.0"
+description = "Summary-only Guidance-TTT harness that talks to a Reef service"
+requires-python = ">=3.10"
+dependencies = ["reef-client", "pyyaml"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

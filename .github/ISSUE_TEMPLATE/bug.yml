@@ -1,0 +1,121 @@
+name: Bug report
+description: Report reproducible behavior that is incorrect or unexpected
+title: "[Bug] "
+labels: [bug, "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a Reef bug. Search existing issues first and
+        remove credentials, private data, provider tokens, and other secrets
+        from every field, log, fixture, and attachment.
+
+  - type: input
+    id: reef_version
+    attributes:
+      label: Reef version
+      description: Provide the installed release, package version, or image tag.
+      placeholder: "For example: 0.7.0 or ghcr.io/...:0.7.0"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Provide the full Reef commit hash for a source checkout, or enter N/A for an unmodified release.
+      placeholder: "For example: 0123456789abcdef... or N/A"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      description: Choose the area that best owns the failure. Maintainers may refine this during triage.
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Documentation
+        - Examples
+        - Packaging or deployment
+        - CI and developer tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system, Python version, install method, accelerator, and relevant runtime or provider versions.
+      placeholder: |
+        OS: Ubuntu 24.04
+        Python: 3.12.4
+        Install: editable checkout
+        Accelerator: NVIDIA H100, driver ..., CUDA ...
+        Runtime/provider: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest complete commands, configuration, and code that reproduce the problem.
+      placeholder: |
+        1. Run ...
+        2. Configure ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the result you expected and the contract or documentation that led to that expectation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Describe what happened instead, including whether the behavior is consistent or intermittent.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and diagnostics
+      description: Paste relevant complete errors, stack traces, and logs, or attach a file. Redact all secrets and private data.
+      placeholder: "Paste diagnostics here. Use fenced code blocks for text logs."
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Add screenshots, links, suspected causes, workarounds, or regression information.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and did not find the same bug.
+          required: true
+        - label: I reduced the report to a minimal reproduction or explained why that is not possible.
+          required: true
+        - label: I removed credentials, tokens, private data, and other secrets from this report and its attachments.
+          required: true

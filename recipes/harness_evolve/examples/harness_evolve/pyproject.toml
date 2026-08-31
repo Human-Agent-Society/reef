@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-harness-evolve-method"
+version = "0.1.0"
+description = "SkillClaw-style skill evolution method package for the Reef harness_evolve recipe"
+requires-python = ">=3.10"
+dependencies = ["reef-client"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

@@ -1,0 +1,91 @@
+"area: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/**"
+          - ".pre-commit-config.yaml"
+
+"area: core":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "reef/core/**"
+          - "reef/scenario/**"
+
+"area: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - "**/*.rst"
+          - "docs/**"
+          - "README*"
+
+"area: examples":
+  - changed-files:
+      - any-glob-to-any-file: "recipes/*/examples/**"
+      - any-glob-to-any-file: "recipes/basic/**"
+
+"area: harness":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "reef/harness/**"
+          - "recipes/sao/**"
+          - "recipes/tttd/**"
+          - "recipes/openclawrl/**"
+          - "recipes/harness_evolve/**"
+          - "reef/surface/**"
+          - "third_party/cordis/**"
+          - "recipes/harness_evolve/examples/harness_evolve/**"
+          - "recipes/harness_evolve/examples/skillclaw/**"
+          - "tests/reef_service/test_compose*.py"
+          - "tests/reef_service/test_harness*.py"
+          - "tests/reef_service/test_*recipe*.py"
+          - "tests/reef_service/test_skill*.py"
+          - "tests/reef_service/test_*surface*.py"
+          - "tests/smoke/**"
+
+"area: packaging":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "docker/**"
+          - "pyproject.toml"
+          - "third_party/**"
+
+"area: service":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "reef/cli.py"
+          - "reef/service/**"
+          - "tests/reef_service/**"
+
+"area: training":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "reef/artifact/**"
+          - "reef/dispatcher.py"
+          - "reef/runtime/**"
+          - "reef/train/**"
+          - "recipes/*/examples/*/serve.yaml"
+          - "tests/reef_service/test_async*.py"
+          - "tests/reef_service/test_*artifact*.py"
+          - "tests/reef_service/test_*checkpoint*.py"
+          - "tests/reef_service/test_*runtime*.py"
+          - "tests/reef_service/test_sao*.py"
+          - "tests/reef_service/test_slime*.py"
+          - "tests/reef_service/test_*training*.py"
+          - "tests/reef_service/test_*weight*.py"
+          - "tests/slime_backend/**"
+
+dependencies:
+  - changed-files:
+      - any-glob-to-any-file:
+          - ".github/dependabot.yml"
+          - "**/package-lock.json"
+          - "**/package.json"
+          - "**/pyproject.toml"
+          - "**/requirements*.txt"
+          - "docker/**/Dockerfile*"
+
+"type: tests":
+  - changed-files:
+      - any-glob-to-all-files:
+          - "tests/**"
+          - "**/test_*.py"

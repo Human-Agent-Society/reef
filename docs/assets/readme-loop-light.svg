@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #22363E; }
+    .m { fill: #7A929A; } .f { fill: #AABDC3; } .a { fill: #0E7490; } .c { fill: #D65F4A; }
+    .lab { font-size: 14px; } .sm { font-size: 12.5px; }
+    .draw { stroke: #22363E; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-f { stroke: #AABDC3; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-a { stroke: #0E7490; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-c { stroke: #D65F4A; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .dash { stroke-dasharray: 5 6; }
+  </style>
+  <defs>
+    <marker id="l-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22363E"/>
+    </marker>
+    <marker id="l-faint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#AABDC3"/>
+    </marker>
+    <marker id="l-acc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0E7490"/>
+    </marker>
+    <marker id="l-cor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#D65F4A"/>
+    </marker>
+  </defs>
+
+  <circle cx="185" cy="150" r="76" class="draw-a"/>
+  <path d="M 244 102 A 76 76 0 0 1 258 128" class="draw-a" marker-end="url(#l-acc)"/>
+  <path d="M 126 198 A 76 76 0 0 1 112 172" class="draw-a" marker-end="url(#l-acc)"/>
+
+  <circle cx="185" cy="74" r="5" fill="#0E7490"/>
+  <text x="185" y="52" text-anchor="middle" class="lab" font-weight="600">serve</text>
+  <circle cx="261" cy="150" r="5" fill="#0E7490"/>
+  <text x="282" y="156" class="lab" font-weight="600">observe</text>
+  <circle cx="185" cy="226" r="5" fill="#D65F4A"/>
+  <text x="185" y="262" text-anchor="middle" class="lab" font-weight="600">grow</text>
+  <circle cx="109" cy="150" r="5" fill="#0E7490"/>
+  <text x="88" y="156" text-anchor="end" class="lab" font-weight="600">commit</text>
+  <text x="185" y="156" text-anchor="middle" class="sm m">keeps serving</text>
+
+  <path d="M 358 150 H 400" class="draw" marker-end="url(#l-ink)"/>
+  <text x="379" y="134" text-anchor="middle" class="sm m">each lap</text>
+
+  <g>
+    <circle cx="436" cy="150" r="15" class="draw-f"/>
+    <text x="436" y="155" text-anchor="middle" class="sm f">v1</text>
+    <path d="M455 150 H481" class="draw-f" marker-end="url(#l-faint)"/>
+    <circle cx="500" cy="150" r="15" class="draw-f"/>
+    <text x="500" y="155" text-anchor="middle" class="sm f">v2</text>
+    <path d="M519 150 H545" class="draw-f" marker-end="url(#l-faint)"/>
+    <circle cx="564" cy="150" r="15" class="draw-f"/>
+    <text x="564" y="155" text-anchor="middle" class="sm f">v3</text>
+    <path d="M583 150 H609" class="draw" marker-end="url(#l-ink)"/>
+    <circle cx="628" cy="150" r="15" class="draw"/>
+    <text x="628" y="155" text-anchor="middle" class="sm">v4</text>
+    <path d="M647 150 H673" class="draw" marker-end="url(#l-ink)"/>
+    <circle cx="692" cy="150" r="15" class="draw-a"/>
+    <text x="692" y="155" text-anchor="middle" class="sm a" font-weight="600">v5</text>
+    <path d="M711 150 H749" class="draw-c dash" marker-end="url(#l-cor)"/>
+    <text x="772" y="156" class="sm c" font-weight="600">v6…</text>
+  </g>
+  <text x="600" y="112" text-anchor="middle" class="sm m">one more link — serving continues throughout</text>
+
+  <path d="M 692 172 C 664 214, 534 214, 504 170" class="draw-f dash" marker-end="url(#l-faint)"/>
+  <text x="598" y="234" text-anchor="middle" class="sm f">roll back anytime</text>
+</svg>

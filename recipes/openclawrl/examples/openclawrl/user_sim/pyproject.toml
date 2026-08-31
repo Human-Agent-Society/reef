@@ -1,0 +1,17 @@
+# The lazy-student judge sidecar as a package: the shared sidecar image
+# (Dockerfile here, built by run.sh) pip-installs it, so no task carries a copy
+# of student_server.py or personas.py. Stdlib only: the sidecar and the whole
+# stream run without extra dependencies.
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openclawrl-user-sim"
+version = "0.1.0"
+description = "OpenClaw-RL simulated-student judge sidecar for the GSM8K homework stream"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.setuptools]
+py-modules = ["personas", "student_server"]

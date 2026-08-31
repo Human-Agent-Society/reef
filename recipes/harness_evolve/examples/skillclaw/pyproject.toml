@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-skillclaw-harness"
+version = "0.1.0"
+description = "SkillClaw reproduction method package on Reef harness evolution"
+requires-python = ">=3.10"
+# The method runs inside the embedded Reef service (run.py), so the package
+# also imports reef itself; run.sh supplies it from the repo via PYTHONPATH.
+dependencies = ["reef-client", "pyyaml"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

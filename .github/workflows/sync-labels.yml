@@ -1,0 +1,110 @@
+name: sync repository labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/labeler.yml"
+      - ".github/labels.json"
+      - ".github/workflows/sync-labels.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      pull-requests: ${{ steps.open-pull-requests.outputs.result }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require("fs");
+            const labels = JSON.parse(
+              fs.readFileSync(".github/labels.json", "utf8"),
+            );
+            const names = new Set();
+            for (const label of labels) {
+              if (
+                !label ||
+                typeof label.name !== "string" ||
+                !/^[0-9a-fA-F]{6}$/.test(label.color) ||
+                typeof label.description !== "string"
+              ) {
+                core.setFailed("Every label needs a name, hex color, and description");
+                return;
+              }
+              if (names.has(label.name)) {
+                core.setFailed(`Duplicate label: ${label.name}`);
+                return;
+              }
+              names.add(label.name);
+            }
+
+            const { owner, repo } = context.repo;
+            const existing = await github.paginate(
+              github.rest.issues.listLabelsForRepo,
+              { owner, repo, per_page: 100 },
+            );
+            const byName = new Map(existing.map((label) => [label.name, label]));
+
+            for (const label of labels) {
+              const current = byName.get(label.name);
+              if (!current) {
+                await github.rest.issues.createLabel({ owner, repo, ...label });
+                continue;
+              }
+              if (
+                current.color.toLowerCase() !== label.color.toLowerCase() ||
+                (current.description || "") !== label.description
+              ) {
+                await github.rest.issues.updateLabel({
+                  owner,
+                  repo,
+                  name: current.name,
+                  new_name: label.name,
+                  color: label.color,
+                  description: label.description,
+                });
+              }
+            }
+      - id: open-pull-requests
+        name: Find open pull requests to relabel
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pulls = await github.paginate(
+              github.rest.pulls.list,
+              { owner, repo, state: "open", per_page: 100 },
+            );
+            return pulls.map((pull) => pull.number);
+
+  relabel:
+    needs: sync
+    if: needs.sync.outputs.pull-requests != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        pr-number: ${{ fromJSON(needs.sync.outputs.pull-requests) }}
+    steps:
+      - name: Apply current routing rules to open pull requests
+        uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13 # v7.0.0
+        with:
+          configuration-path: .github/labeler.yml
+          pr-number: ${{ matrix.pr-number }}
+          sync-labels: true

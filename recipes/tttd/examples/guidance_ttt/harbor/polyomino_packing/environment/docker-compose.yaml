@@ -1,0 +1,11 @@
+# The authoritative judge is the external, privileged FrontierCS/go-judge that
+# the deployment starts on the host (see README). The verifier reaches it
+# through the host gateway, so the trial is scored by the same service that
+# scored every search rollout — never by the agent's own bookkeeping.
+services:
+  main:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      FRONTIERCS_JUDGE_URL: "${FRONTIERCS_JUDGE_URL:-http://host.docker.internal:8081}"
+      FRONTIERCS_PROBLEM_ID: "${FRONTIERCS_PROBLEM_ID:-0}"

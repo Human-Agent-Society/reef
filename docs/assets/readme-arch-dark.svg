@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 400" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #DCE9EC; }
+    .m { fill: #8AA2AA; } .a { fill: #45B2C6; }
+    .ttl { font-size: 15px; font-weight: 600; } .lab { font-size: 13px; font-weight: 600; }
+    .body { font-size: 11.5px; } .sm { font-size: 11.5px; } .tag { font-size: 10px; }
+    .draw { stroke: #DCE9EC; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-a { stroke: #45B2C6; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-d { stroke: #DCE9EC; stroke-width: 1.6; fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 5 5; }
+    .fill-soft { fill: #12262C; }
+  </style>
+  <defs>
+    <marker id="x-ink" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#DCE9EC"/>
+    </marker>
+    <marker id="x-acc" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#45B2C6"/>
+    </marker>
+  </defs>
+
+  <!-- Reef container -->
+  <rect x="248" y="20" width="404" height="340" rx="16" class="draw-a fill-soft"/>
+  <text x="450" y="46" text-anchor="middle" class="ttl a">Reef</text>
+
+  <!-- Request plane -->
+  <rect x="308" y="82" width="284" height="44" rx="10" class="draw"/>
+  <text x="450" y="100" text-anchor="middle" class="lab">Request plane</text>
+  <text x="450" y="116" text-anchor="middle" class="body m">OpenAI / Anthropic compatible</text>
+
+  <!-- Record store (cylinder) -->
+  <path d="M 358,150 L 358,190 A 92,10 0 0 0 542,190 L 542,150 Z" class="fill-soft"/>
+  <ellipse cx="450" cy="150" rx="92" ry="10" class="fill-soft draw-a"/>
+  <line x1="358" y1="150" x2="358" y2="190" class="draw-a"/>
+  <line x1="542" y1="150" x2="542" y2="190" class="draw-a"/>
+  <path d="M 358,190 A 92,10 0 0 0 542,190" class="draw-a"/>
+  <text x="450" y="167" text-anchor="middle" class="lab">record store</text>
+  <text x="450" y="182" text-anchor="middle" class="sm m">per scenario</text>
+
+  <!-- Trainer -->
+  <rect x="308" y="218" width="284" height="44" rx="10" class="draw"/>
+  <text x="450" y="236" text-anchor="middle" class="lab">Trainer</text>
+  <text x="450" y="252" text-anchor="middle" class="body m">batches records + feedback</text>
+
+  <!-- Version history (cylinder) -->
+  <path d="M 346,296 L 346,336 A 104,10 0 0 0 554,336 L 554,296 Z" class="fill-soft"/>
+  <ellipse cx="450" cy="296" rx="104" ry="10" class="fill-soft draw-a"/>
+  <line x1="346" y1="296" x2="346" y2="336" class="draw-a"/>
+  <line x1="554" y1="296" x2="554" y2="336" class="draw-a"/>
+  <path d="M 346,336 A 104,10 0 0 0 554,336" class="draw-a"/>
+  <text x="450" y="313" text-anchor="middle" class="lab">version history</text>
+  <text x="450" y="328" text-anchor="middle" class="sm m">Git-backed</text>
+
+  <!-- Your harness -->
+  <rect x="30" y="74" width="170" height="62" rx="12" class="draw"/>
+  <text x="115" y="95" text-anchor="middle" class="lab">Your harness</text>
+  <text x="115" y="111" text-anchor="middle" class="body m">agent · prompts</text>
+  <text x="115" y="125" text-anchor="middle" class="body m">tools · feedback</text>
+
+  <!-- Inference runtime -->
+  <rect x="710" y="71" width="200" height="66" rx="12" class="draw"/>
+  <text x="810" y="98" text-anchor="middle" class="lab">Inference runtime</text>
+  <text x="810" y="116" text-anchor="middle" class="body m">SGLang router + engines</text>
+
+  <!-- Training runtime (optional, dashed) -->
+  <rect x="710" y="207" width="200" height="66" rx="12" class="draw-d"/>
+  <text x="810" y="234" text-anchor="middle" class="lab">Training runtime</text>
+  <text x="810" y="251" text-anchor="middle" class="body m">Ray + Megatron</text>
+  <text x="810" y="266" text-anchor="middle" class="tag m">optional · slime · veRL · AReaL</text>
+
+  <!-- Arrows -->
+  <!-- harness -> request plane -->
+  <path d="M 200,104 L 305,104" class="draw" marker-end="url(#x-ink)"/>
+  <text x="252" y="96" text-anchor="middle" class="sm m">inference · report</text>
+
+  <!-- request plane -> record store -->
+  <path d="M 450,126 L 450,138" class="draw-a" marker-end="url(#x-acc)"/>
+  <text x="463" y="135" class="sm m">store</text>
+
+  <!-- request plane -> inference (proxy) -->
+  <path d="M 592,104 L 707,104" class="draw" marker-end="url(#x-ink)"/>
+  <text x="649" y="96" text-anchor="middle" class="sm m">proxy</text>
+
+  <!-- record store -> trainer -->
+  <path d="M 450,190 L 450,216" class="draw-a" marker-end="url(#x-acc)"/>
+  <text x="463" y="206" class="sm m">batch</text>
+
+  <!-- trainer -> training runtime -->
+  <path d="M 592,240 L 707,240" class="draw" marker-end="url(#x-ink)"/>
+  <text x="649" y="232" text-anchor="middle" class="sm m">prepared update</text>
+
+  <!-- training -> inference (weight sync) -->
+  <path d="M 810,207 L 810,140" class="draw" marker-end="url(#x-ink)"/>
+  <text x="824" y="178" class="sm m">weight sync</text>
+
+  <!-- trainer -> version history -->
+  <path d="M 450,262 L 450,285" class="draw-a" marker-end="url(#x-acc)"/>
+  <text x="463" y="277" class="sm m">publish version</text>
+
+  <!-- version history -> request plane (serve current, loop back) -->
+  <path d="M 346,316 L 296,316 Q 286,316 286,306 L 286,114 Q 286,104 296,104 L 305,104" class="draw-a" marker-end="url(#x-acc)"/>
+  <text x="278" y="210" text-anchor="middle" transform="rotate(-90, 278, 210)" class="sm a">serve current</text>
+</svg>

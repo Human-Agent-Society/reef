@@ -1,0 +1,104 @@
+{
+  "best_node_id": "eb0c6876-37b8-4efa-98e2-14148ff15e3d",
+  "config": {
+    "max_buffer_size": 1000,
+    "puct_c": 1.0,
+    "rollout_n": 1,
+    "topk_children": 2
+  },
+  "entries": {
+    "51e421d1-3e3d-42ba-869b-525353d1239c": {
+      "execution_thinking": "The baseline simply places each polyomino next to the previous one without any rotation or reflection. For each piece we compute its axis\u2011aligned bounding box, shift it so its minimum x and y become 0, then translate it horizontally by the accumulated width of earlier pieces. The board width is the sum of all piece widths, height is the maximum piece height. This guarantees a valid, non\u2011overlapping placement with minimal implementation effort.",
+      "failure_mode": null,
+      "guidance": "Bootstrap execution without guidance.",
+      "id": "51e421d1-3e3d-42ba-869b-525353d1239c",
+      "metadata": {
+        "bootstrap": true,
+        "bootstrap_attempts": 2,
+        "execution_fallback_reason": null,
+        "execution_fallback_used": false,
+        "execution_finish_reason": "stop",
+        "execution_model": "openai/gpt-oss-120b",
+        "execution_prompt": {
+          "system": "You are the bootstrap execution model. Produce one concrete runnable C++17 baseline candidate and a concise summary for seeding a Guidance-TTT library.",
+          "user": "<problem>\nYou are solving FrontierCS algorithmic problem 0: Polyomino Packing.\n\nWrite a self-contained C++17 program that reads one instance from stdin and writes\none placement to stdout.\n\nInput:\n- The first line contains n, the number of polyominoes.\n- For each polyomino i, one line contains k_i, followed by k_i lines of integer\n  cell coordinates x y in the polyomino local frame.\n- Each polyomino has 1 to 10 cells, is 4-connected, and coordinates may be negative.\n\nOutput:\n- First line: two integers W H for the chosen board.\n- Then exactly n lines, one per input polyomino, each with X Y R F.\n- X Y is the integer translation.\n- R is one of 0, 1, 2, 3 and means clockwise rotation by R * 90 degrees.\n- F is 0 or 1. If F=1, reflect across the y-axis before applying the rotation.\n\nValidity:\n- Apply transforms in this order: optional reflection, rotation, translation.\n- Every transformed cell must satisfy 0 <= x < W and 0 <= y < H.\n- No two transformed cells may overlap.\n- Invalid output, crashes, or timeouts receive zero score.\n\nObjective:\n- Maximize the FrontierCS score by minimizing packing area W * H across the benchmark cases.\n- Ties favor smaller H, then smaller W.\n- Solutions are compiled with g++ -std=c++17 -O2 and evaluated by FrontierCS/go-judge.\n\n</problem>\n\nYou are generating the initial bootstrap candidate for a Guidance-TTT run.\n\nThere is no previous library summary and no guidance yet. Produce one concrete baseline solution that satisfies the problem statement and can seed the future search history.\n\nThe <solution> block must contain one complete C++17 program in a ```cpp fenced block. It must read the Polyomino Packing instance from stdin and write the placement to stdout.\n\nYour response must contain exactly three top-level XML blocks and no extra text before, between, or after them.\nYou must output all three XML blocks exactly as shown below.\nThe <execution_thinking>...</execution_thinking> block is mandatory and must use angle brackets.\nThe <solution> block is mandatory and must contain a fenced ```cpp code block.\nThe <summary>...</summary> block is mandatory and must be closed.\nDo not output only execution_thinking, only a summary, or plain natural language.\nDo not omit angle brackets from XML tags.\nThe final characters of your response must be </summary>.\n\nRequired output format:\n\n<execution_thinking>\nA short explanation of the baseline strategy used to produce the initial candidate.\nDo not include code.\n</execution_thinking>\n\n<solution>\n```cpp\nA complete self-contained C++17 program.\n```\n</solution>\n\n<summary>\nA concise natural-language summary of the candidate.\n\nThis summary must describe the implemented baseline algorithm, the main construction/search/refinement mechanism, and what future guidance could improve. If the solution intentionally uses a simple heuristic rather than a full optimization method, state that clearly.\n\nDo not include source code, code fences, copied constants, hard-coded arrays, raw candidate parameters, benchmark-specific recipe values, or the output-format instructions themselves.\n</summary>\n\nAny response that does not follow this exact three-block structure should be treated as invalid.\n"
+        },
+        "execution_provider": "openai_compatible",
+        "execution_response_metadata": {
+          "bootstrap": true,
+          "provider": "openai_compatible",
+          "purpose": "execution"
+        },
+        "execution_response_usage": {
+          "completion_tokens": 1172,
+          "prompt_tokens": 794,
+          "prompt_tokens_details": null,
+          "total_tokens": 1966
+        },
+        "execution_text": "<execution_thinking>\nThe baseline simply places each polyomino next to the previous one without any rotation or reflection. For each piece we compute its axis\u2011aligned bounding box, shift it so its minimum x and y become 0, then translate it horizontally by the accumulated width of earlier pieces. The board width is the sum of all piece widths, height is the maximum piece height. This guarantees a valid, non\u2011overlapping placement with minimal implementation effort.\n</execution_thinking>\n\n<solution>\n```cpp\n#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    ios::sync_with_stdio(false);\n    cin.tie(nullptr);\n    int n;\n    if (!(cin >> n)) return 0;\n    struct Piece {\n        vector<pair<int,int>> cells;\n        int minX, maxX, minY, maxY;\n        int width, height;\n        int transX, transY;\n    };\n    vector<Piece> pieces(n);\n    for (int i = 0; i < n; ++i) {\n        int k; cin >> k;\n        pieces[i].cells.resize(k);\n        pieces[i].minX = pieces[i].minY = INT_MAX;\n        pieces[i].maxX = pieces[i].maxY = INT_MIN;\n        for (int j = 0; j < k; ++j) {\n            int x, y; cin >> x >> y;\n            pieces[i].cells[j] = {x, y};\n            pieces[i].minX = min(pieces[i].minX, x);\n            pieces[i].maxX = max(pieces[i].maxX, x);\n            pieces[i].minY = min(pieces[i].minY, y);\n            pieces[i].maxY = max(pieces[i].maxY, y);\n        }\n        pieces[i].width  = pieces[i].maxX - pieces[i].minX + 1;\n        pieces[i].height = pieces[i].maxY - pieces[i].minY + 1;\n    }\n\n    int curX = 0;\n    int boardH = 0;\n    for (auto &p : pieces) {\n        p.transX = curX - p.minX;   // shift so minX maps to curX\n        p.transY = -p.minY;         // shift so minY maps to 0\n        curX += p.width;\n        boardH = max(boardH, p.height);\n    }\n    int boardW = curX;\n\n    cout << boardW << ' ' << boardH << '\\n';\n    for (auto &p : pieces) {\n        cout << p.transX << ' ' << p.transY << ' ' << 0 << ' ' << 0 << '\\n';\n    }\n    return 0;\n}\n```\n</solution>\n\n<summary>\nThe program implements a trivial greedy layout: each polyomino is placed axis\u2011aligned, unrotated, and unreflected, positioned side\u2011by\u2011side in a single row. Bounding boxes determine required horizontal offsets; vertical offset aligns all pieces to y\u202f=\u202f0. The board dimensions are the total width and the maximum height among pieces, guaranteeing a valid non\u2011overlapping solution. Future guidance could introduce rotations, reflections, or 2\u2011D bin\u2011packing heuristics (e.g., skyline, bottom\u2011left) to reduce the area and improve the FrontierCS score.\n</summary>",
+        "original_execution_text": "<execution_thinking>\nThe baseline simply places each polyomino next to the previous one without any rotation or reflection. For each piece we compute its axis\u2011aligned bounding box, shift it so its minimum x and y become 0, then translate it horizontally by the accumulated width of earlier pieces. The board width is the sum of all piece widths, height is the maximum piece height. This guarantees a valid, non\u2011overlapping placement with minimal implementation effort.\n</execution_thinking>\n\n<solution>\n```cpp\n#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    ios::sync_with_stdio(false);\n    cin.tie(nullptr);\n    int n;\n    if (!(cin >> n)) return 0;\n    struct Piece {\n        vector<pair<int,int>> cells;\n        int minX, maxX, minY, maxY;\n        int width, height;\n        int transX, transY;\n    };\n    vector<Piece> pieces(n);\n    for (int i = 0; i < n; ++i) {\n        int k; cin >> k;\n        pieces[i].cells.resize(k);\n        pieces[i].minX = pieces[i].minY = INT_MAX;\n        pieces[i].maxX = pieces[i].maxY = INT_MIN;\n        for (int j = 0; j < k; ++j) {\n            int x, y; cin >> x >> y;\n            pieces[i].cells[j] = {x, y};\n            pieces[i].minX = min(pieces[i].minX, x);\n            pieces[i].maxX = max(pieces[i].maxX, x);\n            pieces[i].minY = min(pieces[i].minY, y);\n            pieces[i].maxY = max(pieces[i].maxY, y);\n        }\n        pieces[i].width  = pieces[i].maxX - pieces[i].minX + 1;\n        pieces[i].height = pieces[i].maxY - pieces[i].minY + 1;\n    }\n\n    int curX = 0;\n    int boardH = 0;\n    for (auto &p : pieces) {\n        p.transX = curX - p.minX;   // shift so minX maps to curX\n        p.transY = -p.minY;         // shift so minY maps to 0\n        curX += p.width;\n        boardH = max(boardH, p.height);\n    }\n    int boardW = curX;\n\n    cout << boardW << ' ' << boardH << '\\n';\n    for (auto &p : pieces) {\n        cout << p.transX << ' ' << p.transY << ' ' << 0 << ' ' << 0 << '\\n';\n    }\n    return 0;\n}\n```\n</solution>\n\n<summary>\nThe program implements a trivial greedy layout: each polyomino is placed axis\u2011aligned, unrotated, and unreflected, positioned side\u2011by\u2011side in a single row. Bounding boxes determine required horizontal offsets; vertical offset aligns all pieces to y\u202f=\u202f0. The board dimensions are the total width and the maximum height among pieces, guaranteeing a valid non\u2011overlapping solution. Future guidance could introduce rotations, reflections, or 2\u2011D bin\u2011packing heuristics (e.g., skyline, bottom\u2011left) to reduce the area and improve the FrontierCS score.\n</summary>",
+        "raw_model_summary": "The program implements a trivial greedy layout: each polyomino is placed axis\u2011aligned, unrotated, and unreflected, positioned side\u2011by\u2011side in a single row. Bounding boxes determine required horizontal offsets; vertical offset aligns all pieces to y\u202f=\u202f0. The board dimensions are the total width and the maximum height among pieces, guaranteeing a valid non\u2011overlapping solution. Future guidance could introduce rotations, reflections, or 2\u2011D bin\u2011packing heuristics (e.g., skyline, bottom\u2011left) to reduce the area and improve the FrontierCS score.",
+        "task": {
+          "frontiercs": {
+            "base_dir": "/opt/Frontier-CS",
+            "judge_url": "http://127.0.0.1:8081",
+            "memory_mb": 256,
+            "n_cases": 70,
+            "problem_id": "0",
+            "time_limit_s": 2,
+            "total_timeout_s": 340
+          },
+          "id": "polyomino_packing"
+        },
+        "verification_artifacts": {
+          "code": "#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    ios::sync_with_stdio(false);\n    cin.tie(nullptr);\n    int n;\n    if (!(cin >> n)) return 0;\n    struct Piece {\n        vector<pair<int,int>> cells;\n        int minX, maxX, minY, maxY;\n        int width, height;\n        int transX, transY;\n    };\n    vector<Piece> pieces(n);\n    for (int i = 0; i < n; ++i) {\n        int k; cin >> k;\n        pieces[i].cells.resize(k);\n        pieces[i].minX = pieces[i].minY = INT_MAX;\n        pieces[i].maxX = pieces[i].maxY = INT_MIN;\n        for (int j = 0; j < k; ++j) {\n            int x, y; cin >> x >> y;\n            pieces[i].cells[j] = {x, y};\n            pieces[i].minX = min(pieces[i].minX, x);\n            pieces[i].maxX = max(pieces[i].maxX, x);\n            pieces[i].minY = min(pieces[i].minY, y);\n            pieces[i].maxY = max(pieces[i].maxY, y);\n        }\n        pieces[i].width  = pieces[i].maxX - pieces[i].minX + 1;\n        pieces[i].height = pieces[i].maxY - pieces[i].minY + 1;\n    }\n\n    int curX = 0;\n    int boardH = 0;\n    for (auto &p : pieces) {\n        p.transX = curX - p.minX;   // shift so minX maps to curX\n        p.transY = -p.minY;         // shift so minY maps to 0\n        curX += p.width;\n        boardH = max(boardH, p.height);\n    }\n    int boardW = curX;\n\n    cout << boardW << ' ' << boardH << '\\n';\n    for (auto &p : pieces) {\n        cout << p.transX << ' ' << p.transY << ' ' << 0 << ' ' << 0 << '\\n';\n    }\n    return 0;\n}",
+          "frontiercs_base_dir": "/opt/Frontier-CS",
+          "frontiercs_config": {
+            "memory_mb": 256,
+            "n_cases": 70,
+            "time_limit_s": 2,
+            "total_timeout_s": 340
+          },
+          "problem_id": "0"
+        }
+      },
+      "parent_id": "eb0c6876-37b8-4efa-98e2-14148ff15e3d",
+      "problem_id": "polyomino_packing",
+      "reusable_idea": "Continue from the submitted guidance: Bootstrap execution without guidance.",
+      "solution": "#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    ios::sync_with_stdio(false);\n    cin.tie(nullptr);\n    int n;\n    if (!(cin >> n)) return 0;\n    struct Piece {\n        vector<pair<int,int>> cells;\n        int minX, maxX, minY, maxY;\n        int width, height;\n        int transX, transY;\n    };\n    vector<Piece> pieces(n);\n    for (int i = 0; i < n; ++i) {\n        int k; cin >> k;\n        pieces[i].cells.resize(k);\n        pieces[i].minX = pieces[i].minY = INT_MAX;\n        pieces[i].maxX = pieces[i].maxY = INT_MIN;\n        for (int j = 0; j < k; ++j) {\n            int x, y; cin >> x >> y;\n            pieces[i].cells[j] = {x, y};\n            pieces[i].minX = min(pieces[i].minX, x);\n            pieces[i].maxX = max(pieces[i].maxX, x);\n            pieces[i].minY = min(pieces[i].minY, y);\n            pieces[i].maxY = max(pieces[i].maxY, y);\n        }\n        pieces[i].width  = pieces[i].maxX - pieces[i].minX + 1;\n        pieces[i].height = pieces[i].maxY - pieces[i].minY + 1;\n    }\n\n    int curX = 0;\n    int boardH = 0;\n    for (auto &p : pieces) {\n        p.transX = curX - p.minX;   // shift so minX maps to curX\n        p.transY = -p.minY;         // shift so minY maps to 0\n        curX += p.width;\n        boardH = max(boardH, p.height);\n    }\n    int boardW = curX;\n\n    cout << boardW << ' ' << boardH << '\\n';\n    for (auto &p : pieces) {\n        cout << p.transX << ' ' << p.transY << ' ' << 0 << ' ' << 0 << '\\n';\n    }\n    return 0;\n}",
+      "summary": "Execution Interpretation\nThe baseline simply places each polyomino next to the previous one without any rotation or reflection. For each piece we compute its axis\u2011aligned bounding box, shift it so its minimum x and y become 0, then translate it horizontally by the accumulated width of earlier pieces. The board width is the sum of all piece widths, height is the maximum piece height. This guarantees a valid, non\u2011overlapping placement with minimal implementation effort.\n\nImplemented Algorithm\n```cpp\n#include <bits/stdc++.h>\nusing namespace std;\n\nint main() {\n    ios::sync_with_stdio(false);\n    cin.tie(nullptr);\n    int n;\n    if (!(cin >> n)) return 0;\n    struct Piece {\n        vector<pair<int,int>> cells;\n        int minX, maxX, minY, maxY;\n        int width, height;\n        int transX, transY;\n    };\n    vector<Piece> pieces(n);\n    for (int i = 0; i < n; ++i) {\n        int k; cin >> k;\n        pieces[i].cells.resize(k);\n        pieces[i].minX = pieces[i].minY = INT_MAX;\n        pieces[i].maxX = pieces[i].maxY = INT_MIN;\n        for (int j = 0; j < k; ++j) {\n            int x, y; cin >> x >> y;\n            pieces[i].cells[j] = {x, y};\n            pieces[i].minX = min(pieces[i].minX, x);\n            pieces[i].maxX = max(pieces[i].maxX, x);\n            pieces[i].minY = min(pieces[i].minY, y);\n            pieces[i].maxY = max(pieces[i].maxY, y);\n        }\n        pieces[i].width  = pieces[i].maxX - pieces[i].minX + 1;\n        pieces[i].height = pieces[i].maxY - pieces[i].minY + 1;\n    }\n\n    int curX = 0;\n    int boardH = 0;\n    for (auto &p : pieces) {\n        p.transX = curX - p.minX;   // shift so minX maps to curX\n        p.transY = -p.minY;         // shift so minY maps to 0\n        curX += p.width;\n        boardH = max(boardH, p.height);\n    }\n    int boardW = curX;\n\n    cout << boardW << ' ' << boardH << '\\n';\n    for (auto &p : pieces) {\n        cout << p.transX << ' ' << p.transY << ' ' << 0 << ' ' << 0 << '\\n';\n    }\n    return 0;\n}\n```\n\nNew Ideas Introduced\nThe program implements a trivial greedy layout: each polyomino is placed axis\u2011aligned, unrotated, and unreflected, positioned side\u2011by\u2011side in a single row. Bounding boxes determine required horizontal offsets; vertical offset aligns all pieces to y\u202f=\u202f0. The board dimensions are the total width and the maximum height among pieces, guaranteeing a valid non\u2011overlapping solution. Future guidance could introduce rotations, reflections, or 2\u2011D bin\u2011packing heuristics (e.g., skyline, bottom\u2011left) to reduce the area and improve the FrontierCS score.\n\nEmpirical Outcome\nVerifier status: valid\nFrontierCS score: 27.810517627142843\nReward: 27.810517627142843\nVerifier message: accepted\n\nFailure / Bottleneck Analysis\nNo verifier failure reported.\n\nNext Guidance Delta\nContinue from the submitted guidance: Bootstrap execution without guidance.",
+      "timestep": 0,
+      "verifier_message": "accepted",
+      "verifier_raw_score": 27.810517627142843,
+      "verifier_reward": 27.810517627142843,
+      "verifier_status": "valid"
+    }
+  },
+  "groups": {},
+  "nodes": {
+    "eb0c6876-37b8-4efa-98e2-14148ff15e3d": {
+      "children": [],
+      "entry_id": "51e421d1-3e3d-42ba-869b-525353d1239c",
+      "id": "eb0c6876-37b8-4efa-98e2-14148ff15e3d",
+      "metadata": {
+        "bootstrap": true,
+        "frontiercs_problem_id": "0",
+        "initialization": "empty_frontiercs_score",
+        "kind": "root",
+        "task": "polyomino_packing",
+        "verifier_status": "valid"
+      },
+      "parent_id": null,
+      "problem_id": "polyomino_packing",
+      "raw_score": 27.810517627142843,
+      "timestep": 0,
+      "value": 27.810517627142843,
+      "visits": 0
+    }
+  },
+  "puct_T": 0,
+  "puct_c": 1.0,
+  "puct_m": {},
+  "puct_n": {},
+  "rollout_n": 1
+}

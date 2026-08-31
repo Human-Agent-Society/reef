@@ -1,0 +1,39 @@
+# Local inference (SGLang) — 1+ GPUs, recipe, no training.
+# Two processes: sglang server + reef (serve).
+#
+# reef.model_path accepts a local HF model directory or an HF repo ID
+# (e.g. Qwen/Qwen2.5-7B-Instruct); the repo ID is auto-downloaded on start.
+#
+# Start the configured stack with
+# `reef serve -c recipes/basic/local-sglang.yaml`. Commands run in
+# dependency order and support ${a.b.c} interpolation. ${REEF_TOKEN} is read
+# from the environment at launch time.
+#   export REEF_TOKEN=$(openssl rand -hex 16)
+
+reef:
+  host: 0.0.0.0
+  model_path: Qwen/Qwen2.5-7B-Instruct
+  port: 8900
+  recipe: recipe
+  # The service credential. Use `tokens: [...]` instead to accept several
+  # at once, e.g. while rotating.
+  token: ${REEF_TOKEN}
+  agent_record_dir: .reef/agent-record
+
+sglang:
+  cuda_visible_devices: "0"
+  port: "30000"
+
+services:
+  - name: sglang
+    command: >-
+      python -m sglang.launch_server
+      --model-path=${reef.model_path} --tp 1
+      --host 0.0.0.0 --port=${sglang.port}
+    ready: curl -sf http://127.0.0.1:${sglang.port}/health
+    cuda: ${sglang.cuda_visible_devices}
+
+  - name: reef
+    command: python -m reef.service
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    depends_on: [sglang]

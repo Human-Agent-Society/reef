@@ -1,0 +1,46 @@
+{
+  "run_family": "formal-8x64-v3",
+  "completed_at": "2026-08-29",
+  "model": "Qwen/Qwen3-8B",
+  "hardware": {
+    "gpu_count": 2,
+    "gpu_type": "NVIDIA B200"
+  },
+  "search": {
+    "steps": 50,
+    "groups_per_step": 8,
+    "rollouts_per_group": 64,
+    "max_new_tokens": 26000,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "thinking": true
+  },
+  "runtime_commits": [
+    "889f12b4863927cc6bd4e1082a22db4b2263a5de",
+    "e827ce5f039c98c3da99f631bd54ca1380005401"
+  ],
+  "tasks": {
+    "circle_packing_26": {
+      "scenario": "tttd-qwen3-8b-2gpu-formal-8x64-v3-packing26",
+      "certified_sum_of_radii": 2.6359830849177777,
+      "candidate_id": "state-9997",
+      "milestone_job_ids": ["593472", "593420", "593421"],
+      "wandb_project": "reef",
+      "wandb_run_id": "51956ca8ab8ea95a02b6a64375c4a081",
+      "instruction_sha256": "76111e7a7d9c594b4c4dac12df7d0851f1b1ad1daabce9e80c93633f689d27dc",
+      "verifier_sha256": "d6b3af37bbd5366d7624af2aa0caeaf683191a0ce5593bf1d6913e4edb8005ac",
+      "solution_sha256": "9ba4255b4e796fc8b3d4a15b32bb8ede4fb244fa2762e9a68b93189c443eee4c"
+    },
+    "circle_packing_32": {
+      "scenario": "tttd-qwen3-8b-2gpu-formal-8x64-v3-packing32",
+      "certified_sum_of_radii": 2.9395727712074926,
+      "candidate_id": "state-12045",
+      "milestone_job_ids": ["593473", "593422", "593423"],
+      "wandb_project": "reef",
+      "wandb_run_id": "030683efe2bfee9866d61cf3b654ef59",
+      "instruction_sha256": "352187e63a5ad14d91358bf6742a9aba7d2f5222ebe283d672c31ab8317a230e",
+      "verifier_sha256": "17c7e4e1e5a3a1924d07c8e847fcf61d72e16174163fecef86377531c47efb63",
+      "solution_sha256": "b3371209e93251f493d617b6e8d95a7569e7c24ce1349dcdbf3ec94dbe2448fa"
+    }
+  }
+}

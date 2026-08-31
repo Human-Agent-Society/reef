@@ -1,0 +1,257 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "buildCommand": "npm run build",
+  "redirects": [
+    {
+      "source": "/docs/concepts",
+      "destination": "/docs/getting-started/quickstart",
+      "permanent": true
+    },
+    {
+      "source": "/docs/concepts/",
+      "destination": "/docs/getting-started/quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/intro",
+      "destination": "/docs/getting-started/intro",
+      "permanent": true
+    },
+    {
+      "source": "/docs/intro/",
+      "destination": "/docs/getting-started/intro/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/installation",
+      "destination": "/docs/getting-started/installation",
+      "permanent": true
+    },
+    {
+      "source": "/docs/installation/",
+      "destination": "/docs/getting-started/installation/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/quickstart",
+      "destination": "/docs/getting-started/quickstart",
+      "permanent": true
+    },
+    {
+      "source": "/docs/quickstart/",
+      "destination": "/docs/getting-started/quickstart/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/architecture",
+      "destination": "/docs/getting-started/architecture",
+      "permanent": true
+    },
+    {
+      "source": "/docs/architecture/",
+      "destination": "/docs/getting-started/architecture/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes",
+      "destination": "/docs/user-guide/recipes",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/",
+      "destination": "/docs/user-guide/recipes/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/evolve-your-harness",
+      "destination": "/docs/user-guide/evolve-your-harness",
+      "permanent": true
+    },
+    {
+      "source": "/docs/evolve-your-harness/",
+      "destination": "/docs/user-guide/evolve-your-harness/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/evolve-your-model",
+      "destination": "/docs/user-guide/evolve-your-model",
+      "permanent": true
+    },
+    {
+      "source": "/docs/evolve-your-model/",
+      "destination": "/docs/user-guide/evolve-your-model/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/run-ttt-discover",
+      "destination": "/docs/user-guide/recipes/tttd",
+      "permanent": true
+    },
+    {
+      "source": "/docs/run-ttt-discover/",
+      "destination": "/docs/user-guide/recipes/tttd/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/user-guide/run-ttt-discover",
+      "destination": "/docs/user-guide/recipes/tttd",
+      "permanent": true
+    },
+    {
+      "source": "/docs/user-guide/run-ttt-discover/",
+      "destination": "/docs/user-guide/recipes/tttd/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/operate",
+      "destination": "/docs/user-guide/operate",
+      "permanent": true
+    },
+    {
+      "source": "/docs/operate/",
+      "destination": "/docs/user-guide/operate/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/troubleshooting",
+      "destination": "/docs/user-guide/troubleshooting",
+      "permanent": true
+    },
+    {
+      "source": "/docs/troubleshooting/",
+      "destination": "/docs/user-guide/troubleshooting/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/sao",
+      "destination": "/docs/user-guide/recipes/sao",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/sao/",
+      "destination": "/docs/user-guide/recipes/sao/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/tttd",
+      "destination": "/docs/user-guide/recipes/tttd",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/tttd/",
+      "destination": "/docs/user-guide/recipes/tttd/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/openclawrl",
+      "destination": "/docs/user-guide/recipes/openclawrl",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/openclawrl/",
+      "destination": "/docs/user-guide/recipes/openclawrl/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/harness-evolve",
+      "destination": "/docs/user-guide/recipes/harness-evolve",
+      "permanent": true
+    },
+    {
+      "source": "/docs/recipes/harness-evolve/",
+      "destination": "/docs/user-guide/recipes/harness-evolve/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/write-a-recipe",
+      "destination": "/docs/developer-guide/write-a-recipe",
+      "permanent": true
+    },
+    {
+      "source": "/docs/write-a-recipe/",
+      "destination": "/docs/developer-guide/write-a-recipe/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/write-a-harness-method",
+      "destination": "/docs/developer-guide/write-a-harness-method",
+      "permanent": true
+    },
+    {
+      "source": "/docs/write-a-harness-method/",
+      "destination": "/docs/developer-guide/write-a-harness-method/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/harness-adapters",
+      "destination": "/docs/developer-guide/harness-adapters",
+      "permanent": true
+    },
+    {
+      "source": "/docs/harness-adapters/",
+      "destination": "/docs/developer-guide/harness-adapters/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/loss-families",
+      "destination": "/docs/developer-guide/loss-families",
+      "permanent": true
+    },
+    {
+      "source": "/docs/loss-families/",
+      "destination": "/docs/developer-guide/loss-families/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/cli",
+      "destination": "/docs/reference/cli",
+      "permanent": true
+    },
+    {
+      "source": "/docs/cli/",
+      "destination": "/docs/reference/cli/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/configuration",
+      "destination": "/docs/reference/configuration",
+      "permanent": true
+    },
+    {
+      "source": "/docs/configuration/",
+      "destination": "/docs/reference/configuration/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/http-api",
+      "destination": "/docs/reference/http-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/http-api/",
+      "destination": "/docs/reference/http-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/python-api",
+      "destination": "/docs/reference/python-api",
+      "permanent": true
+    },
+    {
+      "source": "/docs/python-api/",
+      "destination": "/docs/reference/python-api/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/glossary",
+      "destination": "/docs/reference/glossary",
+      "permanent": true
+    },
+    {
+      "source": "/docs/glossary/",
+      "destination": "/docs/reference/glossary/",
+      "permanent": true
+    }
+  ]
+}

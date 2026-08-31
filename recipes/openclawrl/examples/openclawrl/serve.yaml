@@ -1,0 +1,225 @@
+# OpenClaw-RL on reef — next-state binary reward, changes model weights.
+# Five processes: ray-head + prm-sglang + user-llm-sglang + slime-driver + reef.
+# The whole method is the bundled `openclawrl` recipe: its processor
+# correlates sessions from recorded traffic by trace matching and judges
+# next states with the PRM on a private worker — agents talk to reef
+# directly, no grader proxy and no session headers.
+#
+# Ports sit in the 2xxxx range: --network host shares the namespace with
+# anything else on the host (e.g. another reef stack on 8900/30000), and
+# Ray reserves 10002-19999 for worker ports.
+# GPU split (GPU 0 is deliberately left free on shared hosts — adjust):
+#   1-4 Megatron actor (TP4) · 5 policy rollout · 6 PRM
+#   · 7 the Qwen3-32B user simulator (the paper's §4.1 persona).
+#
+# Hyperparameters mirror the run that reproduced the paper's Table 3
+# (PR #240): Qwen3-4B-Thinking policy/PRM, batch 16, 8192-token responses.
+#
+# Objective mirrors Gen-Verse/OpenClaw-RL: the top-K select loss with the
+# PPO clipped surrogate on both halves, one sample per turn (group size 1 by
+# construction, so rewards pass through raw), eps-clip 0.2/0.28, entropy 0,
+# no ref model. Reef supplies rollout_data externally, so slime's estimator
+# chain never runs — declaring --advantage-estimator here would be inert and
+# would only mislead anyone debugging from the config.
+#
+# Prerequisites:
+#   HF model directory at reef.model_path (bridge mode loads HF weights
+#   directly; no torch_dist conversion needed).
+
+reef:
+  host: 0.0.0.0
+  model_path: /root/models/Qwen3-4B-Thinking-2507
+  port: 28900
+  recipe: openclawrl
+  token: ${REEF_TOKEN}                 # run.sh mints one per run
+  batch_size: 16                       # MUST equal training.global_batch_size
+  checkpoint_every_n_versions: 1
+  ray_address: 127.0.0.1:${training.ray_port}
+  ray_namespace: reef
+  ray_actor_name: reef-train-bridge
+  # A step with long assembled episodes can exceed the 300 s default; a
+  # timed-out worker retry then collides with the still-running job's
+  # RUNNING marker (observed live as "operator recovery required").
+  inference_timeout_s: 7200
+  train_timeout_s: 7200
+  # slime's sglang router binds the node IP, not localhost.
+  # In-processor judging: one sglang server (prm-sglang below) answers judge
+  # generations and teacher prefills.
+  prm_url: http://127.0.0.1:${prm.port}
+  prm_tokenizer_path: ${prm.model_path}
+  # Thinking-model PRM under judge load: single votes need minutes. Upstream
+  # never times judge calls out (httpx timeout=None); 3600s is effectively
+  # that while still freeing a truly wedged socket. 300s was punishing long
+  # turns: votes timed out -> 0.0 -> no verdict, so degenerate long replies
+  # escaped the -1 upstream would deliver. (The directive teacher no longer
+  # calls this server at all — candidates go to the train actor's Megatron
+  # teacher pass, which computes exact log-probs on the trainer's own
+  # tempered scale.)
+  prm_timeout_s: 3600
+  prm_max_hint_candidates: 3
+  # The judged population, one JSON line per batch (upstream's
+  # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
+  # "the judges disagree" from "the judges never ran".
+  prm_record_file: /var/lib/reef/prm-records.jsonl
+  inference_backend_factory: >-
+    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  inference_backend_config:
+    tool_call_parser: qwen25
+    # Old-policy top-K capture (S^q / ell_old) for the top-K objective.
+    capture_topk: 4
+    # The native /generate path has engine sampling defaults (T=1.0), not
+    # the model generation_config the chat endpoint would apply; pin the
+    # upstream-effective values (Qwen3-4B-Thinking generation_config) so
+    # agent traffic samples at the reference temperature.
+    sampling_defaults:
+      temperature: 0.6
+      top_p: 0.95
+      top_k: 20
+      max_new_tokens: 8192
+  artifact_repository: /var/lib/reef/artifacts.git
+  artifact_work_dir: /var/lib/reef/artifact-work
+  artifact_cache_dir: /var/lib/reef/artifact-cache
+  agent_record_dir: /var/lib/reef/agent-record
+
+prm:
+  model_path: /root/models/Qwen3-4B-Thinking-2507
+  cuda_visible_devices: "6"
+  port: "23001"
+  tp: 1
+
+user_llm:
+  # The paper simulates users with Qwen3-32B "to ensure faithful
+  # role-following" (§4.1); one B200 hosts it comfortably.
+  model_path: /root/models/Qwen3-32B
+  cuda_visible_devices: "7"
+  port: "30001"
+  served_name: qwen3-32b-user-llm
+
+training:
+  num_gpus: 5                          # ray-head GPU total (actor + rollout)
+  cuda_visible_devices: "1,2,3,4,5"
+  ray_port: 26379
+  ray_dashboard_port: 28265
+  sglang_port: "23000"
+  checkpoint_dir: /var/lib/reef/checkpoints
+  checkpoint_retention:
+    max_storage_fraction: 0.80
+    min_free_space_fraction: 0.10
+    policy: latest
+  global_batch_size: 16
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: openclawrl        # produces group openclawrl/<scenario>
+    # name_prefix: openclawrl
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: /var/lib/reef/wandb
+    upload_checkpoints: false
+  # openclawrl runs the verbatim upstream top-K select objective; architecture
+  # Reef derives architecture flags from the HF config.
+  # --padded-vocab-size + the rope/swiglu/norm/GQA flags below: the
+  # Reef autofills architecture sizes from the HF config but not these;
+  # its tokenizer-derived vocab pad mismatches Qwen3's 151936.
+  # The objective itself comes from the loss family: the worker's @objective
+  # registry sets every hook path at init, so none appears here.
+  # --openclawrl-*: the objective's knobs. Upstream ships them through
+  # ray's runtime-env; on argv a Megatron actor can never silently run a
+  # different value than the one configured.
+  # Nothing in this block may carry a comment: `>-` folds every line into the
+  # flag string, so a comment becomes argv tokens that only survive because
+  # Megatron parses with ignore_unknown_args.
+  slime_flags: >-
+    --actor-num-nodes=1 --actor-num-gpus-per-node=4 --rollout-num-gpus=1
+    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=5
+    --tensor-model-parallel-size=4 --pipeline-model-parallel-size=1
+    --seq-length=65536 --rollout-max-response-len=8192
+    --rollout-max-context-len=65536 --sglang-context-length=65536
+    --sglang-reasoning-parser=qwen3-thinking --rotary-base=5000000
+    --recompute-granularity=full --recompute-method=uniform
+    --recompute-num-layers=1 --log-probs-chunk-size=1024
+    --ckpt-fully-parallel-save --sequence-parallel
+    --use-dynamic-batch-size --max-tokens-per-gpu=65536
+    --attention-dropout=0.0 --hidden-dropout=0.0
+    --attention-softmax-in-fp32 --accumulate-allreduce-grads-in-fp32
+    --attention-backend=flash
+    --optimizer=adam --lr=1e-5 --lr-decay-style=constant
+    --weight-decay=0.1 --adam-beta1=0.9 --adam-beta2=0.98
+    --loss-type=custom_loss
+    --eps-clip=0.2 --eps-clip-high=0.28 --entropy-coef=0.0
+    --n-samples-per-prompt=1 --num-steps-per-rollout=1
+    --openclawrl-w-rl=1.0 --openclawrl-w-opd=1.0
+    --openclawrl-adv-diff-clip=1.0
+    --openclawrl-hint-selection=sequence_optimal
+    --openclawrl-subset-mode=student
+    --rollout-temperature=0.6
+    --padded-vocab-size=151936
+    --position-embedding-type=rope
+    --swiglu --disable-bias-linear --normalization=RMSNorm
+    --group-query-attention --qk-layernorm
+    --sglang-tool-call-parser=qwen25
+
+services:
+  - name: ray-head
+    command: >-
+      ray start --head --port=${training.ray_port}
+      --dashboard-host=0.0.0.0 --dashboard-port=${training.ray_dashboard_port}
+      --num-gpus=${training.num_gpus} --disable-usage-stats --block
+    ready: ray health-check --address=127.0.0.1:${training.ray_port}
+    cuda: ${training.cuda_visible_devices}
+
+  - name: prm-sglang
+    command: >-
+      python -m sglang.launch_server
+      --model-path=${prm.model_path} --tp ${prm.tp}
+      --host 0.0.0.0 --port=${prm.port}
+    ready: curl -sf http://127.0.0.1:${prm.port}/health
+    ready_timeout: 600
+    cuda: ${prm.cuda_visible_devices}
+
+  - name: user-llm-sglang
+    command: >-
+      python -m sglang.launch_server
+      --model-path=${user_llm.model_path} --tp 1
+      --served-model-name=${user_llm.served_name}
+      --host 0.0.0.0 --port=${user_llm.port}
+    ready: curl -sf http://127.0.0.1:${user_llm.port}/health
+    ready_timeout: 600
+    cuda: ${user_llm.cuda_visible_devices}
+
+  - name: slime-driver
+    command: >-
+      python -m reef.train.slime_backend.reef_adapters.driver
+      --reef-checkpoint-max-storage-fraction=${training.checkpoint_retention.max_storage_fraction}
+      --reef-checkpoint-min-free-space-fraction=${training.checkpoint_retention.min_free_space_fraction}
+      --reef-checkpoint-policy=${training.checkpoint_retention.policy}
+      --megatron-to-hf-mode bridge
+      --hf-checkpoint=${reef.model_path}
+      --load=${training.checkpoint_dir}/megatron
+      --save=${training.checkpoint_dir}/megatron
+      --save-interval=100
+      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
+      --sglang-router-port=${training.sglang_port}
+      --num-rollout=100000000
+      --rollout-batch-size=${training.global_batch_size}
+      --global-batch-size=${training.global_batch_size}
+      --micro-batch-size=1
+      ${training.slime_flags}
+    ready: test -f "$REEF_BRIDGE_READY_FILE"
+    ready_timeout: 900
+    env:
+      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
+      REEF_RAY_NAMESPACE: reef
+      REEF_RAY_ACTOR_NAME: reef-train-bridge
+      REEF_TRAINING_RECIPE: ${reef.recipe}
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      NCCL_NVLS_ENABLE: "0"
+    depends_on: [ray-head]
+
+  - name: reef
+    command: python -m reef.service
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    env:
+      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
+    depends_on: [slime-driver, prm-sglang]

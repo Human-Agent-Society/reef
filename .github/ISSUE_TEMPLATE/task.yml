@@ -1,0 +1,74 @@
+name: Maintainer task
+description: Track scoped project work created or approved by a Reef maintainer
+title: "[Task] "
+labels: ["type: task", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is for maintainer planning and explicitly requested
+        contributor work. Use the bug, performance, question, feature, or RFC
+        template for a new external report or proposal.
+
+  - type: checkboxes
+    id: authorization
+    attributes:
+      label: Maintainer coordination
+      options:
+        - label: I am a Reef maintainer or a maintainer asked me to create this task.
+          required: true
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Documentation
+        - Examples
+        - Packaging or deployment
+        - CI and developer tooling
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: Describe the concrete outcome, not only an activity.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List checkable conditions for considering the task complete.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link relevant issues, RFCs, pull requests, incidents, or documentation.
+    validations:
+      required: false
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies and blockers
+      description: List prerequisite decisions, work, access, hardware, or external dependencies.
+    validations:
+      required: false

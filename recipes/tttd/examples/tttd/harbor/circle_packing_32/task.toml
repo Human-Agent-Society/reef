@@ -1,0 +1,28 @@
+schema_version = "1.4"
+
+artifacts = []
+
+[task]
+name = "tide/tttd-circle-packing-32"
+description = "Pack 32 non-overlapping circles inside the unit square to maximize the sum of their radii. The agent writes a Python program whose run_packing() returns (centers, radii, sum_radii)."
+
+[metadata]
+category = "autoresearch"
+author_name = "Reef"
+difficulty = "hard"
+tags = ["reef", "tttd", "circle-packing", "discovery"]
+
+[agent]
+# One Harbor trial owns the complete multi-step TTT trajectory.
+timeout_sec = 604800.0
+
+[verifier]
+timeout_sec = 600.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 16384
+storage_mb = 10240
+network_mode = "allowlist"
+allowed_hosts = ["judge"]

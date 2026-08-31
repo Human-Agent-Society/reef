@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/Human-Agent-Society/reef/blob/main/SECURITY.md
+    about: Read the private reporting instructions; do not open an issue with vulnerability details.
+  - name: Read the contribution guide
+    url: https://github.com/Human-Agent-Society/reef/blob/main/CONTRIBUTING.md
+    about: Check contribution, RFC, testing, and review requirements before starting substantial work.

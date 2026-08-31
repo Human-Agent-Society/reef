@@ -1,0 +1,9 @@
+{
+  "autoupdate": false,
+  "defaultModel": "qwen/qwen3-8b",
+  "defaultProvider": "qwen",
+  "permission": {
+    "*": "allow"
+  },
+  "share": "disabled"
+}

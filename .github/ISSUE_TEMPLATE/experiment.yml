@@ -1,0 +1,81 @@
+name: Experiment or reproduction
+description: Propose a benchmark, paper reproduction, or empirical evaluation
+title: "[Experiment] "
+labels: ["type: experiment", "status: needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Define the empirical question and the evidence needed to answer it.
+        Pin models, datasets, prompts, code revisions, and evaluation methods
+        closely enough that another contributor can reproduce the result.
+
+  - type: dropdown
+    id: primary_area
+    attributes:
+      label: Primary area
+      options:
+        - Core and scenario lifecycle
+        - Service, API, or CLI
+        - Training and runtime
+        - Artifact management
+        - Versioning, lineage, or rollback
+        - Observability, metrics, or tracing
+        - Harness, recipes, or surfaces
+        - Examples
+        - CI and developer tooling
+        - Multiple areas
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question or reproduction target
+      description: State the hypothesis, benchmark claim, or published result to evaluate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: Pinned setup
+      description: List model and tokenizer versions, datasets, tasks, prompts, code revisions, seeds, hardware, and runtime configuration.
+    validations:
+      required: true
+
+  - type: textarea
+    id: baselines
+    attributes:
+      label: Baselines and controls
+      description: Identify the comparison runs and the variables that must remain equivalent.
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics and acceptance criteria
+      description: Define primary metrics, uncertainty or repeated-run treatment, and the result that would answer the question.
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Reproduction artifacts
+      description: Describe the commands, configs, raw results, curves, logs, and metadata that will be retained. Do not include secrets or private data.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues, pull requests, RFCs, and experiment results for related work.
+          required: true
+        - label: I separated the empirical question from a preferred implementation.
+          required: true
+        - label: I identified enough pinned inputs and retained evidence for an independent reproduction.
+          required: true

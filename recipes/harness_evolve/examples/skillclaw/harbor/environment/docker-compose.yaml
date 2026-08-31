@@ -1,0 +1,19 @@
+# Harbor's build template keeps `main` alive with `sleep infinity`; this
+# task compose file is applied after it, so the command override below wins
+# and the container boots through the benchmark's warmup instead (mock
+# services up, ground-truth fixtures removed). The healthcheck gates
+# `up --wait`: the agent starts only after both services answer on
+# localhost and the fixtures are gone.
+services:
+  main:
+    command: ["start-services.sh"]
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import os, urllib.request; assert not os.path.exists('/tmp_workspace/fixtures'); urllib.request.urlopen('http://localhost:9100/gmail/audit', timeout=2); urllib.request.urlopen('http://localhost:9101/calendar/audit', timeout=2)"
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 3s
