@@ -62,10 +62,38 @@ COLUMNS = (
     "accept_cum",
     *(f"{key}_rate_{WINDOW}" for key in RATE_KEYS),
 )
-BLUE = "#2563a6"
-ORANGE = "#d97706"
-PURPLE = "#6b46c1"
-GREEN = "#2f855a"
+# Figure style shared with the docs site (paper surface, warm ink, hairline
+# grid, and the site's brand red / blue / green as the fixed series order).
+PAPER = "#fbfaf8"
+INK = "#302c28"
+MUTED = "#716b65"
+HAIRLINE = "#ddd8d0"
+BRAND, BLUE, GREEN = "#a03729", "#2e5fa6", "#3f7d44"
+STYLE = {
+    "figure.facecolor": PAPER,
+    "savefig.facecolor": PAPER,
+    "axes.facecolor": PAPER,
+    "text.color": INK,
+    "axes.titlecolor": INK,
+    "axes.titleweight": "normal",
+    "axes.labelcolor": MUTED,
+    "xtick.color": MUTED,
+    "ytick.color": MUTED,
+    "axes.edgecolor": HAIRLINE,
+    "axes.linewidth": 1.0,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "axes.grid.axis": "y",
+    "grid.color": HAIRLINE,
+    "grid.linewidth": 1.0,
+    "axes.axisbelow": True,
+    "lines.linewidth": 2.0,
+    "lines.solid_capstyle": "round",
+    "legend.frameon": False,
+    "legend.labelcolor": INK,
+    "font.size": 11,
+}
 TITLE = "OpenClaw-RL training over the GSM8K homework stream"
 
 
@@ -158,6 +186,7 @@ def sessions_to_adaptation(rows: list[dict]) -> int | None:
 def plot(rows: list[dict], path: Path, max_session: int | None = None) -> None:
     import matplotlib.pyplot as plt
 
+    plt.rcParams.update(STYLE)
     adaptation = sessions_to_adaptation(rows)
     if max_session is not None:
         rows = [row for row in rows if row["session"] <= max_session]
@@ -166,29 +195,20 @@ def plot(rows: list[dict], path: Path, max_session: int | None = None) -> None:
     top.plot(
         sessions,
         [row["accept_cum"] for row in rows],
-        color=BLUE,
-        linewidth=1.5,
-        marker="o",
-        markersize=2.5,
+        color=BRAND,
         label="accumulated accepts (eval/accept_cum)",
     )
     top.set_ylabel("Accepted sessions")
     bottom.plot(
         sessions,
         [row[f"bold_rate_{WINDOW}"] for row in rows],
-        color=ORANGE,
-        linewidth=1.5,
-        marker="o",
-        markersize=2.5,
+        color=BLUE,
         label=f"bold rate, {WINDOW}-session window (eval/bold_rate_{WINDOW})",
     )
     bottom.plot(
         sessions,
         [row[f"list_rate_{WINDOW}"] for row in rows],
-        color=PURPLE,
-        linewidth=1.5,
-        marker="o",
-        markersize=2.5,
+        color=GREEN,
         label=f"list rate, {WINDOW}-session window (eval/list_rate_{WINDOW})",
     )
     bottom.set_ylim(-0.02, 1.02)
@@ -198,14 +218,13 @@ def plot(rows: list[dict], path: Path, max_session: int | None = None) -> None:
         if adaptation is not None and adaptation <= sessions[-1]:
             axis.axvline(
                 adaptation,
-                color=GREEN,
+                color=MUTED,
                 linestyle="--",
-                linewidth=1.2,
+                linewidth=1.4,
                 label=f"sessions-to-adaptation = {adaptation}" if axis is top else None,
             )
-        axis.grid(alpha=0.25)
         axis.legend(frameon=False, loc="upper left" if axis is top else "upper right")
-    figure.suptitle(TITLE, fontsize=15)
+    figure.suptitle(TITLE, fontsize=15, fontweight="bold")
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180)
     plt.close(figure)
