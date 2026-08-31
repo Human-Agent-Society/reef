@@ -149,7 +149,7 @@ Keep the ``tasks`` list short because it sets each step's cost. Start Reef where
 package is importable, and give ``-c`` an absolute path: Reef resolves a
 relative ``-c`` against its own repo root, not your working directory. Recovered
 tree state always wins over ``seed``. The full field list is in `harness_evolve
-<../user-guide/recipes/harness-evolve.rst>`__.
+<../user-guide/recipes/cordis.rst>`__.
 
 Selection policies
 ~~~~~~~~~~~~~~~~~~

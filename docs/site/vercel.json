@@ -155,12 +155,22 @@
     },
     {
       "source": "/docs/recipes/harness-evolve",
-      "destination": "/docs/user-guide/recipes/harness-evolve",
+      "destination": "/docs/user-guide/recipes/cordis",
+      "permanent": true
+    },
+    {
+      "source": "/docs/user-guide/recipes/harness-evolve",
+      "destination": "/docs/user-guide/recipes/cordis",
+      "permanent": true
+    },
+    {
+      "source": "/docs/user-guide/recipes/harness-evolve/",
+      "destination": "/docs/user-guide/recipes/cordis/",
       "permanent": true
     },
     {
       "source": "/docs/recipes/harness-evolve/",
-      "destination": "/docs/user-guide/recipes/harness-evolve/",
+      "destination": "/docs/user-guide/recipes/cordis/",
       "permanent": true
     },
     {

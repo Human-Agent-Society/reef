@@ -1,9 +1,10 @@
-harness_evolve
-==============
+cordis
+======
 
-The harness half of Reef, built in: the general engine that evolves any kind
-of harness, carried by ``reef/train/cordis_backend/`` the way
-``slime_backend`` carries weights. It proposes one edit to the agent's harness
+The harness half of Reef, built in: cordis is the general engine that evolves
+any kind of harness, carried by ``reef/train/cordis_backend/`` the way
+``slime_backend`` carries weights. The demo deployment selects it through a
+recipe config named ``harness_evolve``. It proposes one edit to the agent's harness
 tree, runs the agent both ways on your tasks, and publishes the edit only if
 it wins. The demo lives in ``tutorials/harness_evolve/``; the paper-backed
 reproduction on the same engine is ``recipes/skillclaw/``.
