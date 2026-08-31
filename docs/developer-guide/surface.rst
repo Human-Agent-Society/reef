@@ -30,7 +30,7 @@ caches. Those live in ``train/``, ``artifact/``, ``scenario/``,
 Admission is deliberately adjacent rather than a field on ``Surface``. A
 recipe selects it through ``build_artifact_validator()``, the scenario factory
 freezes it on ``ScenarioBinding.artifact_validator``, and the commit protocol
-runs it before publication and rollback — so the decision stays in the commit
+runs it before publication and rollback, so the decision stays in the commit
 path instead of looking like a serving capability.
 
 Capabilities and call sites
@@ -99,7 +99,7 @@ transaction; the surface does not repeat that step.
 **Per-scenario adapters.** When a runtime trains one LoRA adapter per
 scenario, ``create_weight_surface(scenario=...)`` puts that scenario's frozen
 adapter revision on every request. ``reef.surface.adapter`` holds only the
-naming contract — ``adapter_name(scenario, version)`` and its inverse — so a
+naming contract (``adapter_name(scenario, version)`` and its inverse), so a
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the training bridge owns one
 ``AdapterResidencyManager`` per engine, and the surface never touches it.
@@ -154,5 +154,5 @@ protocols, and never imports a concrete one.
 See also
 --------
 
-- `Write a recipe <write-a-recipe.rst>`__ — where ``build_surface`` fits.
-- `Harness adapters <harness-adapters.rst>`__ — the client side of a file tree.
+- `Write a recipe <write-a-recipe.rst>`__: where ``build_surface`` fits.
+- `Harness adapters <harness-adapters.rst>`__: the client side of a file tree.

@@ -45,10 +45,10 @@ Where it writes
 ---------------
 
 Each service gets a log and a PID file under ``run_dir``, which defaults to
-``/tmp/reef-stack``. Reef's own state — records, commit logs, and the Git-backed
-version chain — goes to the ``reef.*_dir`` paths in the config, not here.
+``/tmp/reef-stack``. Reef writes its own state, including records, commit logs,
+and the Git-backed version chain, to the ``reef.*_dir`` paths in the config.
 
 See also
 --------
 
-- `Configuration <configuration.rst>`__ — what goes in the file this reads.
+- `Configuration <configuration.rst>`__: what goes in the file this reads.

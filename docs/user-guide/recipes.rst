@@ -42,7 +42,7 @@ How a recipe is selected
 
 A deployment serves exactly one recipe, named by ``reef.recipe`` in its config.
 Every scenario it creates binds to that recipe, permanently. Requests never name
-a recipe — the scenario header is the only routing a caller provides.
+a recipe. The scenario header is the only routing a caller provides.
 
 .. code:: yaml
 
@@ -50,8 +50,9 @@ a recipe — the scenario header is the only routing a caller provides.
      recipe: sao          # a bundled kind
      batch_size: 1
 
-Naming — bundled kind, dotted class, or preset — and the per-kind config shapes
-are in `Configuration <../reference/configuration.rst#recipe-configuration>`__.
+``reef.recipe`` accepts a bundled kind, dotted class, or preset. `Configuration
+<../reference/configuration.rst#recipe-configuration>`__ describes the config
+for each kind.
 
 Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
 ``checkpoint_every_n_versions`` is the shorter spelling in deployment YAML.
@@ -61,4 +62,4 @@ See also
 
 - `tttd <recipes/tttd.rst>`__ includes the bundled TTT-Discover example,
   formal circle-packing results, and recovery details.
-- `Write a recipe <../developer-guide/write-a-recipe.rst>`__ — when none of them fits.
+- `Write a recipe <../developer-guide/write-a-recipe.rst>`__: when none of them fits.

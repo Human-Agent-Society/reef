@@ -64,8 +64,8 @@ behavior.
    └── HarnessEvolveRecipe      harness surface + backend   reef.harness_evolve
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
-does not mean record-only — it means starting without a specialized base's extra
-contracts.
+starts without the extra contracts of a specialized base; it does not force the
+recipe to remain record-only.
 
 +---------------------------------+------------------------------------------------------+
 | What you are building           | Where to start                                       |
@@ -156,7 +156,7 @@ parser, and an optional environment fallback:
 Precedence is explicit configuration, then environment, then the default.
 ``from_environment()`` builds the recipe; ``service_config()`` forwards declared
 fields and shared artifact settings from the service configuration. Override
-``processor_config()`` when a processor needs renamed or derived keys — never
+``processor_config()`` when a processor needs renamed or derived keys. Never
 read deployment YAML from inside a processor.
 
 Report
@@ -291,7 +291,7 @@ Begin a score-based ``judge()`` with ``context.eligibility()``: it returns
 ``WAIT`` while a referenced inference is missing, ``NEVER`` for permanently
 ineligible input, and ``None`` when the method should decide. Use
 ``ReportDecision.never(reason)`` for a rejection an operator should be able to
-diagnose — the processor logs each new reason and counts repeats.
+diagnose. The processor logs each new reason and counts repeats.
 
 ``ReportDecision.train(value)`` creates a singleton candidate. Supply
 ``group_key`` and an idempotent ``slot`` when the training unit is a complete
@@ -365,7 +365,7 @@ depend on mutable external state.
 +------------------------+-------------------------------------------------+
 
 A ``PolicySample`` carries ``source_agent_record_id``, ``tokens``,
-``loss_mask``, ``rollout_log_probs``, ``reward``, and — when available —
+``loss_mask``, ``rollout_log_probs``, and ``reward``. When available, it also carries
 ``weight_version``, ``action_mask``, ``rollout_created_at``, ``turn_count``,
 ``topk_indices`` / ``topk_log_probs``, ``weight_version_spans``, and ``extras``,
 the field a processor uses for its own loss family. Use the shared assembly
@@ -427,7 +427,7 @@ A preparer owns method math and nothing else. It must not import a runtime, Ray,
 torch, or Slime; execute a training job; read deployment configuration; mutate
 the reserved batch; or commit state outside ``next_algorithm_state``. The
 recipe's loss family, the signal's loss family, the driver environment, and the
-backend flags must agree — Reef rejects a mismatch at startup or step
+backend flags must agree. Reef rejects a mismatch at startup or during step
 preparation.
 
 Use a ``StepPreparer`` subclass with ``@register_step_preparer`` only when
@@ -499,8 +499,8 @@ exact result it was given.
 
 A rejection leaves the previous artifact serving. An exception is fail-closed:
 Reef aborts the prepared candidate rather than publishing it. Make evaluations
-idempotent by ``candidate.candidate_id`` — recovery may repeat work whose result
-was not durably committed. The deployment names the factory in its
+idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
+result was not durably committed. The deployment names the factory in its
 ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
 

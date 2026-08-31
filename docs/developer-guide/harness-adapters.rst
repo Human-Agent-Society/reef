@@ -59,5 +59,5 @@ adapter-specific: ``config`` node contents follow each adapter's schema.
 See also
 --------
 
-- `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ — the loop that produces the tree.
-- `harness_evolve <../user-guide/recipes/harness-evolve.rst>`__ — the recipe's configuration.
+- `Evolve your harness <../user-guide/evolve-your-harness.rst>`__: the loop that produces the tree.
+- `harness_evolve <../user-guide/recipes/harness-evolve.rst>`__: the recipe's configuration.

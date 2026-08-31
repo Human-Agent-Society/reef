@@ -1,14 +1,14 @@
 .. _continual-opd-on-reef--framework:
 
-Continual OPD on Reef — Framework
+Continual OPD on Reef: framework
 =================================
 
    A small model serves by default; a verifier flags tasks it handles poorly and
    escalates them to a large model; escalated trajectories are continually
    distilled back into the small model (hard distillation + soft on-policy
-   distillation, including cross-tokenizer). As the small model improves, the
-   escalation share narrows — the goals are a steadily falling cost per solved
-   task and escalation rate.
+   distillation, including cross-tokenizer). The intended result is a lower
+   escalation rate and a steadily falling cost per solved task as the small
+   model improves.
 
 .. _1-system-framework-four-components:
 
@@ -44,16 +44,16 @@ Continual OPD on Reef — Framework
       artifact version chain (one version per distillation step;
       probe-set regression → rollback)
 
-1. **Router** — v1 lives harness-side (~50 LoC). The student runs first; if the
-   verifier fails it, the task is retried on the teacher. This requires no
+1. **Router:** v1 lives on the harness side (~50 LoC). The student runs first;
+   if the verifier fails it, the task is retried on the teacher. This requires no
    Reef changes: two scenarios, each bound to its own recipe/upstream
    (multi-recipe deployments are natively supported).
-2. **Verifier** — it is the existing report score. v1 targets domains
+2. **Verifier:** the existing report score is the verifier. v1 targets domains
    where verification is free (code via unit tests, math via numeric checks).
-3. **Distillation** — layered, cheapest first (see §2). Triggering is free:
-   escalated samples filling a batch *is* Reef's native processor training
-   trigger.
-4. **Trust evolution** — track per-domain student pass rates; once a domain
+3. **Distillation:** layers run from cheapest to most expensive (see §2).
+   Escalated samples filling a batch provide the trigger, using Reef's native
+   processor training mechanism, so no separate trigger is needed.
+4. **Trust evolution:** track per-domain student pass rates; once a domain
    clears the bar, escalation is switched off there (keeping a small audit
    sample; dropping below the floor re-enables it). Thresholds and state
    eventually become versioned artifacts; v1 uses a simple EMA + fixed
@@ -102,29 +102,29 @@ Continual OPD on Reef — Framework
 |                 |                | needed)               |                   |
 +-----------------+----------------+-----------------------+-------------------+
 
-Key facts (verified in code): **slime already ships OPD** — teacher scoring,
-reverse-KL, an end-to-end ``teacher_log_probs`` pipeline, and frozen
-heterogeneous teacher engines all exist. The Reef↔slime bridge now carries it
+The code already provides the required OPD backend. Slime includes teacher
+scoring, reverse-KL, an end-to-end ``teacher_log_probs`` pipeline, and frozen
+heterogeneous teacher engines. The Reef↔slime bridge now carries it
 too: ``opd`` is in the bridge's algorithm whitelist, and after the bridge
 receives a batch it calls the teacher for scoring and directly constructs
 per-token advantages
 (``β·clip(RMSNorm(teacher_logp − rollout_logp), −c, c)``; optional centering
-happens before RMS normalization) shipped through the existing channel — it
-requires no slime-core changes and leaves the client contract unchanged.
+happens before RMS normalization) through the existing channel. This requires
+no slime-core changes and leaves the client contract unchanged.
 
 .. _3-roadmap:
 
 3. Roadmap
 ----------
 
-- **Phase 0 (no code changes — get the loop running)**: dual scenarios + harness
+- **Phase 0 (no code changes):** run the loop with dual scenarios, a harness
   router + verifier + the L0 hard-distillation loop. Deliverables: end-to-end
   engineering validation plus all baselines.
-- **Phase 1 (core development, shipped)**: L1 same-vocab OPD through the
-  bridge — landed in ``reef/train/slime_backend/reef_adapters/``
+- **Phase 1 (core development, shipped):** L1 same-vocab OPD through the
+  bridge, implemented in ``reef/train/slime_backend/reef_adapters/``
   plus one cookbook backend-preparer file (the removed ``examples/opd``
   prototype exercised this end to end; see git history).
-- **Phase 2**: cross-tokenizer alignment library + L2; automate trust
+- **Phase 2:** cross-tokenizer alignment library + L2; automate trust
   evolution and rollback.
 
 .. _4-first-experiments:

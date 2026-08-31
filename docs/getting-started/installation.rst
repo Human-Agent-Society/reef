@@ -18,8 +18,8 @@ under LFS. This install runs the base ``recipe`` kind and ``harness_evolve``.
 Client only
 -----------
 
-A client that only talks to a Reef deployment needs neither the repository nor
-the install above — just the stdlib-only wire client:
+A client that only talks to a Reef deployment does not need the repository or
+the full install. Install the stdlib-only wire client instead:
 
 .. code:: bash
 

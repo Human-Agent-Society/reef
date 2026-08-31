@@ -23,8 +23,8 @@ with no GPU.
 
 .. steps::
 
-   #. **Install.** Follow `Installation <installation.rst>`__ — the laptop path
-      is enough.
+   #. **Install.** Follow the laptop path in `Installation
+      <installation.rst>`__.
 
    #. **Serve.** ``external-provider.yaml`` is one process that
       proxies an OpenAI-compatible provider and records what it serves.
@@ -36,10 +36,10 @@ with no GPU.
 
          reef serve -c recipes/basic/external-provider.yaml
 
-      The config carries every other value — the provider, the model, and a
-      ``.reef/`` state directory beside the checkout. Only these two stay in the
-      environment: the upstream key is a secret, and this file is a template to
-      copy rather than an example to run, so it ships no token of its own.
+      The config supplies the provider, the model, and a ``.reef/`` state
+      directory beside the checkout. Only the two secrets stay in the
+      environment: the upstream key and the Reef token. The file is a template
+      to copy, so it does not include a token.
 
       ``reef serve`` runs in the foreground and holds the terminal until
       Ctrl-C. Leave it running and open a second terminal for everything below.
@@ -51,8 +51,8 @@ with no GPU.
    #. **Send a request and report on it.** The body is the provider's;
       ``x-reef-scenario`` is the only thing Reef adds. The response header
       ``x-reef-agent-record-id`` carries the **receipt**, which names the
-      stored exchange. Any grader you already have — tests, a verifier, a
-      rubric, a thumbs-down — becomes feedback against it.
+      stored exchange. Tests, a verifier, a rubric, a thumbs-down, or any other
+      grader you already have can report feedback against it.
 
       .. code:: python
 
@@ -82,7 +82,7 @@ with no GPU.
       id. Only inference-record ids are receipts, and they appear only
       in ``references``.
 
-   #. **Or use the wire client.** ``reef-client`` is a stdlib-only client —
+   #. **Or use the wire client.** Install the stdlib-only ``reef-client`` with
       ``pip install reef-client``. It keeps the receipt for you.
 
       .. code:: python
@@ -129,16 +129,16 @@ with no GPU.
       One version, and it will stay at one: this deployment's recipe is the
       base ``recipe`` kind, which records and trains nothing.
 
-To make the chain advance, bind a recipe that learns. Weight recipes are named
-directly — copy ``recipes/basic/external-provider.yaml``, set
-``reef.recipe: sao``, serve that — but they need GPUs (`Evolve your model
+To make the chain advance, bind a recipe that learns. To use a weight recipe,
+copy ``recipes/basic/external-provider.yaml``, set ``reef.recipe: sao``, and
+serve the new config. Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
 The one that runs on a laptop is ``harness_evolve``, and it takes a second file:
 a **preset** naming your ``propose`` and ``evaluate`` callables and the tasks to
-evaluate on. ``recipes/harness_evolve/examples/harness_evolve/run.sh`` is that
-whole loop already wired — run it, then `Evolve your harness
-<../user-guide/evolve-your-harness.rst>`__ explains each piece.
+evaluate on. ``recipes/harness_evolve/examples/harness_evolve/run.sh`` wires the
+whole loop together. Run it, then read `Evolve your harness
+<../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 
 
 
@@ -163,9 +163,10 @@ Receipt
 Every recorded exchange gets an id, and that id is the receipt. It identifies
 the request, the response, and the artifact version that produced it.
 
-The receipt arrives in the ``x-reef-agent-record-id`` response header, or in the
-terminal SSE metadata for a stream — `HTTP API <../reference/http-api.rst#inference>`__ has
-the exact field per dialect. A stream carries it only once the record is stored.
+The receipt arrives in the ``x-reef-agent-record-id`` response header or in the
+terminal SSE metadata for a stream. `HTTP API
+<../reference/http-api.rst#inference>`__ lists the exact field for each dialect.
+A stream carries it only after the record is stored.
 
 Report
 ------
@@ -174,9 +175,9 @@ A report is feedback that quotes receipts. It carries ``score``, ``feedback``,
 ``references``, and ``metadata``; `HTTP API <../reference/http-api.rst#report>`__ gives the
 types and the rules.
 
-Whatever already decides whether your agent did well — a test suite, a verifier,
-a human — stays in your harness. Reports are consumed at most once, so a retry
-or a late arrival is never counted twice.
+Whatever already decides whether your agent did well stays in your harness.
+That may be a test suite, a verifier, or a human. Reports are consumed at most
+once, so a retry or late arrival is never counted twice.
 
 Version chain
 -------------

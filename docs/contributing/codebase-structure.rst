@@ -7,9 +7,9 @@ This page says which package should own a change.
 Choose a destination
 --------------------
 
-``reef/`` holds every shared mechanism. Each bundled method is one package
-beside it — ``recipes/sao/``, ``recipes/tttd/``, ``recipes/openclawrl/``,
-``recipes/harness_evolve/`` — with that method's recipe, processor, step
+``reef/`` holds every shared mechanism. Each bundled method lives in one
+package under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
+``harness_evolve``) with that method's recipe, processor, step
 preparer, and, for weight methods, the ``slime/`` subpackage only the training
 plane imports. Nothing under ``reef/`` imports a method package.
 

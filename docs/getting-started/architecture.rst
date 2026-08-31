@@ -51,9 +51,9 @@ own process, with no GPU.
 The opening pull is for recipes whose artifact is the harness tree: the agent
 fetches the currently served tree (``GET /reef/harness``, or the install script
 built on it) and runs on that version, so the harness it uses is the one whose
-receipts it will later report against. Weight recipes skip it — the artifact
-lives in the inference runtime, and a request reaches the new version on its
-own.
+receipts it will later report against. Weight recipes skip this pull because
+their artifact lives in the inference runtime. Requests reach the new version
+there directly.
 
 The request path
 ----------------
@@ -82,7 +82,7 @@ Records
 -------
 
 Every inference and every report is an ``AgentRecord``: an id, a scenario, a
-request type, a payload, and — for inference — the frozen ``artifact_ref``. The
+request type, a payload, and the frozen ``artifact_ref`` for inference. The
 record id is the receipt.
 
 Appending the same id with different content returns a conflict rather than
@@ -109,8 +109,8 @@ when the recipe is constructed are fixed with it.
 A Reef process runs at most one scenario that trains full weights, on a single
 thread, so preparation, remote execution, and commit never interleave. It may
 run any number of scenarios that produce no updates or that update text
-artifacts in process — each grows and commits on its own background thread, so
-record acceptance never waits for artifact evolution.
+artifacts in process. Each one grows and commits on its own background thread,
+so record acceptance never waits for artifact evolution.
 
 Surfaces
 --------
@@ -176,7 +176,7 @@ weight files and a ``reef-artifact.json`` manifest in every version. Heads move
 only by compare-and-swap: ``advance_current`` requires the expected head,
 ``publish`` requires the expected parent, and the push carries a lease, so a
 stale publication conflicts instead of overwriting. Rollback does not rewrite
-history — it activates an earlier version and publishes the same bytes as a new
+history. It activates an earlier version and publishes the same bytes as a new
 commit, keeping step numbers monotonic.
 
 Durability
@@ -208,7 +208,7 @@ artifact and reloads from durable state, replaying the uncompacted records. Each
 scenario needs exactly one logical Reef writer, and external training operations
 must be idempotent or reconcilable after a crash.
 
-All of this assumes persistent storage — see `Configuration
+These guarantees require persistent storage. See `Configuration
 <../reference/configuration.rst>`__ for the paths.
 
 Evaluation

@@ -2,9 +2,9 @@ Processors
 ==========
 
 A processor is a scenario's batch builder: records in, one typed training
-batch out, plus the answer to what the record store may delete. This page is
-the design behind the two engines a recipe subclasses — why there are two,
-what each owns, and the path a record takes to a batch.
+batch out, plus the answer to what the record store may delete. This page
+explains the two engines a recipe can subclass, what each owns, and the path a
+record takes to a batch.
 
 .. page::
    :for: recipe authors choosing an engine, and anyone reading ``reef/train/processors/``
@@ -17,16 +17,17 @@ The contract
 The trainer drives four mutating methods on its own thread, under its lock;
 none may block:
 
-- ``ingest(record)`` — one record arrives;
-- ``ready()`` — is a batch available;
-- ``build_batch()`` — produce it (the trainer validates it against ``output_schema``);
-- ``acknowledge(batch_id)`` — the training step consumed that batch; returns
+- ``ingest(record)``: one record arrives;
+- ``ready()``: is a batch available;
+- ``build_batch()``: produce it (the trainer validates it against ``output_schema``);
+- ``acknowledge(batch_id)``: the training step consumed that batch; returns
   the consumed record ids, which the commit record persists so recovery never
   re-ingests them.
 
-Retention rides along: the trainer reads ``retention_decision()`` (protected
-vs releasable ids) and reports deletions back through ``compaction_applied()``.
-Nothing numeric lives here — advantages and the loss family are the step
+The processor also controls retention. The trainer reads
+``retention_decision()`` (protected vs releasable ids) and reports deletions
+back through ``compaction_applied()``.
+Nothing numeric lives here. Advantages and the loss family are the step
 preparer's. The read-only ``status()`` hook is empty by default; a processor
 uses it only when a terminal outcome cannot become a batch and an external
 runner must stop waiting (TTTD reports a complete mixed-artifact step as an
@@ -61,7 +62,7 @@ Why there are two
 
 Everything else, including the ``async``, follows from that one question.
 
-A report *arrives knowing what it judges* — it names its inference records.
+A report *arrives knowing what it judges*: it names its inference records.
 The decision is then a comparison on data already in hand: cheap,
 synchronous, and possible the moment the last referenced record lands. What
 it costs is bookkeeping about the reference: an index of reports waiting on
@@ -70,20 +71,20 @@ dedup for a grader that retries its POST, and a barrier for recipes whose
 unit is a whole group.
 
 A computed-feedback recipe has no report. Its signal does not exist until
-later traffic completes an earlier record, and judging it calls a model —
-seconds to minutes the trainer's thread cannot spend without stalling
-serving. So judgment moves to a worker, and the bookkeeping is a different
-set: which records still wait, a TTL for the ones whose completion never
-comes, and absorption for judgments that land without a record to trigger
-them.
+later traffic completes an earlier record, and judging it calls a model.
+Judgment can take seconds or minutes, which would stall serving if it ran on
+the trainer's thread. It moves to a worker instead, with different
+bookkeeping: which records still wait, a TTL for the ones whose completion
+never comes, and absorption for judgments that land without a record to
+trigger them.
 
 Neither set follows from ``async``. Making the reported judge asynchronous
-would buy uniform timing while keeping every structure above, and would make
+would make timing uniform while keeping every structure above, and would make
 every reported recipe's readiness eventually consistent and expose it to
-losing an in-flight judgment on a crash — an exposure only the computed path
+losing an in-flight judgment on a crash, an exposure only the computed path
 carries today. The engines differ because the questions differ. What they
-share — hold a pending batch, be ready while it exists or once enough units
-are held, release what it consumed — is defined once in ``base.py``; each
+share (hold a pending batch, be ready while it exists or once enough units
+are held, and release what it consumed) is defined once in ``base.py``. Each
 engine fills in ``_ready_count``, ``_make_pending``, and ``_consume_pending``.
 
 What a recipe writes
@@ -93,12 +94,12 @@ What a recipe writes
 groups, plus the class attributes ``output_schema``, ``exclusive_sources``,
 ``ordered_groups``.
 
-**Computed feedback:** ``ingest`` — the correlation *is* the method, written
-with the engine's ``catch_up`` / ``dispatch`` / ``track`` / ``retire`` verbs —
-plus ``judge``, ``make_sample``, ``make_batch``, and ``expire`` for tracked
+**Computed feedback:** In ``ingest``, the correlation *is* the method. It uses
+the engine's ``catch_up`` / ``dispatch`` / ``track`` / ``retire`` verbs, as
+well as ``judge``, ``make_sample``, ``make_batch``, and ``expire`` for tracked
 records that time out.
 
-Nothing else on either tier: no retention, lifecycle, or recovery code.
+Neither tier contains retention, lifecycle, or recovery code.
 
 A record's path to a batch
 --------------------------
@@ -119,8 +120,8 @@ Where a processor lives
 
 Every file under ``reef/train/processors/`` is framework: ``base``,
 ``reported``, ``computed``, and ``common`` (shared report readers and sample
-builders). A method's processor is ``recipes/<name>/processor.py`` — its data
-story, read top to bottom. Machinery beyond that file's job sits beside it as
+builders). A method's processor is ``recipes/<name>/processor.py`` and should
+show its data flow from top to bottom. Machinery beyond that file's job sits beside it as
 modules named by concern (``recipes/openclawrl/``: ``sessions``, ``turns``,
 ``prm``), never in the processor file and never in a ``utils`` grab-bag.
 
@@ -154,5 +155,5 @@ The bundled processors
 See also
 --------
 
-- `Write a recipe <write-a-recipe.rst>`__ — a processor in a complete recipe.
-- `Loss families <loss-families.rst>`__ — the numeric side, which lives in the preparer.
+- `Write a recipe <write-a-recipe.rst>`__: a processor in a complete recipe.
+- `Loss families <loss-families.rst>`__: the numeric side, which lives in the preparer.

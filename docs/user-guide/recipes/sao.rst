@@ -97,11 +97,11 @@ convergence result; the README lists every protocol deviation from the paper.
 The committed smoke configuration has one recorded run of its own
 (``results/smoke-2026-08-30/``): all 18 scored rollouts became committed
 training steps with no stale drops, which is the acceptance criterion for the
-smoke. Every score is 0.0 — Qwen2.5-1.5B-Instruct does not solve these
-problems — so its value is the per-step training metrics, exported from an
+smoke. Every score is 0.0 because Qwen2.5-1.5B-Instruct does not solve these
+problems. The useful output is the per-step training metrics, exported from an
 offline W&B run.
 
 See also
 --------
 
-- `Evolve your model <../evolve-your-model.rst>`__ — running the deployment.
+- `Evolve your model <../evolve-your-model.rst>`__: running the deployment.

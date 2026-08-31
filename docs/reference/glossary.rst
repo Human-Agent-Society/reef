@@ -9,13 +9,13 @@ Scenario
 
 One workload: its records, training state, and version chain, isolated from
 every other scenario. The first request carrying a new ``x-reef-scenario``
-creates it and binds its recipe — and optionally a starting artifact version —
-permanently.
+creates it and permanently binds its recipe. The request may also bind a
+starting artifact version.
 
 Agent record
 ------------
 
-One stored exchange — an inference call or a report — with its id, scenario,
+One stored exchange, either an inference call or a report, with its id, scenario,
 request type, payload, and, for inference, the artifact version that served it.
 The record store lives under ``agent_record_dir``.
 
@@ -77,9 +77,9 @@ Candidate selection
 The decision whether a produced update should replace the current served
 version. A ``CandidateEvaluator`` measures the candidate, a
 ``CandidateSelector`` makes the select-or-reject decision, and a
-``CandidateEvaluationPlugin`` implements both. Also called the gate. It is
-part of the recipe — every recipe carries its plugin as ``candidate_evaluation``
-— and is independent of checkpoint cadence and of retention.
+``CandidateEvaluationPlugin`` implements both. The docs also call this the
+gate. Every recipe carries the plugin as ``candidate_evaluation``. It is
+independent of checkpoint cadence and retention.
 
 Surface
 -------
@@ -91,17 +91,19 @@ hooks, and an optional client-pulled file tree, composed as fields on one
 Processor
 ---------
 
-The method's data-side component. It judges each resolved unit — one record plus
-the reports referencing it — as ``TRAIN``, ``WAIT``, or ``NEVER``, and assembles
+The method's data-side component. It judges each resolved unit, consisting of
+one record plus the reports referencing it, as ``TRAIN``, ``WAIT``, or
+``NEVER``, and assembles
 the accepted units into one typed batch. Reported and computed feedback pick
 different engines.
 
 Preparer
 --------
 
-The function that converts a reserved batch into a ``StepSignal`` — loss family,
-advantages, next algorithm state. Backend-neutral, importing no training stack.
-A recipe names it by registered name or dotted path.
+The function that converts a reserved batch into a ``StepSignal`` containing
+the loss family, advantages, and next algorithm state. It is backend neutral
+and imports no training stack. A recipe names it by registered name or dotted
+path.
 
 Loss family
 -----------
@@ -115,9 +117,9 @@ Harness
 
 Two meanings, both in use here.
 
-1. **Your harness** — the agent program around the model, owning prompts,
+1. **Your harness:** the agent program around the model, owning prompts,
    conversations, tools, environments, and grading. It runs outside Reef.
-2. **The harness tree** — Reef's deliverable: a versioned artifact of config,
+2. **The harness tree:** Reef's deliverable, a versioned artifact of config,
    rules, prompt templates, skills, and extension code, served over
    ``GET /reef/harness``.
 
@@ -133,10 +135,10 @@ Runtime
 
 Two meanings.
 
-1. **The request-plane contract** — ``InferenceRuntime`` and
+1. **The request-plane contract:** ``InferenceRuntime`` and
    ``TrainingRuntime``: the external service that executes model work. Inference
    is always required; GPU training only for weight recipes.
-2. **A training backend integration** — a concrete implementation of that
+2. **A training backend integration:** a concrete implementation of that
    contract, such as Reef's Slime runtime.
 
 SAO

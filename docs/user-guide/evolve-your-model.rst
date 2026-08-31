@@ -135,7 +135,7 @@ publishes it to the engine, and records a new version.
 You are training when a new ``training`` entry appears, which happens once
 ``batch_size`` eligible records have arrived. Later requests use the current
 version without a restart. Keep ``checkpoint_every_n_versions`` at its default
-of ``1`` unless you want versions without durable checkpoints — between
+of ``1`` unless you want versions without durable checkpoints. Between
 checkpoints, weight bytes live only in engine memory and a restart falls back to
 the last checkpoint.
 
@@ -146,7 +146,7 @@ Gate a candidate
 ----------------
 
 By default a successful training step is published. To measure the exported
-checkpoint first, add an ``evaluation`` section — the fields are in
+checkpoint first, add an ``evaluation`` section. The fields are in
 `Configuration <../reference/configuration.rst#the-evaluation-section>`__, the plugin
 interface and a worked example in `Write a recipe
 <../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
@@ -171,12 +171,13 @@ between scenarios; each keeps its own adapter and optimizer state, and a restart
 recovers every one of them. ``/reef/status`` lists each scenario with its
 ``adapter_weight_version``.
 
-An adapter the scenario did not train — an offline SFT run — is admitted the
-same way: it enters the version chain only if ``adapter_config.json`` declares a
+An adapter the scenario did not train, such as one from an offline SFT run,
+is admitted the same way. It enters the version chain only if
+``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
 
 See also
 --------
 
-- `Architecture <../getting-started/architecture.rst#the-version-chain>`__ — the update transaction and durability model.
+- `Architecture <../getting-started/architecture.rst#the-version-chain>`__: the update transaction and durability model.

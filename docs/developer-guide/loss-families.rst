@@ -77,18 +77,18 @@ The spec
 ``loss_family``, ``loss_type``, and ``validate_specific_args`` are required. The
 rest has defaults. The overrides, in the order the pipeline reaches them:
 
-- ``parse_specific_options`` and ``apply_driver_options`` — family flags on
+- ``parse_specific_options`` and ``apply_driver_options``: family flags on
   the driver's argv (``--<name>-*``), stripped before Slime's parser sees them
   and stamped onto ``args``.
-- ``configure_backend_args`` — derive backend settings once ``loss_family`` is
+- ``configure_backend_args``: derive backend settings once ``loss_family`` is
   stamped. SAO turns Slime's advantage pass on here.
-- ``shape_sample_row`` and ``build_rollout_data`` — a custom wire row. The
+- ``shape_sample_row`` and ``build_rollout_data``: a custom wire row. The
   default row is ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``;
   a family appends its own columns and reads them back.
-- ``prepare_rollout`` — driver-side work before a step.
-- ``bind`` — a per-run instance carrying state such as a critic schedule.
-- ``train`` — critic and actor orchestration; the default is one actor step.
-- ``provenance_metrics`` — telemetry after the step.
+- ``prepare_rollout``: driver-side work before a step.
+- ``bind``: a per-run instance carrying state such as a critic schedule.
+- ``train``: critic and actor orchestration; the default is one actor step.
+- ``provenance_metrics``: telemetry after the step.
 
 Two loss lanes
 --------------
@@ -108,12 +108,12 @@ every declared channel is present, and projects the dotted paths onto ``args``.
 A missing module or hook stops the worker; nothing falls back to Slime's default
 loss.
 
-- ``custom_loss_function_path`` — ``<name>_loss(args, batch, logits, sum_of_sample_mean)``
-- ``custom_pg_loss_function_path`` — ``<name>_loss(args, ppo_kl, log_probs, advantages)``
-- ``custom_advantage_function_path`` — ``<name>_advantages(args, rollout_data)``
-- ``reef_actor_init_hook_path`` — ``<name>_actor_init(actor)``, once, after the
+- ``custom_loss_function_path``: ``<name>_loss(args, batch, logits, sum_of_sample_mean)``
+- ``custom_pg_loss_function_path``: ``<name>_loss(args, ppo_kl, log_probs, advantages)``
+- ``custom_advantage_function_path``: ``<name>_advantages(args, rollout_data)``
+- ``reef_actor_init_hook_path``: ``<name>_actor_init(actor)``, once, after the
   actor has loaded its weights
-- ``reef_actor_pre_train_hook_path`` — ``<name>_actor_pre_train(actor, rollout_data)``,
+- ``reef_actor_pre_train_hook_path``: ``<name>_actor_pre_train(actor, rollout_data)``,
   before every training step
 
 ``tests/reef_service/test_slime_algorithm_contract.py`` enforces the entry point
@@ -126,18 +126,18 @@ Wire declarations
 
 A family that ships more than the five policy columns declares them on the spec.
 
-- ``rollout_data_keys`` — per-sample payload keys the rollout manager
+- ``rollout_data_keys``: per-sample payload keys the rollout manager
   partitions across data-parallel ranks.
-- ``rollout_tensor_dtypes`` — which of those become tensors, and as what
+- ``rollout_tensor_dtypes``: which of those become tensors, and as what
   (``"int"``, ``"long"``, ``"float32"``). Ragged fields stay undeclared and
   pass through as lists.
-- ``response_aligned_keys`` — tensors laid out per response token; the worker
+- ``response_aligned_keys``: tensors laid out per response token; the worker
   slices them for context parallelism the way it slices advantages.
-- ``external_batch_keys`` — keys the worker forwards through ``get_batch``
+- ``external_batch_keys``: keys the worker forwards through ``get_batch``
   into the microbatch.
-- ``rollout_log_skip_keys`` — non-scalar keys hidden from Slime's numeric
+- ``rollout_log_skip_keys``: non-scalar keys hidden from Slime's numeric
   rollout logger.
-- ``critic_value_head_zero_init`` and ``critic_value_mask_key`` — critic
+- ``critic_value_head_zero_init`` and ``critic_value_mask_key``: critic
   families only.
 
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
@@ -148,5 +148,5 @@ frozen Megatron teacher).
 See also
 --------
 
-- `Python API <../reference/python-api.rst#step-preparer>`__ — the signal side of the pair.
-- `Write a recipe <write-a-recipe.rst>`__ — binding a family to a method.
+- `Python API <../reference/python-api.rst#step-preparer>`__: the signal side of the pair.
+- `Write a recipe <write-a-recipe.rst>`__: binding a family to a method.

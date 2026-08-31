@@ -1,6 +1,6 @@
 .. _method-integration--one-method-one-trust-domain:
 
-Method integration — one method, one trust domain
+Method integration: one method, one trust domain
 =================================================
 
    **Status (2026-08): resolved, beyond M3.** The judging half moved all the
@@ -8,15 +8,15 @@ Method integration — one method, one trust domain
    sessions are reconstructed from recorded traffic by trace matching (no
    tags, no headers), PRM judging runs on a processor-private worker
    sanctioned by the ``DataProcessor`` contract, and verdicts become batch
-   candidates directly — no report round-trip at all. The grader proxy and
+   candidates directly, without a report round trip. The grader proxy and
    its ``x-reef-return-training`` opt-in are retired; agents point at Reef
    directly. File references below describe the pre-move layout and are kept
    as the record of why the move happened.
 
 ..
 
-   A bundled method's correctness-critical logic — grading orchestration,
-   session correlation, exclusion semantics — must live in **one** trust
+   A bundled method's correctness-critical logic, including grading orchestration,
+   session correlation, and exclusion semantics, must live in **one** trust
    domain, versioned and tested with the processor that consumes its reports.
    Reef's core capabilities (records, inference, dispatch) are **served to**
    method components through APIs, never **re-implemented by** them. The
@@ -30,44 +30,46 @@ Method integration — one method, one trust domain
 
 The ``openclawrl`` integration is our first method whose grading is itself part
 of the algorithm (a PRM judging next-state feedback). Making it work under the
-current rules — *no method-specific code in the request plane*, agent records have
-a write-only HTTP surface — produced a topology with four structural defects:
+current rules produced a topology with four structural defects. Those rules
+kept method-specific code out of the request plane while giving agent records
+a write-only HTTP surface.
 
 1. **Correctness split across trust domains.** The method's exclusion
    semantics (next-state presence, neutral drops, the at-least-one promotion)
    live in ``recipes/openclawrl/examples/openclawrl/sessions.py`` (since removed),
    while `OpenClawRLProcessor <../../recipes/openclawrl/processor.py>`__
    deliberately accepts *any* numeric score. The processor's docstring says
-   "the external grader owns the method's exclusion semantics" — load-bearing
-   training logic labeled as an example, outside CI's method tests, outside
-   the version chain.
+   "the external grader owns the method's exclusion semantics." Correctness
+   therefore depended on training logic labeled as an example, outside CI's
+   method tests and the version chain.
 2. **Core capabilities rebuilt outside, degraded.** The grader is a
    forwarding proxy that re-implements a miniature request plane
    (``grader.py`` ≈ ``service/`` +
    ``inference.py`` forwarding) and a miniature record store
    (``sessions.py`` ≈ ``records.py``,
-   but in-memory, TTL-swept, lost on crash). ``sessions.py`` says it plainly:
+   but in-memory, TTL-swept, lost on crash). ``sessions.py`` explains its origin:
    *"Adapted from the reef-internal coordinator on the openclaw branch."*
-   The coordinator was not designed outside — it was evicted.
+   The architecture moved the coordinator outside Reef even though it depended
+   on Reef's request-plane behavior.
 3. **Two unsynchronized failure domains.** The grader holds turns Reef has no
    verdict for; Reef holds records the grader may never judge (crash, TTL).
    Neither side can recover the other's state: the grader cannot re-read what
    Reef stored, and Reef cannot know a session ended.
 4. **A serving regression.** Because the grader must see complete responses,
-   it buffers upstream and synthesizes SSE all at once — every agent behind
-   this method loses true streaming, which Reef itself supports.
+   it buffers upstream and synthesizes SSE all at once. Every agent behind
+   this method loses the true streaming that Reef supports.
 
-None of these are bugs in the grader. They are forced moves given one missing
-capability, which is the actual root cause:
+These defects result from one missing capability rather than from isolated
+grader bugs:
 
 **Reef's agent-record surface is write-only.**
 `service/routes/records.py <../../reef/service/routes/records.py>`__
-registers ``POST /reef/report`` — nothing reads,
+registers ``POST /reef/report``, but nothing reads,
 queries, or subscribes. An external component that needs to see exchanges has
 exactly one option: sit on the traffic path and keep its own copy. Meanwhile
-the storage primitive for egress already exists —
+the storage primitive for egress already exists.
 `RecordStore.replay_page <../../reef/records.py>`__ is keyset-paginated and
-documented "for internal streaming consumers" — it simply has no HTTP surface.
+documented "for internal streaming consumers," but it has no HTTP surface.
 
 The same forces will apply to every future method whose grading is
 algorithmic (ACE's Reflector, ReasoningBank's distiller, OpenClaw-RL's
@@ -83,7 +85,7 @@ These are the standards new method integrations follow. Each traces to a
 defect above.
 
 - **P1 · One trust domain per method.** Everything that decides *what
-  trains* — grading orchestration, correlation, exclusion, promotion — ships
+  trains*, including grading orchestration, correlation, exclusion, and promotion, ships
   in one package with the processor that consumes its output, tested
   together. A processor may never delegate its acceptance semantics to an
   unversioned external component.
@@ -93,13 +95,13 @@ defect above.
   blocks review.
 - **P3 · Observe, don't carry.** Method components consume traffic from the
   egress surface (§3.1); they do not proxy the request path. The request
-  plane stays method-agnostic — that contract is kept, not weakened.
+  plane stays method-agnostic. This preserves the existing contract.
 - **P4 · Training-relevant state is durable.** Any state whose loss changes
   what trains (session tables, pending verdicts, retry queues) lives in
   Reef's store or is reconstructible from it by replay. Process memory is a
   cache, never the source of truth.
 - **P5 · No serving regressions.** A method integration may not degrade the
-  request path it observes — streaming stays end-to-end native. Buffered
+  request path it observes. Streaming stays end-to-end native. Buffered
   capture with synthesized SSE is disallowed.
 - **P6 · Reports carry the whole signal.** ``POST /reef/report`` already
   accepts structured ``feedback``; a method that produces more than a scalar
@@ -139,8 +141,8 @@ Egress is the inverse of ingress and reuses its auth. A consumer's position
 is its own cursor (``after_sequence``); Reef keeps no per-consumer state, so a
 crashed grader recovers by replaying from its last durable cursor. Compaction
 is safe unchanged: records are only compacted after training consumed them,
-which requires the method's own report — a record cannot be compacted before
-its grader has seen it, because the grader is what makes it trainable.
+which requires the method's own report. A record cannot be compacted before
+its grader has seen it because the grader is what makes it trainable.
 
 .. _32-request-tags:
 
@@ -164,15 +166,16 @@ A bundled method is one package under ``reef/<name>/`` (landed 2026-08 as
 ``recipe``/``processor``/``preparer``/``slime``) containing
 every correctness-critical part: the recipe, the processor, and any grading
 service (judge orchestration, PRM client, correlation). Grading services run
-as service entries in the deployment config — as the grader already does in
-``training-openclawrl.yaml`` — but from inside the package, on the egress API.
+as service entries in the deployment config, as the grader already does in
+``training-openclawrl.yaml``. They run from inside the package on the egress API.
 There are no re-exports: a method's names are imported from its package.
 
-The considered alternative — in-core observer hooks on the request path
-(a method plugin invoked post-serve) — is rejected for now: it breaks the
-method-agnostic request plane for a latency win no current method needs.
-Egress-with-replay gives the same visibility with a crash story the hook
-model lacks. Revisit only if a method demonstrably cannot tolerate
+The considered alternative is an in-core observer hook on the request path,
+implemented as a method plugin invoked after serving. It is rejected for now
+because it breaks the
+method-agnostic request plane for a latency benefit no current method needs.
+Egress with replay provides the same visibility and allows recovery after a
+crash, which the hook model does not. Revisit only if a method cannot tolerate
 observe-lag.
 
 .. _34-report-payload-conventions:
@@ -186,7 +189,7 @@ The report schema is already open (``score``, ``feedback``, ``references``,
 - ``score``: scalar consumed by scored-rollout processors, as today.
 - ``metadata.training.eligible: false``: the existing framework-neutral
   opt-out (`reported.py <../../reef/train/processors/reported.py>`__,
-  ``_report_is_trainable``) — how a method submits a record-keeping report
+  ``_report_is_trainable``): how a method submits a record-keeping report
   that must not train.
 - ``feedback.<method>.*``: structured method signal. For OpenClaw-RL's OPD
   half: ``feedback.openclawrl.hint`` (the selected directive hint) and
@@ -201,20 +204,20 @@ The report schema is already open (``score``, ``feedback``, ``references``,
 
 Milestones, each independently shippable:
 
-1. **M1 — egress + tags.** Add §3.1 and §3.2. No behavior change for
+1. **M1: egress + tags.** Add §3.1 and §3.2. No behavior change for
    existing methods.
-2. **M2 — grader off the data path.** Agents point at Reef directly (true
+2. **M2: grader off the data path.** Agents point at Reef directly (true
    streaming restored, P5). The grader becomes an egress consumer: replay →
    correlate by tags → judge with the PRM → ``POST /reef/report``. Its session
    table becomes derived state; the retry queue survives because report ids
    stay deterministic (``openclawrl:<receipt>``) and
    `records.py <../../reef/records.py>`__ dedup is unchanged.
-3. **M3 — graduate the package.** Move grader, sessions, and PRM client into
+3. **M3: graduate the package.** Move grader, sessions, and PRM client into
    ``reef/methods/openclawrl/`` beside the recipe and processor; CI runs the
    exclusion-semantics tests against the processor contract (P1, P7).
    ``recipes/openclawrl/examples/openclawrl/`` keeps the opencode plugin, workload, and launch
    config.
-4. **M4 — the OPD half.** With P6 conventions in place, the missing half of
+4. **M4: the OPD half.** With P6 conventions in place, the missing half of
    the paper lands as data, not new infrastructure: the grader extracts
    hints, runs the hint-augmented teacher forward as a non-trainable
    inference call, and reports ``score`` + ``feedback.openclawrl.*``; a
@@ -231,7 +234,7 @@ Milestones, each independently shippable:
   integrated today keep working unmodified; tags are optional.
 - **The evolution boundary.** This RFC moves *method* code, not *run state*.
   A grader's session table is derived bookkeeping over Reef-served traffic,
-  which is exactly why it belongs on Reef's store — the
+  which is why it belongs on Reef's store. The
   `evolution boundary <evolution-boundary.rst>`__ is about harness-owned search
   state, and is untouched.
 - **Recipe authorship.** Third-party methods still need only a recipe class
@@ -250,7 +253,7 @@ Before a method merges, its review answers yes to all of:
 - ☐ No component proxies the request path or re-implements a core module
   (P2, P3).
 - ☐ Killing any method component and restarting it loses no
-  training-relevant state — everything derives from replay (P4).
+  training-relevant state because everything derives from replay (P4).
 - ☐ An agent behind this method gets native streaming (P5).
 - ☐ Every training signal arrives through ``POST /reef/report`` under
   documented keys (P6).

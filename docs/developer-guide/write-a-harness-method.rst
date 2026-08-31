@@ -2,7 +2,7 @@ Write a harness method
 ======================
 
 A harness method is the part you write: what edit to try, and how an episode
-scored. Reef runs the loop around it — snapshot, apply, run the paired episodes,
+scored. Reef runs the loop around it: snapshot, apply, run the paired episodes,
 record, publish or revert.
 
 `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ is the mechanism this plugs
@@ -19,17 +19,18 @@ A method fills three slots:
 
 ``propose`` sees the tree as ``(kind, config)`` pairs, the batch of
 ``TraceSample`` records (recorded request payload, score, source receipt), and
-``models``, its only path to a model — ``models.served`` is the model under
-test, ``models["teacher"]`` comes from ``evolution.models``. Each binding is
-called as ``binding.chat(messages, *, timeout_s=None, **params) -> str`` —
-OpenAI-shaped ``messages`` whatever the endpoint's dialect, returning the
-assistant text. It returns one ``Mutation`` (``create``, ``update``, or
+``models``, its only path to a model. ``models.served`` is the model under
+test, ``models["teacher"]`` comes from ``evolution.models``. Call each binding
+as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
+``messages`` are OpenAI-shaped regardless of the endpoint's dialect, and the
+binding returns the assistant text. ``propose`` returns one ``Mutation``
+(``create``, ``update``, or
 ``remove`` on one root-level entry), a sequence applied as one composite
 proposal under one verdict, or ``None`` to skip. An optional keyword-only
 ``manifest`` argument receives the previous step's ``FailureManifest``.
 
-``evaluate`` grades one finished episode — both sides of every pair. ``result``
-carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
+``evaluate`` grades one finished episode. Reef calls it for both sides of every
+pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
 that could not run never reach it.
 
 ``selection`` defaults to ``score_comparison``: select when the candidate wins
@@ -39,7 +40,7 @@ more task comparisons than it loses. ``always`` selects every applied mutation.
 
    The tree refuses credentials outright. A config node holding a literal
    credential (``apiKey``, ``token``, plural and list forms) fails admission at
-   seed boot, at every proposal, and when recovered state loads — tree state
+   seed boot, at every proposal, and when recovered state loads. Tree state
    persists into the commit log, the snapshot metadata, and the published
    artifact. If a workdir from before this gate already holds a key, resuming
    fails and names the field: rotate the key, then edit the entry out of the
@@ -48,7 +49,7 @@ more task comparisons than it loses. ``always`` selects every applied mutation.
 A complete method
 ~~~~~~~~~~~~~~~~~
 
-Each task string starts with a tag — ``[fib]`` in the config below — and
+Each task string starts with a tag, such as ``[fib]`` in the config below, and
 ``evaluate`` uses it to look up that task's expected answer. The tag convention
 is the method's own; Reef passes the task string through unchanged.
 
@@ -120,7 +121,7 @@ The recipe config names the callables, the tasks, and the first-boot tree:
 Preset YAML is read as-is: ``${VAR}`` is **not** interpolated in a preset, only
 in a deployment config. Write literal values.
 
-That file is a preset, not a deployment config — it has no ``services`` and no
+That file is a preset, not a deployment config. It has no ``services`` and no
 ``reef`` section, so ``reef serve -c`` cannot read it. Save it as
 ``recipes/<name>.yaml`` and ``export REEF_RECIPE_CONFIG_DIR=$PWD/recipes``;
 there is no default directory. The deployment config is the file ``reef serve
@@ -144,7 +145,7 @@ the one to copy:
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
 ``recipes/harness_evolve/examples/harness_evolve/run.sh`` does exactly this.
 
-Keep ``tasks`` short — it sets each step's cost. Start Reef where the method
+Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
 package is importable, and give ``-c`` an absolute path: Reef resolves a
 relative ``-c`` against its own repo root, not your working directory. Recovered
 tree state always wins over ``seed``. The full field list is in `harness_evolve
@@ -189,4 +190,4 @@ candidate selection breaks revert.
 See also
 --------
 
-- `Python API <../reference/python-api.rst#harness-method>`__ — the contract as a table.
+- `Python API <../reference/python-api.rst#harness-method>`__: the contract as a table.

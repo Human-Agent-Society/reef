@@ -1,8 +1,8 @@
 HTTP API
 ========
 
-Reef serves the provider's own inference routes — OpenAI at
-``/v1/chat/completions``, Anthropic at ``/v1/messages`` — and forwards each
+Reef serves the provider's own inference routes: OpenAI at
+``/v1/chat/completions`` and Anthropic at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
@@ -155,10 +155,10 @@ It answers ``{agent_record_id, scenario, request_type}``.
 The optional top-level ``agent_record_id`` makes posting retry-safe: Reef uses
 it as the report's own record id, so an identical resend returns the stored
 record instead of reprocessing it, while the same id with different content is
-HTTP 409. It is not a receipt — receipts go in ``references``.
+HTTP 409. It is not a receipt. Receipts go in ``references``.
 
-A recipe may declare a report schema — `tttd
-<../user-guide/recipes/tttd.rst#the-report-contract>`__ declares one — in which case Reef
+A recipe may declare a report schema. `tttd
+<../user-guide/recipes/tttd.rst#the-report-contract>`__ declares one. In that case, Reef
 validates the declared ``score`` and ``metadata`` fields at ingress and answers
 HTTP 400 on a violation; ``feedback`` and undeclared ``metadata`` keys pass
 through unvalidated. To record a report but keep it out of training, send
@@ -236,7 +236,7 @@ an update is being trained or published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
-``serving`` is runtime-wide and recipe-shaped — a LoRA deployment reports each
+``serving`` is runtime-wide but recipe-shaped. A LoRA deployment reports each
 scenario's ``adapter_weight_version`` under it.
 
 Status codes

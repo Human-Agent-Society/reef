@@ -108,7 +108,7 @@ when the model itself cannot do the task.
 Before you start
 ----------------
 
-- ``pip install reef-client`` — the loop driver imports it.
+- ``pip install reef-client``: the loop driver imports it.
 - An OpenAI-compatible endpoint serving the model under test, hosted or local.
   ``REEF_UPSTREAM_URL`` takes no ``/v1`` suffix.
 - The ``pi`` binary on ``PATH``, or named by ``REEF_PI_BINARY``
@@ -211,4 +211,4 @@ how to connect an agent that has no adapter yet.
 See also
 --------
 
-- `harness_evolve <recipes/harness-evolve.rst>`__ — the recipe's full configuration.
+- `harness_evolve <recipes/harness-evolve.rst>`__: the recipe's full configuration.
