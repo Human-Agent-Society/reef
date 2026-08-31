@@ -11,15 +11,16 @@ import hashlib
 import math
 import shutil
 import threading
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from reef_client import ReefClient
+from examples.reef_client import ReefClient
+from examples.tttd.harness import TTTDChatRequestBuilder, openai_action
 
-from .contract import TaskContract
 from .execution import ExecutionClient
 from .library import GuidanceLibrary
 from .prompts import (
@@ -29,9 +30,8 @@ from .prompts import (
     extract_strict_guidance,
     extract_terminal_tag_or_none,
 )
-from .scorer import Scorer, extract_solution_code
-from .search import guidance_chat_request, openai_action
 from .state import LibraryEntry, LibraryNode, LLMRequest, VerificationResult
+from .tasks import POLYOMINO_TASK, TaskSpec
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,7 @@ class GuidanceRolloutResult:
     group: int
     rollout: int
     parent_node_id: str
-    agent_record_id: str
+    agent_data_id: str
     guidance: str | None
     guidance_format_ok: bool
     execution_text: str
@@ -71,6 +71,7 @@ def prepare_library(
     puct_c: float = 1.0,
     max_buffer_size: int = 1_000,
     topk_children: int = 2,
+    task: TaskSpec = POLYOMINO_TASK,
 ) -> GuidanceLibrary:
     """Create or validate a Discover-compatible run archive from one seed."""
     seed_path = Path(seed_path)
@@ -92,10 +93,11 @@ def prepare_library(
             topk_children=topk_children,
             discover_compat=True,
             groups_per_batch=groups_per_step,
-            score_direction="max",
+            score_direction=task.score_direction,
         )
     else:
         library = GuidanceLibrary(run_path)
+    _assert_task_identity(library, task)
     library.assert_runtime_config(
         rollout_n=rollouts_per_group,
         puct_c=puct_c,
@@ -104,9 +106,23 @@ def prepare_library(
         topk_children=topk_children,
         discover_compat=True,
         groups_per_batch=groups_per_step,
-        score_direction="max",
+        score_direction=task.score_direction,
     )
     return library
+
+
+def _assert_task_identity(library: GuidanceLibrary, task: TaskSpec) -> None:
+    snapshot = library.snapshot()
+    problem_ids = {
+        str(item.get("problem_id"))
+        for collection in (snapshot.get("nodes", {}), snapshot.get("entries", {}))
+        for item in collection.values()
+        if item.get("problem_id") is not None
+    }
+    if problem_ids != {task.task_id}:
+        raise ValueError(
+            f"Guidance library task mismatch: archive={sorted(problem_ids)!r}, requested={task.task_id!r}"
+        )
 
 
 class ReefGuidanceTTTHarness:
@@ -120,18 +136,32 @@ class ReefGuidanceTTTHarness:
         *,
         scenario: str,
         model: str,
-        contract: TaskContract,
-        scorer: Scorer,
+        task: TaskSpec = POLYOMINO_TASK,
         recipe: str = "tttd",
+        artifact_version: str | None = None,
+        inference_path: str = "/v1/chat/completions",
         groups_per_step: int = 8,
         rollouts_per_group: int = 16,
         guidance_max_tokens: int = 8_192,
+        guidance_temperature: float = 1.0,
+        guidance_top_p: float = 1.0,
+        guidance_top_k: int = -1,
+        sampling_seed: int | None = None,
         max_workers: int | None = None,
+        verifier_timeout_s: int = 340,
+        verifier_concurrency: int | None = None,
+        verifier_config: Mapping[str, Any] | None = None,
+        request_extra: Mapping[str, Any] | None = None,
+        report_training: bool = True,
     ) -> None:
         if groups_per_step < 1 or rollouts_per_group < 2:
             raise ValueError("groups_per_step must be positive and rollouts_per_group must be at least two")
-        if guidance_max_tokens < 1:
-            raise ValueError("guidance_max_tokens must be positive")
+        if guidance_max_tokens < 1 or verifier_timeout_s < 1:
+            raise ValueError("guidance_max_tokens and verifier_timeout_s must be positive")
+        if sampling_seed is not None and int(sampling_seed) < 0:
+            raise ValueError("sampling_seed must be non-negative")
+        if verifier_concurrency is not None and verifier_concurrency < 1:
+            raise ValueError("verifier_concurrency must be positive")
         if library.groups_per_batch != groups_per_step or library.rollout_n != rollouts_per_group:
             raise ValueError("library cardinalities do not match the harness")
         self.client = client
@@ -139,14 +169,33 @@ class ReefGuidanceTTTHarness:
         self.library = library
         self.scenario = scenario
         self.model = model
-        self.contract = contract
-        self.scorer = scorer
+        self.task = task
         self.recipe = recipe
+        self.artifact_version = artifact_version
+        self.inference_path = inference_path
         self.groups_per_step = groups_per_step
         self.rollouts_per_group = rollouts_per_group
         self.guidance_max_tokens = guidance_max_tokens
+        self.guidance_temperature = float(guidance_temperature)
+        self.guidance_top_p = float(guidance_top_p)
+        self.guidance_top_k = int(guidance_top_k)
+        self.sampling_seed = None if sampling_seed is None else int(sampling_seed)
         self.max_workers = max_workers or min(groups_per_step * rollouts_per_group, 32)
+        self.verifier_timeout_s = verifier_timeout_s
+        self.verifier_concurrency = verifier_concurrency or self.max_workers
+        self.verifier_config = dict(verifier_config or {})
+        self.request_extra = dict(request_extra or {})
+        self.report_training = bool(report_training)
+        self._request_builder = TTTDChatRequestBuilder(
+            max_new_tokens=guidance_max_tokens,
+            temperature=self.guidance_temperature,
+            top_p=self.guidance_top_p,
+            top_k=self.guidance_top_k,
+            enable_thinking=True,
+            lora_path="reef_lora",
+        )
         self._execution_slots = threading.BoundedSemaphore(execution_client.backend.concurrency)
+        self._verifier_slots = threading.BoundedSemaphore(self.verifier_concurrency)
 
     def run_step(self, step: int) -> tuple[GuidanceRolloutResult, ...]:
         if step < 0:
@@ -169,7 +218,7 @@ class ReefGuidanceTTTHarness:
             topk_children=self.library.topk_children,
             discover_compat=True,
             groups_per_batch=self.groups_per_step,
-            score_direction="max",
+            score_direction=self.task.score_direction,
         )
         return results
 
@@ -185,12 +234,12 @@ class ReefGuidanceTTTHarness:
         if parent_entry is None or not parent_entry.solution.strip():
             raise RuntimeError(f"selected node {parent.id!r} has no visible executable parent entry")
         prompt = build_guidance_prompt(
-            problem_prompt=self.contract.problem_prompt,
+            problem_prompt=self.task.problem_prompt,
             selected_node=parent,
             selected_entry=parent_entry,
-            objective_text=self.contract.objective,
-            mechanism_constraint=self.contract.mechanism_constraint,
-            raw_score_label=self.contract.raw_score_label,
+            objective_text=self.task.guidance_objective(parent.raw_score),
+            mechanism_constraint=self.task.guidance_mechanism_constraint,
+            raw_score_label=self.task.raw_score_label,
         )
         return _GroupContext(group, group_uid, parent, parent_entry, prompt)
 
@@ -201,19 +250,30 @@ class ReefGuidanceTTTHarness:
         archive_timestep: int,
         rollout: int,
     ) -> GuidanceRolloutResult:
-        payload = guidance_chat_request(
+        request_extra = dict(self.request_extra)
+        policy_sampling_seed = None
+        if self.sampling_seed is not None:
+            policy_sampling_seed = (
+                self.sampling_seed
+                + step * self.groups_per_step * self.rollouts_per_group
+                + context.group * self.rollouts_per_group
+                + rollout
+            )
+            request_extra["seed"] = policy_sampling_seed
+        payload = self._request_builder(
             self.model,
             [
                 {"role": "system", "content": context.guidance_prompt.system},
                 {"role": "user", "content": context.guidance_prompt.user},
             ],
-            self.guidance_max_tokens,
+            request_extra,
         )
-        response, agent_record_id = self.client.inference_with_record(
+        response, agent_data_id = self.client.inference_with_record(
             self.scenario,
-            "/v1/chat/completions",
+            self.inference_path,
             payload,
             recipe=self.recipe,
+            artifact_version=self.artifact_version,
         )
         guidance_text = openai_action(response)
         guidance, guidance_error = extract_strict_guidance(guidance_text)
@@ -232,13 +292,13 @@ class ReefGuidanceTTTHarness:
             )
         else:
             execution_prompt = build_execution_prompt(
-                problem_prompt=self.contract.problem_prompt,
+                problem_prompt=self.task.problem_prompt,
                 selected_entry=context.parent_entry,
                 guidance=guidance,
-                solution_language=self.contract.solution_language,
-                solution_contract=self.contract.solution_contract,
-                score_direction=self.contract.score_direction,
-                raw_score_label=self.contract.raw_score_label,
+                solution_language=self.task.solution_language,
+                solution_contract=self.task.execution_solution_contract,
+                score_direction=self.task.score_direction,
+                raw_score_label=self.task.raw_score_label,
             )
             try:
                 with self._execution_slots:
@@ -259,22 +319,16 @@ class ReefGuidanceTTTHarness:
                     "finish_reason": execution_response.finish_reason,
                 }
                 execution_usage = execution_response.usage
-                candidate = extract_solution_code(execution_text, self.contract.solution_language)
-                if candidate is None:
-                    verification = VerificationResult(
-                        reward=0.0,
-                        raw_score=None,
-                        valid=False,
-                        status="parse_error",
-                        message=f"no {self.contract.solution_language} code block found in <solution>",
-                        artifacts={},
+                with self._verifier_slots:
+                    verification = self.task.verify_execution_text(
+                        execution_text,
+                        timeout_s=self.verifier_timeout_s,
+                        config=self.verifier_config,
                     )
-                else:
-                    verification = self.scorer(candidate)
             except Exception as exc:  # External execution is an environment outcome.
                 verification = VerificationResult.execution_error(f"{type(exc).__name__}: {exc}")
 
-        solution = extract_solution_code(execution_text, self.contract.solution_language) or ""
+        solution = self.task.solution_extractor(execution_text) or ""
         model_summary = extract_terminal_tag_or_none(execution_text, "summary")
         summary = model_summary or "The execution model did not emit a usable canonical summary."
         entry = LibraryEntry(
@@ -314,6 +368,8 @@ class ReefGuidanceTTTHarness:
                 "execution_response_metadata": execution_metadata,
                 "execution_response_usage": execution_usage,
                 "verification_artifacts": verification.artifacts,
+                "training_reported": self.report_training,
+                "policy_sampling_seed": policy_sampling_seed,
             },
         )
         child = self.library.submit_child(context.group_uid, entry)
@@ -321,36 +377,40 @@ class ReefGuidanceTTTHarness:
         score = float(verification.reward)
         if not math.isfinite(score):
             raise RuntimeError(f"verifier returned a non-finite reward: {score!r}")
-        self.client.report(
-            self.scenario,
-            {
-                "score": score,
-                "feedback": f"{verification.status}: {verification.message}",
-                "references": [agent_record_id],
-                "metadata": {
-                    "comparison_set": comparison_set,
-                    "algorithm": "ttt-discover",
-                    "step": step,
-                    "group": context.group,
-                    "rollout": rollout,
-                    "groups_per_step": self.groups_per_step,
-                    "rollouts_per_group": self.rollouts_per_group,
-                    "parent_id": context.parent.id,
-                    "search_value": verification.raw_score,
-                    "guidance_ttt": True,
-                    "prompt_mode": "summary_only",
-                    "archive_timestep": archive_timestep,
-                    "library_entry_id": entry.id,
+        if self.report_training:
+            self.client.report(
+                self.scenario,
+                {
+                    "score": score,
+                    "feedback": f"{verification.status}: {verification.message}",
+                    "references": [agent_data_id],
+                    "metadata": {
+                        "comparison_set": comparison_set,
+                        "algorithm": "ttt-discover",
+                        "task": self.task.task_id,
+                        "step": step,
+                        "group": context.group,
+                        "rollout": rollout,
+                        "groups_per_step": self.groups_per_step,
+                        "rollouts_per_group": self.rollouts_per_group,
+                        "parent_id": context.parent.id,
+                        "search_value": verification.raw_score,
+                        "guidance_ttt": True,
+                        "prompt_mode": "summary_only",
+                        "archive_timestep": archive_timestep,
+                        "library_entry_id": entry.id,
+                        "policy_sampling_seed": policy_sampling_seed,
+                    },
                 },
-            },
-            recipe=self.recipe,
-        )
+                recipe=self.recipe,
+                artifact_version=self.artifact_version,
+            )
         return GuidanceRolloutResult(
             step=step,
             group=context.group,
             rollout=rollout,
             parent_node_id=context.parent.id,
-            agent_record_id=agent_record_id,
+            agent_data_id=agent_data_id,
             guidance=guidance,
             guidance_format_ok=guidance is not None,
             execution_text=execution_text,
@@ -358,3 +418,11 @@ class ReefGuidanceTTTHarness:
             entry_id=entry.id,
             child_node_id=None if child is None else child.id,
         )
+
+
+def openai_response_text(response: Mapping[str, Any]) -> str:
+    """Compatibility wrapper kept public for small external harness tests."""
+    choices = response.get("choices")
+    if not isinstance(choices, Sequence) or not choices:
+        raise ValueError("response has no choices")
+    return openai_action(response)

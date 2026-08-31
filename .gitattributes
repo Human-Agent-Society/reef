@@ -1,0 +1,6 @@
+# Preserve upstream benchmark artifacts byte-for-byte, including their original
+# line endings and trailing whitespace.
+examples/guidance_ttt/tasks/trimul_prompt.py whitespace=-trailing-space
+examples/guidance_ttt/tasks/assets/trimul/** whitespace=-trailing-space
+examples/guidance_ttt/tasks/assets/trimul_evaluator/** whitespace=-trailing-space
+examples/guidance_ttt/tasks/assets/vliw_kernel_optimization/** whitespace=-trailing-space

@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import asyncio
-import importlib
 import json
-import logging
 import sys
 import threading
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -15,56 +11,50 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from recipes.tttd.examples.guidance_ttt.harness import (
+from examples.guidance_ttt import (
     ExecutionBackend,
     OpenAICompatibleExecutionClient,
     ReefGuidanceTTTHarness,
-    TaskContract,
+    TaskSpec,
     gpt_oss_120b_backend,
     openrouter_glm_5_2_backend,
     prepare_library,
 )
-from recipes.tttd.examples.guidance_ttt.harness.library import GuidanceLibrary
-from recipes.tttd.examples.guidance_ttt.harness.prompts import (
-    build_execution_prompt,
-    build_guidance_prompt,
-    extract_strict_guidance,
-)
-from recipes.tttd.examples.guidance_ttt.harness.puct import archive_puct_score
-from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
-    GuidanceRunIdentity,
-    GuidanceRunStateError,
-    GuidanceRunStateStore,
-    RayTrainingBridge,
-    read_json,
-    require_step_success,
-    scenario_status,
-    wait_for_training_step,
-    write_json,
-)
-from recipes.tttd.examples.guidance_ttt.harness.scorer import JudgeResult, JudgeScorer, extract_solution_code
-from recipes.tttd.examples.guidance_ttt.harness.state import (
-    LibraryEntry,
-    LLMRequest,
-    LLMResponse,
-    VerificationResult,
-    make_root_node,
-)
+from examples.guidance_ttt.deployments.qwen3_8b_lora.cluster import build_parser
+from examples.guidance_ttt.deployments.qwen3_8b_lora.runner import _validate_settings
+from examples.guidance_ttt.library import GuidanceLibrary
+from examples.guidance_ttt.prompts import build_execution_prompt, build_guidance_prompt, extract_strict_guidance
+from examples.guidance_ttt.puct import archive_puct_score
+from examples.guidance_ttt.state import LibraryEntry, LLMResponse, VerificationResult, make_root_node
+from examples.guidance_ttt.tasks.polyomino import POLYOMINO_PROBLEM_PROMPT
+from examples.guidance_ttt.verifier.frontiercs_adapter import FrontierCSResult, evaluate_cpp_solution
+from examples.guidance_ttt.verifier.polyomino import extract_cpp_solution_code
 
-TASK_DIR = REPO_ROOT / "recipes" / "tttd" / "examples" / "guidance_ttt" / "harbor" / "polyomino_packing"
-SEED = TASK_DIR / "solution" / "gpt_oss_120b_bootstrap_library.json"
-INSTRUCTION = (TASK_DIR / "instruction.md").read_text()
-CONTRACT_PATH = TASK_DIR / "contract.json"
+SEED = REPO_ROOT / "examples" / "guidance_ttt" / "seeds" / "polyomino_packing" / "gpt_oss_120b_bootstrap_library.json"
 
 
-def _contract() -> TaskContract:
-    return TaskContract.load(CONTRACT_PATH, problem_prompt=INSTRUCTION)
+def _task() -> TaskSpec:
+    def verify(text, *, timeout_s, config):
+        _ = timeout_s, config
+        code = extract_cpp_solution_code(text)
+        if not code:
+            return VerificationResult(0.0, None, False, "parse_error", "missing code")
+        score = float(len(code))
+        return VerificationResult(score, score, True, "valid", "accepted", {"code": code})
 
-
-def _length_scorer(code: str) -> VerificationResult:
-    """Stand in for the external judge: a deterministic, non-constant score."""
-    score = float(len(code))
-    return VerificationResult(score, score, True, "valid", "accepted", {"code": code})
+    return TaskSpec(
+        task_id="polyomino_packing",
+        problem_prompt=POLYOMINO_PROBLEM_PROMPT,
+        solution_language="cpp",
+        execution_solution_contract="Return one complete C++17 solution.",
+        guidance_mechanism_constraint="Use only self-contained C++17 mechanisms.",
+        score_direction="max",
+        raw_score_label="FrontierCS score",
+        create_root_node=lambda: None,
+        verifier=verify,
+        solution_extractor=extract_cpp_solution_code,
+        guidance_objective=lambda _: "Improve the FrontierCS score.",
+    )
 
 
 class _ReefClient:
@@ -188,8 +178,7 @@ def test_one_step_links_only_guidance_receipts_and_skips_executor_on_bad_format(
         library,
         scenario="guidance-smoke",
         model="Qwen/Qwen3-8B",
-        contract=_contract(),
-        scorer=_length_scorer,
+        task=_task(),
         groups_per_step=2,
         rollouts_per_group=2,
         guidance_max_tokens=64,
@@ -224,6 +213,44 @@ def test_one_step_links_only_guidance_receipts_and_skips_executor_on_bad_format(
     assert snapshot["puct_T"] == 4
     assert all(entry["metadata"]["guidance_generation_attempts"] == 1 for entry in generated)
     assert all(entry["metadata"]["prompt_mode"] == "summary_only" for entry in generated)
+
+
+def test_frozen_policy_control_advances_archive_without_training_reports(tmp_path: Path) -> None:
+    library = prepare_library(
+        seed_path=SEED,
+        run_path=tmp_path / "library.json",
+        groups_per_step=1,
+        rollouts_per_group=2,
+    )
+    reef = _ReefClient()
+    harness = ReefGuidanceTTTHarness(
+        reef,
+        _ExecutionClient(),
+        library,
+        scenario="guidance-smoke",
+        model="Qwen/Qwen3-8B",
+        task=_task(),
+        groups_per_step=1,
+        rollouts_per_group=2,
+        guidance_max_tokens=64,
+        max_workers=2,
+        sampling_seed=40,
+        report_training=False,
+    )
+
+    results = harness.run_step(0)
+
+    assert len(results) == 2
+    assert len(reef.inferences) == 2
+    assert {payload["seed"] for payload in reef.inferences} == {40, 41}
+    assert reef.reports == []
+    generated = [
+        entry
+        for entry in library.snapshot()["entries"].values()
+        if entry["timestep"] == 1
+    ]
+    assert len(generated) == 2
+    assert all(entry["metadata"]["training_reported"] is False for entry in generated)
 
 
 def test_openrouter_secret_is_environment_only_and_not_serialized(monkeypatch) -> None:
@@ -334,7 +361,7 @@ def test_best_child_puct_mode_matches_guidance_reference() -> None:
     assert score == 50.0
 
 
-def test_judge_scorer_speaks_the_judge_protocol_and_surfaces_its_score(monkeypatch, tmp_path: Path) -> None:
+def test_frontiercs_adapter_and_polyomino_verifier_surface_score(monkeypatch, tmp_path: Path) -> None:
     seen = []
 
     class Response:
@@ -366,24 +393,27 @@ def test_judge_scorer_speaks_the_judge_protocol_and_surfaces_its_score(monkeypat
         assert url.endswith("/result/1")
         return Response({"status": "done", "score": 91.5, "scoreUnbounded": 93.0})
 
-    monkeypatch.setattr("recipes.tttd.examples.guidance_ttt.harness.scorer.urllib.request.urlopen", urlopen)
-    scorer = JudgeScorer(
-        "http://127.0.0.1:8081",
+    monkeypatch.setattr("examples.guidance_ttt.verifier.frontiercs_adapter.urllib.request.urlopen", urlopen)
+    result = evaluate_cpp_solution(
+        "int main() { return 0; }",
         problem_id="0",
         timeout_s=7,
-        poll_interval_s=0,
-        base_dir=str(tmp_path),
+        config={
+            "base_dir": str(tmp_path),
+            "judge_url": "http://127.0.0.1:8081",
+            "poll_interval_s": 0,
+        },
     )
-    result = scorer.evaluate("int main() { return 0; }")
 
-    assert result == JudgeResult(
+    assert result == FrontierCSResult(
         valid=True,
         score=91.5,
         message="accepted",
         artifacts={
             "problem_id": "0",
             "submission_id": "1",
-            "judge_base_dir": str(tmp_path),
+            "frontiercs_config": {},
+            "frontiercs_base_dir": str(tmp_path),
             "judge_status": "done",
             "score_unbounded": 93.0,
         },
@@ -393,363 +423,54 @@ def test_judge_scorer_speaks_the_judge_protocol_and_surfaces_its_score(monkeypat
         "http://127.0.0.1:8081/result/1",
     ]
     assert all(call[1] > 0 for call in seen)
-    # As a Scorer, the same verdict becomes the harness's VerificationResult.
-    verification = scorer("int main() { return 0; }")
-    assert (verification.reward, verification.valid, verification.status) == (91.5, True, "valid")
 
 
-def _bridge_health(**overrides) -> dict:
-    health = {
-        "ok": True,
-        "completed_train_steps": 1,
-        "last_train_rollout_id": 0,
-        "phase": "awaiting_commit",
-    }
-    health.update(overrides)
-    return health
+def test_guidance_deployment_defaults_are_small_but_not_hard_coded() -> None:
+    args = build_parser().parse_args(["--executor", "gpt_oss_120b"])
+
+    assert args.groups == 2
+    assert args.rollouts == 4
+    assert args.guidance_max_tokens == 8_192
+    assert args.sequence_length == 12_288
+    assert args.lora_rank == 32
+    assert args.steps == 1
+    assert args.training_horizon_steps is None
+    assert args.verifier_timeout_s is None
+    assert args.require_nonconstant_step is False
+    assert args.frozen_policy_control is False
 
 
-def test_training_wait_keeps_polling_until_the_bridge_returns_to_serving() -> None:
-    health = iter([_bridge_health(), _bridge_health(phase="serving")])
-
-    result = wait_for_training_step(
-        health=lambda: next(health),
-        status=lambda: scenario_status(_reef_status(), "guidance-run"),
-        expected_completed_steps=1,
-        expected_rollout_id=0,
-        timeout_s=1,
-        poll_interval_s=0,
+def test_guidance_deployment_exposes_matched_frozen_policy_control() -> None:
+    args = build_parser().parse_args(
+        ["--executor", "gpt_oss_120b", "--task", "trimul", "--frozen-policy-control"]
     )
 
-    assert result["phase"] == "serving"
+    assert args.task == "trimul"
+    assert args.frozen_policy_control is True
 
 
-def test_training_wait_fails_when_tttd_reports_the_expected_step_failure() -> None:
-    failed = _reef_status(
-        failed_steps=[
-            {
-                "step": 1,
-                "reason": "mixed_artifact_versions",
-                "artifact_versions": ["artifact-old", "artifact-new"],
-            }
-        ],
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match=r"step 1 failed \(mixed_artifact_versions\).*artifact-old.*artifact-new",
-    ):
-        wait_for_training_step(
-            health=lambda: _bridge_health(completed_train_steps=0, last_train_rollout_id=None, phase="serving"),
-            status=lambda: scenario_status(failed, "guidance-run"),
-            expected_completed_steps=1,
-            expected_rollout_id=1,
-            timeout_s=1,
-            poll_interval_s=0,
-        )
-
-
-def test_training_wait_fails_on_reef_training_error() -> None:
-    """Issue #344: a pre-bridge failure must not look like healthy serving."""
-    body = _reef_status(error="guidance-run: RuntimeError: failed before RolloutManager submission")
-
-    with pytest.raises(RuntimeError, match="failed before RolloutManager submission"):
-        wait_for_training_step(
-            health=lambda: _bridge_health(last_train_rollout_id=11, phase="serving"),
-            status=lambda: scenario_status(body, "guidance-run"),
-            expected_completed_steps=2,
-            expected_rollout_id=12,
-            timeout_s=0.01,
-            poll_interval_s=0,
-        )
-
-
-def _reef_status(
-    *,
-    error: str | None = None,
-    failed_steps: list[dict] | None = None,
-) -> dict:
-    return {
-        "error": error,
-        "scenarios": {
-            "guidance-run": {
-                "processor": {"failed_steps": failed_steps or []},
-            }
-        },
-    }
-
-
-def test_the_harness_takes_its_task_vocabulary_from_the_harbor_task(tmp_path: Path) -> None:
-    contract = TaskContract.load(CONTRACT_PATH, problem_prompt=INSTRUCTION)
-
-    assert contract.problem_prompt == INSTRUCTION
-    assert "Polyomino Packing" in INSTRUCTION
-    assert (contract.solution_language, contract.score_direction) == ("cpp", "max")
-    assert contract.judge_problem_id == "0"
-
-    with pytest.raises(ValueError, match="problem_prompt"):
-        TaskContract.load(CONTRACT_PATH, problem_prompt="  ")
-
-    unknown = tmp_path / "contract.json"
-    unknown.write_text(json.dumps({**json.loads(CONTRACT_PATH.read_text()), "verifier": "polyomino"}))
-    with pytest.raises(ValueError, match="unknown task contract fields"):
-        TaskContract.load(unknown, problem_prompt=INSTRUCTION)
-
-
-def test_solution_extraction_prefers_the_solution_block_then_the_last_fence() -> None:
-    text = "```cpp\nint old();\n```\n<solution>\n```cpp\nint main() { return 0; }\n```\n</solution>"
-
-    assert extract_solution_code(text) == "int main() { return 0; }"
-    assert extract_solution_code("```C++\nint x;\n```") == "int x;"
-    assert extract_solution_code("no fenced program") is None
-
-
-def test_execution_client_sends_and_decodes_openai_compatible_request(monkeypatch) -> None:
-    from recipes.tttd.examples.guidance_ttt.harness import execution
-
-    seen = []
-
-    class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            pass
-
-        def read(self):
-            return json.dumps(
-                {
-                    "model": "executor-revision",
-                    "choices": [
-                        {
-                            "message": {"content": "final program", "reasoning_content": "checked it"},
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {"completion_tokens": 4},
-                }
-            ).encode()
-
-    def urlopen(request, timeout):
-        seen.append((request, timeout))
-        return Response()
-
-    monkeypatch.setattr(execution.urllib.request, "urlopen", urlopen)
-    backend = ExecutionBackend(
-        name="host-test",
-        model="executor",
-        base_url="http://executor.invalid/v1",
-        temperature=0.25,
-        max_tokens=64,
-        timeout_s=9,
-        max_retries=0,
-        request_options={"reasoning_effort": "high"},
-    )
-    result = OpenAICompatibleExecutionClient(backend).complete(
-        LLMRequest("system", "user", "executor", 0.25, 64, {"step": 1})
-    )
-
-    request, timeout = seen[0]
-    assert (request.full_url, timeout) == ("http://executor.invalid/v1/chat/completions", 9)
-    assert request.headers["Authorization"] == "Bearer local-executor"
-    payload = json.loads(request.data)
-    assert payload["messages"] == [
-        {"role": "system", "content": "system"},
-        {"role": "user", "content": "user"},
-    ]
-    assert payload["reasoning_effort"] == "high"
-    assert result.text == "final program"
-    assert result.reasoning == "checked it"
-    assert result.metadata["step"] == 1
-    assert result.metadata["api_attempts"] == 1
-
-
-def test_guidance_training_success_gate_accepts_complete_lora_update() -> None:
-    health = {
-        "ok": True,
-        "phase": "serving",
-        "completed_train_steps": 1,
-        "last_train_rollout_id": 0,
-        "last_train_metrics": {
-            "train/global_batch_size": 8,
-            "train/lora_trainable_parameters": 2048,
-            "train/lora_base_trainable_parameters": 0,
-            "train/lora_b_nonzero": 128,
-            "train/lora_b_l1": 1.5,
-        },
-    }
-
-    assert (
-        require_step_success(
-            expected_rollouts=8,
-            actual_rollouts=8,
-            retained_trajectories=8,
-            bridge_health=health,
-            expected_completed_train_steps=1,
-            expected_rollout_id=0,
-            grad_norm=0.75,
-            lora_rank=32,
-        )
-        == 0.75
-    )
-
-
-def _identity(**overrides) -> GuidanceRunIdentity:
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"gpu_count": 0}, "gpu_count"),
+        ({"rollouts": 1}, "rollouts"),
+        ({"tensor_parallel_size": 3}, "divisible"),
+        ({"guidance_max_tokens": 12_288}, "sequence_length"),
+    ],
+)
+def test_guidance_deployment_rejects_invalid_settings(overrides: dict[str, int], message: str) -> None:
     settings = {
-        "model": "Qwen/Qwen3-8B",
-        "executor": "gpt_oss_120b",
-        "gpt_oss_reasoning_effort": "high",
-        "groups_per_step": 2,
-        "rollouts_per_group": 4,
+        "gpu_count": 4,
+        "tensor_parallel_size": 2,
+        "groups": 2,
+        "rollouts": 4,
         "guidance_max_tokens": 8_192,
         "sequence_length": 12_288,
         "lora_rank": 32,
-        "tensor_parallel_size": 2,
+        "steps": 1,
+        "verifier_timeout_s": 340,
     }
     settings.update(overrides)
-    return GuidanceRunIdentity(**settings)
 
-
-def test_guidance_resume_state_round_trips_and_fails_closed_on_a_changed_run(tmp_path: Path) -> None:
-    store = GuidanceRunStateStore(tmp_path / "state", _identity())
-    store.save(next_step=3, step_summaries=[{"step": 2}], extra={"prompt_mode": "summary_only"})
-
-    saved = store.load()
-    assert saved is not None
-    assert saved["next_step"] == 3
-    assert saved["step_summaries"] == [{"step": 2}]
-    assert saved["prompt_mode"] == "summary_only"
-    assert read_json(store.resume_path) == saved
-
-    changed = GuidanceRunStateStore(tmp_path / "state", _identity(rollouts_per_group=8))
-    with pytest.raises(GuidanceRunStateError, match="rollouts_per_group"):
-        changed.load()
-
-
-def test_guidance_committed_archive_is_the_only_resume_source(tmp_path: Path) -> None:
-    store = GuidanceRunStateStore(tmp_path / "state", _identity())
-    with pytest.raises(GuidanceRunStateError, match="committed Guidance archive is missing"):
-        store.restore_working_library()
-
-    write_json(store.working_library_path, {"nodes": {}, "step": 1})
-    store.commit_library()
-    write_json(store.working_library_path, {"nodes": {}, "step": 2})
-    store.restore_working_library()
-
-    assert read_json(store.working_library_path)["step"] == 1
-
-
-def test_ray_bridge_rejects_an_invalid_training_timeout() -> None:
-    with pytest.raises(ValueError, match="training timeout"):
-        RayTrainingBridge("http://127.0.0.1:8900", "guidance-run", timeout_s=0)
-
-
-def _harbor_agent_module(monkeypatch):
-    """Load the Harbor agent against the minimal Harbor protocol it uses."""
-    modules = {
-        "harbor": ModuleType("harbor"),
-        "harbor.agents": ModuleType("harbor.agents"),
-        "harbor.agents.base": ModuleType("harbor.agents.base"),
-        "harbor.environments": ModuleType("harbor.environments"),
-        "harbor.environments.base": ModuleType("harbor.environments.base"),
-        "harbor.models": ModuleType("harbor.models"),
-        "harbor.models.agent": ModuleType("harbor.models.agent"),
-        "harbor.models.agent.context": ModuleType("harbor.models.agent.context"),
-    }
-    modules["harbor.agents.base"].BaseAgent = type("BaseAgent", (), {})
-    modules["harbor.environments.base"].BaseEnvironment = object
-    modules["harbor.models.agent.context"].AgentContext = object
-    for name, module in modules.items():
-        monkeypatch.setitem(sys.modules, name, module)
-    return importlib.import_module("recipes.tttd.examples.guidance_ttt.harness.harbor_agent")
-
-
-class _Environment:
-    def __init__(self) -> None:
-        self.commands: list[str] = []
-
-    async def exec(self, command):
-        self.commands.append(command)
-        return SimpleNamespace(return_code=0, stdout="", stderr="")
-
-
-def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp_path, monkeypatch) -> None:
-    agent_module = _harbor_agent_module(monkeypatch)
-
-    scores = iter([1_000_000.0, 2_000_000.0])
-
-    class _Scorer:
-        def __init__(self, *args, **kwargs) -> None:
-            self.args = (args, kwargs)
-
-        def __call__(self, code: str) -> VerificationResult:
-            score = next(scores)
-            return VerificationResult(score, score, True, "valid", "accepted", {"code": code})
-
-    monkeypatch.setattr(agent_module, "JudgeScorer", _Scorer)
-
-    checkpoint_root = tmp_path / "checkpoints" / "megatron"
-    checkpoint_root.mkdir(parents=True)
-    (checkpoint_root / "latest_checkpointed_iteration.txt").write_text("1")
-
-    class _Bridge:
-        def __init__(self, *args, **kwargs) -> None:
-            self.args = (args, kwargs)
-
-        def start_step(self) -> int:
-            return 0
-
-        def wait_for_step(self, *, expected_completed_steps, expected_rollout_id):
-            assert (expected_completed_steps, expected_rollout_id) == (1, 0)
-            return {
-                "ok": True,
-                "phase": "serving",
-                "completed_train_steps": 1,
-                "last_train_rollout_id": 0,
-                "weight_version": "guidance:1",
-                "last_train_metrics": {
-                    "train/grad_norm": 0.5,
-                    "train/global_batch_size": 2,
-                    "train/lora_trainable_parameters": 1024,
-                    "train/lora_base_trainable_parameters": 0,
-                    "train/lora_b_nonzero": 8,
-                    "train/lora_b_l1": 0.25,
-                },
-            }
-
-    monkeypatch.setattr(agent_module, "RayTrainingBridge", _Bridge)
-    monkeypatch.setattr(agent_module, "OpenAICompatibleExecutionClient", lambda _backend: _ExecutionClient())
-    for name, value in {
-        "SCENARIO": "guidance-smoke",
-        "GROUPS_PER_STEP": 1,
-        "ROLLOUTS_PER_GROUP": 2,
-        "STEPS": 1,
-        "MAX_TOKENS": 64,
-        "MAX_WORKERS": 2,
-        "SEED_LIBRARY": SEED,
-        "TASK_CONTRACT": CONTRACT_PATH,
-        "RUN_DIR": tmp_path / "guidance-run",
-        "STATE_DIR": tmp_path,
-    }.items():
-        monkeypatch.setattr(agent_module, name, value)
-
-    agent = object.__new__(agent_module.HarborAgent)
-    agent._client = _ReefClient()
-    agent.model_name = "Qwen/Qwen3-8B"
-    agent.logger = logging.getLogger("guidance-test")
-    environment = _Environment()
-    context = SimpleNamespace(metadata=None)
-
-    asyncio.run(agent.run(INSTRUCTION, environment, context))
-
-    assert environment.commands and "#include <iostream>" in environment.commands[0]
-    assert "/workspace/solution.cpp" in environment.commands[0]
-    reef = context.metadata["reef"]
-    assert reef["agent_record_ids"] == ["receipt-1"]
-    assert (reef["start_step"], reef["next_step"]) == (0, 1)
-    assert reef["step_summaries"][0]["sampled_rollouts"] == 2
-    assert reef["step_summaries"][0]["well_formed_guidance"] == 1
-    resumed = GuidanceRunStateStore(
-        tmp_path / "guidance-run", _identity(groups_per_step=1, rollouts_per_group=2, guidance_max_tokens=64)
-    ).load()
-    assert resumed is not None and resumed["next_step"] == 1
+    with pytest.raises(ValueError, match=message):
+        _validate_settings(**settings)
