@@ -26,6 +26,12 @@ reef:
   artifact_cache_dir: ${TTTD_STATE_DIR}/artifact-cache
   agent_record_dir: ${TTTD_STATE_DIR}/agent-record
 
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    directory: ${TTTD_STATE_DIR}/wandb
+
 training:
   num_gpus: 2
   # The grid and completion limit. harness/harbor_agent.py reads these same
@@ -38,10 +44,6 @@ training:
     max_storage_fraction: 0.8
     min_free_space_fraction: 0.1
     policy: latest
-  wandb:
-    enabled: false
-    project: reef
-    directory: ${TTTD_STATE_DIR}/wandb
 
 services:
   - name: ray-head

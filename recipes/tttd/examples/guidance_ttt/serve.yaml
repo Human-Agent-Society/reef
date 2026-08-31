@@ -26,6 +26,18 @@ reef:
   artifact_cache_dir: work/polyomino_packing/artifact-cache
   agent_record_dir: work/polyomino_packing/agent-record
 
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: guidance-ttt      # produces group guidance-ttt/<scenario>
+    # name_prefix: guidance-ttt
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: work/polyomino_packing/wandb
+    upload_checkpoints: false
+
 training:
   num_gpus: 2
   cuda_visible_devices: "0,1"
@@ -37,16 +49,6 @@ training:
   lora_rank: 32
   tensor_parallel_size: 2
   checkpoint_dir: work/polyomino_packing/checkpoints
-  wandb:
-    enabled: false                     # omitted or false means no tracking
-    project: reef
-    # entity: your-team
-    # group_prefix: guidance-ttt      # produces group guidance-ttt/<scenario>
-    # name_prefix: guidance-ttt
-    tags: []
-    mode: online                       # online, offline, or disabled
-    directory: work/polyomino_packing/wandb
-    upload_checkpoints: false
 
 services:
   - name: ray-head

@@ -45,14 +45,7 @@ reef:
   artifact_cache_dir: work/artifact-cache
   agent_record_dir: work/agent-record
 
-training:
-  num_gpus: 2                          # ray-head GPU total (actor+critic colocated, rollout)
-  cuda_visible_devices: "0,1"
-  ray_port: 6379
-  ray_dashboard_port: 8265
-  sglang_port: "30000"
-  checkpoint_dir: work/checkpoints
-  global_batch_size: 1
+observability:
   wandb:
     enabled: false                     # omitted or false means no tracking
     project: reef
@@ -63,6 +56,15 @@ training:
     mode: online                       # online, offline, or disabled
     directory: work/wandb
     upload_checkpoints: false
+
+training:
+  num_gpus: 2                          # ray-head GPU total (actor+critic colocated, rollout)
+  cuda_visible_devices: "0,1"
+  ray_port: 6379
+  ray_dashboard_port: 8265
+  sglang_port: "30000"
+  checkpoint_dir: work/checkpoints
+  global_batch_size: 1
   # SAO objective as slime flags: --use-critic creates the value-model group;
   # the algorithm spec sets --custom-advantage-function-path (skip-observation
   # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)

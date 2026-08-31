@@ -190,7 +190,7 @@ recipe, the processor, backend results, and the commit lifecycle. Install
 
 .. code:: yaml
 
-   training:
+   observability:
      wandb:
        enabled: true
        project: reef

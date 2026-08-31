@@ -319,7 +319,7 @@ def test_config_surface_is_generic_and_rejects_credentials() -> None:
     settings = service_settings_from_config(
         {
             "reef": {"recipe": "pg"},
-            "training": {
+            "observability": {
                 "wandb": {
                     "enabled": True,
                     "project": "reef-smoke",
@@ -334,9 +334,9 @@ def test_config_surface_is_generic_and_rejects_credentials() -> None:
     assert config.tags == ("baseline", "cpu")
     assert config.active is True
 
-    with pytest.raises(ValueError, match=r"unknown training\.wandb settings"):
+    with pytest.raises(ValueError, match=r"unknown observability\.wandb settings"):
         WandbConfig.from_mapping({"enabled": True, "api_key": "must-not-be-accepted"})
-    with pytest.raises(ValueError, match=r"unknown training\.wandb settings: group, name"):
+    with pytest.raises(ValueError, match=r"unknown observability\.wandb settings: group, name"):
         WandbConfig.from_mapping({"group": "legacy", "name": "legacy"})
 
 

@@ -33,7 +33,7 @@ produced the queued rollouts — the gap the DIS ratio calibrates.
 Run the example as documented in its README (`./run.sh`). Two deviations from
 the committed defaults were used to record this result:
 
-- `training.wandb` set to `enabled: true, mode: offline` — offline mode needs
+- `observability.wandb` set to `enabled: true, mode: offline` — offline mode needs
   no W&B account; the run file lands under `work/wandb`.
 - The stack ran inside the `docker/Dockerfile.reef` image with this repository
   mounted, instead of a host install of the training dependencies.

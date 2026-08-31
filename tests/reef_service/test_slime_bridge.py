@@ -1322,7 +1322,7 @@ def test_slime_rejects_its_legacy_raw_wandb_flags() -> None:
     from reef.train.slime_backend.reef_adapters.driver import _validate_tracking_args
 
     _validate_tracking_args(SimpleNamespace(use_wandb=False, wandb_key=None))
-    with pytest.raises(RuntimeError, match=r"generic training\.wandb"):
+    with pytest.raises(RuntimeError, match=r"observability\.wandb"):
         _validate_tracking_args(SimpleNamespace(use_wandb=True, wandb_key=None))
     with pytest.raises(RuntimeError, match="WANDB_API_KEY"):
         _validate_tracking_args(SimpleNamespace(use_wandb=False, wandb_key="secret"))
