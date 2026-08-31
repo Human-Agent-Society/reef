@@ -7,11 +7,12 @@ This page says which package should own a change.
 Choose a destination
 --------------------
 
-``reef/`` holds every shared mechanism. Cookbook methods live in separate
-packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
-``harness_evolve``) with that method's recipe, processor, step
-preparer, and, for weight methods, the ``slime/`` subpackage only the training
-plane imports. Nothing under ``reef/`` imports a method package.
+``reef/`` holds every shared mechanism, including the harness evolution engine
+at ``reef/train/cordis_backend/``. Paper-backed methods live in separate
+packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
+with that method's recipe, processor, step preparer, and, for weight methods,
+the ``slime/`` subpackage only the training plane imports. Nothing under
+``reef/`` imports a method package.
 
 Reef is organized around an application kernel and three capability domains,
 not a strict stack of top-level packages. The arrows below show the primary
@@ -88,7 +89,7 @@ import a concrete integration.
 |                      | process or client that uses it                           | selecting updates                          |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/artifact/``  | artifact bytes, repositories,                            | commit policy or delivery                  |
-|                      | materialization, version heads                           | behavior                                   |
+|                      | materialization, release heads                           | behavior                                   |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the release chain           |
 |                      | episodes, trajectories                                   |                                            |

@@ -110,7 +110,7 @@ engine, one for the PRM, and one for the Qwen3-32B student model.
 Results
 -------
 
-The example's README records one complete run of all 72 sessions.
+The example's README records one run over the first 36 sessions of the stream.
 
 .. image:: ../../assets/openclawrl/learning-curve.png
    :alt: Accumulated accepts and the rolling bold and list rates

@@ -124,7 +124,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 Add a surface or artifact type
 ------------------------------
 
-Artifacts own immutable bytes and version heads; surfaces own validation and
+Artifacts own immutable bytes and release heads; surfaces own validation and
 delivery. A change that needs both still keeps those responsibilities in
 separate packages. Read the `Python API <../reference/python-api.rst#surface>`__ and the
 release-chain section of `Architecture <../getting-started/architecture.rst>`__.

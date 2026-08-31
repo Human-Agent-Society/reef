@@ -130,7 +130,7 @@ publishes it to the engine, and records a new version.
 
    curl -sS -H "Authorization: Bearer reef-local" \
      http://127.0.0.1:8900/reef/scenarios/$SCENARIO/releases
-   # {"scenario": "...", "releases": [{"kind": "training", "step": 1, ...}, ...]}
+   # {"scenario": "...", "releases": [{"operation": "training", "current": true, ...}, ...]}
 
 You are training when a new ``training`` entry appears, which happens once
 ``batch_size`` eligible records have arrived. Later requests use the current

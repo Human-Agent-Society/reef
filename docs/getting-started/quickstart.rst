@@ -124,7 +124,7 @@ with no GPU.
 
          curl -sS -H "Authorization: Bearer reef-local" \
            http://127.0.0.1:8900/reef/scenarios/hello-reef/releases
-         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "step": 0, ...}]}
+         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "operation": "creation", "current": true, ...}]}
 
       One release, and it will stay at one: this deployment's recipe is the
       core ``recipe``, which records and trains nothing.

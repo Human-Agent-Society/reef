@@ -172,8 +172,8 @@ status endpoint reports the scenario step and runtime load ID:
      -H "Authorization: Bearer reef-local" \
      http://127.0.0.1:8900/reef/status
 
-The controller returns an error when the rollout count, scenario step, artifact
-version, or stored search identity does not match the current run. A successful
+The controller returns an error when the rollout count, scenario step, served
+release, or stored search identity does not match the current run. A successful
 exit confirms that Reef committed the requested number of training steps.
 
 Choose a problem
@@ -452,8 +452,9 @@ Add another problem
 
 Create a sibling under ``recipes/tttd/examples/tttd/harbor/``. The task needs a
 ``task.toml``, an ``instruction.md``, a judge service, and a verifier that writes
-the final Harbor reward. Point ``TASK_DIR`` and ``STATE_DIR`` in
-``run.py`` and ``SCENARIO`` and ``SEARCH_STATE_PATH`` in
+the final Harbor reward. Add its name to the ``TASKS`` tuple in ``run.py``,
+which selects one with the ``TTTD_TASK`` environment variable and derives
+``STATE_DIR`` from it, and point ``SCENARIO`` and ``SEARCH_STATE_PATH`` in
 ``harness/harbor_agent.py`` at it. Set the task's own sequence, evaluator, and
 memory values in ``serve.yaml`` and ``harness/harbor_agent.py`` when the
 existing ones do not apply.

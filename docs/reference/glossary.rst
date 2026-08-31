@@ -131,7 +131,7 @@ Loss family
 
 The tensor objective the training backend runs, declared by
 ``WeightTrainingSpec.loss_family``. Separate from the preparer. Bundled:
-``sao``, ``opd``, ``tttd``, ``openclawrl``.
+``sao``, ``tttd``, ``openclawrl``.
 
 Harness
 -------

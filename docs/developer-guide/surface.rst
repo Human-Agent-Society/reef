@@ -99,7 +99,7 @@ transaction; the surface does not repeat that step.
 **Per-scenario adapters.** When a runtime trains one LoRA adapter per
 scenario, ``create_weight_surface(scenario=...)`` puts that scenario's frozen
 adapter revision on every request. ``reef.surface.adapter`` holds only the
-naming contract (``adapter_name(scenario, version)`` and its inverse), so a
+naming contract (``adapter_name(scenario, runtime_load_id)`` and its inverse), so a
 recorded ``lora_path`` names exactly one (scenario, revision). Residency is
 engine-global, not per surface: the training bridge owns one
 ``AdapterResidencyManager`` per engine, and the surface never touches it.
