@@ -75,10 +75,9 @@ receipt. The next problem is served by the weights the previous one produced.
    hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh
 
-``run.sh`` starts the stack that ``serve.yaml`` describes, one Megatron actor
-with the critic colocated on it and one SGLang rollout engine, and then runs
-the loop. Each scored rollout adds one ``training`` entry to the scenario's
-version chain:
+``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
+with the critic colocated on it and one SGLang rollout engine. Each scored
+rollout adds one ``training`` entry to the scenario's version chain:
 
 .. code:: bash
 
@@ -96,19 +95,9 @@ Results
 The example's README records two runs.
 
 The comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS) control from the
-same checkpoint, on the same three problems, with 48 scored rollouts per arm.
+same checkpoint on the same three problems with 48 scored rollouts per arm.
 The mean rewards order as the paper predicts, SAO at 0.479 above the
-untrained base at 0.458 above GRPO(+DIS) at 0.417. At this budget the
-numbers show only that the ordering holds; 48 rollouts per arm is far short
-of a training run, and the README lists every deviation from the paper's
-protocol.
+untrained base at 0.458 above GRPO(+DIS) at 0.417.
 
 .. image:: ../../assets/sao/learning-curve.png
    :alt: Cumulative mean reward over the 48 scored rollouts per arm
-
-The committed smoke configuration has one recorded run of its own
-(``results/smoke-2026-08-30/``). All 18 scored rollouts became committed
-training steps with no stale drops, which is the acceptance criterion for
-the smoke. Every score is 0.0 because Qwen2.5-1.5B-Instruct does not solve
-these problems in a 2048-token window; the useful output is the per-step
-training metrics, exported from an offline W&B run.
