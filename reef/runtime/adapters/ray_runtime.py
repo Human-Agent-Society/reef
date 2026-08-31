@@ -438,7 +438,9 @@ class RayRuntime(TrainingRuntime):
         healthy = health.get("ok")
         if healthy is not None and not isinstance(healthy, bool):
             raise RayRuntimeError("train group returned malformed health status")
-        if healthy is False:
+        # A group that reports its failure as recoverable is retried through
+        # the normal reconciliation path instead of being declared dead.
+        if healthy is False and health.get("recoverable") is not True:
             phase = health.get("phase")
             detail = f" in phase {phase!r}" if isinstance(phase, str) and phase else ""
             raise RayRuntimeError(f"train group is unhealthy{detail}")

@@ -105,6 +105,14 @@ class _Manager(_FakeRolloutManager):
         self.continue_generation_after_update = _RemoteMethod(lambda: self.paused.append("continue"))
         self.engine = _Engine()
         self.get_updatable_engines_and_lock = _RemoteMethod(lambda: ([self.engine], None, 0, [], [], []))
+        self.recovered = 0
+        self.recover_updatable_engines = _RemoteMethod(self._recover)
+
+    def _recover(self) -> None:
+        # Termination killed every updatable engine; recovery restarts them
+        # from the frozen base, holding no adapters.
+        self.recovered += 1
+        self.engine = _Engine()
 
 
 def _actor(
@@ -303,6 +311,38 @@ def test_a_full_engine_refuses_to_evict_another_scenarios_current_revision(tmp_p
     assert manager.engine.unloaded == []
     assert actor.health()["phase"] == "weight_sync_failed"
     assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+
+
+@pytest.mark.unit
+def test_a_dead_engine_publication_recovers_in_place_on_retry(tmp_path, _local_ray_get) -> None:
+    # Issue #61: a wedged rollout engine failed the eviction, the leaked slot
+    # surfaced as AdapterCapacityExhausted, and every retry kept failing
+    # against the recovered (adapter-less) engines — a full stack restart was
+    # the only way out. The retry must instead reset residency to the
+    # recovered engines and finish the publication in the same incarnation.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    _run(actor, _job("a", 0, "inc:0"))  # a serves inc:1
+
+    manager.engine.refuse.add(scenario_adapter_name("a", "inc:1"))  # the engine wedges
+    result = actor.execute_training_job(_job("a", 1, "inc:1"))
+    with pytest.raises(AdapterCapacityExhausted, match="engine keeps"):
+        actor.update_serving_weights(result.training_job_id)
+    health = actor.health()
+    assert health["phase"] == "weight_sync_failed"
+    assert health["ok"] is False and health["recoverable"] is True
+    assert health["adapter_residency"]["leaked"] == 1
+
+    recovered = actor.update_serving_weights(result.training_job_id)
+    assert manager.recovered == 1
+    assert recovered.outcome == "complete" and recovered.weight_version == "inc:2"
+    actor.acknowledge_training_commit(recovered.training_job_id)
+    assert actor.health()["phase"] == "serving"
+    residency = actor.health()["adapter_residency"]
+    assert residency["leaked"] == 0
+    assert residency["scenarios"]["a"]["current"]["version"] == "inc:2"
+    # The fresh engine held nothing, so nothing was (or had to be) unloaded.
+    assert manager.engine.unloaded == []
 
 
 @pytest.mark.unit
