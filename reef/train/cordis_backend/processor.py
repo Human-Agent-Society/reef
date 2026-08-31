@@ -13,7 +13,7 @@ from reef.train.processors.reported import (
 from reef.train.types import ProcessorContext, TraceBatch, TraceSample
 
 
-class HarnessEvolveProcessor(ReportedFeedbackProcessor):
+class CordisProcessor(ReportedFeedbackProcessor):
     """Pair recorded requests with reported scores and batch them unmodified.
 
     Requests are recorded post-transform, so a trace shows exactly what the

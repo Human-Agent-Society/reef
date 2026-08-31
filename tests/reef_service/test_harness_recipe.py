@@ -22,13 +22,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import RecipeRegistry, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.train.cordis_backend import (
-    CordisBackend,
-    HarnessEvolveRecipe,
-    Mutation,
-    MutationError,
-    ScoreComparisonSelector,
-)
+from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation, MutationError, ScoreComparisonSelector
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -98,8 +92,8 @@ def runtime() -> InferenceProxyRuntime:
     return InferenceProxyRuntime(model_path=MODEL.model, base_url=MODEL.base_url, api_key=MODEL.api_key)
 
 
-def recipe(tmp_path: Path, propose, seed: tuple = ()) -> HarnessEvolveRecipe:
-    return HarnessEvolveRecipe(
+def recipe(tmp_path: Path, propose, seed: tuple = ()) -> CordisRecipe:
+    return CordisRecipe(
         resolve_proposer(propose),
         resolve_episode_scorer(evaluate),
         ("task one",),
@@ -153,7 +147,7 @@ def run_backend_step(
 
 
 def test_recipe_resolves_by_dotted_reference() -> None:
-    assert recipe_class_for("reef.train.cordis_backend.recipe:HarnessEvolveRecipe") is HarnessEvolveRecipe
+    assert recipe_class_for("reef.train.cordis_backend.recipe:CordisRecipe") is CordisRecipe
     assert recipe_class_for("harness_evolve") is None
 
 
@@ -163,7 +157,7 @@ def test_yaml_config_boots_the_recipe_through_dotted_references(tmp_path: Path, 
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    built = HarnessEvolveRecipe.from_environment(
+    built = CordisRecipe.from_environment(
         {},
         config={
             "evolution": {
@@ -182,7 +176,7 @@ def test_yaml_config_boots_the_recipe_through_dotted_references(tmp_path: Path, 
 
 def test_config_without_evolution_section_is_rejected() -> None:
     with pytest.raises(RecipeConfigError, match="'evolution' config section"):
-        HarnessEvolveRecipe.from_environment({}, config={})
+        CordisRecipe.from_environment({}, config={})
 
 
 def test_build_returns_a_trainer_over_the_evolution_backend(tmp_path: Path) -> None:
@@ -743,12 +737,12 @@ def test_yaml_seed_must_be_a_list_of_mappings(tmp_path: Path, monkeypatch) -> No
             }
         }
 
-    built = HarnessEvolveRecipe.from_environment({}, config=config([SEED_MODELS]))
+    built = CordisRecipe.from_environment({}, config=config([SEED_MODELS]))
     assert built.seed == (SEED_MODELS,)
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed must be a list"):
-        HarnessEvolveRecipe.from_environment({}, config=config("models"))
+        CordisRecipe.from_environment({}, config=config("models"))
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed entries must be"):
-        HarnessEvolveRecipe.from_environment({}, config=config(["models"]))
+        CordisRecipe.from_environment({}, config=config(["models"]))
 
 
 def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, monkeypatch) -> None:
@@ -771,9 +765,9 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
         }
 
     with pytest.raises(RecipeConfigError, match=r"evolution\.acceptance was removed"):
-        HarnessEvolveRecipe.from_environment({}, config=config(acceptance="always"))
+        CordisRecipe.from_environment({}, config=config(acceptance="always"))
     with pytest.raises(RecipeConfigError, match=r"must provide decide"):
-        HarnessEvolveRecipe.from_environment({}, config=config(selection="demo_method:accept"))
+        CordisRecipe.from_environment({}, config=config(selection="demo_method:accept"))
 
 
 def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
@@ -799,20 +793,20 @@ def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
             }
         }
 
-    compared = HarnessEvolveRecipe.from_environment({}, config=config())
+    compared = CordisRecipe.from_environment({}, config=config())
     assert compared.candidate_selector is not None
     assert type(compared.candidate_selector).__name__ == "ScoreComparisonSelector"
 
-    named = HarnessEvolveRecipe.from_environment({}, config=config(selection="always"))
+    named = CordisRecipe.from_environment({}, config=config(selection="always"))
     assert named.candidate_selector is not None
     assert type(named.candidate_selector).__name__ == "AlwaysSelect"
 
-    dotted = HarnessEvolveRecipe.from_environment({}, config=config(selection="demo_selection:policy"))
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:policy"))
     assert dotted.candidate_selector is not None
     assert type(dotted.candidate_selector).__name__ == "Policy"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
-        HarnessEvolveRecipe.from_environment(
+        CordisRecipe.from_environment(
             {},
             config=config(selection="always", acceptance="pairwise"),
         )
@@ -858,7 +852,7 @@ def test_propose_receives_the_model_binding(tmp_path: Path) -> None:
 
 
 def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
-    built = HarnessEvolveRecipe(
+    built = CordisRecipe(
         resolve_proposer(lambda n, s, m: None),
         resolve_episode_scorer(evaluate),
         ("task one",),

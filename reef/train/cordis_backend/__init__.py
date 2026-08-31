@@ -496,5 +496,5 @@ def _write_rendered_files(files: Mapping[str, str]) -> Path:
 
 # Re-exports of the engine's method shell, imported last because recipe.py
 # imports CordisBackend from this module.
-from reef.train.cordis_backend.processor import HarnessEvolveProcessor  # noqa: F401
-from reef.train.cordis_backend.recipe import HarnessEvolveRecipe  # noqa: F401
+from reef.train.cordis_backend.processor import CordisProcessor  # noqa: F401
+from reef.train.cordis_backend.recipe import CordisRecipe  # noqa: F401

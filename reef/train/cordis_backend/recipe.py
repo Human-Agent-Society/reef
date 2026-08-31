@@ -1,6 +1,6 @@
 """Harness evolution recipe: boots the composition mutation loop from config.
 
-``HarnessEvolveRecipe`` boots the loop from a config yaml. ``propose`` and
+``CordisRecipe`` boots the loop from a config yaml. ``propose`` and
 ``evaluate`` are Python callables, named as dotted ``module:attribute``
 references in YAML or passed directly when registering from code; ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
@@ -29,7 +29,7 @@ from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
-from reef.train.cordis_backend.processor import HarnessEvolveProcessor
+from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
@@ -74,7 +74,7 @@ def _resolve_candidate_selector(value: Any) -> CandidateSelector:
 
 
 @dataclass(frozen=True)
-class HarnessEvolveRecipe(Recipe):
+class CordisRecipe(Recipe):
     """The harness evolution loop as a bootable recipe class.
 
     Config shape (the ``evolution`` section): ``adapter`` (a name
@@ -250,7 +250,7 @@ class HarnessEvolveRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: HarnessEvolveProcessor(
+            processor_factory=lambda context: CordisProcessor(
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
             training_backend=training_backend,

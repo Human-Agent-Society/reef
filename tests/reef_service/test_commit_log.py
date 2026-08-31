@@ -743,8 +743,8 @@ class _HarnessEvolveTestRecipe(Recipe):
     These tests exercise commit-log/version-chain mechanics, not
     harness-evolution semantics specifically; they just need a concrete,
     artifact-producing Recipe. Constructs CordisBackend and
-    HarnessEvolveProcessor directly, the same shape
-    HarnessEvolveRecipe.build() has, minus the config-boot layer these
+    CordisProcessor directly, the same shape
+    CordisRecipe.build() has, minus the config-boot layer these
     tests never touch (see tests/reef_service/test_harness_recipe.py for
     the backend's own guarantees).
     """
@@ -761,7 +761,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return create_harness_surface()
 
     def build(self, scenario, records, *, algorithm_state=None) -> Trainer:
-        from reef.train.cordis_backend.processor import HarnessEvolveProcessor
+        from reef.train.cordis_backend.processor import CordisProcessor
 
         training_backend = CordisBackend(
             descriptor=get_adapter("pi"),
@@ -773,7 +773,7 @@ class _HarnessEvolveTestRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: HarnessEvolveProcessor(
+            processor_factory=lambda context: CordisProcessor(
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
             training_backend=training_backend,
