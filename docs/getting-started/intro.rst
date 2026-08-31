@@ -4,15 +4,16 @@ Introduction
 Reef is a continual learning infrastructure. It serves an inference endpoint in
 front of the model your agent already calls, records what it served, accepts
 feedback about it, and uses that feedback to publish a better version of the
-model weights or of the agent's harness.
+model weights or of the agent's harness. The model and harness together form
+the agent.
 
 Nothing about the agent has to change except the base URL it sends requests to.
 
 .. diagram::
-   :caption: Reef serves the model, loads new weights into the engine, and sends a new harness tree to the agent.
+   :caption: An agent combines a harness and a model. Reef serves their connection and can improve either component.
 
    <div class="fig-lane">
-     <div class="fig-node">Your agent<span class="fig-node-caption">runs the harness tree: prompts, skills, config</span></div>
+     <div class="fig-node">The harness<span class="fig-node-caption">runs the control loop, prompts, skills, tools, and config</span></div>
      <div class="fig-edge">
        <span>requests and feedback</span>
        <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
@@ -66,15 +67,16 @@ the whole thing:
 What Reef can evolve
 --------------------
 
-Weights and the harness are the two *artifacts* Reef versions. The recipe you
-configure picks one (composite version is a feature in the roadmap).
+Model weights and the harness tree are the two *artifacts* Reef versions. Each
+updates one of the agent's two components. The recipe you configure picks one
+(composite version is a feature in the roadmap).
 
 **Model weights.** Reef runs the training step and hot-swaps the result into the
 serving engine. See `Evolve your model <../user-guide/evolve-your-model.rst>`__.
 
-**The harness tree** is the agent's rules, prompts, skills, and config, versioned
-as one object. Reef proposes an edit, runs the current and proposed versions on
-your tasks, and keeps the winner. See `Evolve your harness
+**The harness tree** is the versioned representation of the harness's mutable
+rules, prompts, skills, config, and extension code. Reef proposes an edit, runs
+the current and proposed versions on your tasks, and keeps the winner. See `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__.
 
 What a call looks like

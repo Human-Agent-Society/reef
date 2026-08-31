@@ -1,9 +1,10 @@
 Harness adapters
 ================
 
-An adapter is how a rendered harness tree becomes a running agent. The tree
-never names a file path; the adapter does. Reef bundles two, one per third-party
-coding-agent CLI.
+An adapter maps a harness tree into the files expected by a third-party
+coding-agent CLI and binds that harness to the served model. The harness and
+model together form the running agent. The tree never names a file path; the
+adapter does. Reef bundles two, one per third-party coding-agent CLI.
 
 +--------------+-------------------------------------------+-----------------------------------------+
 | Adapter      | Config targets                            | Install pin                             |
@@ -17,7 +18,8 @@ coding-agent CLI.
 The descriptor
 --------------
 
-One ``descriptor.yaml`` declares how a tree becomes a running agent.
+One ``descriptor.yaml`` declares how a tree configures and starts a running
+agent.
 
 .. config::
 

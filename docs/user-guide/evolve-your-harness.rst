@@ -1,10 +1,11 @@
 Evolve your harness
 ===================
 
-A harness is everything around the model: rules, prompt templates, skills,
-config, extension code. Harness evolution improves that text while the model
-weights stay fixed. Reef needs no GPU for this. The model stays a fixed
-endpoint, hosted or local, and the served agent stays online throughout.
+A harness is everything around the model: the control loop, rules, prompt
+templates, skills, tools, config, and extension code. Together, the model and
+harness form an agent. Harness evolution improves the harness tree while the
+model weights stay fixed. Reef needs no GPU for this. The model stays a fixed
+endpoint, hosted or local, and the agent stays online throughout.
 
 Reef supplies the mechanism: it snapshots the tree, applies a mutation, runs
 the paired episodes, and publishes or reverts. You supply two Python
@@ -15,7 +16,7 @@ contract.
 The harness tree
 ----------------
 
-Reef stores the whole text side of one agent in a single versioned object
+Reef stores the mutable, versioned files of one harness in a single object
 called the tree. A tree is a flat list of entries, and each entry has three
 fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds

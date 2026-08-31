@@ -1,10 +1,10 @@
 Architecture
 ============
 
-Reef sits between an agent and the runtime that answers it. It records the
-artifact version that served each response, accepts feedback that refers to
-those responses, and lets a scenario's recipe use eligible records to produce
-the next version. Your harness keeps prompts, tools, environments, and graders.
+An agent is a model plus its harness. Reef sits between the harness and the
+runtime that executes the model. It records the artifact version that served
+each response, accepts feedback that refers to those responses, and lets a
+scenario's recipe use eligible records to produce the next version.
 
 Which package holds which code is `Codebase structure
 <../contributing/codebase-structure.rst>`__.
