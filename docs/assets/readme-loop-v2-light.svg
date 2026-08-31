@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="600" viewBox="0 0 880 300" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #22363E; }
+    .m { fill: #7A929A; } .f { fill: #AABDC3; } .a { fill: #0E7490; } .c { fill: #D65F4A; }
+    .lab { font-size: 14px; } .sm { font-size: 12.5px; } .xs { font-size: 11.5px; }
+    .draw { stroke: #22363E; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-f { stroke: #AABDC3; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-a { stroke: #0E7490; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .draw-c { stroke: #D65F4A; stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    .dash { stroke-dasharray: 5 6; }
+    .arc { stroke-dasharray: 150; stroke-dashoffset: 0; }
+    @keyframes k1 { 0%,1.11% {opacity:0} 3.06%,95.5% {opacity:1} 100% {opacity:0} }
+    .g1 { animation: k1 18s linear infinite; }
+    @keyframes k2 { 0%,3.33% {opacity:0} 5.28%,95.5% {opacity:1} 100% {opacity:0} }
+    @keyframes d2 { 0%,3.33% {stroke-dashoffset:150} 11.11%,100% {stroke-dashoffset:0} }
+    .g2 { animation: k2 18s linear infinite, d2 18s linear infinite; }
+    @keyframes k3 { 0%,8.33% {opacity:0} 10.28%,95.5% {opacity:1} 100% {opacity:0} }
+    .g3 { animation: k3 18s linear infinite; }
+    @keyframes k4 { 0%,11.39% {opacity:0} 13.33%,95.5% {opacity:1} 100% {opacity:0} }
+    .g4 { animation: k4 18s linear infinite; }
+    @keyframes k5 { 0%,12.22% {opacity:0} 14.17%,95.5% {opacity:1} 100% {opacity:0} }
+    .g5 { animation: k5 18s linear infinite; }
+    @keyframes k6 { 0%,14.44% {opacity:0} 16.39%,95.5% {opacity:1} 100% {opacity:0} }
+    @keyframes d6 { 0%,14.44% {stroke-dashoffset:150} 22.22%,100% {stroke-dashoffset:0} }
+    .g6 { animation: k6 18s linear infinite, d6 18s linear infinite; }
+    @keyframes k7 { 0%,19.44% {opacity:0} 21.39%,95.5% {opacity:1} 100% {opacity:0} }
+    .g7 { animation: k7 18s linear infinite; }
+    @keyframes k8 { 0%,22.5% {opacity:0} 24.44%,95.5% {opacity:1} 100% {opacity:0} }
+    .g8 { animation: k8 18s linear infinite; }
+    @keyframes k9 { 0%,23.33% {opacity:0} 25.28%,95.5% {opacity:1} 100% {opacity:0} }
+    .g9 { animation: k9 18s linear infinite; }
+    @keyframes k10 { 0%,25.56% {opacity:0} 27.5%,95.5% {opacity:1} 100% {opacity:0} }
+    @keyframes d10 { 0%,25.56% {stroke-dashoffset:150} 33.33%,100% {stroke-dashoffset:0} }
+    .g10 { animation: k10 18s linear infinite, d10 18s linear infinite; }
+    @keyframes k11 { 0%,30.56% {opacity:0} 32.5%,95.5% {opacity:1} 100% {opacity:0} }
+    .g11 { animation: k11 18s linear infinite; }
+    @keyframes k12 { 0%,33.61% {opacity:0} 35.56%,95.5% {opacity:1} 100% {opacity:0} }
+    .g12 { animation: k12 18s linear infinite; }
+    @keyframes k13 { 0%,34.44% {opacity:0} 36.39%,95.5% {opacity:1} 100% {opacity:0} }
+    .g13 { animation: k13 18s linear infinite; }
+    @keyframes k14 { 0%,36.67% {opacity:0} 38.61%,95.5% {opacity:1} 100% {opacity:0} }
+    @keyframes d14 { 0%,36.67% {stroke-dashoffset:150} 44.44%,100% {stroke-dashoffset:0} }
+    .g14 { animation: k14 18s linear infinite, d14 18s linear infinite; }
+    @keyframes k15 { 0%,41.67% {opacity:0} 43.61%,95.5% {opacity:1} 100% {opacity:0} }
+    .g15 { animation: k15 18s linear infinite; }
+    @keyframes k16 { 0%,44.72% {opacity:0} 46.67%,95.5% {opacity:1} 100% {opacity:0} }
+    .g16 { animation: k16 18s linear infinite; }
+    @keyframes k17 { 0%,46.11% {opacity:0} 48.06%,95.5% {opacity:1} 100% {opacity:0} }
+    .g17 { animation: k17 18s linear infinite; }
+    @keyframes k18 { 0%,48.89% {opacity:0} 50.83%,95.5% {opacity:1} 100% {opacity:0} }
+    .g18 { animation: k18 18s linear infinite; }
+    @keyframes k19 { 0%,51.11% {opacity:0} 53.06%,95.5% {opacity:1} 100% {opacity:0} }
+    .g19 { animation: k19 18s linear infinite; }
+    @keyframes k20 { 0%,52.5% {opacity:0} 54.44%,95.5% {opacity:1} 100% {opacity:0} }
+    .g20 { animation: k20 18s linear infinite; }
+    @keyframes k21 { 0%,53.89% {opacity:0} 55.83%,95.5% {opacity:1} 100% {opacity:0} }
+    .g21 { animation: k21 18s linear infinite; }
+    @keyframes k22 { 0%,55.28% {opacity:0} 57.22%,95.5% {opacity:1} 100% {opacity:0} }
+    .g22 { animation: k22 18s linear infinite; }
+    @keyframes k23 { 0%,58.33% {opacity:0} 60.28%,95.5% {opacity:1} 100% {opacity:0} }
+    .g23 { animation: k23 18s linear infinite; }
+    @keyframes k24 { 0%,62.22% {opacity:0} 64.17%,95.5% {opacity:1} 100% {opacity:0} }
+    .g24 { animation: k24 18s linear infinite; }
+    @keyframes k25 { 0%,66.67% {opacity:0} 68.61%,95.5% {opacity:1} 100% {opacity:0} }
+    .g25 { animation: k25 18s linear infinite; }
+    @media (prefers-reduced-motion: reduce) {
+      g[class^="g"] { animation: none !important; }
+      .arc { stroke-dashoffset: 0 !important; }
+    }
+  </style>
+  <defs>
+    <marker id="l-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22363E"/>
+    </marker>
+    <marker id="l-faint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#AABDC3"/>
+    </marker>
+    <marker id="l-acc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0E7490"/>
+    </marker>
+    <marker id="l-cor" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#D65F4A"/>
+    </marker>
+  </defs>
+
+  <g class="g1"><circle cx="195" cy="65" r="5" fill="#0E7490"/><text x="195" y="45" text-anchor="middle" class="lab" font-weight="600">serve</text></g>
+  <g class="g2"><path d="M195 65 A95 95 0 0 1 290 160" class="draw-a arc"/></g>
+  <g class="g3"><text x="294" y="64" text-anchor="middle" class="xs f">agent trajectories</text><text x="294" y="78" text-anchor="middle" class="xs f">+ feedback</text></g>
+  <g class="g4"><path d="M249.5 82.2 A95 95 0 0 1 262.2 92.8" class="draw-a" marker-end="url(#l-acc)"/></g>
+  <g class="g5"><circle cx="290" cy="160" r="5" fill="#0E7490"/><text x="304" y="166" text-anchor="start" class="lab" font-weight="600">observe</text></g>
+  <g class="g6"><path d="M290 160 A95 95 0 0 1 195 255" class="draw-a arc"/></g>
+  <g class="g7"><text x="296" y="248" text-anchor="middle" class="xs f">filter and process</text><text x="296" y="262" text-anchor="middle" class="xs f">what to learn from</text></g>
+  <g class="g8"><path d="M272.8 214.5 A95 95 0 0 1 262.2 227.2" class="draw-a" marker-end="url(#l-acc)"/></g>
+  <g class="g9"><circle cx="195" cy="255" r="5" fill="#0E7490"/><text x="195" y="282" text-anchor="middle" class="lab" font-weight="600">grow</text></g>
+  <g class="g10"><path d="M195 255 A95 95 0 0 1 100 160" class="draw-a arc"/></g>
+  <g class="g11"><text x="100" y="248" text-anchor="middle" class="xs f">new weights</text><text x="100" y="262" text-anchor="middle" class="xs f">or a new harness</text></g>
+  <g class="g12"><path d="M140.5 237.8 A95 95 0 0 1 127.8 227.2" class="draw-a" marker-end="url(#l-acc)"/></g>
+  <g class="g13"><circle cx="100" cy="160" r="5" fill="#0E7490"/><text x="86" y="166" text-anchor="end" class="lab" font-weight="600">commit</text></g>
+  <g class="g14"><path d="M100 160 A95 95 0 0 1 195 65" class="draw-a arc"/></g>
+  <g class="g15"><text x="92" y="64" text-anchor="middle" class="xs f">publish a new version</text><text x="92" y="78" text-anchor="middle" class="xs f">if it passes eval</text></g>
+  <g class="g16"><path d="M117.2 105.5 A95 95 0 0 1 127.8 92.8" class="draw-a" marker-end="url(#l-acc)"/></g>
+  <g class="g17"><text x="195" y="165" text-anchor="middle" class="sm m">keeps serving</text></g>
+  <g class="g18"><path d="M 420 160 H 462" class="draw" marker-end="url(#l-ink)"/><text x="441" y="145" text-anchor="middle" class="sm m">each lap</text></g>
+  <g class="g19"><circle cx="529" cy="160" r="15" class="draw-f"/><text x="529" y="165" text-anchor="middle" class="sm f">v1</text></g>
+  <g class="g20"><path d="M548 160 H574" class="draw-f" marker-end="url(#l-faint)"/><circle cx="593" cy="160" r="15" class="draw-f"/><text x="593" y="165" text-anchor="middle" class="sm f">v2</text></g>
+  <g class="g21"><path d="M612 160 H638" class="draw" marker-end="url(#l-ink)"/><circle cx="657" cy="160" r="15" class="draw"/><text x="657" y="165" text-anchor="middle" class="sm">v3</text></g>
+  <g class="g22"><path d="M676 160 H702" class="draw" marker-end="url(#l-ink)"/><circle cx="721" cy="160" r="15" class="draw-a"/><text x="721" y="165" text-anchor="middle" class="sm a" font-weight="600">v4</text></g>
+  <g class="g23"><path d="M740 160 H774" class="draw-a dash" marker-end="url(#l-acc)"/><text x="797" y="165" class="sm a" font-weight="600">v5…</text></g>
+  <g class="g24"><path d="M731 146 L748 124" class="draw-c dash" marker-end="url(#l-cor)"/><circle cx="763" cy="110" r="13" class="draw-c dash"/><path d="M757 104 L769 116 M769 104 L757 116" class="draw-c"/><text x="763" y="86" text-anchor="middle" class="xs c">didn&#8217;t pass eval</text></g>
+  <g class="g25"><path d="M514 202 V211 H672 V202" class="draw-f"/><path d="M723 181 C722 199, 705 213, 687 211" class="draw-f dash" marker-end="url(#l-faint)"/><text x="593" y="234" text-anchor="middle" class="sm f">roll back to a past version</text></g>
+</svg>
