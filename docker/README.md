@@ -9,7 +9,8 @@ under `/tmp/reef-stack`.
 ## Build
 
 ```bash
-docker build -f docker/Dockerfile.reef -t reef .
+docker build -f docker/Dockerfile.reef -t reef \
+  --build-arg REEF_VERSION="$(git describe --tags | sed s/^v//)" .
 ```
 
 The image inherits the GPU training stack and installs Reef's exact runtime

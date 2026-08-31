@@ -1,0 +1,103 @@
+name: release
+
+# Cut a release by pushing a tag:
+#
+#   git tag -a v0.4.0 -m "reef 0.4.0" && git push origin v0.4.0
+#
+# The version is the tag (setuptools-scm, see pyproject.toml); nothing in the
+# tree is edited. The tag builds the sdist and wheel, smoke-installs the wheel,
+# publishes a GitHub Release with both attached and notes generated from the
+# merged PRs' labels (.github/release.yml), and — once the PyPI project exists
+# and the repository variable REEF_PYPI_PUBLISH is "true" — uploads to PyPI
+# as `reef-infra` (the import package stays `reef`)
+# through trusted publishing. RELEASE.md has the full procedure.
+
+on:
+  push:
+    tags: ["v[0-9]*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # setuptools-scm derives the version from the tag.
+          fetch-depth: 0
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+      # The wheel's version must be exactly the tag: a tag on an untagged
+      # commit range or a dirty tree would otherwise ship as 0.4.1.devN.
+      - name: Check the wheel version matches the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          expected="${TAG#v}"
+          ls dist/reef_infra-"$expected"-py3-none-any.whl dist/reef_infra-"$expected".tar.gz
+      - name: Smoke the wheel
+        env:
+          TAG: ${{ github.ref_name }}
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m venv smoke
+          smoke/bin/python -m pip install "$GITHUB_WORKSPACE"/third_party/reef-client
+          smoke/bin/python -m pip install "$GITHUB_WORKSPACE"/dist/reef_infra-[0-9]*.whl
+          test "$(smoke/bin/reef --version)" = "reef ${TAG#v}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      # Notes come from the merged PRs since the previous tag, grouped by the
+      # labels in .github/release.yml. Edit the Highlights and Breaking
+      # changes sections by hand afterwards; the release is created as a
+      # draft so nothing goes out before that pass.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --verify-tag --draft --generate-notes \
+            --title "reef ${TAG#v}"
+
+  pypi:
+    needs: build
+    # Off until the PyPI project name is ours (RELEASE.md). Flip the repository
+    # variable REEF_PYPI_PUBLISH to "true" and configure trusted publishing on
+    # pypi.org for this repository, this workflow file, environment "pypi".
+    if: vars.REEF_PYPI_PUBLISH == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1 (v1.14.2)

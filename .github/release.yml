@@ -1,0 +1,45 @@
+# Grouping for the notes `gh release create --generate-notes` drafts from the
+# PRs merged since the previous tag (.github/workflows/release.yml). Labels are
+# the ones label-pull-requests.yml applies from .github/labeler.yml. A PR that
+# fits none of the groups lands under "Other changes".
+changelog:
+  exclude:
+    labels:
+      - dependencies
+      - stale
+    authors:
+      - dependabot
+      - github-actions
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking
+    - title: Core and service
+      labels:
+        - "area: core"
+        - "area: service"
+        - "area: versioning"
+        - "area: artifacts"
+    - title: Training
+      labels:
+        - "area: training"
+    - title: Harness
+      labels:
+        - "area: harness"
+    - title: Recipes and examples
+      labels:
+        - "area: examples"
+        - "type: example"
+    - title: Observability
+      labels:
+        - "area: observability"
+    - title: Packaging and CI
+      labels:
+        - "area: packaging"
+        - "area: ci"
+    - title: Documentation
+      labels:
+        - "area: docs"
+    - title: Other changes
+      labels:
+        - "*"

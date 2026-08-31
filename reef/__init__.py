@@ -10,6 +10,14 @@ installed Reef package.
 """
 
 # isort: skip_file
+# Written by setuptools-scm at install time from the git tag (see
+# [tool.setuptools_scm] in pyproject.toml); absent only on an uninstalled
+# checkout imported straight off the tree.
+try:
+    from reef._version import __version__
+except ImportError:
+    __version__ = "0.0.0.dev0"
+
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.records import RecordStore

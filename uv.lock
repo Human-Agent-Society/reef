@@ -4421,8 +4421,16 @@ default = [
 ]
 
 [[package]]
-name = "reef"
-version = "0.4.0"
+name = "reef-client"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/23/f5/d483408ec1d6be0ee4852c58d878604cb30b4754b725788754b97e7920c6/reef_client-0.2.0.tar.gz", hash = "sha256:04d2db3c5cb450333ee0ce830219bbb398c874941927a37fb9910134dffe2ab1", size = 22719, upload-time = "2026-08-22T17:06:04.9Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/5f/2f1d4771ecae7f858a9b045b16c0cd03a0d6ef19973ee4c04a5301ec312c/reef_client-0.2.0-py3-none-any.whl", hash = "sha256:8dbc2a83277d94f421188400f0238c03bb7b8fc8799c75c50f607aeccfeb3b4c", size = 20891, upload-time = "2026-08-22T17:06:03.949Z" },
+]
+
+[[package]]
+name = "reef-infra"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -4493,15 +4501,6 @@ provides-extras = ["wandb", "slime", "dev"]
 
 [package.metadata.requires-dev]
 runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=41014d1f29e201137fdffce737bb8bac65bc5219" }]
-
-[[package]]
-name = "reef-client"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/23/f5/d483408ec1d6be0ee4852c58d878604cb30b4754b725788754b97e7920c6/reef_client-0.2.0.tar.gz", hash = "sha256:04d2db3c5cb450333ee0ce830219bbb398c874941927a37fb9910134dffe2ab1", size = 22719, upload-time = "2026-08-22T17:06:04.9Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/fc/5f/2f1d4771ecae7f858a9b045b16c0cd03a0d6ef19973ee4c04a5301ec312c/reef_client-0.2.0-py3-none-any.whl", hash = "sha256:8dbc2a83277d94f421188400f0238c03bb7b8fc8799c75c50f607aeccfeb3b4c", size = 20891, upload-time = "2026-08-22T17:06:03.949Z" },
-]
 
 [[package]]
 name = "referencing"

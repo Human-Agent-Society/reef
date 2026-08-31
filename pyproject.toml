@@ -1,12 +1,18 @@
 [build-system]
 requires = [
     "setuptools >= 84.0.0",
+    "setuptools-scm >= 8",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reef"
-version = "0.4.0"
+# Distribution name on PyPI; the import package stays `reef` (the bare name
+# on PyPI belongs to an unrelated project).
+name = "reef-infra"
+# The version comes from git: the nearest `vX.Y.Z` tag, or `X.Y.(Z+1).devN+g<sha>`
+# past it (setuptools-scm, configured below). Cut a release by tagging; never
+# edit a version string by hand.
+dynamic = ["version"]
 description = "A framework-agnostic runtime for continuously improving agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,7 +26,7 @@ classifiers = [
     "Topic :: System :: Distributed Computing",
 ]
 # Reef core dependencies. Keep this list free of training and GPU packages:
-# `pip install reef` must support the base `recipe` configuration on CPU.
+# `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
     "aiohttp",
     "huggingface_hub",
@@ -82,6 +88,15 @@ reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plug
 
 [tool.setuptools]
 include-package-data = true
+
+# Version from git tags. `reef/_version.py` is generated at build/install time
+# (gitignored) and read by `reef.__version__`. Builds without git metadata
+# (the docker image copies the tree without .git; sdists carry PKG-INFO) fall
+# back to the version below unless SETUPTOOLS_SCM_PRETEND_VERSION_FOR_REEF_INFRA is
+# set, which docker/Dockerfile.reef does from its REEF_VERSION build arg.
+[tool.setuptools_scm]
+version_file = "reef/_version.py"
+fallback_version = "0.0.0.dev0"
 
 # reef-client is now a separate repo (Human-Agent-Society/reef-client) and a
 # declared dependency; the reef wheel must not ship its source.
