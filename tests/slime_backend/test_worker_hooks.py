@@ -137,8 +137,8 @@ def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: py
     values = {
         "tokens": [torch.tensor([1])],
         "topk_log_probs": [torch.tensor([[-0.2]])],
-        "producing_weight_versions": ["inc:4"],
-        "producing_weight_version_spans": [[{"start": 0, "end": 1, "weight_version": "inc:4"}]],
+        "producing_runtime_load_ids": ["inc:4"],
+        "producing_runtime_load_spans": [[{"start": 0, "end": 1, "runtime_load_id": "inc:4"}]],
     }
     from reef.train.slime_backend.loss_families import LOSS_FAMILIES
 
@@ -148,9 +148,9 @@ def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: py
     )
     assert data.log_rollout_data(3, log_args, values) == "stored"
     assert "topk_log_probs" not in captured[0]
-    assert "producing_weight_versions" not in captured[0]
-    assert "producing_weight_version_spans" not in captured[0]
-    assert values["producing_weight_versions"] == ["inc:4"]
+    assert "producing_runtime_load_ids" not in captured[0]
+    assert "producing_runtime_load_spans" not in captured[0]
+    assert values["producing_runtime_load_ids"] == ["inc:4"]
     assert actor.log_rollout_data is data.log_rollout_data
 
     # A family's declared skip keys resolve from loss_family alone, so the

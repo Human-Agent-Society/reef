@@ -79,7 +79,7 @@ def main():
         print(f"no skill mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
 
-    print(f"published: artifact {manifest['artifact_version']} (parent {manifest['parent_artifact_version']})")
+    print(f"published: artifact {manifest['release_id']} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
     print("evolved skill files:")

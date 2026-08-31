@@ -17,10 +17,10 @@ def test_adapter_name_is_lossless_and_scenario_qualified() -> None:
     assert adapter_name("a.b", "v1") != adapter_name("a", "b.v1")
 
 
-def test_adapter_name_requires_a_scenario_and_a_version() -> None:
+def test_adapter_name_requires_a_scenario_and_a_runtime_load_id() -> None:
     with pytest.raises(ValueError, match="scenario"):
         adapter_name("", "v1")
-    with pytest.raises(ValueError, match="version"):
+    with pytest.raises(ValueError, match="runtime_load_id"):
         adapter_name("a", "")
 
 

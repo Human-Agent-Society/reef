@@ -38,10 +38,10 @@ def _artifact(tmp_path) -> Artifact:
 def _live_artifact() -> Artifact:
     return Artifact(
         LiveWeightArtifactRef(
-            artifact_id="live-test",
-            version="live:engine:6",
-            parent_version="checkpoint",
-            weight_version="engine:6",
+            content_id="live-test",
+            release_id="live:engine:6",
+            parent_release_id="checkpoint",
+            runtime_load_id="engine:6",
         ),
         None,
     )
@@ -111,7 +111,7 @@ def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) ->
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
-                        "weight_version": "wv-7",
+                        "runtime_load_id": "wv-7",
                     },
                 }
             )
@@ -153,9 +153,9 @@ def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) ->
             "rollout_log_probs": [-0.25, -0.5],
             "prompt_length": 2,
             "response_length": 2,
-            "weight_version": "wv-7",
-            "weight_version_spans": [
-                {"start": 0, "end": 2, "weight_version": "wv-7"},
+            "runtime_load_id": "wv-7",
+            "runtime_load_spans": [
+                {"start": 0, "end": 2, "runtime_load_id": "wv-7"},
             ],
         }
 
@@ -178,8 +178,8 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
                         "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
                         # Tokenizer metadata can move after the final decode;
                         # the scheduler-owned list remains exact.
-                        "weight_version": "engine:8",
-                        "_reef_token_weight_versions": ["engine:6", "engine:7", "engine:7"],
+                        "runtime_load_id": "engine:8",
+                        "_reef_token_runtime_load_ids": ["engine:6", "engine:7", "engine:7"],
                     },
                 }
             )
@@ -206,12 +206,12 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
             await server.close()
 
         assert response["training"]["rollout_log_probs"] == [-0.1, -0.2, -0.3]
-        assert response["training"]["weight_version"] is None
-        assert response["training"]["weight_version_spans"] == [
-            {"start": 0, "end": 1, "weight_version": "engine:6"},
-            {"start": 1, "end": 3, "weight_version": "engine:7"},
+        assert response["training"]["runtime_load_id"] is None
+        assert response["training"]["runtime_load_spans"] == [
+            {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+            {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
         ]
-        assert response["choices"][0]["meta_info"]["weight_version"] == "engine:7"
+        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:7"
 
     asyncio.run(run())
 
@@ -227,8 +227,8 @@ def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20]],
                         # The tokenizer may move first while draining output.
-                        "weight_version": "engine:7",
-                        "_reef_token_weight_versions": ["engine:6"],
+                        "runtime_load_id": "engine:7",
+                        "_reef_token_runtime_load_ids": ["engine:6"],
                     },
                 }
             )
@@ -254,14 +254,14 @@ def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
         finally:
             await server.close()
 
-        assert response["choices"][0]["meta_info"]["weight_version"] == "engine:6"
-        assert response["training"]["weight_version_spans"] == [{"start": 0, "end": 1, "weight_version": "engine:6"}]
+        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:6"
+        assert response["training"]["runtime_load_spans"] == [{"start": 0, "end": 1, "runtime_load_id": "engine:6"}]
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_live_chat_rejects_tokenizer_only_weight_versions() -> None:
+def test_live_chat_rejects_tokenizer_only_runtime_load_ids() -> None:
     async def run() -> None:
         async def generate(request):
             return web.json_response(
@@ -271,7 +271,7 @@ def test_live_chat_rejects_tokenizer_only_weight_versions() -> None:
                         "finish_reason": {"type": "stop"},
                         "completion_tokens": 1,
                         "output_token_logprobs": [[-0.1, 20]],
-                        "weight_version": "engine:7",
+                        "runtime_load_id": "engine:7",
                     },
                 }
             )
@@ -286,7 +286,7 @@ def test_live_chat_rejects_tokenizer_only_weight_versions() -> None:
                 model_path="model",
                 tokenizer=FakeTokenizer(),
             )
-            with pytest.raises(ValueError, match="scheduler-stamped token weight versions"):
+            with pytest.raises(ValueError, match="scheduler-stamped token runtime load IDs"):
                 await backend.inference(
                     _live_artifact(),
                     "/v1/chat/completions",
@@ -312,7 +312,7 @@ def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20], [-0.2, 21]],
-                        "weight_version": "wv-tools",
+                        "runtime_load_id": "wv-tools",
                     },
                 }
             )
@@ -418,7 +418,7 @@ def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcr
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.2, 20], [-0.4, 21]],
-                        "weight_version": "wv-anthropic",
+                        "runtime_load_id": "wv-anthropic",
                     },
                 }
             )
@@ -511,7 +511,7 @@ def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_trainin
         {},
     )
     assert response["input_tokens"] == 2
-    assert response["training"]["weight_version"].startswith("local:")
+    assert response["training"]["runtime_load_id"].startswith("local:")
     assert client_inference_response(response) == {"input_tokens": 2}
 
 
@@ -526,7 +526,7 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20]],
-                        "weight_version": "wv-tools",
+                        "runtime_load_id": "wv-tools",
                     },
                 }
             )
@@ -651,8 +651,8 @@ def test_streaming_chat_keeps_exact_training_response_for_recording(tmp_path) ->
                     "finish_reason": {"type": "stop"},
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "weight_version": "engine:6",
-                    "_reef_token_weight_versions": ["engine:6"],
+                    "runtime_load_id": "engine:6",
+                    "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -711,8 +711,8 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
                     "finish_reason": None,
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "weight_version": "engine:6",
-                    "_reef_token_weight_versions": ["engine:6"],
+                    "runtime_load_id": "engine:6",
+                    "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
             await response.write(f"data: {json.dumps(first)}\n\n".encode())
@@ -724,8 +724,8 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
                     "finish_reason": {"type": "length"},
                     "completion_tokens": 2,
                     "output_token_logprobs": [[-0.25, 21]],
-                    "weight_version": "engine:8",
-                    "_reef_token_weight_versions": ["engine:7"],
+                    "runtime_load_id": "engine:8",
+                    "_reef_token_runtime_load_ids": ["engine:7"],
                 },
             }
             await response.write(f"data: {json.dumps(final)}\n\n".encode())
@@ -774,9 +774,9 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
         recorded = stream_record(stream, body, complete=True)
         assert recorded["type"] == "message"
         assert recorded["training"]["tokens"] == [10, 11, 20, 21]
-        assert recorded["training"]["weight_version_spans"] == [
-            {"start": 0, "end": 1, "weight_version": "engine:6"},
-            {"start": 1, "end": 2, "weight_version": "engine:7"},
+        assert recorded["training"]["runtime_load_spans"] == [
+            {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+            {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
         ]
         assert recorded["stream_delivery"]["complete"] is True
 
@@ -797,7 +797,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                         "finish_reason": None,
                         "completion_tokens": 1,
                         "output_token_logprobs": [[-0.5, 20]],
-                        "_reef_token_weight_versions": ["engine:6"],
+                        "_reef_token_runtime_load_ids": ["engine:6"],
                     },
                 },
                 {
@@ -807,7 +807,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                         "finish_reason": {"type": "stop"},
                         "completion_tokens": 2,
                         "output_token_logprobs": [[-0.25, 21]],
-                        "_reef_token_weight_versions": ["engine:7"],
+                        "_reef_token_runtime_load_ids": ["engine:7"],
                     },
                 },
             ]
@@ -892,7 +892,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                     "finish_reason": {"type": "stop"},
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "weight_version": "wv-tools",
+                    "runtime_load_id": "wv-tools",
                 },
             }
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -1024,7 +1024,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.25, 20], [-0.5, 21], [-0.75, 22]],
-                        "weight_version": "wv-9",
+                        "runtime_load_id": "wv-9",
                     },
                 }
             )

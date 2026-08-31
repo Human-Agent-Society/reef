@@ -43,7 +43,7 @@ from ._threshold_processor import ThresholdProcessor
 def sample_record(
     *,
     step: int = 1,
-    weight_version: str = "w1",
+    runtime_load_id: str = "w1",
     checkpoint: bool = False,
     training_job_id: str | None = None,
 ) -> CommitRecord:
@@ -51,10 +51,10 @@ def sample_record(
         scenario="math",
         step=step,
         artifact_ref=LiveWeightArtifactRef(
-            artifact_id=f"live:{step}",
-            version=f"live:proc:{weight_version}:{step}",
-            parent_version="base",
-            weight_version=weight_version,
+            content_id=f"live:{step}",
+            release_id=f"live:proc:{runtime_load_id}:{step}",
+            parent_release_id="base",
+            runtime_load_id=runtime_load_id,
         ),
         checkpoint=checkpoint,
         algorithm_state={"steps": step},
@@ -70,14 +70,14 @@ def sample_record(
 def test_commit_record_round_trips_through_the_log(tmp_path) -> None:
     log = CommitLog(tmp_path / "commits.jsonl")
     log.append(sample_record(step=1))
-    log.append(sample_record(step=2, weight_version="w2"))
+    log.append(sample_record(step=2, runtime_load_id="w2"))
 
     records = log.records()
     assert [record.step for record in records] == [1, 2]
     first = records[0]
     assert first.scenario == "math"
     assert isinstance(first.artifact_ref, LiveWeightArtifactRef)
-    assert first.artifact_ref.weight_version == "w1"
+    assert first.artifact_ref.runtime_load_id == "w1"
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
@@ -93,7 +93,7 @@ def test_commit_record_round_trips_gate_metrics(tmp_path) -> None:
     log = CommitLog(tmp_path / "commits.jsonl")
     log.append(sample_record(step=1))
     metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
-    record = sample_record(step=2, weight_version="w2")
+    record = sample_record(step=2, runtime_load_id="w2")
     record.metrics = dict(metrics)
     log.append(record)
 
@@ -116,11 +116,11 @@ def test_commit_record_round_trips_training_job_identity(tmp_path) -> None:
 def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
     weight_value = sample_record().to_dict()["artifact_ref"]
     assert weight_value == {
-        "kind": "weight",
-        "artifact_id": "live:1",
-        "version": "live:proc:w1:1",
-        "parent_version": "base",
-        "weight_version": "w1",
+        "kind": "live_weights",
+        "content_id": "live:1",
+        "release_id": "live:proc:w1:1",
+        "parent_release_id": "base",
+        "runtime_load_id": "w1",
     }
 
     durable = CommitRecord(
@@ -134,9 +134,9 @@ def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
     )
     assert durable.to_dict()["artifact_ref"] == {
         "kind": "artifact",
-        "artifact_id": "artifact:1",
-        "version": "checkpoint:1",
-        "parent_version": None,
+        "content_id": "artifact:1",
+        "release_id": "checkpoint:1",
+        "parent_release_id": None,
     }
 
 
@@ -146,7 +146,7 @@ def test_commit_record_validates_its_schema() -> None:
         CommitRecord(
             scenario="math",
             step=0,
-            artifact_ref=ArtifactRef(artifact_id="a", version="r", parent_version=None),
+            artifact_ref=ArtifactRef(content_id="a", release_id="r", parent_release_id=None),
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=0,
@@ -156,7 +156,7 @@ def test_commit_record_validates_its_schema() -> None:
         CommitRecord(
             scenario="math",
             step=1,
-            artifact_ref=ArtifactRef(artifact_id="a", version="r", parent_version=None),
+            artifact_ref=ArtifactRef(content_id="a", release_id="r", parent_release_id=None),
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=-1,
@@ -172,9 +172,9 @@ def test_commit_record_validates_its_schema() -> None:
                 "step": 1,
                 "artifact_ref": {
                     "kind": "artifact",
-                    "artifact_id": "a",
-                    "version": "r",
-                    "parent_version": None,
+                    "content_id": "a",
+                    "release_id": "r",
+                    "parent_release_id": None,
                 },
                 "checkpoint": False,
                 "algorithm_state": None,
@@ -191,7 +191,7 @@ def test_records_tolerate_a_torn_tail(tmp_path) -> None:
     log.append(sample_record())
     # A crash mid-append leaves a partial final line; the commit never happened.
     with open(path, "a", encoding="utf-8") as handle:
-        handle.write('{"record":"reef-commit/4","scenario":"ma')
+        handle.write('{"record":"reef-commit/5","scenario":"ma')
 
     records = log.records()
     assert [record.step for record in records] == [1]
@@ -243,30 +243,30 @@ class RecordingRuntime(TrainingRuntime):
 
     def train_candidate(self, payload):
         self.trained_batches.append(payload["sources"])
-        weight_version = f"w{len(self.trained_batches)}"
+        runtime_load_id = f"w{len(self.trained_batches)}"
         checkpoint = self._checkpoint_dir / str(payload["rollout_id"]) if self._checkpoint_dir else "/unused"
         if self._checkpoint_dir:
             checkpoint.mkdir(parents=True)
-            (checkpoint / "model.txt").write_text(weight_version)
+            (checkpoint / "model.txt").write_text(runtime_load_id)
         job_id = f"job-{payload['rollout_id']}"
-        self._candidate_versions[job_id] = weight_version
+        self._candidate_versions[job_id] = runtime_load_id
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,
             checkpoint_path=str(checkpoint),
-            current_weight_version=self._served_version,
+            current_runtime_load_id=self._served_version,
         )
 
     def activate_candidate(self, candidate):
-        weight_version = self._candidate_versions[candidate.candidate_id]
-        self._served_version = weight_version
-        return ActivatedModel(candidate.candidate_id, weight_version)
+        runtime_load_id = self._candidate_versions[candidate.candidate_id]
+        self._served_version = runtime_load_id
+        return ActivatedModel(candidate.candidate_id, runtime_load_id)
 
     def reject_candidate(self, candidate, decision):
         del decision
         self._candidate_versions.pop(candidate.candidate_id, None)
 
-    def serving_weight_version(self):
+    def serving_runtime_load_id(self):
         return self._served_version
 
 
@@ -351,12 +351,12 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     first, second = records
     assert isinstance(first.artifact_ref, LiveWeightArtifactRef)
     assert isinstance(second.artifact_ref, LiveWeightArtifactRef)
-    assert first.artifact_ref.weight_version == "w1"
+    assert first.artifact_ref.runtime_load_id == "w1"
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.compacted_ids == frozenset({"i1", "r1"})
     assert first.high_water_sequence == 2
-    assert second.artifact_ref.weight_version == "w2"
+    assert second.artifact_ref.runtime_load_id == "w2"
     assert second.high_water_sequence == 4
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
@@ -402,17 +402,17 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     wait_for_step(first, 2)
     committed_head = first.get_or_create_scenario("math").repository.require_current_artifact()
     assert isinstance(committed_head, LiveWeightArtifactRef)
-    assert committed_head.weight_version == "w2"
+    assert committed_head.runtime_load_id == "w2"
 
     # A fresh dispatcher over the same dirs is a process restart: nothing is
-    # durable except the version chain, the record store, and the commit log.
+    # durable except the release chain, the record store, and the commit log.
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     recovered = second.get_or_create_scenario("math", "test_policy")
     assert recovered.scenario_step == 2
     # The live head survives the restart: it is the log's head record, even
-    # though the version chain only knows the bootstrap checkpoint.
+    # though the release chain only knows the bootstrap checkpoint.
     assert recovered.repository.require_current_artifact() == committed_head
     assert recovered.trainer.state == {"steps": 2}
 
@@ -434,7 +434,7 @@ class ProtectAllProcessor(ThresholdProcessor):
 
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(self, scenario, records, *, algorithm_state=None):
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         return Trainer.build(
             scenario,
             records,
@@ -443,6 +443,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             ),
             training_backend=SlimeTrainingBackend(self.runtime, "sft"),
             algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
         )
 
 
@@ -586,7 +587,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
-    """Crash window: checkpoint published to the version chain, record never appended.
+    """Crash window: checkpoint published to the release chain, record never appended.
 
     The checkpoint head is then ahead of the log. Its snapshot metadata carries
     the same record fields, so recovery adopts it and heals the log.
@@ -728,7 +729,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     assert first.get_or_create_scenario("math").commit_log is None
     assert not list(tmp_path.rglob("*.commits.jsonl"))
 
-    # Recovery still works from the version chain: the live head is forgotten, as
+    # Recovery still works from the release chain: the live head is forgotten, as
     # before the log existed, and the step reverts to the checkpointed 0.
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math", "test_policy")
@@ -760,7 +761,7 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface()
 
-    def build(self, scenario, records, *, algorithm_state=None) -> Trainer:
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
         from reef.train.cordis_backend.processor import CordisProcessor
 
         training_backend = CordisBackend(
@@ -782,6 +783,7 @@ class _HarnessEvolveTestRecipe(Recipe):
                 ScoreComparisonSelector(),
             ),
             algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
         )
 
 

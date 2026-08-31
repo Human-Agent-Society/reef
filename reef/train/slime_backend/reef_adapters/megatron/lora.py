@@ -75,11 +75,11 @@ def lora_engine_slots(args: Namespace) -> int:
     return 1 if value is None else max(1, int(value))
 
 
-def scenario_adapter_name(scenario: str, weight_version: str) -> str:
-    """The engine adapter name for one scenario's publication at ``weight_version``.
+def scenario_adapter_name(scenario: str, runtime_load_id: str) -> str:
+    """The engine adapter name for one scenario's publication at ``runtime_load_id``.
 
     The same lossless ``adapter_name(scenario, version)`` the serving side
-    uses for durable adapters, with the serving weight version as the
+    uses for durable adapters, with the serving runtime load ID as the
     version component: the training side knows it at publication time, and
     the live artifact Reef commits carries the same token. Every scenario's
     every publication therefore has its own engine name; nothing is ever
@@ -88,7 +88,7 @@ def scenario_adapter_name(scenario: str, weight_version: str) -> str:
 
     from reef.surface.adapter import adapter_name
 
-    return adapter_name(scenario, weight_version)
+    return adapter_name(scenario, runtime_load_id)
 
 
 def megatron_lora_enabled(args: Namespace) -> bool:

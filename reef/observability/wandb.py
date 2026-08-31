@@ -258,9 +258,9 @@ class WandbExperimentTracker(ExperimentTracker):
                             {
                                 "reef/ended_by": "rollback",
                                 "reef/rollback_step": event.step,
-                                "reef/rollback_from_artifact_version": event.source_artifact_ref.version,
-                                "reef/rollback_target_artifact_version": event.target_artifact_version,
-                                "reef/current_artifact_version": event.produced_artifact_ref.version,
+                                "reef/rollback_from_release_id": event.source_artifact_ref.release_id,
+                                "reef/rollback_target_release_id": event.target_release_id,
+                                "reef/current_release_id": event.produced_artifact_ref.release_id,
                             }
                         )
                     run.finish()
@@ -472,12 +472,12 @@ class WandbExperimentTracker(ExperimentTracker):
     def _event_metadata(self, event: TrainingExperimentEvent, run_id: str) -> dict[str, Any]:
         source = event.context.source_artifact_ref
         produced = event.produced_artifact_ref
-        source_weight = event.source_weight_version
+        source_weight = event.source_runtime_load_id
         if source_weight is None and isinstance(source, LiveWeightArtifactRef):
-            source_weight = source.weight_version
-        produced_weight = event.produced_weight_version
+            source_weight = source.runtime_load_id
+        produced_weight = event.produced_runtime_load_id
         if produced_weight is None and isinstance(produced, LiveWeightArtifactRef):
-            produced_weight = produced.weight_version
+            produced_weight = produced.runtime_load_id
         return {
             "step": event.context.step,
             "run_segment": event.context.run_segment,
@@ -488,10 +488,10 @@ class WandbExperimentTracker(ExperimentTracker):
             "backend": event.context.backend,
             "training_job_id": event.training_job_id,
             "outcome": event.outcome,
-            "source_artifact_version": source.version,
-            "produced_artifact_version": produced.version,
-            "source_weight_version": source_weight,
-            "produced_weight_version": produced_weight,
+            "source_release_id": source.release_id,
+            "produced_release_id": produced.release_id,
+            "source_runtime_load_id": source_weight,
+            "produced_runtime_load_id": produced_weight,
             "checkpoint_path": event.checkpoint_path,
         }
 
@@ -499,7 +499,7 @@ class WandbExperimentTracker(ExperimentTracker):
         client = self._client
         if client is None or event.checkpoint_path is None:
             return
-        identity = event.training_job_id or event.produced_artifact_ref.version
+        identity = event.training_job_id or event.produced_artifact_ref.release_id
         artifact = client.Artifact(name=f"reef-checkpoint-{_artifact_name(identity)}", type="model")
         artifact.add_dir(event.checkpoint_path)
         run.log_artifact(artifact)

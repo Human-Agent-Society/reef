@@ -230,8 +230,8 @@ class SaoAlgorithm(SlimeAlgorithm):
         if serving_step is not None and head:
             steps = [
                 step
-                for token in rollout_data.get("producing_weight_versions") or []
-                if token is not None and (step := _weight_version_sequence(str(token), head)) is not None
+                for token in rollout_data.get("producing_runtime_load_ids") or []
+                if token is not None and (step := _runtime_load_id_sequence(str(token), head)) is not None
             ]
             future_steps = [step for step in steps if step > serving_step]
             if future_steps:
@@ -258,7 +258,7 @@ class SaoAlgorithm(SlimeAlgorithm):
         return metrics
 
 
-def _weight_version_sequence(token: str, incarnation: str) -> int | None:
+def _runtime_load_id_sequence(token: str, incarnation: str) -> int | None:
     head, sep, tail = token.rpartition(":")
     return int(tail) if sep and head == incarnation and tail.isdigit() else None
 

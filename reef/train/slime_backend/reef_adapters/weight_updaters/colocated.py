@@ -44,7 +44,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
     def __init__(
         self,
         *args: Any,
-        weight_version_incarnation: str | None = None,
+        runtime_load_id_incarnation: str | None = None,
         is_lora: bool | None = None,
         tie_word_embeddings: bool = False,
         **kwargs: Any,
@@ -61,7 +61,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
                 HfWeightIteratorBase.create = staticmethod(original_create)
         else:
             super().__init__(*args, **kwargs)
-        self._initialize_weight_version(weight_version_incarnation)
+        self._initialize_runtime_load_id(runtime_load_id_incarnation)
         self.is_lora = megatron_lora_enabled(self.args) if is_lora is None else is_lora
         self.tie_word_embeddings = tie_word_embeddings
         self._base_checksums: dict[str, str] | None = None
@@ -78,13 +78,13 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
         """The engine adapter name the next publication loads under."""
         if not self.active_scenario:
             raise RuntimeError("LoRA publication requires an active scenario")
-        return scenario_adapter_name(self.active_scenario, str(self.weight_version))
+        return scenario_adapter_name(self.active_scenario, str(self.runtime_load_id))
 
     def publish_lora_adapter(self, lora_name: str) -> None:
         """Load the slot's adapter under ``lora_name`` without a version bump.
 
         Used at restart to make every scenario's committed adapter resident
-        again; the caller owns pausing and the serving weight version.
+        again; the caller owns pausing and the serving runtime load ID.
         """
         if not self.is_lora:
             raise RuntimeError("adapter publication requires a LoRA-enabled actor")
@@ -198,7 +198,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             if self.is_lora:
                 if getattr(self.args, "verify_lora_base_weights", False):
                     self._capture_or_verify_base_checksums("after adapter publication")
-                ray.get([engine.set_weight_version.remote(str(self.weight_version)) for engine in serving_engines])
+                ray.get([engine.set_runtime_load_id.remote(str(self.runtime_load_id)) for engine in serving_engines])
             elif self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
                     restore_weights_before_load=False,
@@ -260,7 +260,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             ipc_engine=self._ipc_engine,
             ipc_gather_src=self._ipc_gather_src,
             ipc_gather_group=self._ipc_gather_group,
-            weight_version=str(self.weight_version),
+            runtime_load_id=str(self.runtime_load_id),
         )
         all_refs.extend(refs_colocated)
         if self.use_distribute and self._is_distributed_src_rank:
@@ -268,7 +268,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
                 update_weights_from_distributed(
                     self._group_name,
                     self._model_update_groups,
-                    str(self.weight_version),
+                    str(self.runtime_load_id),
                     self.distributed_rollout_engines,
                     hf_named_tensors,
                 )

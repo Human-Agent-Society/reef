@@ -184,14 +184,14 @@ def test_inference_with_record_requires_receipt() -> None:
 
 @pytest.mark.unit
 def test_get_sends_token_and_returns_body() -> None:
-    stub = _Stub(reply={"versions": [{"operation": "training"}, {"operation": "inference"}]})
+    stub = _Stub(reply={"releases": [{"operation": "training"}, {"operation": "inference"}]})
     client = ReefClient(stub.url(), token="tok", timeout_s=5)
-    body = client.get("/reef/scenarios/scen/versions")
+    body = client.get("/reef/scenarios/scen/releases")
     stub.close()
 
-    assert body == {"versions": [{"operation": "training"}, {"operation": "inference"}]}
+    assert body == {"releases": [{"operation": "training"}, {"operation": "inference"}]}
     sent = stub.requests[0]
-    assert sent["path"] == "/reef/scenarios/scen/versions"
+    assert sent["path"] == "/reef/scenarios/scen/releases"
     assert sent["headers"]["authorization"] == "Bearer tok"
 
 
@@ -200,7 +200,7 @@ def test_get_http_error_carries_status() -> None:
     stub = _Stub(status=404, reply={"detail": "unknown scenario"})
     client = ReefClient(stub.url(), timeout_s=5)
     with pytest.raises(ReefClientError) as caught:
-        client.get("/reef/scenarios/scen/versions")
+        client.get("/reef/scenarios/scen/releases")
     stub.close()
 
     assert caught.value.status == 404

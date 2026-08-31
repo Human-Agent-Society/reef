@@ -35,7 +35,7 @@ class ModelCandidate(UpdateCandidate):
 
     training_job_id: str
     checkpoint_path: str
-    current_weight_version: str | None
+    current_runtime_load_id: str | None
     training_metrics: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -44,10 +44,10 @@ class ModelCandidate(UpdateCandidate):
             raise ValueError("training_job_id must be a non-empty string")
         if not isinstance(self.checkpoint_path, str) or not self.checkpoint_path:
             raise ValueError("checkpoint_path must be a non-empty string")
-        if self.current_weight_version is not None and (
-            not isinstance(self.current_weight_version, str) or not self.current_weight_version
+        if self.current_runtime_load_id is not None and (
+            not isinstance(self.current_runtime_load_id, str) or not self.current_runtime_load_id
         ):
-            raise ValueError("current_weight_version must be a non-empty string or None")
+            raise ValueError("current_runtime_load_id must be a non-empty string or None")
 
 
 @dataclass(frozen=True)
@@ -55,13 +55,13 @@ class ActivatedModel:
     """Serving identity returned after a selected candidate is activated."""
 
     candidate_id: str
-    weight_version: str
+    runtime_load_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate_id, str) or not self.candidate_id:
             raise ValueError("candidate_id must be a non-empty string")
-        if not isinstance(self.weight_version, str) or not self.weight_version:
-            raise ValueError("weight_version must be a non-empty string")
+        if not isinstance(self.runtime_load_id, str) or not self.runtime_load_id:
+            raise ValueError("runtime_load_id must be a non-empty string")
 
 
 __all__ = [

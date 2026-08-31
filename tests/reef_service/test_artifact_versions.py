@@ -1,4 +1,4 @@
-"""Artifact version listing and rollback tests (issue #78, phase 4)."""
+"""Release listing and rollback tests (issue #78, phase 4)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from reef.observability import NullExperimentLogger
 from reef.recipe import RecipeRegistry
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
-from reef.scenario import VersionNotRestorable
+from reef.scenario import ReleaseNotRestorable
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService, create_app
 
@@ -55,7 +55,7 @@ class RollbackRuntime(TrainingRuntime):
             candidate_id=job_id,
             training_job_id=job_id,
             checkpoint_path=str(checkpoint),
-            current_weight_version=None,
+            current_runtime_load_id=None,
         )
 
     def activate_candidate(self, candidate):
@@ -75,14 +75,14 @@ class BlockingBackend(InferenceBackend):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
-        self.artifact_version: str | None = None
+        self.release_id: str | None = None
 
     async def inference(self, artifact, path, payload):
         del path, payload
-        self.artifact_version = artifact.ref.version
+        self.release_id = artifact.ref.release_id
         self.started.set()
         await self.finish.wait()
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"weight_version": "w1"}}
+        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
 
 
 class RecordingExperimentTracker:
@@ -162,20 +162,20 @@ def train(dispatcher: Dispatcher, index: int) -> None:
 @pytest.mark.unit
 def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> None:
     value, runtime, _ = dispatcher(tmp_path)
-    created = value.get_or_create_scenario("math", "test_policy").versions()[0]["artifact_version"]
+    created = value.get_or_create_scenario("math", "test_policy").releases()[0]["release_id"]
     train(value, 1)
     train(value, 2)
     train(value, 3)
 
-    before = value.list_versions("math")
+    before = value.list_releases("math")
     assert len(before) == 4
     assert all(version["restorable"] for version in before)
-    assert before[-1]["artifact_version"] == created
-    target_version = before[-2]["artifact_version"]
+    assert before[-1]["release_id"] == created
+    target_version = before[-2]["release_id"]
 
     published = value.rollback("math", target_version)
 
-    assert published.version != target_version
+    assert published.release_id != target_version
     assert (
         value.get_or_create_scenario("math").repository.resolve(published).local_path.joinpath("model.txt").read_text()
         == "w1"
@@ -183,7 +183,7 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     assert runtime.restored == ["w1"]
     record = value.get_or_create_scenario("math").commit_log.records()[-1]
     assert record.operation == "rollback"
-    assert record.rollback_target_artifact_version == target_version
+    assert record.rollback_target_release_id == target_version
     assert record.artifact_ref == published
 
 
@@ -193,7 +193,7 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     train(value, 1)
     train(value, 2)
-    target_version = value.list_versions("math")[-2]["artifact_version"]
+    target_version = value.list_releases("math")[-2]["release_id"]
 
     value.rollback("math", target_version)
     train(value, 4)
@@ -207,7 +207,7 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     rollback = tracker.rollbacks[0]
     assert rollback.step == 3
     assert rollback.run_segment == 0
-    assert rollback.target_artifact_version == target_version
+    assert rollback.target_release_id == target_version
 
 
 @pytest.mark.unit
@@ -215,7 +215,7 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     value, _, backend_factory = dispatcher(tmp_path)
     train(value, 1)
     train(value, 2)
-    target_version = value.list_versions("math")[-2]["artifact_version"]
+    target_version = value.list_releases("math")[-2]["release_id"]
     value.rollback("math", target_version)
 
     scenario = value.get_or_create_scenario("math")
@@ -243,7 +243,7 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
 
     assert adopted.operation == "rollback"
     assert adopted.operation_verified is True
-    assert adopted.rollback_target_artifact_version == target_version
+    assert adopted.rollback_target_release_id == target_version
     assert recovered.committed_training_without_job_id is False
 
 
@@ -254,8 +254,8 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         train(value, index)
     scenario = value.get_or_create_scenario("math")
 
-    version_one = scenario.versions()[-2]
-    version_one_ref = scenario.repository.backend.resolve_version(version_one["artifact_version"])
+    version_one = scenario.releases()[-2]
+    version_one_ref = scenario.repository.backend.resolve_release(version_one["release_id"])
     assert scenario.repository.resolve(version_one_ref).local_path.joinpath("model.txt").read_text() == "w1"
 
     restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
@@ -266,7 +266,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         agent_record_dir=tmp_path / "agent-record",
     )
     recovered = restarted.get_or_create_scenario("math", "test_policy")
-    assert [version["operation"] for version in recovered.versions()] == [
+    assert [version["operation"] for version in recovered.releases()] == [
         "training",
         "training",
         "training",
@@ -280,11 +280,11 @@ def test_live_version_is_listed_but_cannot_be_a_rollback_target(tmp_path) -> Non
     train(value, 1)
     train(value, 2)
 
-    versions = value.list_versions("math")
+    versions = value.list_releases("math")
     live = next(version for version in versions if not version["checkpoint"])
     assert not live["restorable"]
-    with pytest.raises(VersionNotRestorable, match="no durable checkpoint bytes"):
-        value.rollback("math", live["artifact_version"])
+    with pytest.raises(ReleaseNotRestorable, match="no durable checkpoint bytes"):
+        value.rollback("math", live["release_id"])
 
 
 @pytest.mark.unit
@@ -292,7 +292,7 @@ def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) ->
     async def run() -> None:
         value, _, _ = dispatcher(tmp_path)
         train(value, 1)
-        selected_version = value.get_or_create_scenario("math").current_artifact_ref().version
+        selected_version = value.get_or_create_scenario("math").current_artifact_ref().release_id
         backend = BlockingBackend()
         service = RequestService(value)
         request = asyncio.create_task(
@@ -309,9 +309,9 @@ def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) ->
 
         backend.finish.set()
         _, item = await request
-        assert backend.artifact_version == selected_version
+        assert backend.release_id == selected_version
         assert item.artifact_ref is not None
-        assert item.artifact_ref.version == selected_version
+        assert item.artifact_ref.release_id == selected_version
 
     asyncio.run(run())
 
@@ -325,22 +325,22 @@ def test_version_and_rollback_http_api(tmp_path) -> None:
         client = TestClient(TestServer(create_app(value)))
         await client.start_server()
         try:
-            listed = await client.get("/reef/scenarios/math/versions")
+            listed = await client.get("/reef/scenarios/math/releases")
             assert listed.status == 200
             listed_body = await listed.json()
-            assert len(listed_body["versions"]) == 3
-            target_version = listed_body["versions"][-2]["artifact_version"]
+            assert len(listed_body["releases"]) == 3
+            target_version = listed_body["releases"][-2]["release_id"]
 
             rolled_back = await client.post(
                 "/reef/scenarios/math/rollback",
-                json={"artifact_version": target_version},
+                json={"release_id": target_version},
             )
             assert rolled_back.status == 200
-            assert (await rolled_back.json())["artifact_version"] != target_version
+            assert (await rolled_back.json())["release_id"] != target_version
 
             missing = await client.post(
                 "/reef/scenarios/math/rollback",
-                json={"artifact_version": "missing"},
+                json={"release_id": "missing"},
             )
             assert missing.status == 404
         finally:

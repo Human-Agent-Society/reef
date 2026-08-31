@@ -111,7 +111,7 @@ def test_two_by_two_smoke_waits_for_each_training_commit(tmp_path) -> None:
     outcome = controller.run(2)
 
     assert len(outcome.results) == 8
-    assert (outcome.start_step, outcome.next_step, outcome.weight_version) == (0, 2, "v2")
+    assert (outcome.start_step, outcome.next_step, outcome.runtime_load_id) == (0, 2, "v2")
     assert events.index(("tttd_step_committed", 0)) < events.index(("run", 1))
     assert store.load()["phase"] == "committed"
     assert store.load()["archive"] == {"steps": [0, 1]}
@@ -135,7 +135,7 @@ def test_commit_event_reports_archive_progress(tmp_path) -> None:
         "event": "tttd_step_committed",
         "step": 0,
         "next_step": 1,
-        "weight_version": "v1",
+        "runtime_load_id": "v1",
         "archive_size": 1,
         "archive_best_reward": 1.0,
     }
@@ -144,7 +144,7 @@ def test_commit_event_reports_archive_progress(tmp_path) -> None:
 @pytest.mark.unit
 def test_pending_archive_finishes_recovered_training_before_resuming(tmp_path) -> None:
     store = TTTDRunStateStore(tmp_path / "state.json", _identity())
-    store.save_pending(next_step=1, previous_weight_version="v0", archive={"steps": [0]})
+    store.save_pending(next_step=1, previous_runtime_load_id="v0", archive={"steps": [0]})
     harness = _Harness([])
     reader = _StatusReader([_status(0, "v0"), _status(1, "v1")])
     controller = TTTDRunController(harness, reader, store, poll_interval_s=0.01, sleep=lambda _seconds: None)
@@ -154,7 +154,7 @@ def test_pending_archive_finishes_recovered_training_before_resuming(tmp_path) -
     assert outcome.results == ()
     assert harness.archive.steps == [0]
     assert store.load()["phase"] == "committed"
-    assert store.load()["weight_version"] == "v1"
+    assert store.load()["runtime_load_id"] == "v1"
 
 
 @pytest.mark.unit
@@ -180,14 +180,14 @@ def test_commit_waits_for_serving_version_reconciliation(tmp_path) -> None:
 
     outcome = controller.run(1)
 
-    assert outcome.weight_version == "v1"
+    assert outcome.runtime_load_id == "v1"
     assert ("sleep", None) in events
 
 
 @pytest.mark.unit
-def test_resume_rebinds_session_scoped_weight_version(tmp_path) -> None:
+def test_resume_rebinds_session_scoped_runtime_load_id(tmp_path) -> None:
     store = TTTDRunStateStore(tmp_path / "state.json", _identity())
-    store.save_committed(next_step=1, weight_version="v1", archive={"steps": [0]})
+    store.save_committed(next_step=1, runtime_load_id="v1", archive={"steps": [0]})
     events = []
     controller = TTTDRunController(
         _Harness(events),
@@ -201,14 +201,14 @@ def test_resume_rebinds_session_scoped_weight_version(tmp_path) -> None:
     outcome = controller.run(1)
 
     assert outcome.results == ()
-    assert outcome.weight_version == "new-session-v1"
-    assert store.load()["weight_version"] == "new-session-v1"
+    assert outcome.runtime_load_id == "new-session-v1"
+    assert store.load()["runtime_load_id"] == "new-session-v1"
     assert events == [
         {
-            "event": "tttd_weight_version_rebound",
+            "event": "tttd_runtime_load_id_rebound",
             "step": 1,
-            "previous_weight_version": "v1",
-            "weight_version": "new-session-v1",
+            "previous_runtime_load_id": "v1",
+            "runtime_load_id": "new-session-v1",
         }
     ]
 
@@ -216,7 +216,7 @@ def test_resume_rebinds_session_scoped_weight_version(tmp_path) -> None:
 @pytest.mark.unit
 def test_resume_fails_closed_when_reef_and_archive_steps_disagree(tmp_path) -> None:
     store = TTTDRunStateStore(tmp_path / "state.json", _identity())
-    store.save_committed(next_step=1, weight_version="v1", archive={"steps": [0]})
+    store.save_committed(next_step=1, runtime_load_id="v1", archive={"steps": [0]})
     controller = TTTDRunController(
         _Harness([]),
         _StatusReader([_status(2, "v2")]),
@@ -248,7 +248,7 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
                     "scenarios": {
                         "smoke": {
                             "scenario_step": 1,
-                            "current_weight_version": "v1",
+                            "current_runtime_load_id": "v1",
                             "batch_ready": False,
                             "processor": {"failed_steps": []},
                         }
@@ -279,11 +279,11 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
 def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path) -> None:
     failure = ScenarioTrainingFailure(
         step=0,
-        reason="mixed_artifact_versions",
-        artifact_versions=("v0", "v1"),
+        reason="mixed_release_ids",
+        release_ids=("v0", "v1"),
     )
     store = TTTDRunStateStore(tmp_path / "state.json", _identity())
-    store.save_pending(next_step=1, previous_weight_version="v0", archive={"steps": [0]})
+    store.save_pending(next_step=1, previous_runtime_load_id="v0", archive={"steps": [0]})
     controller = TTTDRunController(
         _Harness([]),
         _StatusReader([ScenarioTrainingStatus(0, "v0", False, (failure,))]),
@@ -292,5 +292,5 @@ def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path
         sleep=lambda _seconds: None,
     )
 
-    with pytest.raises(TTTDRunStateError, match="mixed_artifact_versions"):
+    with pytest.raises(TTTDRunStateError, match="mixed_release_ids"):
         controller.run(1)

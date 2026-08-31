@@ -109,10 +109,10 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
             return {"open": self.open, "active": 0}
 
         @staticmethod
-        def serving_weight_version():
+        def serving_runtime_load_id():
             return "engine:new"
 
-        def current_weight_version(self):
+        def current_runtime_load_id(self):
             return self.current
 
     monkeypatch.setattr(dispatcher_module, "TrainingRuntime", Runtime)
@@ -124,14 +124,14 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
     )
 
     status = dispatcher.training_status["scenarios"]["s"]
-    assert status["current_weight_version"] == "engine:old"
+    assert status["current_runtime_load_id"] == "engine:old"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
     runtime = dispatcher._registry.get_optional("s").runtime
     runtime.current = "engine:new"
     runtime.open = True
     status = dispatcher.training_status["scenarios"]["s"]
-    assert status["current_weight_version"] == "engine:new"
+    assert status["current_runtime_load_id"] == "engine:new"
     assert status["inference_admission"] == {"open": True, "active": 0}
 
 
@@ -141,8 +141,8 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
         "failed_steps": [
             {
                 "step": 1,
-                "reason": "mixed_artifact_versions",
-                "artifact_versions": ["old", "new"],
+                "reason": "mixed_release_ids",
+                "release_ids": ["old", "new"],
             }
         ]
     }

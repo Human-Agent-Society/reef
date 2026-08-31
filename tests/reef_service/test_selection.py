@@ -35,7 +35,7 @@ def evaluation() -> EvaluationResult:
 
 
 def test_always_select_returns_an_explainable_structured_decision() -> None:
-    candidate = UpdateCandidate("job-7", current_version="version-6")
+    candidate = UpdateCandidate("job-7")
     decision = AlwaysSelect().decide(candidate, evaluation())
 
     assert decision.selected is True
@@ -107,16 +107,9 @@ def test_rejected_decision_is_not_selected() -> None:
     assert decision.selected is False
 
 
-@pytest.mark.parametrize(
-    ("candidate_id", "current_version", "message"),
-    [
-        ("", None, "candidate_id"),
-        ("job-1", "", "current_version"),
-    ],
-)
-def test_candidate_identity_is_validated(candidate_id, current_version, message) -> None:
-    with pytest.raises(ValueError, match=message):
-        UpdateCandidate(candidate_id, current_version=current_version)
+def test_candidate_identity_is_validated() -> None:
+    with pytest.raises(ValueError, match="candidate_id"):
+        UpdateCandidate("")
 
 
 def test_decision_rejects_an_unknown_outcome() -> None:
@@ -135,8 +128,8 @@ def test_model_candidate_records_the_unactivated_checkpoint() -> None:
         candidate_id="job-7",
         training_job_id="job-7",
         checkpoint_path="/checkpoints/job-7",
-        current_weight_version="inc:6",
+        current_runtime_load_id="inc:6",
     )
 
-    assert candidate.current_weight_version == "inc:6"
-    assert ActivatedModel(candidate.candidate_id, "inc:7").weight_version == "inc:7"
+    assert candidate.current_runtime_load_id == "inc:6"
+    assert ActivatedModel(candidate.candidate_id, "inc:7").runtime_load_id == "inc:7"

@@ -117,7 +117,7 @@ def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) ->
                                 "rollout_log_probs": [-0.3, -0.2],
                                 "topk_indices": [[1, 2], [3, 4]],
                                 "topk_log_probs": [[-0.1, -0.2], [-0.3, -0.4]],
-                                "weight_version": version,
+                                "runtime_load_id": version,
                             },
                         },
                     },
@@ -145,7 +145,7 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
     batch = processor.build_batch()
-    versions = {sample.weight_version for sample in batch.samples}
+    versions = {sample.runtime_load_id for sample in batch.samples}
     assert versions == {"v2"}
     assert len(batch.samples) == 3
 

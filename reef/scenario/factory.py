@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,16 +81,13 @@ class _RecoveredHead:
 def _consumed_by_committed_steps(
     commit_log: CommitLog | None,
     head_record: CommitRecord | None,
-) -> frozenset[str] | None:
-    """The rows every committed step's batch consumed, or ``None`` when unknown.
+) -> frozenset[str]:
+    """The rows every committed step's batch consumed.
 
     Rehydration must skip these rows: retention may keep a consumed row stored
     (audit-only retention is contract-legal), and re-ingesting one would train
     it twice. Consumption is permanent, so the union over the whole log is the
-    exclusion set. A record written before the consumed_ids field cannot name
-    what its batch trained, so any such record makes the whole set unknown and
-    recovery skips re-ingestion for the scenario, preserving the pre-field
-    behavior for old state rather than risking a re-train.
+    exclusion set.
     """
     records = commit_log.records() if commit_log is not None else ()
     if not records and head_record is not None:
@@ -100,8 +96,6 @@ def _consumed_by_committed_steps(
         records = (head_record,)
     consumed: set[str] = set()
     for record in records:
-        if record.consumed_ids is None:
-            return None
         consumed |= record.consumed_ids
     return frozenset(consumed)
 
@@ -136,7 +130,7 @@ class ScenarioFactory:
         self,
         scenario: str,
         recipe: str | None = None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> Scenario:
         """Create or recover a scenario.
 
@@ -161,15 +155,15 @@ class ScenarioFactory:
                 backend,
                 snapshot_data,
                 recipe=recipe,
-                artifact_version=artifact_version,
+                release_id=release_id,
             )
 
         if recipe is None:
             raise ReefError(f"no served recipe to bind scenario {scenario!r} to")
         self._recipes.resolve(recipe)
-        selected = backend.resolve_version(artifact_version)
+        selected = backend.resolve_release(release_id)
         backend.fork(
-            selected.version,
+            selected.release_id,
             metadata={
                 SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata_for(
                     name=scenario,
@@ -193,17 +187,17 @@ class ScenarioFactory:
             backend,
             persisted_snapshot,
             recipe=recipe,
-            # Freeze moving selectors such as "latest" at the version resolved
+            # Freeze moving selectors such as "head" at the release resolved
             # for this create attempt. If another creator won, its persisted
             # base must still match the version this caller observed.
-            artifact_version=selected.version,
+            release_id=selected.release_id,
         )
 
     def validate_existing(
         self,
         current: Scenario,
         recipe: str | None,
-        artifact_version: str | None,
+        release_id: str | None,
     ) -> None:
         self._validate_binding_selectors(
             current.name,
@@ -211,7 +205,7 @@ class ScenarioFactory:
             current.repository.base_artifact,
             current.repository.backend,
             recipe,
-            artifact_version,
+            release_id,
         )
 
     def _recover(
@@ -221,21 +215,21 @@ class ScenarioFactory:
         snapshot_data: object,
         *,
         recipe: str | None,
-        artifact_version: str | None,
+        release_id: str | None,
     ) -> Scenario:
         if not isinstance(snapshot_data, Mapping):
             raise ValueError(f"invalid scenario snapshot for {scenario!r}")
         snapshot = parse_snapshot_metadata(snapshot_data)
         if snapshot.scenario != scenario:
             raise ValueError(f"scenario snapshot is for {snapshot.scenario!r}, not {scenario!r}")
-        base_artifact = backend.resolve_version(snapshot.base_artifact.version)
+        base_artifact = backend.resolve_release(snapshot.base_artifact.release_id)
         self._validate_binding_selectors(
             scenario,
             snapshot.recipe,
             base_artifact,
             backend,
             recipe,
-            artifact_version,
+            release_id,
         )
         recipe_definition = self._recipes.resolve(snapshot.recipe)
         surface = recipe_definition.build_surface(scenario)
@@ -250,7 +244,7 @@ class ScenarioFactory:
             snapshot_record_progress=snapshot.record_progress,
             snapshot_training_job_id=snapshot.training_job_id,
             snapshot_operation=snapshot.operation,
-            snapshot_rollback_target_artifact_version=snapshot.rollback_target_artifact_version,
+            snapshot_rollback_target_release_id=snapshot.rollback_target_release_id,
             checkpoint_head=checkpoint_head,
         )
         head = (
@@ -296,8 +290,7 @@ class ScenarioFactory:
             recovered.records.compact(scenario, head.compacted_ids)
         if head.high_water is not None:
             consumed = _consumed_by_committed_steps(commit_log, head_record)
-            if consumed is not None:
-                recovered.reingest(up_to_sequence=head.high_water[0], consumed_ids=consumed)
+            recovered.reingest(up_to_sequence=head.high_water[0], consumed_ids=consumed)
             recovered.restore_record_progress(
                 after_sequence=head.high_water[0],
                 offset=head.high_water[1],
@@ -375,16 +368,13 @@ class ScenarioFactory:
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger,
     ) -> Trainer:
-        """Inject logging when supported while preserving legacy recipes."""
-        parameters = inspect.signature(recipe.build).parameters.values()
-        supports_experiment_logger = any(
-            parameter.name == "experiment_logger" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-            for parameter in parameters
+        """Build a recipe trainer with the complete current recipe contract."""
+        return recipe.build(
+            scenario,
+            records,
+            algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
         )
-        kwargs: dict[str, Any] = {"algorithm_state": algorithm_state}
-        if supports_experiment_logger:
-            kwargs["experiment_logger"] = experiment_logger
-        return recipe.build(scenario, records, **kwargs)
 
     def _artifact_selector_matches(
         self,
@@ -392,10 +382,10 @@ class ScenarioFactory:
         selector: str,
         backend: RepositoryBackend,
     ) -> bool:
-        if selector == base_artifact.version or selector == base_artifact.artifact_id:
+        if selector == base_artifact.release_id:
             return True
         try:
-            return backend.resolve_version(selector).version == base_artifact.version
+            return backend.resolve_release(selector).release_id == base_artifact.release_id
         except ArtifactNotFound:
             return False
 
@@ -406,19 +396,19 @@ class ScenarioFactory:
         base_artifact: ArtifactRef,
         backend: RepositoryBackend,
         recipe: str | None,
-        artifact_version: str | None,
+        release_id: str | None,
     ) -> None:
         """Refuse request selectors that conflict with the existing binding."""
         if recipe is not None and recipe != bound_recipe:
             raise ScenarioRecipeConflict(
                 f"scenario {scenario!r} is already bound to recipe {bound_recipe!r}, not {recipe!r}"
             )
-        if artifact_version is not None and not self._artifact_selector_matches(
+        if release_id is not None and not self._artifact_selector_matches(
             base_artifact,
-            artifact_version,
+            release_id,
             backend,
         ):
             raise ArtifactConflict(
-                f"scenario {scenario!r} is already bound to artifact version "
-                f"{base_artifact.version!r}, not {artifact_version!r}"
+                f"scenario {scenario!r} is already bound to release "
+                f"{base_artifact.release_id!r}, not {release_id!r}"
             )

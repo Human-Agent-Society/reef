@@ -158,14 +158,14 @@ class Dispatcher:
         self,
         scenario: str,
         recipe: str | None = None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         *,
         allow_implicit_creation: bool | None = None,
     ) -> Scenario | None:
         return self._registry.get_or_create(
             scenario,
             recipe,
-            artifact_version,
+            release_id,
             allow_implicit_creation=allow_implicit_creation,
         )
 
@@ -178,9 +178,9 @@ class Dispatcher:
     def file_recipe_names(self) -> tuple[str, ...]:
         return self._registry.file_recipe_names()
 
-    def list_versions(self, scenario: str) -> tuple[dict[str, Any], ...]:
+    def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
-            return self._registry.require(scenario).versions()
+            return self._registry.require(scenario).releases()
 
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
@@ -193,12 +193,12 @@ class Dispatcher:
                 "required_request_types": sorted(rt.value for rt in processor.required_request_types),
             }
 
-    def rollback(self, scenario: str, artifact_version: str) -> ArtifactRef:
+    def rollback(self, scenario: str, release_id: str) -> ArtifactRef:
         with self._registry.lock_for(scenario):
             current = self._registry.require(scenario)
             source = current.current_artifact_ref()
             context = self._experiment_context(current)
-            published = current.rollback(artifact_version)
+            published = current.rollback(release_id)
             if published == source:
                 return published
             event = RollbackExperimentEvent(
@@ -208,7 +208,7 @@ class Dispatcher:
                 run_segment=context.run_segment,
                 source_artifact_ref=source,
                 produced_artifact_ref=published,
-                target_artifact_version=artifact_version,
+                target_release_id=release_id,
             )
         try:
             self._experiment_tracker.record_rollback(event)
@@ -220,9 +220,9 @@ class Dispatcher:
         self,
         scenario: str,
         recipe: str | None = None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> Artifact:
-        current = self.get_or_create_scenario(scenario, recipe, artifact_version)
+        current = self.get_or_create_scenario(scenario, recipe, release_id)
         if current is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         return Artifact(current.repository.require_current_artifact(), current.repository)
@@ -234,10 +234,10 @@ class Dispatcher:
         item: AgentRecord,
         *,
         recipe: str | None = None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
     ) -> AgentRecord:
         with self._registry.lock_for(item.scenario):
-            current = self.get_or_create_scenario(item.scenario, recipe, artifact_version)
+            current = self.get_or_create_scenario(item.scenario, recipe, release_id)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             return self._accept_record(current, item)
@@ -292,8 +292,8 @@ class Dispatcher:
                     metrics=dict(tracked_result.metrics),
                     outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
                     training_job_id=tracked_result.training_job_id,
-                    source_weight_version=tracked_result.source_weight_version,
-                    produced_weight_version=tracked_result.weight_version,
+                    source_runtime_load_id=tracked_result.source_runtime_load_id,
+                    produced_runtime_load_id=tracked_result.runtime_load_id,
                     checkpoint_path=tracked_result.checkpoint_path,
                 )
             )
@@ -610,8 +610,8 @@ class Dispatcher:
                         # A version is current only after Reef commits its head
                         # and reopens admission. The backend may report it
                         # earlier while the update is still being published.
-                        "current_weight_version": (
-                            runtime.current_weight_version() if isinstance(runtime, TrainingRuntime) else None
+                        "current_runtime_load_id": (
+                            runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
                         ),
                         "checkpoint_storage": storage_status,
                         "batch_ready": batch_ready,
@@ -621,7 +621,7 @@ class Dispatcher:
                     if isinstance(runtime, TrainingRuntime) and getattr(
                         runtime, "concurrent_training_scenarios", False
                     ):
-                        block["adapter_weight_version"] = runtime.serving_adapter_version(scenario_name)
+                        block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
                     scenarios[scenario_name] = block
             except Exception as exc:  # noqa: PERF203
                 status_error = f"{scenario_name}: {self._error_text(exc)}"

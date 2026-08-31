@@ -19,11 +19,11 @@ logger = logging.getLogger(__name__)
 class ReefRayTrainGroup(RayTrainGroup):
     """Expose the small control surface Reef needs from a Slime group."""
 
-    _disk_weight_version: int
+    _disk_runtime_load_id: int
 
-    def restore_weight_version_for_republication(self, weight_version: str):
+    def restore_runtime_load_id_for_republication(self, runtime_load_id: str):
         return ray.get(
-            [actor.restore_weight_version_for_republication.remote(weight_version) for actor in self._actor_handlers]
+            [actor.restore_runtime_load_id_for_republication.remote(runtime_load_id) for actor in self._actor_handlers]
         )
 
     def async_pop_rank0_metrics(self):
@@ -36,19 +36,19 @@ class ReefRayTrainGroup(RayTrainGroup):
             raise RuntimeError(f"actors disagree about prior state for scenario {scenario!r}: {existed!r}")
         return bool(existed[0])
 
-    def sync_serving_weight_version(self) -> str:
-        """Stamp the group's current weight-version token on the engines."""
-        versions = ray.get([actor.sync_serving_weight_version.remote() for actor in self._actor_handlers])
+    def sync_serving_runtime_load_id(self) -> str:
+        """Stamp the group's current runtime-load-ID token on the engines."""
+        versions = ray.get([actor.sync_serving_runtime_load_id.remote() for actor in self._actor_handlers])
         if len(set(versions)) != 1:
-            raise RuntimeError(f"Slime workers disagree on the weight version: {versions!r}")
+            raise RuntimeError(f"Slime workers disagree on the runtime load ID: {versions!r}")
         return str(versions[0])
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Re-register one scenario's adapter without a serving version bump."""
         ray.get([actor.publish_adapter.remote(scenario, lora_name) for actor in self._actor_handlers])
 
-    def async_get_rank0_weight_version(self):
-        return self._actor_handlers[0].get_weight_version.remote()
+    def async_get_rank0_runtime_load_id(self):
+        return self._actor_handlers[0].get_runtime_load_id.remote()
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         if not self._full_disk_weight_update_enabled():
@@ -64,7 +64,7 @@ class ReefRayTrainGroup(RayTrainGroup):
                 ]
             )
 
-        disk_sequence = self._disk_weight_version + 1
+        disk_sequence = self._disk_runtime_load_id + 1
         disk_weight_dir = Path(self.args.update_weight_disk_dir) / f"weight_v{disk_sequence:06d}"
         if manage_generation and not force_full:
             updates = [actor.update_weights.remote() for actor in self._actor_handlers]
@@ -77,14 +77,14 @@ class ReefRayTrainGroup(RayTrainGroup):
                 for actor in self._actor_handlers
             ]
         ray.get(updates)
-        self._disk_weight_version = disk_sequence
-        serving_weight_version = str(ray.get(self.async_get_rank0_weight_version()))
+        self._disk_runtime_load_id = disk_sequence
+        serving_runtime_load_id = str(ray.get(self.async_get_rank0_runtime_load_id()))
         if self._release_train_enabled():
             self.release()
         return self._reload_rollout_weights_from_disk(
             disk_weight_dir,
             disk_sequence,
-            serving_weight_version,
+            serving_runtime_load_id,
             manage_generation=manage_generation,
         )
 
@@ -92,7 +92,7 @@ class ReefRayTrainGroup(RayTrainGroup):
         self,
         disk_weight_dir: Path,
         disk_sequence: int,
-        serving_weight_version: str,
+        serving_runtime_load_id: str,
         *,
         manage_generation: bool,
     ) -> None:
@@ -119,21 +119,21 @@ class ReefRayTrainGroup(RayTrainGroup):
             [
                 engine.update_weights_from_disk.remote(
                     model_path=model_path,
-                    weight_version=serving_weight_version,
+                    runtime_load_id=serving_runtime_load_id,
                 )
                 for engine in engines
             ]
         )
         if self.args.ci_test:
-            engine_versions = ray.get([engine.get_weight_version.remote() for engine in engines])
+            engine_versions = ray.get([engine.get_runtime_load_id.remote() for engine in engines])
             mismatches = [
                 f"engine {index}: {engine_version}"
                 for index, engine_version in enumerate(engine_versions)
-                if str(engine_version) != serving_weight_version
+                if str(engine_version) != serving_runtime_load_id
             ]
             if mismatches:
                 raise RuntimeError(
-                    f"weight version mismatch after disk reload; expected {serving_weight_version}: "
+                    f"runtime load ID mismatch after disk reload; expected {serving_runtime_load_id}: "
                     + ", ".join(mismatches)
                 )
         if not self.args.update_weight_disk_keep_files:

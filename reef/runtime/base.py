@@ -38,7 +38,7 @@ class TrainingJobResult:
     """
 
     outcome: Literal["complete", "checkpoint", "stale", "storage_blocked"]
-    weight_version: str
+    runtime_load_id: str
     checkpoint_path: str | None = None
     storage: Mapping[str, Any] | None = None
     metrics: Mapping[str, Any] | None = None
@@ -50,8 +50,8 @@ class TrainingJobResult:
         # be published as a durable version pointing at nothing.
         if self.outcome in {"complete", "checkpoint"} and not self.checkpoint_path:
             raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported")
-        if not self.weight_version:
-            raise ValueError("a training job result must report a weight version")
+        if not self.runtime_load_id:
+            raise ValueError("a training job result must report a runtime load ID")
         if self.training_job_id is not None and (
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
@@ -227,8 +227,8 @@ class TrainingRuntime(InferenceRuntime, ABC):
         """
         return 0
 
-    def serving_weight_version(self) -> str | None:
-        """The weight version the serving engine currently reports, if knowable.
+    def serving_runtime_load_id(self) -> str | None:
+        """The runtime load ID the serving engine currently reports, if knowable.
 
         A read-only probe used at recovery to detect an engine that disagrees
         with the recovered head. ``None`` means the runtime cannot tell;
@@ -266,22 +266,22 @@ class TrainingRuntime(InferenceRuntime, ABC):
         """
         return False
 
-    def serving_adapter_version(self, scenario: str) -> str | None:
-        """The serving weight version of ``scenario``'s resident adapter.
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
+        """The serving runtime load ID of ``scenario``'s resident adapter.
 
         ``None`` when the runtime does not serve per-scenario adapters or the
         scenario has published nothing yet (requests then sample the base).
         """
         return None
 
-    def current_weight_version(self) -> str | None:
+    def current_runtime_load_id(self) -> str | None:
         """Return the version Reef has made available to new inference.
 
         The default is suitable for runtimes whose serving update and Reef
         publication are one operation. Runtimes with a deferred commit
         handshake retain the previous value until that handshake completes.
         """
-        return self.serving_weight_version() if self.inference_admission_status.get("open") is True else None
+        return self.serving_runtime_load_id() if self.inference_admission_status.get("open") is True else None
 
     def restore_checkpoint(self, artifact: Artifact) -> str:
         """Restore training and serving weights from a durable artifact.

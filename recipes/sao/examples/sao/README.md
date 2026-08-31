@@ -146,14 +146,14 @@ and generation window are constants at the top of `harness/agent.py`, and
 the port and token they use are the ones written in `serve.yaml`. The task
 list is `TASKS` in `run.py`.
 
-### Reading the version chain and the metrics
+### Reading the release chain and the metrics
 
 Each scored rollout publishes one `training` entry to the scenario's version
 chain:
 
 ```bash
 curl -s -H "Authorization: Bearer reef-local" \
-    http://127.0.0.1:8900/reef/scenarios/sao-smoke/versions
+    http://127.0.0.1:8900/reef/scenarios/sao-smoke/releases
 ```
 
 The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask

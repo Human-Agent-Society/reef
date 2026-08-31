@@ -31,7 +31,7 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         scenario: str,
         model: str,
         recipe: str = "tttd",
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         inference_path: str = "/v1/chat/completions",
         groups_per_step: int = 8,
         rollouts_per_group: int = 64,
@@ -54,7 +54,7 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         self.client = client
         self.scenario = scenario
         self.recipe = recipe
-        self.artifact_version = artifact_version
+        self.release_id = release_id
         self.inference_path = inference_path
 
     def _rollout(
@@ -65,12 +65,13 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         group_index: int,
         rollout_index: int,
     ) -> RolloutResult:
+        release_headers = {} if self.release_id is None else {"x-reef-release-id": self.release_id}
         response, agent_record_id = self.client.inference_with_record(
             self.scenario,
             self.inference_path,
             self._request_payload(parent),
             recipe=self.recipe,
-            artifact_version=self.artifact_version,
+            extra_headers=release_headers,
         )
 
         result = dataclasses.replace(
@@ -97,6 +98,6 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
                 },
             },
             recipe=self.recipe,
-            artifact_version=self.artifact_version,
+            extra_headers=release_headers,
         )
         return result

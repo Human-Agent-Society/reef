@@ -1,4 +1,4 @@
-"""Storage for the version chain: every committed version as an immutable artifact.
+"""Storage for the release chain: every publication as an immutable release.
 
 The package owns bytes and heads — persisted, staged, materialized on
 demand. *When* a head moves is the scenario commit protocol's decision, one
@@ -7,13 +7,13 @@ level up. Boundaries this package holds:
 - Repository backends are scenario-agnostic. A backend stores one
   repository; the factory owns the scenario-name-to-backend mapping. Nothing
   here knows what a scenario, trainer, or commit log is;
-  ``ArtifactVersionChain``'s caller decides transaction ordering.
-- Versions are immutable and heads move only by compare-and-swap
+  ``ArtifactReleaseChain``'s caller decides transaction ordering.
+- Releases are immutable and heads move only by compare-and-swap
   (``advance_current`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
-  (``ArtifactConflict``) instead of losing a version.
-- A ``local:`` version has identity but no durable bytes; recovery and
-  rollback refuse it as a restore source (``VersionNotRestorable``).
+  (``ArtifactConflict``) instead of losing a release.
+- A ``local:`` release has identity but no durable bytes; recovery and
+  rollback refuse it as a restore source (``ReleaseNotRestorable``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
@@ -35,6 +35,7 @@ from reef.artifact.artifact import (
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
+from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
     CachedRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
@@ -51,7 +52,6 @@ from reef.artifact.sources import (
     download_huggingface_snapshot,
     parse_artifact_source,
 )
-from reef.artifact.version_chain import ArtifactVersionChain, VersionNotRestorable
 
 __all__ = [
     "AdapterArtifactError",
@@ -62,9 +62,9 @@ __all__ = [
     "ArtifactNotFound",
     "ArtifactPublicationError",
     "ArtifactRef",
+    "ArtifactReleaseChain",
     "ArtifactSource",
     "ArtifactSourceError",
-    "ArtifactVersionChain",
     "CachedRepositoryBackendFactory",
     "DownloadedSnapshot",
     "EnumerableRepositoryBackendFactory",
@@ -75,10 +75,10 @@ __all__ = [
     "LiveWeightArtifactRef",
     "PEFTValidator",
     "RegistrationAwareRepositoryBackendFactory",
+    "ReleaseNotRestorable",
     "Repository",
     "RepositoryBackend",
     "RepositoryBackendFactory",
-    "VersionNotRestorable",
     "download_huggingface_snapshot",
     "parse_artifact_source",
     "read_peft_config",

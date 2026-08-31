@@ -125,7 +125,7 @@ class ScenarioRegistry:
         self,
         scenario: str,
         recipe: str | None = None,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         *,
         allow_implicit_creation: bool | None = None,
     ) -> Scenario | None:
@@ -140,7 +140,7 @@ class ScenarioRegistry:
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, recipe, artifact_version)
+            return self._resolve(scenario, recipe, release_id)
 
     def require(self, scenario: str) -> Scenario:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
@@ -161,7 +161,9 @@ class ScenarioRegistry:
             row: dict[str, Any] = {"scenario": name, "loaded": current is not None}
             if current is not None:
                 row["recipe"] = current.recipe
-                row["artifact_version"] = current.repository.require_current_artifact().version
+                ref = current.repository.require_current_artifact()
+                row["release_id"] = ref.release_id
+                row["content_id"] = ref.content_id
             rows.append(row)
         return tuple(rows)
 
@@ -195,14 +197,14 @@ class ScenarioRegistry:
         self,
         scenario: str,
         recipe: str | None,
-        artifact_version: str | None,
+        release_id: str | None,
     ) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, recipe, artifact_version)
+            self._scenario_factory.validate_existing(current, recipe, release_id)
             return current
-        current = self._scenario_factory.load_or_create(scenario, recipe, artifact_version)
+        current = self._scenario_factory.load_or_create(scenario, recipe, release_id)
         training = isinstance(current.runtime, TrainingRuntime)
         with self._lock:
             shared_runtime = training and getattr(current.runtime, "concurrent_training_scenarios", False)

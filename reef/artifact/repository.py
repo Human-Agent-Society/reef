@@ -13,7 +13,7 @@ from time import monotonic
 from typing import Protocol, runtime_checkable
 
 from reef.artifact.artifact import (
-    LOCAL_VERSION_PREFIX,
+    LOCAL_RELEASE_PREFIX,
     Artifact,
     ArtifactConflict,
     ArtifactPublicationError,
@@ -25,12 +25,12 @@ class RepositoryBackend(ABC):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
-    def resolve_version(self, version: str | None = None) -> ArtifactRef: ...
+    def resolve_release(self, release_id: str | None = None) -> ArtifactRef: ...
 
     @abstractmethod
     def fork(
         self,
-        artifact_version: str | None = None,
+        release_id: str | None = None,
         *,
         metadata: Mapping[str, object] | None = None,
     ) -> ArtifactRef: ...
@@ -129,7 +129,7 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory, Protocol):
 
 
 class Repository:
-    """Scenario-scoped artifact version-chain and persistence facade."""
+    """Scenario-scoped release chain and persistence facade."""
 
     def __init__(
         self,
@@ -145,19 +145,19 @@ class Repository:
         self._current_artifact = current_artifact
         self._checkpoint_artifact = checkpoint_artifact
         # Guards every mutation of the (current, checkpoint) head pair so the
-        # two refs can only move as one atomic version record. Reads stay
+        # two refs can only move as one atomic release record. Reads stay
         # lock-free: a ref read is atomic under the GIL and readers must not
         # be serialized behind a publish.
         self._head_lock = Lock()
-        # Non-checkpointed pull-surface versions remain process-local. Keep
+        # Non-checkpointed pull-surface releases remain process-local. Keep
         # every staged artifact addressable for snapshot and rollback reads; a
         # single "latest local" slot would make an older snapshot dangle as
-        # soon as the next version staged.
+        # soon as the next release is staged.
         self._local_artifacts: dict[str, Artifact] = {}
         self._process_id = uuid.uuid4().hex
         self._temporary_directory = None
         if local_dir is None:
-            self._temporary_directory = tempfile.TemporaryDirectory(prefix="reef-artifact-versions-")
+            self._temporary_directory = tempfile.TemporaryDirectory(prefix="reef-artifact-releases-")
             self._local_root = Path(self._temporary_directory.name)
         else:
             self._local_root = Path(local_dir)
@@ -197,28 +197,28 @@ class Repository:
         """Move serving state without changing the last durable checkpoint.
 
         The move is a compare-and-swap: ``expected`` is the head the caller
-        observed when it prepared the new version. A mismatch means a
+        observed when it prepared the new release. A mismatch means a
         concurrent writer advanced the head in between, and fails loudly
         instead of blind-overwriting it (lost update).
         """
         with self._head_lock:
             if self._current_artifact != expected:
                 raise ArtifactConflict(
-                    f"serving head advanced from {expected.version} to "
-                    f"{None if self._current_artifact is None else self._current_artifact.version}; "
-                    f"refusing to advance to {ref.version}"
+                    f"serving head advanced from {expected.release_id} to "
+                    f"{None if self._current_artifact is None else self._current_artifact.release_id}; "
+                    f"refusing to advance to {ref.release_id}"
                 )
             self._current_artifact = ref
 
     def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
-        ref = self.backend.fork(self.base_artifact.version, metadata=metadata)
+        ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)
         with self._head_lock:
             self._current_artifact = ref
             self._checkpoint_artifact = ref
         return ref
 
     def materialize(self, ref: ArtifactRef) -> Artifact:
-        local = self._local_artifacts.get(ref.version)
+        local = self._local_artifacts.get(ref.release_id)
         if local is not None and local.ref == ref:
             return local
         return self.backend.materialize(ref).with_repository(self)
@@ -252,15 +252,15 @@ class Repository:
             raise ArtifactPublicationError(f"failed to stage artifact from {artifact.local_path}: {exc}") from exc
         staged = Artifact(
             ArtifactRef(
-                artifact_id=f"{LOCAL_VERSION_PREFIX}{uuid.uuid4().hex}",
-                version=f"{LOCAL_VERSION_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
-                parent_version=parent.version,
+                content_id=artifact.ref.content_id,
+                release_id=f"{LOCAL_RELEASE_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
+                parent_release_id=parent.release_id,
             ),
             self,
             local_path=destination,
             metadata=artifact.metadata,
         )
-        self._local_artifacts[staged.ref.version] = staged
+        self._local_artifacts[staged.ref.release_id] = staged
         return staged
 
     def publish(
@@ -290,8 +290,8 @@ class Repository:
         return ref
 
     def discard(self, artifact: Artifact) -> None:
-        if self._local_artifacts.get(artifact.ref.version) is artifact:
-            self._local_artifacts.pop(artifact.ref.version, None)
+        if self._local_artifacts.get(artifact.ref.release_id) is artifact:
+            self._local_artifacts.pop(artifact.ref.release_id, None)
         path = artifact.local_path
         artifact.discard()
         if path is not None:

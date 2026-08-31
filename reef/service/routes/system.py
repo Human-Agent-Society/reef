@@ -16,23 +16,21 @@ def register_health_route(app: web.Application) -> None:
 
 def register_system_routes(app: web.Application, *, request_service: RequestService) -> None:
     async def harness(request: web.Request) -> web.Response:
-        artifact_version = request.query.get("version") or None
-        manifest = await asyncio.to_thread(request_service.harness_manifest, request.headers, artifact_version)
+        release_id = request.query.get("release_id") or None
+        manifest = await asyncio.to_thread(request_service.harness_manifest, request.headers, release_id)
         return web.json_response(
             manifest,
-            headers={"x-reef-artifact-version": manifest["artifact_version"]},
+            headers={"x-reef-release-id": manifest["release_id"]},
         )
 
     async def harness_install(request: web.Request) -> web.Response:
-        artifact_version = request.query.get("version") or None
+        release_id = request.query.get("release_id") or None
         adapter = request.query.get("adapter")
-        script = await asyncio.to_thread(
-            request_service.harness_install_script, request.headers, adapter, artifact_version
-        )
+        script = await asyncio.to_thread(request_service.harness_install_script, request.headers, adapter, release_id)
         return web.Response(text=script, content_type="text/x-shellscript")
 
-    async def harness_versions(request: web.Request) -> web.Response:
-        catalog = await asyncio.to_thread(request_service.harness_versions, request.headers)
+    async def harness_releases(request: web.Request) -> web.Response:
+        catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
         return web.json_response(catalog)
 
     async def status(request: web.Request) -> web.Response:
@@ -41,7 +39,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
 
     app.router.add_get("/reef/harness", harness)
     app.router.add_get("/reef/harness/install", harness_install)
-    app.router.add_get("/reef/harness/versions", harness_versions)
+    app.router.add_get("/reef/harness/releases", harness_releases)
     app.router.add_get("/reef/status", status)
 
 

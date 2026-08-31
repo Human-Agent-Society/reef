@@ -21,7 +21,7 @@ INCARNATION = "inc"
 
 
 class _EngineVersion:
-    """One engine-global weight version shared by the group and the rollout manager."""
+    """One engine-global runtime load ID shared by the group and the rollout manager."""
 
     def __init__(self, sequence: int) -> None:
         self.sequence = sequence
@@ -42,7 +42,7 @@ class _SlottedGroup:
         self.publications: list[tuple[str, str]] = []
         self.train_calls: list[tuple[int, str | None]] = []
         self._actor_handlers = [_FakeRank(version=str(version))]
-        self._actor_handlers[0].get_weight_version = _RemoteMethod(lambda: str(self.version))
+        self._actor_handlers[0].get_runtime_load_id = _RemoteMethod(lambda: str(self.version))
 
     def activate_scenario(self, scenario: str) -> bool:
         existed = scenario in set(self.activations)
@@ -60,19 +60,19 @@ class _SlottedGroup:
     def async_pop_rank0_metrics(self):
         return self._actor_handlers[0].pop_metrics.remote()
 
-    def async_get_rank0_weight_version(self):
-        return self._actor_handlers[0].get_weight_version.remote()
+    def async_get_rank0_runtime_load_id(self):
+        return self._actor_handlers[0].get_runtime_load_id.remote()
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         del manage_generation, force_full
         self.version.sequence += 1
         self.publications.append((self.active or "?", str(self.version)))
 
-    def sync_serving_weight_version(self) -> str:
+    def sync_serving_runtime_load_id(self) -> str:
         return str(self.version)
 
-    def restore_weight_version_for_republication(self, weight_version):
-        self.version.sequence = int(weight_version.rsplit(":", 1)[1]) - 1
+    def restore_runtime_load_id_for_republication(self, runtime_load_id):
+        self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
 
     def save_model(self, rollout_id, force_sync=False):
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
@@ -99,7 +99,7 @@ class _Manager(_FakeRolloutManager):
     def __init__(self, version: _EngineVersion) -> None:
         super().__init__(["packed"])
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
-        self.get_weight_versions = _RemoteMethod(lambda: [str(version)])
+        self.get_runtime_load_ids = _RemoteMethod(lambda: [str(version)])
         self.paused: list[str] = []
         self.pause_generation_for_update = _RemoteMethod(lambda: self.paused.append("pause"))
         self.continue_generation_after_update = _RemoteMethod(lambda: self.paused.append("continue"))
@@ -139,10 +139,10 @@ def _actor(
 
 
 def _job(scenario: str, step: int, producing: str, *, max_staleness: int | None = None) -> dict:
-    payload = _payload([_sao_row(f"{scenario}-{step}", producing_weight_version=producing)])
-    payload.update(scenario=scenario, rollout_id=step, expected_weight_version=producing)
+    payload = _payload([_sao_row(f"{scenario}-{step}", producing_runtime_load_id=producing)])
+    payload.update(scenario=scenario, rollout_id=step, expected_runtime_load_id=producing)
     if max_staleness is not None:
-        payload.update(max_staleness=max_staleness, producing_weight_versions=[producing])
+        payload.update(max_staleness=max_staleness, producing_runtime_load_ids=[producing])
     return payload
 
 
@@ -168,11 +168,11 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     actor, group, _, template = _actor(tmp_path, version)
 
     a1 = _run(actor, _job("a", 0, "inc:0"))
-    assert a1.outcome == "complete" and a1.weight_version == "inc:1"
+    assert a1.outcome == "complete" and a1.runtime_load_id == "inc:1"
     b1 = _run(actor, _job("b", 0, "inc:1"))  # b's rollouts came from the engine after a published
-    assert b1.outcome == "complete" and b1.weight_version == "inc:2"
+    assert b1.outcome == "complete" and b1.runtime_load_id == "inc:2"
     a2 = _run(actor, _job("a", 1, "inc:2"))
-    assert a2.outcome == "complete" and a2.weight_version == "inc:3"
+    assert a2.outcome == "complete" and a2.runtime_load_id == "inc:3"
 
     # Each job activated its own scenario before training; the bridge's
     # checkpoint index stays one sequence while scenario steps are per scenario.
@@ -182,7 +182,7 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
 
     ledger = ScenarioLedger(ledger_path(template))
     assert ledger.status()["a"] == {
-        "weight_version": "inc:3",
+        "runtime_load_id": "inc:3",
         "adapter": scenario_adapter_name("a", "inc:3"),
         "publications": 2,
         "rollout_id": 2,
@@ -191,7 +191,7 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     assert ledger.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
-    assert health["lora_adapters"]["b"]["weight_version"] == "inc:2"
+    assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
     assert health["training_job"]["scenario"] == "a" and health["training_job"]["rollout_id"] == 1
 
 
@@ -247,10 +247,10 @@ def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray
     assert group.publications == [("a", "inc:4")]
     assert manager.paused == ["pause", "continue"]
     assert restarted.health()["phase"] == "serving"
-    assert restarted.serving_weight_version() == "inc:4"
+    assert restarted.serving_runtime_load_id() == "inc:4"
     # The residency manager starts from the reloaded set, not from empty.
     residency = restarted.health()["adapter_residency"]
-    assert {name: block["current"]["version"] for name, block in residency["scenarios"].items()} == {
+    assert {name: block["current"]["runtime_load_id"] for name, block in residency["scenarios"].items()} == {
         "a": "inc:4",
         "b": "inc:2",
         "c": "inc:3",
@@ -279,7 +279,7 @@ def test_publication_evicts_the_oldest_superseded_revision_never_a_peers_current
     assert residency["scenarios"]["a"]["resident"] == ["inc:3"]
     assert residency["scenarios"]["b"]["resident"] == ["inc:2", "inc:4"]
     assert residency["scenarios"]["b"]["current"] == {
-        "version": "inc:4",
+        "runtime_load_id": "inc:4",
         "adapter": scenario_adapter_name("b", "inc:4"),
     }
     assert residency["counters"]["evictions"] == 1
@@ -335,12 +335,12 @@ def test_a_dead_engine_publication_recovers_in_place_on_retry(tmp_path, _local_r
 
     recovered = actor.update_serving_weights(result.training_job_id)
     assert manager.recovered == 1
-    assert recovered.outcome == "complete" and recovered.weight_version == "inc:2"
+    assert recovered.outcome == "complete" and recovered.runtime_load_id == "inc:2"
     actor.acknowledge_training_commit(recovered.training_job_id)
     assert actor.health()["phase"] == "serving"
     residency = actor.health()["adapter_residency"]
     assert residency["leaked"] == 0
-    assert residency["scenarios"]["a"]["current"]["version"] == "inc:2"
+    assert residency["scenarios"]["a"]["current"]["runtime_load_id"] == "inc:2"
     # The fresh engine held nothing, so nothing was (or had to be) unloaded.
     assert manager.engine.unloaded == []
 

@@ -120,9 +120,9 @@ class RequestHeadersFactory(Protocol):
     def __call__(self, artifact: Artifact, path: str) -> Mapping[str, str]: ...
 
 
-def artifact_identity_headers(artifact: Artifact) -> dict[str, str]:
+def content_identity_headers(artifact: Artifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
-    headers = {"x-reef-artifact-version": artifact.ref.version}
+    headers = {"x-reef-release-id": artifact.ref.release_id}
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -130,7 +130,7 @@ def artifact_identity_headers(artifact: Artifact) -> dict[str, str]:
 
 def default_artifact_request_headers(artifact: Artifact, path: str = "") -> Mapping[str, str]:
     """The default :data:`RequestHeadersFactory`: identity headers for every path."""
-    return artifact_identity_headers(artifact)
+    return content_identity_headers(artifact)
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -144,7 +144,7 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
         raise ValueError("api_key must be non-empty")
 
     def headers_for(artifact: Artifact, path: str) -> Mapping[str, str]:
-        headers = artifact_identity_headers(artifact)
+        headers = content_identity_headers(artifact)
         if path == "/v1/messages":
             headers["x-api-key"] = api_key
             headers["anthropic-version"] = "2023-06-01"
@@ -289,8 +289,8 @@ __all__ = [
     "InferenceStream",
     "RequestHeadersFactory",
     "UpstreamStatusError",
-    "artifact_identity_headers",
     "build_http_inference_backend",
+    "content_identity_headers",
     "default_artifact_request_headers",
     "provider_request_headers",
 ]

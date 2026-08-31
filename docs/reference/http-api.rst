@@ -27,19 +27,19 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                         | every known scenario, recipe, and current version |
+| ``GET /reef/scenarios``                         | every known scenario, recipe, and current release |
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``     | what this scenario accepts                        |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/versions``     | ``{scenario, versions}``, newest first            |
+| ``GET /reef/scenarios/{scenario}/releases``     | ``{scenario, releases}``, newest first            |
 +-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/rollback``    | republish an earlier version as the head          |
+| ``POST /reef/scenarios/{scenario}/rollback``    | republish an earlier release as the head          |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                           | the served harness tree                           |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/versions``                  | the harness version catalog, oldest first         |
+| ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                   | a shell script that installs the tree             |
 +-------------------------------------------------+---------------------------------------------------+
@@ -52,15 +52,15 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | Header                            | Required for                                            |
 +===================================+=========================================================+
-| ``x-reef-scenario``               | inference, report, harness manifest and versions;       |
+| ``x-reef-scenario``               | inference, report, harness manifest and releases;       |
 |                                   | optional on harness install. Names the workload a       |
 |                                   | record belongs to.                                      |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
 |                                   | configured.                                             |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-artifact-version``       | optional: on the request that creates a scenario, the   |
-|                                   | starting artifact version to bind. A later request      |
+| ``x-reef-release-id``             | optional: pin inference to this release, or bind a new  |
+|                                   | scenario to this starting release. A later request      |
 |                                   | naming a different one is HTTP 409.                     |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: opaque key/value context stored  |
@@ -88,12 +88,12 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "recipe", "artifact_version"?}`` |
-|                                             | → ``{scenario, recipe, artifact_version}``; |
+| ``POST /reef/scenarios``                    | ``{"name", "recipe", "release_id"?}``          |
+|                                             | → ``{scenario, recipe, release_id, content_id}``;   |
 |                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario with its recipe and    |
-|                                             | current version once loaded                 |
+|                                             | current release once loaded                 |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, recipe, processor,             |
 |                                             | required_request_types}``                   |
@@ -176,10 +176,10 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 | Route                          | Response                                                      |
 +================================+===============================================================+
-| ``GET /reef/harness``          | ``{artifact_version, parent_artifact_version, files, gate}``, |
-|                                | plus an ``x-reef-artifact-version`` response header           |
+| ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files, gate}``, |
+|                                | plus an ``x-reef-release-id`` response header           |
 +--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/harness/versions`` | ``{scenario, versions}``, oldest first, each training row     |
+| ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
 |                                | carrying the gate metrics of the step that published it       |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
@@ -193,26 +193,26 @@ generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
 automatically.
 
-Use ``?version=`` on the manifest or install route to request a specific catalog
-version. An unknown or unrestorable version returns HTTP 404.
+Use ``?release_id=`` on the manifest or install route to request a specific
+catalog release. An unknown or unrestorable release returns HTTP 404.
 
 Rollback
 ~~~~~~~~
 
-Pulling an older version changes only your local copy. To move the version Reef
+Pulling an older release changes only your local copy. To move the release Reef
 *serves*, send ``POST /reef/scenarios/{scenario}/rollback`` with
-``{"artifact_version": "…"}``; it answers the new head. Reef republishes that
+``{"release_id": "…"}``; it answers the new head. Reef republishes that
 checkpoint as a new commit rather than rewinding history, so step numbers stay
 monotonic.
 
-Choose a target from ``GET /reef/scenarios/{scenario}/versions``, which lists
-**newest first**; ``GET /reef/harness/versions`` lists oldest first. Only
-versions marked ``restorable`` can be rolled back.
+Choose a target from ``GET /reef/scenarios/{scenario}/releases``, which lists
+**newest first**; ``GET /reef/harness/releases`` lists oldest first. Only
+releases marked ``restorable`` can be rolled back.
 
 Status
 ------
 
-Read ``GET /reef/status`` when inference is still serving an older version while
+Read ``GET /reef/status`` when inference is still serving an older release while
 an update is being trained or published.
 
 .. code:: json
@@ -224,7 +224,7 @@ an update is being trained or published.
      "scenarios": {
        "hello-reef": {
          "scenario_step": 3,
-         "current_weight_version": "7f2a:12",
+         "current_runtime_load_id": "7f2a:12",
          "checkpoint_storage": {"...": "..."},
          "batch_ready": false,
          "processor": {"...": "..."},
@@ -237,7 +237,7 @@ an update is being trained or published.
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
 ``serving`` is runtime-wide but recipe-shaped. A LoRA deployment reports each
-scenario's ``adapter_weight_version`` under it.
+scenario's ``adapter_runtime_load_id`` under it.
 
 Status codes
 ------------
@@ -256,12 +256,12 @@ Status codes
 |        | authorization belongs to the gateway in front of Reef.      |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (with implicit creation off), unknown      |
-|        | artifact version, unknown adapter, no configured harness    |
+|        | release, unknown adapter, no configured harness    |
 |        | recipe, or a scenario that serves no files                  |
 +--------+-------------------------------------------------------------+
 | 409    | a recipe or base artifact conflicting with the binding, a   |
 |        | record id resent with different content, or an engine that  |
-|        | reports no serving weight version                           |
+|        | reports no serving runtime load ID                           |
 +--------+-------------------------------------------------------------+
 | 502    | the upstream provider failed on its own account             |
 +--------+-------------------------------------------------------------+

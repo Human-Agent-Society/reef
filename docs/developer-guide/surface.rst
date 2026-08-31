@@ -1,7 +1,7 @@
 Surfaces
 ========
 
-A surface is how a scenario serves the artifact version it has frozen. Its
+A surface is how a scenario serves the release it has frozen. Its
 consumers are an inference runtime, a provider request, or a harness client
 pulling files, and the one invariant is version fidelity: the consumer
 observes exactly that version, and Reef records the request and response
@@ -89,9 +89,9 @@ Built-in surfaces
 | ``create_skill_surface(...)``          | none                    | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
 
-**Weights.** ``WeightLoader`` probes whether an in-memory live weight version
+**Weights.** ``WeightLoader`` probes whether an in-memory live runtime load ID
 survived a restart and restores durable checkpoints during rollback.
-``WeightInferenceHooks`` asks the engine to report its serving weight version
+``WeightInferenceHooks`` asks the engine to report its serving runtime load ID
 and verifies that metadata before Reef records the exchange. The training
 runtime activates newly trained weights inside its own durable job
 transaction; the surface does not repeat that step.

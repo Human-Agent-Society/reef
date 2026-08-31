@@ -69,10 +69,10 @@ def _context(
         recipe="openclawrl",
         step=step,
         source_artifact_ref=LiveWeightArtifactRef(
-            artifact_id="math",
-            version="artifact:7",
-            parent_version="artifact:6",
-            weight_version="engine:7",
+            content_id="math",
+            release_id="artifact:7",
+            parent_release_id="artifact:6",
+            runtime_load_id="engine:7",
         ),
         run_segment=run_segment,
         run_step=run_step,
@@ -91,16 +91,16 @@ def _event(
     return TrainingExperimentEvent(
         context=_context(scenario=scenario, step=step, run_segment=run_segment, run_step=run_step),
         produced_artifact_ref=LiveWeightArtifactRef(
-            artifact_id="math",
-            version="artifact:8",
-            parent_version="artifact:7",
-            weight_version="engine:8",
+            content_id="math",
+            release_id="artifact:8",
+            parent_release_id="artifact:7",
+            runtime_load_id="engine:8",
         ),
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
-        source_weight_version="engine:7",
-        produced_weight_version="engine:8",
+        source_runtime_load_id="engine:7",
+        produced_runtime_load_id="engine:8",
         checkpoint_path="/checkpoints/hf/7",
     )
 
@@ -159,11 +159,11 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
             "model": "Qwen/test",
             "run_segment": 0,
             "source_artifact": {
-                "kind": "weight",
-                "artifact_id": "math",
-                "version": "artifact:7",
-                "parent_version": "artifact:6",
-                "weight_version": "engine:7",
+                "kind": "live_weights",
+                "content_id": "math",
+                "release_id": "artifact:7",
+                "parent_release_id": "artifact:6",
+                "runtime_load_id": "engine:7",
             },
         },
         "backend": {},
@@ -178,10 +178,10 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert logged["train/loss"] == pytest.approx(0.25)
     assert logged["selection/score"] == pytest.approx(1.0)
     assert "selection/label" not in logged
-    assert logged["reef/source_artifact_version"] == "artifact:7"
-    assert logged["reef/produced_artifact_version"] == "artifact:8"
-    assert logged["reef/source_weight_version"] == "engine:7"
-    assert logged["reef/produced_weight_version"] == "engine:8"
+    assert logged["reef/source_release_id"] == "artifact:7"
+    assert logged["reef/produced_release_id"] == "artifact:8"
+    assert logged["reef/source_runtime_load_id"] == "engine:7"
+    assert logged["reef/produced_runtime_load_id"] == "engine:8"
     assert logged["reef/training_job_id"] == "job-7"
     assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
     assert client.runs[0].artifacts == []
@@ -221,7 +221,7 @@ def test_rollback_finishes_one_curve_and_next_commit_starts_another_run() -> Non
             run_segment=0,
             source_artifact_ref=_event().produced_artifact_ref,
             produced_artifact_ref=_context().source_artifact_ref,
-            target_artifact_version="artifact:6",
+            target_release_id="artifact:6",
         )
     )
 
@@ -270,7 +270,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
             run_segment=0,
             source_artifact_ref=_event().produced_artifact_ref,
             produced_artifact_ref=_context().source_artifact_ref,
-            target_artifact_version="artifact:6",
+            target_release_id="artifact:6",
         )
     )
     logger.log({"accepted": 1}, namespace="processor")

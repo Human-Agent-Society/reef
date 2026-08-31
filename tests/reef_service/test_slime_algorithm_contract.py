@@ -330,7 +330,7 @@ def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
 def test_sao_provenance_metrics_handles_policy_versions_and_clock_skew() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = {
-        "producing_weight_versions": ["inc:3"],
+        "producing_runtime_load_ids": ["inc:3"],
         "rollout_created_ats": [time.time() - 2.5],
         "response_lengths": [4],
         "loss_masks": [[1, 1, 1, 0]],

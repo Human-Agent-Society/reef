@@ -36,9 +36,9 @@ def test_git_lfs_repository_initializes_default_local_repository(
         cache_dir=tmp_path / "cache",
     )
 
-    initial = backend.resolve_version()
+    initial = backend.resolve_release()
     assert remote.is_dir()
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/initial") == initial.version
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
     assert run_git("-C", str(tmp_path / "work" / "repository"), "config", "--local", "core.hooksPath") == str(
         tmp_path / "work" / "repository" / ".git" / "hooks"
     )
@@ -85,9 +85,9 @@ def test_local_repository_bootstrap_recovers_after_missing_git_lfs(
     )
     backend = backend_factory("math")
 
-    initial = backend.resolve_version()
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/initial") == initial.version
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/latest") == initial.version
+    initial = backend.resolve_release()
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
 
 
 @pytest.mark.integration
@@ -102,8 +102,8 @@ def test_local_repository_bootstrap_repairs_missing_latest(
         work_dir=tmp_path / "first-work",
         cache_dir=tmp_path / "first-cache",
     )
-    initial = first.resolve_version()
-    run_git("--git-dir", str(remote), "update-ref", "-d", "refs/reef/latest")
+    initial = first.resolve_release()
+    run_git("--git-dir", str(remote), "update-ref", "-d", "refs/reef/head")
 
     recovered = GitLFSRepositoryBackend(
         "math",
@@ -112,8 +112,8 @@ def test_local_repository_bootstrap_repairs_missing_latest(
         cache_dir=tmp_path / "recovered-cache",
     )
 
-    assert recovered.resolve_version() == initial
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/latest") == initial.version
+    assert recovered.resolve_release() == initial
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
 
 
 @pytest.mark.integration
@@ -130,14 +130,14 @@ def test_local_repository_bootstrap_is_idempotent_across_constructors(
             work_dir=tmp_path / f"work-{index}",
             cache_dir=tmp_path / f"cache-{index}",
         )
-        return backend.resolve_version()
+        return backend.resolve_release()
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         versions = tuple(executor.map(build, range(8)))
 
-    assert len({version.version for version in versions}) == 1
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/initial") == versions[0].version
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/latest") == versions[0].version
+    assert len({version.release_id for version in versions}) == 1
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == versions[0].release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == versions[0].release_id
 
 
 @pytest.mark.integration
@@ -166,18 +166,18 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
 
     backend = backend_factory("math")
     code_backend = backend_factory("code")
-    initial = backend.resolve_version()
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/initial") == initial.version
-    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/latest") == initial.version
+    initial = backend.resolve_release()
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
 
     math = backend.fork(metadata={"scenario_snapshot": {"recipe": "openclawrl"}})
     code = code_backend.fork()
-    manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{math.version}:reef-artifact.json"))
-    assert math.version != code.version
+    manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{math.release_id}:reef-artifact.json"))
+    assert math.release_id != code.release_id
     assert "scenario" not in manifest
     assert backend.fork() == math
     assert backend.metadata() == {"scenario_snapshot": {"recipe": "openclawrl"}}
-    assert run_git("--git-dir", str(remote), "rev-parse", backend.ref_name) == math.version
+    assert run_git("--git-dir", str(remote), "rev-parse", backend.ref_name) == math.release_id
 
     fresh_factory = GitLFSRepositoryBackend.factory(
         remote,
@@ -202,7 +202,7 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
         expected_parent=math,
     )
 
-    assert published.parent_version == math.version
+    assert published.parent_release_id == math.release_id
     assert backend.current() == published
     assert code_backend.current() == code
     assert backend.materialize(published).local_path.joinpath("adapter.safetensors").read_text() == "trained"
@@ -244,9 +244,9 @@ def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
     )
     forked = second.fork(metadata={"source_scenario": "scenario-a"})
 
-    assert forked.parent_version == trained.version
+    assert forked.parent_release_id == trained.release_id
     assert second.metadata() == {"source_scenario": "scenario-a"}
-    assert run_git("--git-dir", str(remote), "rev-parse", second.ref_name) == forked.version
+    assert run_git("--git-dir", str(remote), "rev-parse", second.ref_name) == forked.release_id
     inherited_weights = tmp_path / "work-b" / "repository" / weights.name
     assert inherited_weights.read_text().startswith("version https://git-lfs.github.com/spec/v1")
 

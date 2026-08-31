@@ -12,7 +12,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.artifact_ref import WeightVersionSpan, parse_weight_version_spans
+from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.records_types import AgentRecord
 from reef.train.types import PolicySample
 
@@ -119,7 +119,7 @@ def make_policy_sample(
     """Convert inference data and its evaluated reward into a sample.
 
     ``response.training`` attached by an inference backend is authoritative
-    for policy tensors. A top-level ``weight_version`` stamped after response
+    for policy tensors. A top-level ``runtime_load_id`` stamped after response
     validation is authoritative for provenance; if both locations provide a
     version, they must agree. Top-level tensors remain supported for harnesses
     that already ship exact policy data. Missing tensors stay empty and are
@@ -136,35 +136,35 @@ def make_policy_sample(
     tokens = field("tokens")
     loss_mask = field("loss_mask")
     rollout_log_probs = field("rollout_log_probs")
-    training_weight_version = training.get("weight_version") if isinstance(training, dict) else None
-    recorded_weight_version = payload.get("weight_version")
-    if recorded_weight_version and training_weight_version and recorded_weight_version != training_weight_version:
+    training_runtime_load_id = training.get("runtime_load_id") if isinstance(training, dict) else None
+    recorded_runtime_load_id = payload.get("runtime_load_id")
+    if recorded_runtime_load_id and training_runtime_load_id and recorded_runtime_load_id != training_runtime_load_id:
         raise ValueError(
-            "response training weight_version disagrees with the validated record: "
-            f"{training_weight_version!r} != {recorded_weight_version!r}"
+            "response training runtime_load_id disagrees with the validated record: "
+            f"{training_runtime_load_id!r} != {recorded_runtime_load_id!r}"
         )
-    training_spans = training.get("weight_version_spans") if isinstance(training, dict) else None
-    recorded_spans = payload.get("weight_version_spans")
-    weight_version_spans = _policy_version_spans(
+    training_spans = training.get("runtime_load_spans") if isinstance(training, dict) else None
+    recorded_spans = payload.get("runtime_load_spans")
+    runtime_load_spans = _policy_version_spans(
         training_spans if training_spans is not None else recorded_spans,
         len(loss_mask),
     )
     if (
         training_spans is not None
         and recorded_spans is not None
-        and weight_version_spans != _policy_version_spans(recorded_spans, len(loss_mask))
+        and runtime_load_spans != _policy_version_spans(recorded_spans, len(loss_mask))
     ):
-        raise ValueError("response token weight-version spans disagree with the validated record")
-    span_versions = {span.weight_version for span in weight_version_spans}
-    if weight_version_spans:
-        if recorded_weight_version and span_versions != {recorded_weight_version}:
-            raise ValueError("validated record weight_version disagrees with its token weight-version spans")
-        if training_weight_version and span_versions != {training_weight_version}:
-            raise ValueError("response training weight_version disagrees with its token weight-version spans")
-        weight_version = next(iter(span_versions)) if len(span_versions) == 1 else None
+        raise ValueError("response token runtime-load-ID spans disagree with the validated record")
+    span_versions = {span.runtime_load_id for span in runtime_load_spans}
+    if runtime_load_spans:
+        if recorded_runtime_load_id and span_versions != {recorded_runtime_load_id}:
+            raise ValueError("validated record runtime_load_id disagrees with its token runtime-load-ID spans")
+        if training_runtime_load_id and span_versions != {training_runtime_load_id}:
+            raise ValueError("response training runtime_load_id disagrees with its token runtime-load-ID spans")
+        runtime_load_id = next(iter(span_versions)) if len(span_versions) == 1 else None
     else:
-        weight_version = (
-            recorded_weight_version or training_weight_version or getattr(item.artifact_ref, "weight_version", None)
+        runtime_load_id = (
+            recorded_runtime_load_id or training_runtime_load_id or getattr(item.artifact_ref, "runtime_load_id", None)
         )
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
@@ -174,17 +174,17 @@ def make_policy_sample(
         loss_mask=tuple(int(value) for value in loss_mask),
         rollout_log_probs=tuple(float(value) for value in rollout_log_probs),
         reward=reward,
-        weight_version=weight_version,
-        weight_version_spans=weight_version_spans,
+        runtime_load_id=runtime_load_id,
+        runtime_load_spans=runtime_load_spans,
         topk_indices=tuple(tuple(int(v) for v in row) for row in topk_indices),
         topk_log_probs=tuple(tuple(float(v) for v in row) for row in topk_log_probs),
     )
 
 
-def _policy_version_spans(value: Any, response_length: int) -> tuple[WeightVersionSpan, ...]:
+def _policy_version_spans(value: Any, response_length: int) -> tuple[RuntimeLoadSpan, ...]:
     if value is None:
         return ()
-    return parse_weight_version_spans(value, response_length=response_length)
+    return parse_runtime_load_spans(value, response_length=response_length)
 
 
 def make_multi_turn_policy_sample(
@@ -215,7 +215,7 @@ def make_multi_turn_policy_sample(
         return None
 
     turns = [make_policy_sample(item, reward) for item in items]
-    versions = {turn.weight_version for turn in turns}
+    versions = {turn.runtime_load_id for turn in turns}
     if len(versions) != 1 or None in versions or "" in versions:
         return None
 
@@ -287,6 +287,6 @@ def make_multi_turn_policy_sample(
         loss_mask=tuple(loss_mask),
         rollout_log_probs=tuple(token_log_probs[leading_prompt_length:]) if retain_log_probs else (),
         reward=float(reward),
-        weight_version=versions.pop(),
+        runtime_load_id=versions.pop(),
         turn_count=len(turns),
     )

@@ -35,7 +35,7 @@ The presence of a gate cannot answer this question because **no update is
 guaranteed to be an improvement**. A PPO step can regress. The
 ``openclawrl`` and ``sao`` algorithms
 publish every batch with no gate at all, and their safety net is not a gate but
-the version chain: every publish is a commit, receipts tie each outcome to the
+the release chain: every publish is a commit, receipts tie each outcome to the
 exact version that produced it, and rollback restores any earlier one. Gating
 therefore cannot be the placement rule. Placement depends on two
 orthogonal axes.
@@ -50,7 +50,7 @@ this response?"*: model weights, ``SKILL.md``, the harness tree's
 configuration, rules, prompts, skills, extension code. They are long-lived,
 shared by every subsequent request, and changes to them are exactly what needs
 version identity, receipts, stale-publish fencing, and rollback.
-Updating them is a training backend's job, and every update lands on the version chain.
+Updating them is a training backend's job, and every update lands on the release chain.
 
 **Run state → harness.** State produced by *executing* a fixed rule: a PUCT
 archive's visit counts and prunes, the working memory of one search, or one
@@ -89,22 +89,22 @@ cross-run scores would be the same gated text-artifact loop
 -------------------------------------
 
 Acceptance policies form a spectrum. All of them are Reef-side, and all land
-on the same version chain:
+on the same release chain:
 
 +----------------------+--------------------------+----------------------+
 | Policy               | Examples                 | Safety net           |
 +======================+==========================+======================+
-| Ungated continual:   | ``openclawrl``, ``sao``  | version chain,       |
+| Ungated continual:   | ``openclawrl``, ``sao``  | release chain,       |
 | publish every batch  | (weights); ACE-style     | rollback, receipts   |
 |                      | playbook merges          |                      |
 |                      | (artifacts, §5)          |                      |
 +----------------------+--------------------------+----------------------+
 | Compare with current | ``CordisBackend`` | the decision, then   |
-| select when wins     |                          | the version chain    |
+| select when wins     |                          | the release chain    |
 | exceed losses        |                          |                      |
 +----------------------+--------------------------+----------------------+
 | Population / Pareto  | GEPA-style prompt        | the frontier, then   |
-| keep a candidate     | evolution (§5)           | the version chain    |
+| keep a candidate     | evolution (§5)           | the release chain    |
 | frontier             |                          |                      |
 +----------------------+--------------------------+----------------------+
 
@@ -152,7 +152,7 @@ code is:
   **next request** is a harness. This includes task orchestration, grading, and
   search loops such as TTTD's PUCT selection. It runs outside Reef.
 - Code whose input is the **record store** and whose output is a **publish on
-  the version chain** is a recipe backend. Examples include a weight step, a
+  the release chain** is a recipe backend. Examples include a weight step, a
   skill edit, and an ACE reflector/curator pass. It runs inside Reef even when
   it calls an LLM: it never answers a user request and never touches the
   environment.
@@ -171,7 +171,7 @@ runs inside. They exchange receipts and reports.
 1. **Ungated continual publishing for harness artifacts** (unlocks ACE,
    `arXiv:2510.04618 <https://arxiv.org/abs/2510.04618>`__). Structurally
    identical to online weight training with the artifact in the weights'
-   place: reflector/curator merge per batch → publish → the version chain as
+   place: reflector/curator merge per batch → publish → the release chain as
    the safety net. Rollback addresses ACE's own failure mode of context
    collapse;
    a gate is optional hardening, not a prerequisite.
@@ -181,8 +181,8 @@ runs inside. They exchange receipts and reports.
    Reef's record store already holds the execution traces and scores a
    reflective mutator needs; an external implementation would have to rebuild
    that capture and the versioning both.
-3. **Run-state snapshots on the version chain** (TTTD durability, optional).
+3. **Run-state snapshots on the release chain** (TTTD durability, optional).
    ``PUCTArchive.state_dict()`` is already JSON-ready; letting snapshots ride
-   the version chain as attachments would keep a crashed harness's resume aligned
-   with the weight version it trained. This adds persistence only; selection
+   the release chain as attachments would keep a crashed harness's resume aligned
+   with the runtime load ID it trained. This adds persistence only; selection
    logic stays on the harness side.

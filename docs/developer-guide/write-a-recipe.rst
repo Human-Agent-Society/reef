@@ -42,7 +42,7 @@ This page covers a **weight** recipe. For a harness-evolution method with
            BACK["Run backend<br/>driver or local"]
            EVAL["Evaluate candidate"]
            SELECT["Select or reject"]
-           VER["New artifact version<br/>serves later requests ↻"]
+           VER["New release<br/>serves later requests ↻"]
            PREP -->|"step signal"| BACK
            BACK -->|"unpublished checkpoint"| EVAL
            EVAL --> SELECT

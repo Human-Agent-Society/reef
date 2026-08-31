@@ -32,8 +32,8 @@ class TrainingExperimentEvent:
     metrics: Mapping[str, Any]
     outcome: str
     training_job_id: str | None = None
-    source_weight_version: str | None = None
-    produced_weight_version: str | None = None
+    source_runtime_load_id: str | None = None
+    produced_runtime_load_id: str | None = None
     checkpoint_path: str | None = None
 
 
@@ -47,7 +47,7 @@ class RollbackExperimentEvent:
     run_segment: int
     source_artifact_ref: ArtifactRef
     produced_artifact_ref: ArtifactRef
-    target_artifact_version: str
+    target_release_id: str
 
 
 class ExperimentLogger:

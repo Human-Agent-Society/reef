@@ -1,4 +1,4 @@
-"""Serving capabilities a scenario exposes for its frozen artifact version.
+"""Serving capabilities a scenario exposes for its frozen release.
 
 ``Surface`` is a frozen composition of optional capabilities — ``loader``,
 ``inference``, ``files`` — and callers inspect fields, never subclass
@@ -27,7 +27,7 @@ from reef.surface.base import (
 from reef.surface.files import TextFileTree
 from reef.surface.harnesses import create_harness_surface
 from reef.surface.skills import RequestSkillLayer, SkillLayer, create_skill_surface, validate_tree
-from reef.surface.weights import WeightInferenceHooks, WeightLoader, WeightVersionMismatch, create_weight_surface
+from reef.surface.weights import RuntimeLoadMismatch, WeightInferenceHooks, WeightLoader, create_weight_surface
 
 __all__ = [
     "ArtifactActivator",
@@ -37,6 +37,7 @@ __all__ = [
     "InferenceLease",
     "LeasingInferenceHooks",
     "RequestSkillLayer",
+    "RuntimeLoadMismatch",
     "ServingRuntime",
     "SkillLayer",
     "Surface",
@@ -44,7 +45,6 @@ __all__ = [
     "WeightInferenceHooks",
     "WeightLoader",
     "WeightRuntime",
-    "WeightVersionMismatch",
     "adapter_name",
     "create_harness_surface",
     "create_skill_surface",

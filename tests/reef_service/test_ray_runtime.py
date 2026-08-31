@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from reef.artifact import LiveWeightArtifactRef
-from reef.core import WeightVersionSpan
+from reef.core import RuntimeLoadSpan
 from reef.runtime import (
     PreparedTrainingStep,
     RayRuntime,
@@ -23,7 +23,7 @@ from reef.runtime.base import InferenceAdmissionController
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
-from reef.surface import WeightVersionMismatch, create_weight_surface
+from reef.surface import RuntimeLoadMismatch, create_weight_surface
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
@@ -70,7 +70,7 @@ class FakeTrainGroupHandle(RayTrainGroupHandle):
         self.status = "CHECKPOINT"
         return TrainingJobResult(
             outcome="checkpoint",
-            weight_version="pending",
+            runtime_load_id="pending",
             checkpoint_path="/checkpoint",
             training_job_id="job-0",
         )
@@ -80,7 +80,7 @@ class FakeTrainGroupHandle(RayTrainGroupHandle):
         self.status = "READY_TO_COMMIT"
         return TrainingJobResult(
             outcome="complete",
-            weight_version="v1",
+            runtime_load_id="v1",
             checkpoint_path="/checkpoint",
             training_job_id=training_job_id,
         )
@@ -107,12 +107,12 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
         self.status = status
         self.rollout_id = rollout_id
         self.training_job_id = f"job-{rollout_id}"
-        self.weight_version = "engine:0"
+        self.runtime_load_id = "engine:0"
         self.lora_adapter = lora_adapter
         self.calls: list[str] = []
 
-    def serving_weight_version(self) -> str:
-        return self.weight_version
+    def serving_runtime_load_id(self) -> str:
+        return self.runtime_load_id
 
     def health(self) -> Mapping[str, Any]:
         return {
@@ -133,7 +133,7 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
         self.status = "CHECKPOINT"
         return TrainingJobResult(
             outcome="checkpoint",
-            weight_version="pending",
+            runtime_load_id="pending",
             checkpoint_path="/checkpoint",
             training_job_id=self.training_job_id,
         )
@@ -141,11 +141,11 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
     def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
         assert training_job_id == self.training_job_id
         self.calls.append("update_weights")
-        self.weight_version = "engine:1"
+        self.runtime_load_id = "engine:1"
         self.status = "READY_TO_COMMIT"
         return TrainingJobResult(
             outcome="complete",
-            weight_version="engine:1",
+            runtime_load_id="engine:1",
             checkpoint_path="/checkpoint",
             training_job_id=training_job_id,
         )
@@ -228,7 +228,7 @@ def test_ray_runtime_reports_the_served_adapter_from_train_group_health() -> Non
 def test_ray_runtime_serves_one_adapter_per_scenario_from_train_group_health() -> None:
     handle = DeferredWeightUpdateTrainGroupHandle()
     handle.lora_mode = "scenario"
-    handle.lora_adapters = {"math": {"weight_version": "engine:3", "adapter": "reef-adapter-bWF0aA.engine:3"}}
+    handle.lora_adapters = {"math": {"runtime_load_id": "engine:3", "adapter": "reef-adapter-bWF0aA.engine:3"}}
     original_health = handle.health
 
     def health():
@@ -238,8 +238,8 @@ def test_ray_runtime_serves_one_adapter_per_scenario_from_train_group_health() -
     runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
     assert runtime.concurrent_training_scenarios is True
     assert runtime.serving_adapter_name() is None
-    assert runtime.serving_adapter_version("math") == "engine:3"
-    assert runtime.serving_adapter_version("code") is None
+    assert runtime.serving_adapter_runtime_load_id("math") == "engine:3"
+    assert runtime.serving_adapter_runtime_load_id("code") is None
 
     plain = RayRuntime(train_group_handle=DeferredWeightUpdateTrainGroupHandle(), inference_url="http://router")
     assert plain.concurrent_training_scenarios is False
@@ -287,10 +287,10 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
 
     assert prepared.payload is not None
     payload = prepared.payload
-    assert payload["rollout_id"] == 7 and payload["expected_weight_version"] == "v0"
+    assert payload["rollout_id"] == 7 and payload["expected_runtime_load_id"] == "v0"
     assert runtime.execute_training_job(payload) == TrainingJobResult(
         outcome="complete",
-        weight_version="v1",
+        runtime_load_id="v1",
         checkpoint_path="/checkpoint",
         training_job_id="job-0",
     )
@@ -316,7 +316,7 @@ def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
 
     assert payload["loss"] == "sft"
     assert "advantages" not in payload
-    assert payload["expected_weight_version"] == "v0"
+    assert payload["expected_runtime_load_id"] == "v0"
     assert payload["rollout_id"] == 3
 
 
@@ -338,11 +338,11 @@ def test_ray_runtime_rejects_unstructured_training_results() -> None:
     [
         TrainingJobResult(
             outcome="complete",
-            weight_version="v1",
+            runtime_load_id="v1",
             checkpoint_path="/checkpoint",
         ),
-        TrainingJobResult(outcome="stale", weight_version="v1"),
-        TrainingJobResult(outcome="storage_blocked", weight_version="v1", storage={"blocked": True}),
+        TrainingJobResult(outcome="stale", runtime_load_id="v1"),
+        TrainingJobResult(outcome="storage_blocked", runtime_load_id="v1", storage={"blocked": True}),
     ],
 )
 def test_training_job_results_round_trip_across_process_boundary(result: TrainingJobResult) -> None:
@@ -366,7 +366,7 @@ def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, step_prepa
 
     assert payload["loss"] == loss
     assert payload["advantages"] == pytest.approx(advantages)
-    assert payload["expected_weight_version"] == "v0"
+    assert payload["expected_runtime_load_id"] == "v0"
     assert payload["rollout_id"] == 9
 
 
@@ -394,7 +394,7 @@ def test_ray_runtime_rejects_unsupported_preparer_batch_pairs(batch, step_prepar
 @pytest.mark.unit
 def test_ray_runtime_sends_heterogeneous_samples_to_exact_staleness_admission() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:1"
 
     runtime = RayRuntime(train_group_handle=VersionedHandle(), inference_url="http://router")
@@ -406,19 +406,19 @@ def test_ray_runtime_sends_heterogeneous_samples_to_exact_staleness_admission() 
     )
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_weight_version"] == "engine:1"
+    assert prepared.payload["expected_runtime_load_id"] == "engine:1"
     assert prepared.payload["max_staleness"] == 0
-    assert prepared.payload["producing_weight_versions"] == ["engine:0", "engine:1"]
+    assert prepared.payload["producing_runtime_load_ids"] == ["engine:0", "engine:1"]
 
 
 @pytest.mark.unit
-def test_ray_runtime_rejects_empty_serving_weight_version() -> None:
-    class EmptyWeightVersionHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+def test_ray_runtime_rejects_empty_serving_runtime_load_id() -> None:
+    class EmptyRuntimeLoadIdHandle(FakeTrainGroupHandle):
+        def serving_runtime_load_id(self) -> str | None:
             return ""
 
-    with pytest.raises(RayRuntimeError, match="non-empty serving weight version"):
-        RayRuntime(train_group_handle=EmptyWeightVersionHandle(), inference_url="http://router")
+    with pytest.raises(RayRuntimeError, match="non-empty serving runtime load ID"):
+        RayRuntime(train_group_handle=EmptyRuntimeLoadIdHandle(), inference_url="http://router")
 
 
 @pytest.mark.unit
@@ -439,7 +439,7 @@ def test_slime_backend_preparation_emits_framework_agnostic_rows() -> None:
 @pytest.mark.unit
 def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_provenance() -> None:
     # SAO ships an 8-element row: the action mask (for skip-observation GAE)
-    # and rollout provenance (producing weight version, creation time) have no
+    # and rollout provenance (producing runtime load ID, creation time) have no
     # slot in the policy 5-tuple. Each sample is its own rollout (no grouping)
     # and advantages are never shipped — the critic computes them in-backend.
     batch = PolicyBatch(
@@ -452,7 +452,7 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_provenanc
                 action_mask=(1, 0, 1),
                 rollout_log_probs=(-0.1, -0.2, -0.3),
                 reward=0.9,
-                weight_version="slime-v3",
+                runtime_load_id="slime-v3",
                 rollout_created_at=1234.5,
             ),
         ),
@@ -499,12 +499,12 @@ def test_slime_backend_preparation_sao_rows_tolerate_missing_provenance() -> Non
     assert prepared.payload is not None
     payload = prepared.payload
 
-    # A rollout served before weight-version tracking still ships; the last two
+    # A rollout served before runtime-load-ID tracking still ships; the last two
     # slots carry None rather than dropping the row.
     assert payload["samples"][0][-2:] == [None, None]
 
 
-def sao_batch(weight_version: str | None = "slime-v3") -> PolicyBatch:
+def sao_batch(runtime_load_id: str | None = "slime-v3") -> PolicyBatch:
     return PolicyBatch(
         "math:sao:1",
         (
@@ -515,19 +515,19 @@ def sao_batch(weight_version: str | None = "slime-v3") -> PolicyBatch:
                 action_mask=(1, 0),
                 rollout_log_probs=(-0.1, -0.2),
                 reward=0.9,
-                weight_version=weight_version,
+                runtime_load_id=runtime_load_id,
             ),
         ),
     )
 
 
 @pytest.mark.unit
-def test_ray_runtime_prepares_a_sao_job_from_producing_weight_version() -> None:
+def test_ray_runtime_prepares_a_sao_job_from_producing_runtime_load_id() -> None:
     class NoProbeHandle(FakeTrainGroupHandle):
         def __init__(self) -> None:
             self.probes = 0
 
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             self.probes += 1
             return "engine:0"
 
@@ -539,7 +539,7 @@ def test_ray_runtime_prepares_a_sao_job_from_producing_weight_version() -> None:
     payload = prepared.payload
 
     assert payload["loss"] == "sao"
-    assert payload["rollout_id"] == 4 and payload["expected_weight_version"] == "slime-v3"
+    assert payload["rollout_id"] == 4 and payload["expected_runtime_load_id"] == "slime-v3"
     assert "max_staleness" not in payload
     assert handle.probes == initialization_probes
 
@@ -550,7 +550,7 @@ def test_ray_runtime_fences_enabled_sao_window_with_serving_version() -> None:
         def __init__(self) -> None:
             self.probes = 0
 
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             self.probes += 1
             return "engine:3"
 
@@ -565,9 +565,9 @@ def test_ray_runtime_fences_enabled_sao_window_with_serving_version() -> None:
     prepared = runtime.prepare_training_step(sao_batch("engine:1"), "sao", {}, 4)
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_weight_version"] == "engine:3"
+    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
     assert prepared.payload["max_staleness"] == 2
-    assert prepared.payload["producing_weight_versions"] == ["engine:1"]
+    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1"]
     assert prepared.payload["samples"][0][6] == "engine:1"
     assert handle.probes == initialization_probes + 1
 
@@ -575,7 +575,7 @@ def test_ray_runtime_fences_enabled_sao_window_with_serving_version() -> None:
 @pytest.mark.unit
 def test_ray_runtime_preserves_enabled_sao_mixed_provenance() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
 
     first = sao_batch("engine:1").samples[0]
@@ -586,7 +586,7 @@ def test_ray_runtime_preserves_enabled_sao_mixed_provenance() -> None:
         action_mask=(1, 0),
         rollout_log_probs=(-0.3, -0.4),
         reward=0.7,
-        weight_version="engine:2",
+        runtime_load_id="engine:2",
     )
     batch = PolicyBatch("math:sao:2", (first, second))
     runtime = RayRuntime(
@@ -598,14 +598,14 @@ def test_ray_runtime_preserves_enabled_sao_mixed_provenance() -> None:
     prepared = runtime.prepare_training_step(batch, "sao", {}, 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["producing_weight_versions"] == ["engine:1", "engine:2"]
+    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1", "engine:2"]
     assert [row[6] for row in prepared.payload["samples"]] == ["engine:1", "engine:2"]
 
 
 @pytest.mark.unit
 def test_ray_runtime_preserves_enabled_grouped_mixed_provenance() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
 
     runtime = RayRuntime(
@@ -622,8 +622,8 @@ def test_ray_runtime_preserves_enabled_grouped_mixed_provenance() -> None:
     )
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_weight_version"] == "engine:3"
-    assert prepared.payload["producing_weight_versions"] == ["engine:1", "engine:2"]
+    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
+    assert prepared.payload["producing_runtime_load_ids"] == ["engine:1", "engine:2"]
 
 
 @pytest.mark.unit
@@ -634,14 +634,14 @@ def test_ray_runtime_preserves_sao_batch_when_serving_version_is_unverified() ->
         max_staleness=2,
     )
 
-    with pytest.raises(RayRuntimeError, match="verified serving weight version"):
+    with pytest.raises(RayRuntimeError, match="verified serving runtime load ID"):
         runtime.prepare_training_step(sao_batch("engine:1"), "sao", {}, 0)
 
 
 @pytest.mark.unit
 def test_ray_runtime_carries_shared_provenance_for_other_losses() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
 
     runtime = RayRuntime(
@@ -653,15 +653,15 @@ def test_ray_runtime_carries_shared_provenance_for_other_losses() -> None:
     prepared = runtime.prepare_training_step(policy_batch(), "sft", {}, 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_weight_version"] == "engine:3"
+    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
     assert prepared.payload["max_staleness"] == 2
-    assert prepared.payload["producing_weight_versions"] == ["v0", "v0"]
+    assert prepared.payload["producing_runtime_load_ids"] == ["v0", "v0"]
 
 
 @pytest.mark.unit
-def test_ray_runtime_carries_mixed_token_weight_versions_to_bounded_admission() -> None:
+def test_ray_runtime_carries_mixed_token_runtime_load_ids_to_bounded_admission() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:7"
 
     sample = PolicySample(
@@ -670,10 +670,10 @@ def test_ray_runtime_carries_mixed_token_weight_versions_to_bounded_admission() 
         loss_mask=(1, 1, 1),
         rollout_log_probs=(-0.1, -0.2, -0.3),
         reward=1.0,
-        weight_version=None,
-        weight_version_spans=(
-            WeightVersionSpan(0, 1, "engine:6"),
-            WeightVersionSpan(1, 3, "engine:7"),
+        runtime_load_id=None,
+        runtime_load_spans=(
+            RuntimeLoadSpan(0, 1, "engine:6"),
+            RuntimeLoadSpan(1, 3, "engine:7"),
         ),
     )
     runtime = RayRuntime(
@@ -685,11 +685,11 @@ def test_ray_runtime_carries_mixed_token_weight_versions_to_bounded_admission() 
     prepared = runtime.prepare_training_step(PolicyBatch("batch", (sample,)), "sft", {}, 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["producing_weight_versions"] == [None]
-    assert prepared.payload["producing_weight_version_spans"] == [
+    assert prepared.payload["producing_runtime_load_ids"] == [None]
+    assert prepared.payload["producing_runtime_load_spans"] == [
         [
-            {"start": 0, "end": 1, "weight_version": "engine:6"},
-            {"start": 1, "end": 3, "weight_version": "engine:7"},
+            {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
+            {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
         ]
     ]
 
@@ -697,7 +697,7 @@ def test_ray_runtime_carries_mixed_token_weight_versions_to_bounded_admission() 
 @pytest.mark.unit
 def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_the_batch() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:7"
 
     sample = PolicySample(
@@ -706,9 +706,9 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
         loss_mask=(1, 1),
         rollout_log_probs=(-0.1, -0.2),
         reward=1.0,
-        weight_version_spans=(
-            WeightVersionSpan(0, 1, "engine:6"),
-            WeightVersionSpan(1, 2, "engine:7"),
+        runtime_load_spans=(
+            RuntimeLoadSpan(0, 1, "engine:6"),
+            RuntimeLoadSpan(1, 2, "engine:7"),
         ),
     )
     runtime = RayRuntime(train_group_handle=VersionedHandle(), inference_url="http://router")
@@ -716,9 +716,9 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
     prepared = runtime.prepare_training_step(PolicyBatch("batch", (sample,)), "sft", {}, 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["expected_weight_version"] == "engine:7"
+    assert prepared.payload["expected_runtime_load_id"] == "engine:7"
     assert prepared.payload["max_staleness"] == 0
-    assert prepared.payload["producing_weight_versions"] == [None]
+    assert prepared.payload["producing_runtime_load_ids"] == [None]
 
 
 @pytest.mark.unit
@@ -738,14 +738,14 @@ def test_ray_runtime_rejects_a_sao_batch_missing_provenance() -> None:
         ),
     )
 
-    with pytest.raises(RayRuntimeError, match="recorded producing weight version"):
+    with pytest.raises(RayRuntimeError, match="recorded producing runtime load ID"):
         runtime.prepare_training_step(batch, "sao", {}, 0)
 
 
 @pytest.mark.unit
 def test_enabled_sao_window_sends_missing_provenance_to_bridge_admission() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
 
     runtime = RayRuntime(
@@ -757,9 +757,9 @@ def test_enabled_sao_window_sends_missing_provenance_to_bridge_admission() -> No
     prepared = runtime.prepare_training_step(sao_batch(None), "sao", {}, 0)
 
     assert prepared.payload is not None
-    assert prepared.payload["producing_weight_versions"] == [None]
+    assert prepared.payload["producing_runtime_load_ids"] == [None]
     assert prepared.payload["samples"][0][6] is None
-    assert prepared.payload["expected_weight_version"] == "engine:3"
+    assert prepared.payload["expected_runtime_load_id"] == "engine:3"
 
 
 @pytest.mark.unit
@@ -797,13 +797,13 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
 
 
 @pytest.mark.unit
-def test_remote_handle_probes_the_named_serving_weight_version_method(monkeypatch) -> None:
+def test_remote_handle_probes_the_named_serving_runtime_load_id_method(monkeypatch) -> None:
     class RemoteMethod:
         def remote(self):
             return "engine-incarnation:3"
 
     class Bridge:
-        serving_weight_version = RemoteMethod()
+        serving_runtime_load_id = RemoteMethod()
 
     class FakeRay:
         calls = []
@@ -817,18 +817,18 @@ def test_remote_handle_probes_the_named_serving_weight_version_method(monkeypatc
 
     handle = RemoteRayTrainGroupHandle(train_group_actor=Bridge())
 
-    assert handle.serving_weight_version() == "engine-incarnation:3"
+    assert handle.serving_runtime_load_id() == "engine-incarnation:3"
     assert FakeRay.calls == [{"timeout": 300.0}]
 
 
 @pytest.mark.unit
-def test_remote_handle_preserves_missing_serving_weight_version(monkeypatch) -> None:
+def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) -> None:
     class RemoteMethod:
         def remote(self):
             return None
 
     class Bridge:
-        serving_weight_version = RemoteMethod()
+        serving_runtime_load_id = RemoteMethod()
 
     class FakeRay:
         @staticmethod
@@ -837,7 +837,7 @@ def test_remote_handle_preserves_missing_serving_weight_version(monkeypatch) -> 
 
     monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
 
-    assert RemoteRayTrainGroupHandle(train_group_actor=Bridge()).serving_weight_version() is None
+    assert RemoteRayTrainGroupHandle(train_group_actor=Bridge()).serving_runtime_load_id() is None
 
 
 @pytest.mark.unit
@@ -856,7 +856,7 @@ def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
 
         def remote(self, *args):
             self.calls.append(args)
-            return TrainingJobResult(outcome="stale", weight_version="v1")
+            return TrainingJobResult(outcome="stale", runtime_load_id="v1")
 
     class Bridge:
         execute_training_job = RemoteMethod()
@@ -871,7 +871,7 @@ def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
     actor = Bridge()
     handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
 
-    assert handle.execute_training_job({"loss": "pg"}) == TrainingJobResult(outcome="stale", weight_version="v1")
+    assert handle.execute_training_job({"loss": "pg"}) == TrainingJobResult(outcome="stale", runtime_load_id="v1")
     assert actor.execute_training_job.calls == [({"loss": "pg"},)]
 
 
@@ -902,14 +902,14 @@ def test_noncolocated_weight_update_preserves_inflight_and_queues_new_requests_u
     handle = DeferredWeightUpdateTrainGroupHandle()
     runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
     inflight = asyncio.run(runtime.acquire_inference())
-    assert runtime.current_weight_version() == "engine:0"
+    assert runtime.current_runtime_load_id() == "engine:0"
 
     result = runtime.execute_training_job({"rollout_id": 0})
 
     assert result.training_job_id == "job-0"
     assert handle.calls == ["execute", "update_weights"]
-    assert runtime.serving_weight_version() == "engine:1"
-    assert runtime.current_weight_version() == "engine:0"
+    assert runtime.serving_runtime_load_id() == "engine:1"
+    assert runtime.current_runtime_load_id() == "engine:0"
     assert runtime.inference_admission_status == {"open": False, "active": 1}
 
     async def commit_and_admit() -> None:
@@ -926,7 +926,7 @@ def test_noncolocated_weight_update_preserves_inflight_and_queues_new_requests_u
     asyncio.run(commit_and_admit())
     inflight.release()
     assert handle.calls == ["execute", "update_weights", "acknowledge"]
-    assert runtime.current_weight_version() == "engine:1"
+    assert runtime.current_runtime_load_id() == "engine:1"
     assert runtime.inference_admission_status == {"open": True, "active": 0}
 
 
@@ -943,8 +943,8 @@ def test_candidate_rejection_leaves_serving_weights_unchanged() -> None:
     )
 
     assert handle.calls == ["execute", "reject"]
-    assert runtime.serving_weight_version() == "engine:0"
-    assert runtime.current_weight_version() == "engine:0"
+    assert runtime.serving_runtime_load_id() == "engine:0"
+    assert runtime.current_runtime_load_id() == "engine:0"
     assert runtime.inference_admission_status["open"] is True
 
 
@@ -953,17 +953,17 @@ def test_colocated_weight_update_retracts_without_draining_inflight() -> None:
     handle = DeferredWeightUpdateTrainGroupHandle(colocate=True)
     runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
     inflight = asyncio.run(runtime.acquire_inference())
-    assert runtime.current_weight_version() == "engine:0"
+    assert runtime.current_runtime_load_id() == "engine:0"
 
     result = runtime.execute_training_job({"rollout_id": 0})
 
     assert handle.calls == ["execute", "update_weights"]
     assert runtime.inference_admission_status == {"open": False, "active": 1}
-    assert runtime.serving_weight_version() == "engine:1"
-    assert runtime.current_weight_version() == "engine:0"
+    assert runtime.serving_runtime_load_id() == "engine:1"
+    assert runtime.current_runtime_load_id() == "engine:0"
     runtime.reconcile_training_job(scenario_step=1, committed_training_job_id=result.training_job_id)
     assert runtime.inference_admission_status == {"open": True, "active": 1}
-    assert runtime.current_weight_version() == "engine:1"
+    assert runtime.current_runtime_load_id() == "engine:1"
     inflight.release()
     assert runtime.inference_admission_status == {"open": True, "active": 0}
 
@@ -1021,8 +1021,8 @@ def test_running_training_closes_only_colocated_inference_admission() -> None:
 
     assert disjoint.inference_admission_status == {"open": True, "active": 0}
     assert colocated.inference_admission_status == {"open": False, "active": 0}
-    assert disjoint.current_weight_version() == "engine:0"
-    assert colocated.current_weight_version() is None
+    assert disjoint.current_runtime_load_id() == "engine:0"
+    assert colocated.current_runtime_load_id() is None
 
 
 @pytest.mark.unit
@@ -1080,7 +1080,7 @@ def test_colocated_completed_checkpoint_replay_reopens_admission() -> None:
             self.status = "COMPLETE"
             return TrainingJobResult(
                 outcome="complete",
-                weight_version="engine:1",
+                runtime_load_id="engine:1",
                 checkpoint_path="/checkpoint",
             )
 
@@ -1200,10 +1200,10 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         def __init__(self) -> None:
             self.runtime = runtime
             self.ref = LiveWeightArtifactRef(
-                artifact_id="live:old",
-                version="live:proc:engine:0:0",
-                parent_version=None,
-                weight_version="engine:0",
+                content_id="live:old",
+                release_id="live:proc:engine:0:0",
+                parent_release_id=None,
+                runtime_load_id="engine:0",
             )
 
         def current_artifact_ref(self):
@@ -1228,8 +1228,8 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 
         async def inference(self, artifact, path, payload):
             del path, payload
-            self.versions.append(artifact.ref.weight_version)
-            return {"metadata": {"weight_version": artifact.ref.weight_version}}
+            self.versions.append(artifact.ref.runtime_load_id)
+            return {"metadata": {"runtime_load_id": artifact.ref.runtime_load_id}}
 
     scenario = Scenario()
     backend = RecordingBackend()
@@ -1250,17 +1250,17 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
         await asyncio.sleep(0)
         assert backend.versions == []
         scenario.ref = LiveWeightArtifactRef(
-            artifact_id="live:new",
-            version="live:proc:engine:1:1",
-            parent_version=scenario.ref.version,
-            weight_version="engine:1",
+            content_id="live:new",
+            release_id="live:proc:engine:1:1",
+            parent_release_id=scenario.ref.release_id,
+            runtime_load_id="engine:1",
         )
         runtime.reconcile_training_job(
             scenario_step=1,
             committed_training_job_id=updated.training_job_id,
         )
         responses = await asyncio.wait_for(asyncio.gather(*queued), 5)
-        assert {response["metadata"]["weight_version"] for response in responses} == {"engine:1"}
+        assert {response["metadata"]["runtime_load_id"] for response in responses} == {"engine:1"}
 
     asyncio.run(run())
     assert backend.versions == ["engine:1"] * (8 * 64)
@@ -1270,10 +1270,10 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 def test_stream_and_failure_release_their_inference_admission_handles() -> None:
     runtime = RayRuntime(train_group_handle=DeferredWeightUpdateTrainGroupHandle(), inference_url="http://router")
     ref = LiveWeightArtifactRef(
-        artifact_id="live:current",
-        version="live:proc:engine:0:0",
-        parent_version=None,
-        weight_version="engine:0",
+        content_id="live:current",
+        release_id="live:proc:engine:0:0",
+        parent_release_id=None,
+        runtime_load_id="engine:0",
     )
 
     class Scenario:
@@ -1314,7 +1314,7 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
                 status=200,
                 headers={"Content-Type": "text/event-stream"},
                 chunks=chunks(),
-                record_response={"metadata": {"weight_version": "engine:0"}},
+                record_response={"metadata": {"runtime_load_id": "engine:0"}},
             )
 
     class FailingBackend(InferenceBackend):
@@ -1333,8 +1333,8 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             async def chunks():
                 yield b'data: {"content":"first token"}\n\n'
                 holder["stream"].record_response = {
-                    "metadata": {"weight_version": "engine:0"},
-                    "training": {"weight_version": "engine:0"},
+                    "metadata": {"runtime_load_id": "engine:0"},
+                    "training": {"runtime_load_id": "engine:0"},
                 }
                 yield b"data: [DONE]\n\n"
 
@@ -1388,10 +1388,10 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
         body = b"".join([chunk async for chunk in deferred.chunks])
         recorded = stream_record(deferred, body, complete=True)
         item = service.record_stream(deferred_pending, recorded)
-        assert item.payload["weight_version"] == "engine:0"
+        assert item.payload["runtime_load_id"] == "engine:0"
         assert runtime.inference_admission_status == {"open": True, "active": 0}
 
-        with pytest.raises(WeightVersionMismatch, match="atomic record_response"):
+        with pytest.raises(RuntimeLoadMismatch, match="atomic record_response"):
             await service.start_stream(
                 {"x-reef-scenario": "math"},
                 {"stream": True},
@@ -1426,11 +1426,11 @@ def _two_epoch_sample_preparer(batch, state):
 
 @pytest.mark.unit
 def test_ray_runtime_provenance_follows_the_step_schedule() -> None:
-    # Epochs repeat every wire row; the producing weight versions (and spans)
+    # Epochs repeat every wire row; the producing runtime load IDs (and spans)
     # must repeat with them, in the schedule's order, or bounded-staleness
     # admission counts one version per batch row against two rows per sample.
     class VersionedHandle(FakeTrainGroupHandle):
-        def serving_weight_version(self) -> str | None:
+        def serving_runtime_load_id(self) -> str | None:
             return "engine:1"
 
     runtime = RayRuntime(train_group_handle=VersionedHandle(), inference_url="http://router")
@@ -1443,7 +1443,7 @@ def test_ray_runtime_provenance_follows_the_step_schedule() -> None:
 
     assert prepared.payload is not None
     assert [row[0] for row in prepared.payload["samples"]] == ["g1", "g2", "g1", "g2"]
-    assert prepared.payload["producing_weight_versions"] == ["engine:0", "engine:1", "engine:0", "engine:1"]
+    assert prepared.payload["producing_runtime_load_ids"] == ["engine:0", "engine:1", "engine:0", "engine:1"]
     assert "source_rows" not in prepared.payload
 
 

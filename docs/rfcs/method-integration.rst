@@ -48,7 +48,7 @@ a write-only HTTP surface.
    deliberately accepts *any* numeric score. The processor's docstring says
    "the external grader owns the method's exclusion semantics." Correctness
    therefore depended on training logic labeled as an example, outside CI's
-   method tests and the version chain.
+   method tests and the release chain.
 2. **Core capabilities rebuilt outside, degraded.** The grader is a
    forwarding proxy that re-implements a miniature request plane
    (``grader.py`` ≈ ``service/`` +

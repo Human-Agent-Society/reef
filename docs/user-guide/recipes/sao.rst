@@ -82,8 +82,8 @@ rollout adds one ``training`` entry to the scenario's version chain:
 .. code:: bash
 
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/sao-smoke/versions
-   # {"scenario": "sao-smoke", "versions": [{"kind": "training", "step": 1, ...}, ...]}
+     http://127.0.0.1:8900/reef/scenarios/sao-smoke/releases
+   # {"scenario": "sao-smoke", "releases": [{"kind": "training", "step": 1, ...}, ...]}
 
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
 critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,

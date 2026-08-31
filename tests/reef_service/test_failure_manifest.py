@@ -248,7 +248,7 @@ def test_manifest_recovers_through_the_commit_log(tmp_path: Path) -> None:
             scenario="demo",
             step=1,
             artifact_ref=LiveWeightArtifactRef(
-                artifact_id="live:1", version="live:demo:w1:1", parent_version="base", weight_version="w1"
+                content_id="live:1", release_id="live:demo:w1:1", parent_release_id="base", runtime_load_id="w1"
             ),
             checkpoint=False,
             algorithm_state=dict(first.state),
@@ -264,24 +264,29 @@ def test_manifest_recovers_through_the_commit_log(tmp_path: Path) -> None:
     assert received[1] == FailureManifest.from_state(first.state["failure_manifest"])
 
 
-def test_pre_manifest_commit_record_still_drives_a_step(tmp_path: Path) -> None:
-    # A record written before the manifest existed: algorithm_state carries
-    # only the lineage keys. It must parse and step, delivering None.
+def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Path) -> None:
+    # Algorithm state may carry only the lineage keys. It must parse and step,
+    # delivering no previous failure manifest.
     line = json.dumps(
         {
-            "record": "reef-commit/4",
+            "record": "reef-commit/5",
             "scenario": "demo",
             "step": 1,
             "artifact_ref": {
-                "kind": "weight",
-                "artifact_id": "live:1",
-                "version": "live:demo:w1:1",
-                "parent_version": "base",
-                "weight_version": "w1",
+                "kind": "live_weights",
+                "content_id": "live:1",
+                "release_id": "live:demo:w1:1",
+                "parent_release_id": "base",
+                "runtime_load_id": "w1",
             },
             "checkpoint": False,
             "algorithm_state": {"steps": 1, "entries": []},
-            "record_progress": {"high_water_sequence": 1, "high_water_offset": 1, "compacted_ids": []},
+            "record_progress": {
+                "high_water_sequence": 1,
+                "high_water_offset": 1,
+                "compacted_ids": [],
+                "consumed_ids": [],
+            },
             "recorded_at": 1700000000.0,
         },
         sort_keys=True,
