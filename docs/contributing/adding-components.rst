@@ -8,9 +8,10 @@ Bundled and external extensions
 -------------------------------
 
 Prefer a dotted recipe or runtime reference while experimenting. Bundling a
-recipe, learning method, or training backend starts with the `RFC process
-<../rfcs/README.rst>`__. A new top-level package, persisted format, wire
-contract, or incompatible public API also requires an RFC.
+recipe, learning method, or training backend starts with an `RFC issue
+<https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
+A new top-level package, persisted format, wire contract, or incompatible
+public API also requires an RFC.
 
 Add a recipe
 ------------

@@ -1,14 +1,15 @@
-name: RFC discussion
-description: Start discussion for a substantial project or architecture decision
+name: RFC proposal
+description: Propose and record a substantial project or architecture decision
 title: "[RFC] "
 labels: [enhancement, RFC, "status: needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        This issue is the discussion entry point, not the decision record.
-        If maintainers agree that an RFC is appropriate, submit a separate
-        RFC-only pull request using `docs/rfcs/0000-template.rst`.
+        This issue is the RFC and its durable decision record. Keep the proposal
+        and important trade-offs up to date here; do not create a document under
+        `docs/rfcs`. Implementation starts only after the affected maintainers
+        explicitly accept the RFC in this issue.
 
   - type: dropdown
     id: primary_area
@@ -31,8 +32,8 @@ body:
   - type: textarea
     id: decision
     attributes:
-      label: Decision to make
-      description: State the smallest durable project decision that needs agreement.
+      label: Summary and decision to make
+      description: Summarize the proposed outcome and state the smallest durable project decision that needs agreement.
     validations:
       required: true
 
@@ -45,26 +46,82 @@ body:
       required: true
 
   - type: textarea
-    id: constraints
+    id: goals
     attributes:
-      label: Constraints
-      description: Cover compatibility, persistence, security, operations, performance, and maintenance where relevant.
+      label: Goals and non-goals
+      description: List the outcomes this RFC must achieve and adjacent problems it intentionally does not solve.
     validations:
       required: true
 
   - type: textarea
-    id: options
+    id: proposal
     attributes:
-      label: Options considered
-      description: Summarize plausible approaches and their trade-offs. A preferred option is not required yet.
+      label: Proposal
+      description: Describe ownership boundaries, data flow, failure behavior, and the smallest useful version precisely enough to review an implementation against it.
     validations:
       required: true
 
   - type: textarea
-    id: ownership
+    id: interfaces
     attributes:
-      label: Implementation and long-term ownership
-      description: Who could implement, review, operate, and maintain the result?
+      label: Public interfaces and configuration
+      description: List changes to APIs, wire contracts, configuration, CLI, persisted formats, artifacts, and observable behavior. Write "Not applicable" if none change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Cover existing clients, deployments, data, artifacts, and configuration, including rollout, rollback, migration, and deprecation. Write "Not applicable" where appropriate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: security
+    attributes:
+      label: Security, privacy, and trust boundaries
+      description: Identify changed inputs, privileges, credentials, network surfaces, retention, or trust decisions, and explain containment of misuse and partial failure. Write "Not applicable" if none change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: operations
+    attributes:
+      label: Operations and observability
+      description: Describe resource costs, scaling limits, metrics, logs, alerts, debugging, and operator-visible failures. Write "Not applicable" where appropriate.
+    validations:
+      required: true
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing and documentation
+      description: Describe required contract, unit, integration, acceptance, migration, and failure tests, plus user and developer documentation changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe credible alternatives, including keeping the current behavior, their trade-offs, and why this proposal is preferred.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and unresolved questions
+      description: List known risks, assumptions, open decisions, and verification still needed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation plan and ownership
+      description: Break work into reviewable stages, identify the compatibility-commitment point and safe partial rollout, and name expected implementation, review, operation, and maintenance owners.
     validations:
       required: true
 
@@ -75,7 +132,7 @@ body:
       options:
         - label: I searched existing issues, pull requests, and RFCs for this decision.
           required: true
-        - label: I read the RFC process and understand that discussion is not acceptance.
+        - label: I understand this issue is the RFC and that discussion is not acceptance.
           required: true
-        - label: I have not combined the RFC discussion with an implementation pull request.
+        - label: I will keep this issue updated with material design changes and implementation links.
           required: true

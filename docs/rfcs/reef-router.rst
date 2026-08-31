@@ -1,12 +1,17 @@
 RFC: Reef Router
 ================
 
-:Status: Draft
+:Status: Deprecated
 :Authors: @hanfeiyu
 :Created: 2026-08-25
 :Updated: 2026-08-30
 :Discussion: https://github.com/Human-Agent-Society/reef/issues/415
 :Implementation: Not started
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
 
 Summary
 -------

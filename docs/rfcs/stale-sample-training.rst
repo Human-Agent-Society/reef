@@ -1,6 +1,13 @@
 Bounded stale-sample training without giving up the version fence
 =================================================================
 
+:Status: Deprecated
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
+
    Today every training job is fenced to the exact serving weight version that
    produced its rollouts; anything older is discarded. That fence makes
    version lag zero **by construction**. This RFC adds one shared, bounded
