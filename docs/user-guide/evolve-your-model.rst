@@ -44,7 +44,7 @@ localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
 shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
 invocation non-interactively.
 
-The bundled ``recipes/sao/examples/sao/serve.yaml`` declares
+The cookbook ``recipes/sao/examples/sao/serve.yaml`` declares
 ``training.num_gpus: 2`` and ``cuda_visible_devices: "0,1"``.
 ``training.num_gpus`` must match the devices you actually expose, and the
 model at ``reef.model_path`` must be present or downloadable.

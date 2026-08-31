@@ -3,6 +3,13 @@
 Method integration: one method, one trust domain
 =================================================
 
+:Status: Deprecated
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
+
    **Status (2026-08): resolved, beyond M3.** The judging half moved all the
    way into the recipe's processor (``recipes/openclawrl/processor.py``):
    sessions are reconstructed from recorded traffic by trace matching (no
@@ -15,7 +22,7 @@ Method integration: one method, one trust domain
 
 ..
 
-   A bundled method's correctness-critical logic, including grading orchestration,
+   A cookbook method's correctness-critical logic, including grading orchestration,
    session correlation, and exclusion semantics, must live in **one** trust
    domain, versioned and tested with the processor that consumes its reports.
    Reef's core capabilities (records, inference, dispatch) are **served to**
@@ -108,7 +115,7 @@ defect above.
   (hints, teacher log-probs, rubric output) puts it in the report payload
   under a method-namespaced key, and its processor declares what it reads.
   No side channels.
-- **P7 · ``examples/`` teaches; it never load-bears.** Anything a bundled
+- **P7 · ``examples/`` teaches; it never load-bears.** Anything a cookbook
   method requires for correctness graduates out of ``examples/`` into the
   method's package. What remains in ``examples/`` is the harness a user would
   replace anyway (workload, agent plugin, launch config).
@@ -162,7 +169,7 @@ state, reconstructible by replay (P4).
 3.3 Method packages
 ~~~~~~~~~~~~~~~~~~~
 
-A bundled method is one package under ``reef/<name>/`` (landed 2026-08 as
+A cookbook method is one package under ``recipes/<name>/`` (landed 2026-08 as
 ``recipe``/``processor``/``preparer``/``slime``) containing
 every correctness-critical part: the recipe, the processor, and any grading
 service (judge orchestration, PRM client, correlation). Grading services run
@@ -238,12 +245,12 @@ Milestones, each independently shippable:
   `evolution boundary <evolution-boundary.rst>`__ is about harness-owned search
   state, and is untouched.
 - **Recipe authorship.** Third-party methods still need only a recipe class
-  and a config entry. Method packages are how *bundled* methods are held to
+  and a config entry. Method packages are how cookbook methods are held to
   a higher standard, not a new requirement on users.
 
-.. _6-compliance-checklist-for-a-new-bundled-method:
+.. _6-compliance-checklist-for-a-new-cookbook-method:
 
-6. Compliance checklist for a new bundled method
+6. Compliance checklist for a new cookbook method
 ------------------------------------------------
 
 Before a method merges, its review answers yes to all of:

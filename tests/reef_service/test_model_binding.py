@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.render import render_composition

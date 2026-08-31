@@ -51,9 +51,8 @@ class DataProcessor:
       :class:`~reef.train.processors.computed.ComputedFeedbackProcessor` and write
       ``ingest`` (the method's own correlation, built from the engine's
       ``catch_up``/``dispatch``/``track``/``retire`` verbs), ``judge``,
-      ``make_sample``, and ``make_batch`` (``openclawrl.py`` is the worked
-      example; bulky machinery goes in the recipe's ``<kind>_internal/``
-      package). Here ``judge`` is an ``async def``: your ``ingest`` hands a
+      ``make_sample``, and ``make_batch``; bulky machinery stays in the
+      method package. Here ``judge`` is an ``async def``: your ``ingest`` hands a
       job to ``dispatch`` and a private worker thread awaits it, so it may
       call models and take minutes without blocking serving.
 

@@ -3,6 +3,13 @@
 The evolution boundary: what Reef updates, and what it doesn't
 ===============================================================
 
+:Status: Deprecated
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
+
    Reef versions and updates **served artifacts** such as model weights, skills,
    harness trees, and context playbooks. **Run state** is the bookkeeping a
    harness produces while executing a fixed algorithm, and it stays on the

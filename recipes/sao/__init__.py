@@ -1,6 +1,6 @@
 """Single-Rollout Asynchronous Optimization (arXiv:2607.07508): one method, one package.
 
-- ``recipe`` — the ``sao`` recipe kind and its ``WeightTrainingSpec``.
+- ``recipe`` — the SAO recipe class and its ``WeightTrainingSpec``.
 - ``processor`` — one scored rollout, one batch unit.
 - ``preparer`` — the backend-agnostic step preparer.
 - ``slime`` — the Slime loss family (DIS ratio, actor/critic cadence) and

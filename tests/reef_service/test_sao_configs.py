@@ -3,7 +3,7 @@
 The SAO migration (commit 55e551d) removed ``--advantage-estimator=sao`` from
 Slime's argparse choices while the SAO config still passed it — the deployment
 could not boot, and nothing in CI noticed because no test ever
-re-parsed a bundled YAML's flags. These tests close that hole: for each
+re-parsed a cookbook YAML's flags. These tests close that hole: for each
 ``training-*.yaml`` they materialize the slime-driver command exactly as
 ``reef serve`` would, strip the driver/retention/loss-family options exactly as
 ``reef_adapters.driver`` does, and then feed the remaining flags to the actual
@@ -93,7 +93,7 @@ def _resolved_strings(config: dict, value):
         yield interpolate_config(config, value)
 
 
-# Megatron-native flags used by the bundled configs. Slime's parser only knows
+# Megatron-native flags used by the cookbook configs. Slime's parser only knows
 # them when Megatron is importable (its extra-args provider extends Megatron's
 # parser), so on CPU they surface as parse leftovers and are checked by name.
 _MEGATRON_ONLY_FLAGS = frozenset(
@@ -204,7 +204,7 @@ def _build_slime_parser() -> argparse.ArgumentParser:
 
 
 def _driver_tokens(config: dict) -> tuple[list[str], str]:
-    """Materialize the slime-driver command tokens and the configured recipe."""
+    """Materialize the driver command and deployment recipe reference."""
     from reef.service.deploy.config import interpolate_config
 
     services = {service["name"]: service for service in config["services"]}
@@ -212,8 +212,10 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     tokens = shlex.split(command)
     module = SLIME_DRIVER_MODULE
     assert module in tokens, f"slime-driver service must invoke {module}"
-    recipe = services["slime-driver"]["env"]["REEF_TRAINING_RECIPE"]
-    recipe = interpolate_config(config, recipe)
+    driver_env = services["slime-driver"].get("env") or {}
+    assert "REEF_TRAINING_RECIPE" not in driver_env
+    assert "REEF_TRAINING_LOSS" not in driver_env
+    recipe = config["reef"]["recipe"]
     return tokens[tokens.index(module) + 1 :], recipe
 
 
@@ -233,23 +235,26 @@ def _strip_sglang_flags(tokens: list[str]) -> list[str]:
 
 
 def _parse_config(config_path: Path):
-    """Run one bundled config through the driver's own argument pipeline.
+    """Run one cookbook config through the driver's own argument pipeline.
 
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
     from reef.service.deploy.config import load_config
-    from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.slime_backend.reef_adapters.driver import _driver_options, _recipe_loss_family, _retention_options
+    from reef.train.slime_backend.reef_adapters.driver import (
+        _driver_options,
+        _resolve_training_recipe,
+        _retention_options,
+    )
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_config(config_path)
     tokens, recipe = _driver_tokens(config)
-    assert recipe == config["reef"]["recipe"], "slime-driver env must run the configured recipe"
+    _loss_family, resolved_recipe, spec = _resolve_training_recipe(config)
+    assert resolved_recipe == recipe
 
     _, tokens = _driver_options(tokens)
     _, tokens = _retention_options(tokens)
-    spec = resolve_loss_family(_recipe_loss_family(recipe))
     options, tokens = spec.parse_driver_options(tokens)
     tokens = _strip_sglang_flags(tokens)
 
@@ -302,7 +307,7 @@ def _apply_validation_derivations(args) -> None:
 
 
 @pytest.mark.unit
-def test_bundled_training_configs_are_discovered() -> None:
+def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
@@ -358,9 +363,13 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
     recipe_type = recipe_class_for(settings.recipe)
     if recipe_type is None:
-        named_recipe = config_path.with_name(f"{settings.recipe}.yaml")
-        assert named_recipe.is_file(), f"{config_path} selects unknown recipe {settings.recipe!r}"
-        recipe_type = recipe_class_for(load_recipe_config(named_recipe)["kind"])
+        inline_implementation = config.get("implementation")
+        if isinstance(inline_implementation, str):
+            recipe_type = recipe_class_for(inline_implementation)
+        else:
+            named_recipe = config_path.with_name(f"{settings.recipe}.yaml")
+            assert named_recipe.is_file(), f"{config_path} selects unknown recipe {settings.recipe!r}"
+            recipe_type = recipe_class_for(load_recipe_config(named_recipe)["implementation"])
     assert recipe_type is not None
     if settings.model_path is not None and hasattr(recipe_type, "service_config"):
         recipe_type.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
@@ -385,7 +394,7 @@ def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", TRAINING_CONFIGS, ids=_config_id)
-def test_bundled_training_config_parses_and_validates(config_path: Path) -> None:
+def test_cookbook_training_config_parses_and_validates(config_path: Path) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
 
@@ -414,7 +423,7 @@ def test_sao_config_uses_the_hook_based_contract() -> None:
 
 
 # The parser marks a handful of flags required; standalone parses (outside a
-# full bundled command) must supply them.
+# full cookbook command) must supply them.
 _REQUIRED_BASELINE = ["--rollout-batch-size=1"]
 
 

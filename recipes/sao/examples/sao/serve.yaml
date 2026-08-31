@@ -22,7 +22,7 @@ reef:
   host: 127.0.0.1
   model_path: ~/models/Qwen2.5-1.5B-Instruct
   port: 8900
-  recipe: sao
+  recipe: recipes.sao.recipe:SAORecipe
   token: reef-local
   batch_size: 1                        # MUST equal training.global_batch_size
   max_staleness: 18
@@ -118,7 +118,6 @@ services:
       RAY_ADDRESS: 127.0.0.1:${training.ray_port}
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
-      REEF_TRAINING_RECIPE: ${reef.recipe}
     depends_on: [ray-head]
 
   - name: reef

@@ -3,12 +3,12 @@
 A recipe is *how records and their feedback become a new version of the
 weights or the harness*. This package holds everything a method binds to:
 
-- ``base`` — ``Recipe`` (the default record-only kind and base contract:
+- ``base`` — ``Recipe`` (the default record-only recipe and base contract:
   ``build``, ``build_artifact_validator``, ``build_surface``, the
   ``CheckpointStrategy``) and ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (step preparer, loss family, data processor).
-- ``registry`` — the kind table (``register_kind``, ``recipe_class_for``),
-  ``build_named_recipe`` for the recipe a deployment names, and
+- ``registry`` — dotted class resolution (``recipe_class_for``),
+  ``build_named_recipe`` for a deployment preset, and
   ``RecipeRegistry``, the closed instance table scenarios bind to.
 - ``config_fields`` — one dataclass field as the whole configuration surface
   for one setting (YAML key, env fallback, typed parser).
@@ -22,9 +22,10 @@ prepare and settle. Its types (``CandidateEvaluator``, ``CandidateSelector``,
 ``reef.train.evaluation`` because the trainer, backends, and runtime bind to
 them too — the recipe is what chooses and configures them.
 
-The bundled methods are packages under the sibling ``recipes`` tree
-(``recipes.sao``, ``recipes.tttd``, …); ``reef/__init__`` imports them last,
-which registers their kinds. Nothing else in ``reef`` imports a method package.
+Learning methods live outside the core package. The repository's sibling
+``recipes`` tree contains cookbook implementations, but Reef neither imports
+them at boot nor ships them in its wheel. Deployments select one explicitly by
+its dotted ``package.module:ClassName`` reference.
 
 The recipe decides; it does not execute or deliver. ``build`` returns a
 ``Trainer``, ``build_artifact_validator`` an admission policy,
@@ -38,7 +39,7 @@ from reef.recipe.base import Recipe, WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError, ScenarioRecipeConflict, ScenarioRecipeError, UnknownScenarioRecipe
-from reef.recipe.registry import RecipeRegistry, build_named_recipe, build_recipe, recipe_class_for, register_kind
+from reef.recipe.registry import RecipeRegistry, build_named_recipe, build_recipe, recipe_class_for
 
 __all__ = [
     "Recipe",
@@ -54,5 +55,4 @@ __all__ = [
     "config_field",
     "load_recipe_config",
     "recipe_class_for",
-    "register_kind",
 ]

@@ -92,21 +92,21 @@ class Ledger:
 
 
 def load_recipe() -> tuple[str, Any]:
-    """The recipe skillclaw.yaml declares, built through its dotted kind.
+    """The recipe skillclaw.yaml declares, built through its explicit implementation.
 
     This driver is the deployment: it owns the upstream binding and hands it
     to the recipe as its runtime, the way ``reef.upstream_url`` does in a
     served deployment. The method (harness/) never sees the endpoint.
     """
     config = load_config(HERE / "skillclaw.yaml")
-    sections = {key: config[key] for key in ("kind", "model", "evolution", "data")}
+    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     runtime = InferenceProxyRuntime(
         model_path=AGENT_MODEL,
         base_url=UPSTREAM_BASE,
         api_key=read_key(),
         inference_timeout_s=600.0,
     )
-    recipe = build_recipe(str(sections["kind"]), config=sections, runtime=runtime)
+    recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
     return recipe.name, recipe
 
 

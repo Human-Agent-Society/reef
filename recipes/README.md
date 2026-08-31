@@ -10,7 +10,7 @@ pip install -e . "tide-eval[harbor]"
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 (`run.py`).
 
-[Basic](basic/) is everything on the base, record-only `recipe` kind — the
+[Basic](basic/) is everything on the core, record-only `recipe` — the
 deployment that learns nothing, and the smallest complete loop around it.
 Its two stack files are where a deployment starts before it picks a method,
 and what the quickstart serves:
@@ -26,14 +26,14 @@ frozen `ServiceSettings` by
 a `services:` list the orchestrator starts in dependency order, with `${VAR}`
 environment and `${dotted.path}` config interpolation. Copy one and adapt it;
 `reef serve -c <stack> --<key> <value>` overrides any `reef.*` setting. The
-`recipe` kind they bind is the base contract in
+`recipe` they bind is the base contract in
 [`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
 lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
 smallest weight-training one is
 [`recipes/sao/examples/sao/serve.yaml`](sao/examples/sao/serve.yaml)).
 Two contracts hold the set honest:
 [`test_training_server.py`](../tests/reef_service/test_training_server.py)
-boots the internal service from every bundled stack, and
+boots the internal service from every cookbook stack, and
 [`docs/site/scripts/check-doc-contracts.mjs`](../docs/site/scripts/check-doc-contracts.mjs)
 derives the documented port and health route from `local-sglang.yaml`.
 
@@ -45,8 +45,8 @@ the verifier reward back at trial end (`harness/`), the loop written out
 `Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
-[SAO](sao/examples/sao/README.md) is the functional smoke for the bundled
-`sao` recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
+[SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
+SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
 run in order by `run.py`, each driving six scored rollouts through Reef with a
 verifiable binary reward, and every scored rollout is one training step. Its
 README keeps a comparison against GRPO(+DIS) at Qwen3-30B-A3B scale.
@@ -89,7 +89,7 @@ personal-agent experiment as a tide task stream: a simulated student brings
 72 GSM8K homework problems to a Hermes agent whose model calls go through
 reef, and the metric is the number of sessions before the agent's answers
 match the student's taste. The method (session correlation, PRM judging, the
-hint-conditioned teacher) is the `openclawrl` recipe package, so the example
+hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
 contains only the harness side: the task stream, the Hermes agent wrapper,
 the student sidecar, and the analysis scripts. Its README keeps the learning
 curve and training curves of a complete run.

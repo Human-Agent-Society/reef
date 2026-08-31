@@ -1,4 +1,4 @@
-"""Guarantees of the harness_evolve recipe kind and its evolution backend,
+"""Guarantees of the harness_evolve cookbook recipe and its evolution backend,
 hermetic: episodes run a fake pi binary through the real adapter path."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 import reef.train.harness_backend as reef_harness_backend
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -20,7 +20,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
-from reef.recipe.registry import RecipeRegistry, recipe_kinds
+from reef.recipe.registry import RecipeRegistry, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
@@ -144,11 +144,12 @@ def run_backend_step(
         raise
 
 
-# -- recipe registration --------------------------------------------------
+# -- recipe resolution ----------------------------------------------------
 
 
-def test_kind_is_registered() -> None:
-    assert "harness_evolve" in recipe_kinds()
+def test_recipe_resolves_by_dotted_reference() -> None:
+    assert recipe_class_for("recipes.harness_evolve.recipe:HarnessEvolveRecipe") is HarnessEvolveRecipe
+    assert recipe_class_for("harness_evolve") is None
 
 
 def test_yaml_config_boots_the_recipe_through_dotted_references(tmp_path: Path, monkeypatch) -> None:

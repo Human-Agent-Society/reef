@@ -54,9 +54,8 @@ class SupportsReceipt(Protocol):
     """What the engine needs of a recipe's job and of its judgment alike:
     the receipt of the tracked record they concern.
 
-    The recipe defines both types (``TurnJob``/``TurnJudgment`` for
-    openclawrl); the engine only ever reads ``receipt``, so this is the
-    whole seam between them. :class:`Failed` satisfies it too.
+    The recipe defines both types; the engine only ever reads ``receipt``, so
+    this is the whole seam between them. :class:`Failed` satisfies it too.
     """
 
     @property

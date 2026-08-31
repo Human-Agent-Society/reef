@@ -3,6 +3,13 @@
 Continual OPD on Reef: framework
 =================================
 
+:Status: Deprecated
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
+
    A small model serves by default; a verifier flags tasks it handles poorly and
    escalates them to a large model; escalated trajectories are continually
    distilled back into the small model (hard distillation + soft on-policy

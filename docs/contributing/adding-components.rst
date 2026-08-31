@@ -4,13 +4,15 @@ Adding components
 First use the `Codebase structure <codebase-structure.rst>`__ to choose the
 owner, then use the matching playbook below.
 
-Bundled and external extensions
--------------------------------
+Core and external extensions
+----------------------------
 
-Prefer a dotted recipe or runtime reference while experimenting. Bundling a
-recipe, learning method, or training backend starts with the `RFC process
-<../rfcs/README.rst>`__. A new top-level package, persisted format, wire
-contract, or incompatible public API also requires an RFC.
+Recipes and learning methods are external packages selected by dotted
+reference; Reef does not bundle or register them. Changes to shared runtime or
+training machinery start with an `RFC issue
+<https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
+A new top-level package, persisted format, wire contract, or incompatible
+public API also requires an RFC.
 
 Add a recipe
 ------------
@@ -22,26 +24,24 @@ runtime execution, and artifact delivery. Read `Write a recipe
 Implementation
 ~~~~~~~~~~~~~~
 
-- Keep an experiment recipe with its experiment and configure its kind as
-  ``package.module:ClassName``.
-- For an accepted bundled method, add the package ``reef/<name>/``:
-  ``recipe.py`` holds the frozen recipe dataclass decorated with
-  ``@register_kind("<name>")``, and the package's ``__init__`` is imported
-  from ``reef/__init__.py`` so registration happens at boot. The contract it implements is ``reef/recipe/``.
+- Keep a recipe with its method package and select its frozen recipe dataclass
+  as ``package.module:ClassName``. There is no ``register_kind`` step and no
+  import from ``reef/__init__.py``. The contract it implements is
+  ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
   settings again in ``reef/service/``.
 - Put the method's record-to-batch behavior in
-  ``reef/<name>/processor.py``, subclassing a processor contract
+  ``<method-package>/processor.py``, subclassing a processor contract
   from ``reef/train/processors/``; extend those contracts only when they do
   not already express it.
 - Put the method's backend-neutral step preparer in
-  ``reef/<name>/preparer.py`` (``reef/train/algos/`` holds the
+  ``<method-package>/preparer.py`` (``reef/train/algos/`` holds the
   contract). Backend-specific payload
   construction belongs to the concrete integration.
 - A method with its own tensor objective adds a loss family in
-  ``reef/<name>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and imports it from
-  ``reef/train/slime_backend/loss_families.py``; the `Loss families
+  ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
+  ``objective.py``) and names it in the recipe's ``training_spec()``;
+  the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_surface`` only when the produced artifact needs delivery
   behavior beyond the existing surfaces.
@@ -49,7 +49,7 @@ Implementation
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
 
-- Add registry and configuration tests in
+- Add dotted-resolution and configuration tests in
   ``tests/reef_service/test_reef_recipes.py`` and
   ``tests/reef_service/test_recipe_config_fields.py``.
 - Add method behavior tests under ``tests/reef_service/``. Add an integration
@@ -57,8 +57,8 @@ Surrounding changes
 - Put every runnable configuration beside its method under
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
-- Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe table when the
-  method is bundled. Update the relevant processor, preparer, or surface
+- Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
+  table when the cookbook carries the method. Update the relevant processor, preparer, or surface
   reference if its public contract changes.
 
 Add a training integration

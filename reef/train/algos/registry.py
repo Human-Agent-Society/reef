@@ -1,11 +1,9 @@
-"""Registries a method fills at import time: step preparers and loss-family references.
+"""Registries a method may fill at import time.
 
-The bundled preparers register themselves at import time via the
-``@register_step_preparer`` class decorator in their module, each from its
-method package (``recipes.tttd.preparer`` and the like, imported by
-``reef``). This registry never imports a method package — a method
-depends on the machinery, not the other way round.  The table is open for external preparers the same way recipe
-kinds and loss families are: an external preparer registers its
+Step preparers register themselves via the ``@register_step_preparer`` class
+decorator in their method package. This registry never imports a method
+package: a method depends on the machinery, not the other way round. A
+preparer may instead register its
 :class:`StepPreparer` with :func:`register_preparer` from a module imported at
 boot, or is named as a dotted ``"package.module:callable"`` reference wherever
 a preparer is named (a recipe's ``training_spec().step_preparer``).
@@ -23,7 +21,7 @@ from __future__ import annotations
 
 import importlib
 
-from reef.train.algos.base import StepPreparer, _builtin_preparers, _CallableStepPreparer, register_step_preparer
+from reef.train.algos.base import StepPreparer, _CallableStepPreparer, _decorated_preparers, register_step_preparer
 
 __all__ = [
     "StepPreparer",
@@ -37,25 +35,19 @@ __all__ = [
 
 
 class StepPreparerRegistry:
-    """Reads bundled preparers from ``_builtin_preparers`` (populated by decorators).
+    """Resolves preparers registered by decorators or runtime callers.
 
-    External preparers are tracked separately so ``unregister`` can refuse
-    bundled ones while allowing plugin teardown. The bundled set is read live:
-    a method package (``recipes.tttd.preparer``) registers its preparer
-    when the recipe package imports it, which may happen after this registry
-    is constructed.
+    Decorated preparers are read live because a method package may be imported
+    after this registry is constructed. Runtime registrations are tracked
+    separately; unregistering removes whichever registration owns the name.
     """
 
     def __init__(self) -> None:
         self._external: dict[str, StepPreparer] = {}
 
     @property
-    def _bundled(self) -> frozenset[str]:
-        return frozenset(_builtin_preparers)
-
-    @property
     def names(self) -> tuple[str, ...]:
-        return tuple(sorted(set(_builtin_preparers) | set(self._external)))
+        return tuple(sorted(set(_decorated_preparers) | set(self._external)))
 
     def register(self, preparer: StepPreparer) -> StepPreparer:
         """Register an external preparer under its ``name``."""
@@ -65,27 +57,26 @@ class StepPreparerRegistry:
         existing = self._external.get(name)
         if existing is preparer:
             return preparer
-        bundled = _builtin_preparers.get(name)
-        if bundled is preparer:
+        decorated = _decorated_preparers.get(name)
+        if decorated is preparer:
             return preparer
-        if bundled is not None or existing is not None:
+        if decorated is not None or existing is not None:
             available = ", ".join(self.names)
             raise ValueError(f"step preparer {name!r} is already registered; registered preparers: {available}")
         self._external[name] = preparer
         return preparer
 
     def unregister(self, name: str) -> None:
-        """Remove a previously registered external preparer (test/plugin teardown)."""
-        if name in self._bundled:
-            raise ValueError(f"step preparer {name!r} is bundled and cannot be unregistered")
-        if name not in self._external:
-            registered = ", ".join(sorted(self._external)) or "none"
-            raise KeyError(f"step preparer {name!r} is not registered; registered external preparers: {registered}")
-        self._external.pop(name)
+        """Remove a preparer by name."""
+        runtime = self._external.pop(name, None)
+        decorated = _decorated_preparers.pop(name, None)
+        if runtime is None and decorated is None:
+            registered = ", ".join(self.names) or "none"
+            raise KeyError(f"step preparer {name!r} is not registered; registered preparers: {registered}")
 
     def resolve(self, preparer_id: str) -> StepPreparer:
         """Resolve a registered preparer name or a dotted ``"module:callable"`` reference."""
-        preparer = _builtin_preparers.get(preparer_id) or self._external.get(preparer_id)
+        preparer = _decorated_preparers.get(preparer_id) or self._external.get(preparer_id)
         if preparer is not None:
             return preparer
         if ":" in preparer_id:
@@ -141,3 +132,8 @@ def register_loss_family_ref(loss_family: str, reference: str) -> None:
 def loss_family_refs() -> dict[str, str]:
     """The registered ``{loss_family: reference}`` table (a copy)."""
     return dict(_loss_family_refs)
+
+
+def _unregister_loss_family_ref(loss_family: str) -> bool:
+    """Remove a registered family reference, returning whether it existed."""
+    return _loss_family_refs.pop(loss_family, None) is not None

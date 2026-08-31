@@ -11,10 +11,8 @@ from reef.core.reports import ReportBase, ScoredRolloutReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import register_kind
 
 
-@register_kind("sao")
 @dataclass(frozen=True, kw_only=True)
 class SAORecipe(WeightTrainingRecipe):
     """Single-Rollout Asynchronous Optimization (arXiv:2607.07508) on reef.

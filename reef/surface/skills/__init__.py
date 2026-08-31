@@ -2,9 +2,8 @@
 
 A *skill artifact* is the versioned tree of skill text that reef serves to
 its consumer — injected into requests or pulled from ``GET /reef/harness``.
-This surface delivers the artifact; evolution runs elsewhere
-(``harness_evolve``, where a skill is one node kind of the composition
-tree).
+This surface delivers the artifact; evolution runs in a method package, where
+a skill may be one node kind of its composition tree.
 """
 
 from reef.surface.skills.modules import RequestSkillLayer, SkillLayer

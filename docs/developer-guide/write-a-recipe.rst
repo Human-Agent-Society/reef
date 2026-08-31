@@ -80,7 +80,7 @@ A weight recipe is four pieces plus the class that binds them.
    recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the preparer (by dotted path), and the loss family
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
-``recipes/sao/`` is the smallest bundled implementation and the one to read
+``recipes/sao/`` is the smallest cookbook implementation and the one to read
 alongside this page. Its four files total fewer than 200 lines: ``recipe.py``,
 ``processor.py``, ``preparer.py``, and the ``slime/`` loss family.
 
@@ -108,6 +108,10 @@ This fragment shows only the new keys; keep the model, storage, runtime, and
 ``training.global_batch_size`` to the same value, and add the driver flags your
 loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
+The driver reads the same ``reef.recipe`` value from the deployment config and
+gets the loss family from the class's ``training_spec()``. Do not repeat either
+value in the driver environment. Reef has no global recipe-implementation
+registry.
 
 .. code:: bash
 

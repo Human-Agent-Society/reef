@@ -29,7 +29,7 @@ SERVICE_URL = "http://127.0.0.1:8900"
 TOKEN = "reef-local"
 #: This workload's isolated lane, and the recipe that serves it.
 SCENARIO = "basic-arithmetic"
-RECIPE = "recipe"  # the record-only base kind
+RECIPE = "recipe"  # the record-only core recipe
 #: Where the basic task's instruction says to put the answer
 #: (see ``harbor/instruction.md``).
 ANSWER_PATH = "/workspace/answer.txt"

@@ -21,7 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_client.client import HARNESS_VERSION_SIDECAR, ReefClient
 
 import reef.harness.adapters
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter

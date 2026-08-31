@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
 from reef.harness.render import render_composition

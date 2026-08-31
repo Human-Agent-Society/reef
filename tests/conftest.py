@@ -12,6 +12,7 @@ a deployment that brought its own plain objective.
 
 from __future__ import annotations
 
+import importlib
 from argparse import Namespace
 from collections.abc import Mapping
 from typing import Any
@@ -24,7 +25,19 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
 from reef.train.types import PolicyBatch, TrainingBatch
 
-#: The plain families the suite registers on top of the bundled ones.
+# The source suite exercises the repository cookbook as well as Reef core.
+# Load those packages explicitly: production ``import reef`` deliberately does
+# not, while importing a selected cookbook package registers its preparer and
+# lazy loss-family reference in this test process.
+for _cookbook_package in (
+    "recipes.harness_evolve",
+    "recipes.openclawrl",
+    "recipes.sao",
+    "recipes.tttd",
+):
+    importlib.import_module(_cookbook_package)
+
+#: The plain families the suite registers alongside cookbook families.
 TEST_FAMILIES = ("pg", "sft")
 
 

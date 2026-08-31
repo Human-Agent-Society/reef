@@ -1,8 +1,8 @@
 """SkillClaw's recipe: harness evolution plus the pool's own delivery surface.
 
-``skillclaw.yaml`` names this class as its dotted recipe kind
+``skillclaw.yaml`` names this class as its dotted recipe reference
 (``harness.skillclaw_recipe:SkillClawRecipe``). It changes exactly two things over
-the stock ``harness_evolve`` kind:
+the stock ``HarnessEvolveRecipe`` implementation:
 
 - ``build_surface`` returns ``create_skill_surface([SkillCatalogModule(...)])``, so
   every ``/v1`` request the service proxies carries the served pool's
@@ -23,7 +23,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
-from reef import HarnessEvolveRecipe
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.surface import Surface
 from reef.surface.skills import SkillValidator, create_skill_surface

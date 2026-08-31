@@ -16,8 +16,8 @@ the recipe's candidate gate; ``Trainer`` runs it between prepare and settle.
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,
 ``tests/plugin_contracts/`` for package boundaries, ``tests/reef_service/``
-for service-facing contracts, and a runnable example beside its method under
-``recipes/<method>/examples/``.
+for service-facing contracts, with runnable examples owned by their method
+packages.
 """
 
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend

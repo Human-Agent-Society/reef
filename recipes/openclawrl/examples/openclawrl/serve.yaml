@@ -1,6 +1,6 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
 # Five processes: ray-head + prm-sglang + user-llm-sglang + slime-driver + reef.
-# The whole method is the bundled `openclawrl` recipe: its processor
+# The whole method is the cookbook `openclawrl` recipe: its processor
 # correlates sessions from recorded traffic by trace matching and judges
 # next states with the PRM on a private worker — agents talk to reef
 # directly, no grader proxy and no session headers.
@@ -30,7 +30,7 @@ reef:
   host: 0.0.0.0
   model_path: /root/models/Qwen3-4B-Thinking-2507
   port: 28900
-  recipe: openclawrl
+  recipe: recipes.openclawrl.recipe:OpenClawRLRecipe
   token: ${REEF_TOKEN}                 # run.sh mints one per run
   batch_size: 16                       # MUST equal training.global_batch_size
   checkpoint_every_n_versions: 1
@@ -214,7 +214,6 @@ services:
       RAY_ADDRESS: 127.0.0.1:${training.ray_port}
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
-      REEF_TRAINING_RECIPE: ${reef.recipe}
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
     depends_on: [ray-head]

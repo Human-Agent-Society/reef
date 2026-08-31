@@ -127,11 +127,12 @@ with no GPU.
          # {"scenario": "hello-reef", "versions": [{"artifact_version": "...", "step": 0, ...}]}
 
       One version, and it will stay at one: this deployment's recipe is the
-      base ``recipe`` kind, which records and trains nothing.
+      core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
-copy ``recipes/basic/external-provider.yaml``, set ``reef.recipe: sao``, and
-serve the new config. Weight recipes need GPUs (`Evolve your model
+copy ``recipes/basic/external-provider.yaml``, set
+``reef.recipe: recipes.sao.recipe:SAORecipe``, and serve the new config.
+Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
 The one that runs on a laptop is ``harness_evolve``, and it takes a second file:
@@ -216,5 +217,5 @@ and whether a candidate is good enough to publish. `Write a recipe
    Candidate :: a new unpublished artifact
    Version :: the published artifact now serving
 
-Pick a bundled recipe from `Choosing a recipe <../user-guide/recipes.rst>`__, or write one in
+Pick a cookbook recipe from `Choosing a recipe <../user-guide/recipes.rst>`__, or write one in
 `Write a recipe <../developer-guide/write-a-recipe.rst>`__.

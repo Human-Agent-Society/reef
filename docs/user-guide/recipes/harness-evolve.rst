@@ -1,7 +1,7 @@
 harness_evolve
 ==============
 
-The only bundled recipe that updates text instead of weights. It proposes one
+The cookbook recipe that updates text instead of weights. It proposes one
 edit to the agent's harness tree, runs the agent both ways on your tasks, and
 publishes the edit only if it wins.
 
@@ -38,7 +38,7 @@ publishes as a new version, pulled through ``GET /reef/harness``.
 Configuration
 -------------
 
-This kind never reads the flat ``reef.*`` section. Its configuration lives in
+This recipe never reads the flat ``reef.*`` section. Its configuration lives in
 ``<name>.yaml`` under ``REEF_RECIPE_CONFIG_DIR``. The deployment config names
 that preset with ``reef.recipe`` (`Recipe configuration
 <../../reference/configuration.rst#recipe-configuration>`__). ``batch_size`` and

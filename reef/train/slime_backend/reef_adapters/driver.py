@@ -9,6 +9,9 @@ Variable                         Meaning
 ``SLIME_ARGS_FILE``              Optional. Shell-like file of Slime flags,
                                  parsed without a shell; direct command-line
                                  flags are appended after it.
+``REEF_CONFIG``                  Required. Deployment config written or selected
+                                 by ``reef serve``; ``reef.recipe`` identifies
+                                 the weight-training recipe class.
 ``REEF_RAY_NAMESPACE``           Ray namespace of the bridge actor
                                  (default ``reef``).
 ``REEF_RAY_ACTOR_NAME``          Name the bridge actor is published under
@@ -19,10 +22,6 @@ Variable                         Meaning
                                  ``run_dir``); ``--ready-file`` overrides it.
 ``REEF_BRIDGE_HEALTH_TIMEOUT_S``  Healthcheck RPC timeout in seconds
                                  (default ``10``).
-``REEF_TRAINING_LOSS``           Loss family to run, named directly.
-``REEF_TRAINING_RECIPE``         Bundled recipe whose loss family to run;
-                                 informational when ``REEF_TRAINING_LOSS``
-                                 is set.
 ===============================  =============================================
 """
 
@@ -36,13 +35,17 @@ import shlex
 import signal
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import ray
 
+from reef.recipe import RecipeConfigError, WeightTrainingRecipe
+from reef.recipe.registry import recipe_class_for
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.service.deploy.config import config_value, load_config
+from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
@@ -102,48 +105,30 @@ def _parse_slime_args(arguments: Sequence[str]):
         sys.argv = original_argv
 
 
-def _recipe_loss_family(recipe: str) -> str:
-    """Resolve a recipe name to its configured backend loss family.
+def _resolve_training_recipe(config: Mapping[str, Any]) -> tuple[str, str, SlimeAlgorithm]:
+    """Resolve the recipe and its loss family from ``reef.recipe``.
 
-    The registry is the single source of truth: the backend never keeps its
-    own list of method names, so a new method that reuses an existing loss
-    family needs no driver changes.
+    The deployment already has one authoritative recipe reference. Importing
+    that selected class is the extension boundary; its static
+    :meth:`WeightTrainingRecipe.training_spec` supplies the loss family without
+    a second environment setting.
     """
-    from reef.recipe import WeightTrainingRecipe
-    from reef.recipe.registry import recipe_class_for
-
-    recipe_type = recipe_class_for(recipe)
-    if recipe_type is None or not issubclass(recipe_type, WeightTrainingRecipe):
-        raise RuntimeError(f"unsupported REEF_TRAINING_RECIPE: {recipe!r}")
-    loss_family = recipe_type.training_spec().loss_family
+    recipe = config_value(config, "reef", "recipe", expand=False)
+    if not isinstance(recipe, str) or not recipe:
+        raise RuntimeError("REEF_CONFIG must define reef.recipe")
+    try:
+        recipe_class = recipe_class_for(recipe)
+    except RecipeConfigError as exc:
+        raise RuntimeError(f"cannot load reef.recipe {recipe!r}: {exc}") from exc
+    if recipe_class is None or not issubclass(recipe_class, WeightTrainingRecipe):
+        raise RuntimeError(f"slime driver requires reef.recipe to name a WeightTrainingRecipe class, got {recipe!r}")
+    loss_family = recipe_class.training_spec().loss_family.strip()
     if not loss_family:
-        raise RuntimeError(f"unsupported REEF_TRAINING_RECIPE: {recipe!r}")
-    return loss_family
-
-
-def _resolve_loss_family(environ) -> tuple[str | None, str | None, SlimeAlgorithm | None]:
-    """Resolve the training loss family and its spec from the driver environment.
-
-    ``REEF_TRAINING_LOSS`` names a loss family directly, so self-registered
-    (cookbook) methods never have to borrow a bundled recipe's name. When it
-    is set, ``REEF_TRAINING_RECIPE`` is informational only. Without it, the
-    bundled recipe registry resolves ``REEF_TRAINING_RECIPE`` as before.
-    Returns ``(loss_family, recipe, spec)``, resolved through the loss-family
-    registry exactly once, or ``(None, None, None)`` when neither variable is
-    set. The registry is the vocabulary authority: an unknown family fails in
-    ``resolve_loss_family``.
-    """
-    loss = environ.get("REEF_TRAINING_LOSS", "").strip()
-    if loss:
-        try:
-            return loss, None, resolve_loss_family(loss)
-        except UnknownLossFamilyError as exc:
-            raise RuntimeError(f"unsupported REEF_TRAINING_LOSS: {loss!r} ({exc})") from exc
-    recipe = environ.get("REEF_TRAINING_RECIPE", "").strip()
-    if recipe:
-        loss = _recipe_loss_family(recipe)
-        return loss, recipe, resolve_loss_family(loss)
-    return None, None, None
+        raise RuntimeError(f"reef.recipe {recipe!r} declares no training loss family")
+    try:
+        return loss_family, recipe, resolve_loss_family(loss_family)
+    except UnknownLossFamilyError as exc:
+        raise RuntimeError(f"reef.recipe {recipe!r} declares unsupported loss family {loss_family!r}: {exc}") from exc
 
 
 def _stamp_loss_family_reference(args, reference: str | None) -> None:
@@ -153,8 +138,11 @@ def _stamp_loss_family_reference(args, reference: str | None) -> None:
     process cannot resolve for an external family: its registry starts empty.
     The reference is what it needs to import the module itself.
     """
-    if reference and ":" in reference:
-        args.loss_family_ref = reference
+    if not reference:
+        return
+    dotted = reference if ":" in reference else loss_family_refs().get(reference)
+    if dotted is not None:
+        args.loss_family_ref = dotted
 
 
 def _apply_bridge_resume_fallback(args) -> None:
@@ -274,24 +262,22 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     args_file = os.environ.get("SLIME_ARGS_FILE", "").strip() or None
     namespace = os.environ.get("REEF_RAY_NAMESPACE", DEFAULT_NAMESPACE)
     actor_name = os.environ.get("REEF_RAY_ACTOR_NAME", DEFAULT_ACTOR_NAME)
-    loss_family, recipe, spec = _resolve_loss_family(os.environ)
+    config = load_config(_required_environment("REEF_CONFIG"))
+    loss_family, recipe, spec = _resolve_training_recipe(config)
     combined_args = [*(load_args_file(args_file) if args_file else []), *direct_args]
     retention, remaining_args = _retention_options(combined_args)
-    loss_family_config, slime_args = (
-        spec.parse_driver_options(remaining_args) if spec is not None else (None, remaining_args)
-    )
+    loss_family_config, slime_args = spec.parse_driver_options(remaining_args)
     args = _parse_slime_args(slime_args)
     _validate_tracking_args(args)
     _apply_bridge_resume_fallback(args)
-    if spec is not None:
-        # Family-specific flags stripped by ``parse_specific_options`` are
-        # projected back onto args so Slime's workers can observe them.
-        spec.apply_driver_options(args, loss_family_config)
-        _stamp_loss_family_reference(args, loss_family)
-        from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
+    # Family-specific flags stripped by ``parse_specific_options`` are
+    # projected back onto args so Slime's workers can observe them.
+    spec.apply_driver_options(args, loss_family_config)
+    _stamp_loss_family_reference(args, loss_family)
+    from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
 
-        configure_reef_loss_args(args)
-        spec.validate_backend_args(args, recipe=recipe)
+    configure_reef_loss_args(args)
+    spec.validate_backend_args(args, recipe=recipe)
 
     stopping = threading.Event()
 

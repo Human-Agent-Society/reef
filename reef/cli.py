@@ -1,17 +1,15 @@
 """reef CLI: entry point for reef.
 
 Usage:
-  reef serve -c recipes/basic/<stack>.yaml     # start a configured stack
+  reef serve -c path/to/stack.yaml             # start a configured stack
 
 `reef serve` reads a config's `services` list and starts every declared
 process in dependency order, including the internal Reef HTTP service.
 Run `reef serve --help` for config options.
 
-``recipes/basic/`` holds the learn-nothing deployment stacks and
-``recipes/<method>/examples/`` each method's — the `services` layout a
-`reef serve -c` run starts. Named per-scenario recipe YAML is deployment
-data, not library data: point ``REEF_RECIPE_CONFIG_DIR`` at your own
-directory (see ``docs/reference/configuration.rst`` for the shape).
+Deployment stacks use the `services` layout documented in the configuration
+reference. Named per-scenario recipe YAML is deployment data, not library
+data: point ``REEF_RECIPE_CONFIG_DIR`` at your own directory.
 """
 
 from __future__ import annotations
@@ -30,8 +28,8 @@ usage: reef <command> [options]
   -c CONFIG   Config file (default: reef.yaml or $REEF_CONFIG)
 
 Examples:
-  reef serve -c recipes/basic/local-sglang.yaml
-  reef serve -c recipes/basic/external-provider.yaml
+  reef serve -c path/to/local-sglang.yaml
+  reef serve -c path/to/external-provider.yaml
 """
 
 

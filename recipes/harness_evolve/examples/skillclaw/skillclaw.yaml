@@ -1,5 +1,5 @@
 # The recipe the campaign driver boots: run.py loads this file, builds
-# the dotted kind below, and serves it from its own embedded Reef service
+# the explicit implementation below, and serves it from its own embedded Reef service
 # (task containers reach that service through Docker's host gateway, and
 # every /v1 request they make carries the served pool's catalog).
 #
@@ -10,7 +10,7 @@
 # The method package's own recipe class: harness_evolve plus the
 # catalog-injecting delivery surface (harness/skillclaw_recipe.py, imported
 # from this directory - the driver runs with it as the working directory).
-kind: harness.skillclaw_recipe:SkillClawRecipe
+implementation: harness.skillclaw_recipe:SkillClawRecipe
 
 model:
   path: ${REEF_MODEL}

@@ -38,7 +38,7 @@ Config overrides:
 
   Examples:
     reef serve --model_path Qwen2.5-1.5B-Instruct
-    reef serve -c recipes/basic/local-sglang.yaml --port 9000
+    reef serve -c path/to/local-sglang.yaml --port 9000
     reef serve --training.checkpoint_dir /tmp/ckpt
 """
 
