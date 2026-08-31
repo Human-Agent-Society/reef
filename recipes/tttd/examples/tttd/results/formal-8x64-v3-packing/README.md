@@ -6,6 +6,11 @@ Qwen3-8B. The search generated eight groups of 64 programs at each step. Reef
 trained a rank-32 LoRA adapter after every complete grid and served the updated
 adapter during the next search step.
 
+The individual result pages use the same layout as the Erdős result page:
+
+- [Packing 26](packing26/README.md)
+- [Packing 32](packing32/README.md)
+
 ## Results
 
 Higher values are better. The TTT-Discover column reproduces the six decimal
@@ -17,8 +22,8 @@ task instruction and is not a proven optimum.
 | Packing 26 | 50/50 | `2.6359830849177777` | `2.635983` | `2.636` | `0.0000169150822223` |
 | Packing 32 | 50/50 | `2.9395727712074926` | `2.939572` | `2.940` | `0.0004272287925074` |
 
-Both runs match the published TTT-Discover values at the precision used in the
-paper. This comparison does not establish a global optimum.
+Both certified values are within `8e-7` of the values reported by TTT-Discover.
+This comparison does not establish a global optimum.
 
 ![Verified packing configurations](packing_configurations.png)
 
@@ -79,9 +84,10 @@ step 50.
   best-solution curves.
 - `manifest.json` records the task hashes, runtime commits, scenarios, and jobs
   that produced the milestone summaries.
-- `packing26/` and `packing32/` contain the final generated program, the judge
-  summaries at steps 20, 40, and 50, and the returned circle coordinates. The
-  checkpoint fields use paths relative to the corresponding run root.
+- `packing26/` and `packing32/` contain the task result page, final generated
+  program, best-solution figure, judge summaries at steps 20, 40, and 50, and
+  the returned circle coordinates. The checkpoint fields use paths relative to
+  the corresponding run root.
 - `../export_wandb_history.py` exports the numeric history from local W&B run
   files. It runs in an environment that provides the W&B Python package.
 
