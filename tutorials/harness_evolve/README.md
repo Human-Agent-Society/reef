@@ -3,9 +3,6 @@
 This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a composition tree of nodes, a proposal is one gated tree mutation, and a winning mutation publishes as a versioned artifact any client can pull. The proposer is the served model itself: it reads the current skill nodes and its own failing requests and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
 
 The pinned paper reproduction built on this mechanism lives at `recipes/skillclaw/`.
-
-The proposer is the served model itself: it reads the current skill nodes and its own failing requests and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
-
 ## Directory layout
 
 ```text
@@ -18,6 +15,9 @@ harness_evolve/
   run.py         the loop, written out: record -> report -> evolve -> pull
   run.sh         copies the recipe config out of serve.yaml, starts
                  reef serve, waits for /healthz, runs run.py
+  1_evolve_your_harness.ipynb
+                 the same pass cell by cell, with the service managed as a
+                 subprocess from the notebook
   pyproject.toml makes harness/ an installable package
   README.md      this file
 ```
@@ -39,6 +39,12 @@ You also need the pi coding agent binary on your PATH (serve.yaml's `evolution.b
 ```
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The one value it does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
+
+## Notebook
+
+`1_evolve_your_harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
+
+Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible in `work/agent-record/*.commits.jsonl`. The committed outputs are a full local pass with no GPU: ollama `qwen2.5:7b` on a Mac mini scored 1.0 / 0.0 / 1.0 on the recorded pass, the self proposer updated `answer-style`, and the gate published on 1 win, 0 losses, 2 ties.
 
 ## What one run does
 
