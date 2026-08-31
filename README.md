@@ -232,5 +232,5 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 ## Contribute
 
 - Start with the [contribution guide](CONTRIBUTING.md)
-- Use [GitHub issues](https://github.com/Human-Agent-Society/reef/issues) and RFCs for design discussions.
+- Write RFCs directly in [GitHub issues](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) for design discussions.
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).

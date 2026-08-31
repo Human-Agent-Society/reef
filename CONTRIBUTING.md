@@ -30,7 +30,7 @@ Use the structured template that matches the work:
   with pinned models, workloads, baselines, metrics, and retained evidence.
 - **Example** for a runnable user-facing recipe or reference deployment with a
   documented setup and expected result.
-- **RFC discussion** when the change may affect public interfaces,
+- **RFC proposal** when the change may affect public interfaces,
   persistence, trust boundaries, topology, bundled recipes, training
   backends, or project-wide policy.
 - **Maintainer task** for scoped implementation, refactoring, cleanup, or
@@ -103,9 +103,12 @@ Small bug fixes, documentation improvements, tests, internal refactors that
 preserve behavior, and implementation work for an accepted RFC do not normally
 need a new RFC.
 
-Read the [RFC process](docs/rfcs/README.rst) and start from the
-[RFC template](docs/rfcs/0000-template.rst). An RFC must be accepted before its
-implementation is treated as approved project direction.
+Open an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml)
+and complete the full proposal in the issue body. The issue is the RFC and its
+decision record; do not add a new document under `docs/rfcs`. Keep material
+design changes, the maintainer decision, and implementation links on the issue.
+An RFC must be explicitly accepted there before its implementation is treated
+as approved project direction.
 
 ## AI-assisted contributions
 

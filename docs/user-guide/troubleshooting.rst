@@ -63,4 +63,6 @@ Harness evolution
 Docs and links
 --------------
 
-**A docs link points at GitHub instead of a page.** Only files under ``docs/*.rst`` are site pages; ``rfcs/``, examples, and code are linked on GitHub, where they are read.
+**A docs link points at GitHub instead of a page.** Only files under
+``docs/*.rst`` are site pages; historical RFCs, examples, and code are linked
+on GitHub, where they are read.

@@ -3,6 +3,13 @@
 Method integration: one method, one trust domain
 =================================================
 
+:Status: Deprecated
+
+.. warning::
+
+   This historical RFC predates the issue-based RFC process and will be removed
+   in a future cleanup.
+
    **Status (2026-08): resolved, beyond M3.** The judging half moved all the
    way into the recipe's processor (``recipes/openclawrl/processor.py``):
    sessions are reconstructed from recorded traffic by trace matching (no

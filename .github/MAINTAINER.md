@@ -95,6 +95,15 @@ and `type: example` for a maintained, runnable user-facing reference. Use
 question, RFC, and roadmap forms apply their corresponding existing labels.
 These type labels do not replace area or lifecycle labels.
 
+An RFC issue is both the proposal and the durable decision record. Maintainers
+must not ask authors to add new RFC documents under `docs/rfcs`. The affected
+maintainers record acceptance in a comment and move an accepted RFC to
+`status: ready`; implementation pull requests link the issue. Material design
+changes and shipped implementation links are recorded on the RFC issue.
+After the accepted design ships, close the issue as completed. Rejected,
+withdrawn, or superseded RFCs are closed with a comment explaining the outcome
+and linking any replacement.
+
 Every new public issue starts with `status: needs-triage`. During triage, a
 maintainer should choose a clear next state:
 
@@ -154,8 +163,8 @@ A maintainer checks whether the pull request:
 - has enough information to begin review.
 
 The maintainer may ask the author to narrow the change, move design discussion
-to an issue or RFC, or close work that does not fit project direction. The
-reason should be stated clearly.
+to the appropriate issue form, or close work that does not fit project
+direction. The reason should be stated clearly.
 
 ### 3. On-call assignment and review routing
 
@@ -267,6 +276,7 @@ area review when expertise or ownership is disputed. Maintainers make the final
 repository-level decision and record the rationale when consensus is not
 possible.
 
-Substantial changes to this maintenance model follow the
-[RFC process](../docs/rfcs/README.rst). Routine clarifications may be proposed
-directly as a pull request to this document.
+Substantial changes to this maintenance model start with an
+[RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
+Routine clarifications may be proposed directly as a pull request to this
+document.
