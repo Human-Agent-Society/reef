@@ -10,7 +10,7 @@ README records the example's implementation details, paper fidelity, and complet
 reproduction results.
 
 ```text
-harbor/               self-contained Tide/Harbor task definitions
+harbor/               self-contained reef-eval/Harbor task definitions
   erdos_min_overlap/
   circle_packing_26/
   circle_packing_32/
@@ -26,7 +26,7 @@ harness/              agent harness (PUCT search + Reef adapter)
   run_controller.py     training barrier + paired PUCT resume state
   harbor_agent.py       Harbor BaseAgent (imports harbor package)
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config
-run.py                one Tide episode owning the complete TTT trajectory
+run.py                one reef-eval episode owning the complete TTT trajectory
 run.sh                starts the reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
 results/              formal result data, generated programs, and plots
@@ -143,7 +143,7 @@ byte.
 ```bash
 git submodule update --init third_party/reef-client
 pip install -e ./third_party/reef-client
-pip install -e . "tide-eval[harbor]"
+pip install -e .
 ```
 
 ```bash

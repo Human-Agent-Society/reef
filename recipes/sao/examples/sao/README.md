@@ -50,7 +50,7 @@ stripped, or a numeric evaluation of simple LaTeX (fractions, roots, π) within
 a relative tolerance of `1e-6`. The reward is binary, 1.0 for a correct answer
 and 0.0 otherwise. The rule is copied into `harness/agent.py` rather than
 imported from the task, because the harness is installed on its own into
-tide's environment.
+reef-eval's environment.
 
 The last completion is written to `/workspace/answer.txt`, where the Harbor
 verifier (`harbor/imo-*/tests/grade.py`) scores it independently and records
@@ -85,7 +85,7 @@ against the same receipts.
 The runtime flow is:
 
 ```text
-tide starts one Harbor trial for the next problem
+reef-eval starts one Harbor trial for the next problem
   -> the agent sends one OpenAI-compatible chat request through Reef
   -> the SGLang backend renders the prompt once and calls /generate
   -> Reef stores the sampled tokens, the loss mask, and the rollout log-probabilities
@@ -118,7 +118,7 @@ the Slime driver, and CUDA builds of torch, SGLang, and Megatron. Inside it,
 from this directory:
 
 ```bash
-pip install -e . "tide-eval[harbor]"
+pip install -e .
 hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
 ```
 
@@ -136,7 +136,7 @@ loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
 up; `work/reef.log` has the service log if the wait never ends.
 
-`run.py` is the loop, written out. For each task in order, tide's `Lab.run`
+`run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
 executes one episode: the agent runs its six rollouts, reporting each one as
 it is scored, then Harbor's verifier scores the last completion. The ordering
 is the experiment: task `N+1` is served by the weights task `N` produced.

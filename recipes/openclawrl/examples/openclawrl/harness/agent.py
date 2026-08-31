@@ -1,17 +1,17 @@
 """The stream harness IS the Hermes agent: one homework session per position.
 
-Tide invokes this once per stream position. It owns the whole session:
+reef-eval invokes this once per stream position. It owns the whole session:
 
 * a **header shim** thread (``reef_client.serve``) fronting reef with the
   stream's scenario attached — hermes cannot set ``x-reef-scenario``
   itself. It binds ``0.0.0.0`` so the in-container hermes reaches it on
   the same host the deployment already allowlists for reef;
 * the **reef scenario id**, minted at position 0 and carried in
-  ``$TIDE_STATE_DIR`` — one stream, one scenario, one weight chain; a
+  ``$REEF_EVAL_STATE_DIR`` — one stream, one scenario, one weight chain; a
   fresh variant starts fresh;
 * **hermes itself**, run inside the task container (the environment image
   installs it) with its home on the state mount, so optional agent memory
-  rides tide's one cross-position channel. The config is written on first
+  rides reef-eval's one cross-position channel. The config is written on first
   use; compression stays off because history rewrites would break the
   processor's trace matching (and homework sessions are short);
 * the **conversation loop** with the judge sidecar: student message from
@@ -56,7 +56,7 @@ SHIM_PORT = 29101
 #: How often to ask the judge whether its reaction has landed.
 REACTION_POLL_S = 2.0
 
-STATE_DIR = "/tide/state"
+STATE_DIR = "/reef_eval/state"
 HERMES_HOME = f"{STATE_DIR}/hermes"
 
 

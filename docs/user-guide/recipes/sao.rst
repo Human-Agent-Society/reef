@@ -61,7 +61,7 @@ Run the example
 .. code:: bash
 
    cd recipes/sao/examples/sao
-   pip install -e . "tide-eval[harbor]"
+   pip install -e . "reef-eval[harbor]"
    ./run.sh
 
 The example runs three IMOAnswerBench problems in order. Each drives six
