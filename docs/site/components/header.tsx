@@ -3,6 +3,7 @@ import { siteConfig } from "@/lib/site";
 import { GitHubIcon } from "./github-icon";
 import { HeaderNav } from "./header-nav";
 import { Logo } from "./logo";
+import { MobileNav } from "./mobile-nav";
 import { Search } from "./search";
 import { ThemeToggle } from "./theme-toggle";
 
@@ -18,6 +19,7 @@ export function Header({ documents, navigation }: { documents: SearchDocument[];
         <nav className="header-actions" aria-label="Global navigation">
           <a className="icon-button" href={siteConfig.repository} target="_blank" rel="noreferrer" aria-label="Reef on GitHub"><GitHubIcon size={19} /></a>
           <ThemeToggle />
+          <MobileNav navigation={navigation} />
         </nav>
       </div>
     </header>

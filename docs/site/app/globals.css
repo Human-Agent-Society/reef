@@ -73,6 +73,13 @@ button { cursor: pointer; }
 .search-trigger span { flex: 1; text-align: left; font-size: 14px; }
 kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; background: var(--background); font-family: var(--font-sans); font-size: 11px; }
 .header-actions { display: flex; align-items: center; gap: 2px; }
+.icon-button.menu-toggle { display: none; } /* two classes: outranks .icon-button's own display, declared below */
+.mobile-nav-overlay { position: fixed; z-index: 100; inset: 0; background: color-mix(in srgb, var(--foreground) 18%, transparent); }
+.mobile-nav-panel { position: absolute; top: 0; right: 0; bottom: 0; width: min(320px, 86vw); padding: 6px 20px 28px; overflow-y: auto; overscroll-behavior: contain; border-left: 1px solid var(--border); background: var(--background); }
+.mobile-nav-head { height: 48px; display: flex; align-items: center; justify-content: space-between; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.mobile-nav-panel h3 { margin: 18px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.mobile-nav-panel nav a { min-height: 44px; padding: 0 10px; margin: 0 -10px; display: flex; align-items: center; color: var(--text); border-radius: 8px; font-size: 15px; }
+.mobile-nav-panel nav a[aria-current="page"] { color: var(--foreground); background: var(--accent); font-weight: 600; }
 .icon-button { width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center; color: var(--muted); border: 0; border-radius: 8px; background: transparent; }
 .icon-button:hover { color: var(--foreground); background: var(--accent); }
 .theme-toggle .sun-icon, .theme-toggle .moon-icon { display: none; }
@@ -84,9 +91,9 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
 .search-overlay { position: fixed; z-index: 100; inset: 0; padding: 11vh 20px 20px; display: flex; justify-content: center; align-items: flex-start; background: transparent; }
 .search-dialog { width: min(640px, 100%); overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--background); box-shadow: 0 20px 55px rgba(15, 25, 35, .16); }
 .search-input-row { height: 60px; padding: 0 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
-.search-input-row input { min-width: 0; height: 100%; flex: 1; color: var(--foreground); border: 0; outline: 0; background: transparent; }
+.search-input-row input { min-width: 0; height: 100%; flex: 1; color: var(--foreground); border: 0; outline: 0; background: transparent; font-size: 16px; } /* 16px floor: iOS Safari zooms the page when focusing a smaller input */
 .search-input-row button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 7px; background: transparent; }
-.search-results { min-height: 250px; max-height: 55vh; padding: 10px; overflow: auto; }
+.search-results { min-height: 250px; max-height: 55vh; padding: 10px; overflow: auto; overscroll-behavior: contain; }
 .search-label { margin: 4px 8px 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .search-results > a { padding: 10px; display: flex; align-items: center; gap: 11px; border-radius: 8px; }
 .search-results > a:hover { background: var(--accent); }
@@ -172,6 +179,10 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
 .markdown-body blockquote { margin: 24px 0; padding: 14px 18px; border-left: 3px solid var(--border); background: var(--card); }
 .markdown-body blockquote p:last-child { margin-bottom: 0; }
 .markdown-body code, .markdown-body .literal { padding: .15em .35em; color: var(--foreground); border-radius: 4px; background: var(--card); font-family: var(--font-mono); font-size: 14px; overflow-wrap: anywhere; }
+/* In tables the wrapper scrolls, so identifiers never split mid-token. */
+.markdown-body .table-scroll code, .markdown-body .table-scroll .literal { overflow-wrap: normal; }
+/* Code lines are newline-free block spans (see highlightedHtml); 1lh keeps blank lines open. */
+.markdown-body pre .line, pre.code .line { display: block; min-height: 1lh; }
 .markdown-body pre { margin: 24px 0 32px; padding: 20px; overflow-x: auto; color: var(--code-text); border: 1px solid var(--border); border-radius: 12px; box-shadow: inset 0 1px color-mix(in srgb, var(--foreground) 4%, transparent); font: 13px/1.65 var(--font-mono); }
 .markdown-body pre, .markdown-body .table-scroll {
   /* Scroll cue: local-attached covers slide over the pinned edge shadows,
@@ -184,7 +195,8 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
     var(--scroller-bg);
 }
 .markdown-body pre { --scroller-bg: var(--code); border-color: color-mix(in srgb, var(--border) 88%, transparent); }
-.markdown-body .table-scroll { --scroller-bg: var(--background); margin: 24px 0 32px; overflow-x: auto; border-radius: 12px; box-shadow: var(--shadow-sm); }
+.table-scroll { overflow-x: auto; } /* every table wrapper scrolls, on and off .markdown-body pages */
+.markdown-body .table-scroll { --scroller-bg: var(--background); margin: 24px 0 32px; border-radius: 12px; box-shadow: var(--shadow-sm); }
 .markdown-body .table-scroll table { margin: 0; }
 .markdown-body pre code { display: block; width: max-content; min-width: 100%; padding: 0; color: inherit; background: transparent; font-size: 13px; }
 .markdown-body .mermaid-diagram { margin: 24px 0 32px; padding: 20px 16px; overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; background: var(--card); }
@@ -263,8 +275,14 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
   .toc { display: none; }
 }
 
-@media (max-width: 800px) {
+@media (max-width: 1000px) {
+  /* Six tabs need ~990px of header; below that they clip the right-side
+     controls off screen, so the drawer takes over well before it hurts. */
   .header-links { display: none; }
+  .icon-button.menu-toggle { display: inline-grid; }
+}
+
+@media (max-width: 800px) {
   .header-search { margin-left: auto; }
   .home-hero { padding-top: 80px; grid-template-columns: 1fr; align-items: start; }
   .loop-card { max-width: 420px; }
@@ -287,7 +305,10 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
   .home h2 { font-size: 31px; }
   .resource-grid { grid-template-columns: 1fr; }
   .docs-main { padding: 40px 20px 70px; }
-  .markdown-body th, .markdown-body td { overflow-wrap: anywhere; }
+  /* Long words in cells break; header words never split mid-word - a header
+     that no longer fits widens its column and the wrapper scrolls instead. */
+  .markdown-body td { overflow-wrap: anywhere; }
+  .markdown-body th { overflow-wrap: normal; }
   .pager { grid-template-columns: 1fr; }
   .site-footer { align-items: flex-start; flex-direction: column; }
   .site-footer nav { flex-wrap: wrap; }
@@ -295,6 +316,7 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
 @media (pointer: coarse) {
   .icon-button { width: 44px; height: 44px; }
   .search-trigger { min-height: 44px; min-width: 44px; }
+  .logo { min-height: 44px; }
   .markdown-body a.heading-anchor { padding: 10px 15px; margin-left: 0; }
 }
 
@@ -639,6 +661,12 @@ body {
 }
 
 @media (max-width: 600px) {
+  /* Reassert the compact search: the skin rules above this block win the
+     cascade over the earlier compact media query, reintroducing the left
+     padding and raised background (off-center icon) and the desktop
+     .header-search width (a dead gap in the middle of the header). */
+  .search-trigger { padding: 0; background: transparent; box-shadow: none; }
+  .header-search { width: 44px; }
   .home-hero, .home-section { width: calc(100% - 28px); padding-right: 8px; padding-left: 8px; }
   .home-hero { padding-top: 66px; }
   .home h1 { font-size: 46px; }
