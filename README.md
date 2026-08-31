@@ -32,7 +32,10 @@ better and better results without having to do anything.
 ## How it works
 
 <div align="center">
-<img src="docs/assets/readme-loop-v2-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/loop-animation-dark.svg">
+  <img src="docs/assets/loop-animation-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
+</picture>
 </div>
 
 Reef processes each learning cycle in four steps. The table also shows which
