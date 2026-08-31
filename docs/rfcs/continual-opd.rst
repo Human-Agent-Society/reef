@@ -76,7 +76,7 @@ Continual OPD on Reef: framework
 |                 |                |                       | plumbing          |
 +-----------------+----------------+-----------------------+-------------------+
 | L1 same-vocab   | Large Qwen →   | Teacher scores the    | **Backend         |
-| OPD             | small Qwen     | student's own sampled | shipped** — the   |
+| OPD             | small Qwen     | student's own sampled | shipped**: the   |
 |                 |                | tokens per-token;     | ``opd`` loss      |
 |                 |                | reverse-KL signal     | family            |
 |                 |                |                       | (slime-bridge     |
@@ -138,7 +138,7 @@ no slime-core changes and leaves the client contract unchanged.
 | E0 | Three baselines: student-only, | How big the gap is and whether |
 |    | **each teacher's pure-run      | it's worth pursuing; the       |
 |    | ceiling** (large Qwen,         | teacher-only lines are the     |
-|    | GLM/Kimi — one line each),     | ceiling denominator for every  |
+|    | GLM/Kimi (one line each),     | ceiling denominator for every  |
 |    | oracle-router                  | later experiment and the cost  |
 |    |                                | reference for "just use the    |
 |    |                                | big model"                     |

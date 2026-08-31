@@ -19,10 +19,10 @@ a change that needs to reach upward is in the wrong package:
 .. code:: mermaid
 
    flowchart TD
-       accTitle: Which layer depends on which
-       subgraph Methods["Methods — recipes/"]
+       accTitle: Dependency direction between package layers
+       subgraph Methods["Methods in recipes/"]
            direction LR
-           M["sao · tttd · openclawrl · harness_evolve<br/>recipe, processor, preparer"]
+           M["sao, tttd, openclawrl, harness_evolve<br/>recipe, processor, preparer"]
        end
        subgraph Orchestration["Orchestration"]
            direction LR
@@ -32,7 +32,7 @@ a change that needs to reach upward is in the wrong package:
        subgraph Contracts["Contracts"]
            direction LR
            Recipe["reef/recipe<br/>what a method implements"]
-           Runtime["reef/runtime<br/>inference + training"]
+           Runtime["reef/runtime<br/>inference and training"]
            Harness["reef/harness<br/>descriptors, episodes"]
        end
        subgraph Engines["Engines and storage"]
@@ -41,7 +41,7 @@ a change that needs to reach upward is in the wrong package:
            Surfaces["reef/surface<br/>delivery of an artifact"]
            Artifacts["reef/artifact<br/>bytes, repositories, versions"]
        end
-       Core["reef/core — value types, wire shapes, errors"]
+       Core["reef/core: value types, wire shapes, errors"]
        Methods --> Orchestration
        Orchestration --> Contracts
        Contracts --> Engines

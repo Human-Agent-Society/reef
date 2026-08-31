@@ -9,7 +9,7 @@ publishes the edit only if it wins.
 runnable example.
 
 +-------------+------------------------------------------------------------+
-| Evolves     | the harness tree — config, rules, prompts, skills,         |
+| Evolves     | the harness tree: config, rules, prompts, skills,          |
 |             | extensions                                                 |
 +-------------+------------------------------------------------------------+
 | Signal      | one report with a finite ``score`` and exactly one         |
@@ -17,7 +17,7 @@ runnable example.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/harness_evolve/``                                |
 +-------------+------------------------------------------------------------+
-| Loss family | — (no weight training)                                     |
+| Loss family | none (no weight training)                                  |
 +-------------+------------------------------------------------------------+
 | Processor   | reported feedback, producing a ``TraceBatch``              |
 +-------------+------------------------------------------------------------+

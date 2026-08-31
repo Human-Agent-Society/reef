@@ -44,7 +44,7 @@ One question picks the engine: **does feedback arrive in a report, or must the
 method compute it?**
 
 +-----------------+---------------------------------------------+----------------------------------------------------+
-|                 | reported — ``ReportedFeedbackProcessor``    | computed — ``ComputedFeedbackProcessor``           |
+|                 | reported: ``ReportedFeedbackProcessor``     | computed: ``ComputedFeedbackProcessor``            |
 +=================+=============================================+====================================================+
 | feedback        | reports referencing inference records       | signal mined from the traffic itself               |
 | arrives as      |                                             |                                                    |

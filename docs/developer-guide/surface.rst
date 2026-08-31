@@ -76,17 +76,17 @@ Built-in surfaces
 +----------------------------------------+-------------------------+----------------------------------+------------------+
 | Surface                                | Loader                  | Inference                        | Files            |
 +========================================+=========================+==================================+==================+
-| ``Surface()``                          | —                       | —                                | —                |
+| ``Surface()``                          | none                    | none                             | none             |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
-| ``create_weight_surface()``            | ``WeightLoader``        | ``WeightInferenceHooks``         | —                |
+| ``create_weight_surface()``            | ``WeightLoader``        | ``WeightInferenceHooks``         | none             |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
-| ``create_weight_surface(scenario=...)``| ``WeightLoader``        | ``WeightInferenceHooks``         | —                |
+| ``create_weight_surface(scenario=...)``| ``WeightLoader``        | ``WeightInferenceHooks``         | none             |
 |                                        |                         | selecting that scenario's        |                  |
 |                                        |                         | adapter revision                 |                  |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
-| ``create_harness_surface()``           | —                       | —                                | ``TextFileTree`` |
+| ``create_harness_surface()``           | none                    | none                             | ``TextFileTree`` |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
-| ``create_skill_surface(...)``          | —                       | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
+| ``create_skill_surface(...)``          | none                    | optional ``SkillInferenceHooks`` | ``TextFileTree`` |
 +----------------------------------------+-------------------------+----------------------------------+------------------+
 
 **Weights.** ``WeightLoader`` probes whether an in-memory live weight version

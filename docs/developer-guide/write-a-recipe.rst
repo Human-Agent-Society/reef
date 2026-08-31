@@ -18,31 +18,31 @@ This page covers a **weight** recipe. For a harness-evolution method with
 .. code:: mermaid
 
    flowchart TB
-       accTitle: Recipe lifecycle: collect, resolve and select, evolve and publish
-       subgraph COLLECT["1 · COLLECT"]
+       accTitle: How a recipe collects records and publishes an update
+       subgraph COLLECT["1. Collect"]
            direction LR
            REQ["Inference request"]
-           REP["Report<br/>or nothing"]
+           REP["Optional report"]
            STORE[("Records")]
            REQ --> STORE
            REP --> STORE
        end
-       subgraph RESOLVE["2 · RESOLVE & SELECT"]
+       subgraph RESOLVE["2. Resolve and select"]
            direction LR
-           ENG["Resolve feedback<br/>reported · computed"]
+           ENG["Resolve reported<br/>or computed feedback"]
            JUDGE["Judge"]
            BATCH["Make batch"]
            ENG -->|"resolved unit"| JUDGE
            JUDGE -->|TRAIN| BATCH
-           JUDGE -.->|"WAIT · NEVER"| ENG
+           JUDGE -.->|"WAIT or NEVER"| ENG
        end
-       subgraph EVOLVE["3 · EVOLVE & PUBLISH"]
+       subgraph EVOLVE["3. Update and publish"]
            direction LR
            PREP["Prepare step"]
-           BACK["Run backend<br/>driver · local"]
+           BACK["Run backend<br/>driver or local"]
            EVAL["Evaluate candidate"]
            SELECT["Select or reject"]
-           VER["New artifact version<br/>serves next round ↻"]
+           VER["New artifact version<br/>serves later requests ↻"]
            PREP -->|"step signal"| BACK
            BACK -->|"unpublished checkpoint"| EVAL
            EVAL --> SELECT

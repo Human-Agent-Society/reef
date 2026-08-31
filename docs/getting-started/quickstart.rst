@@ -5,15 +5,15 @@ Reef adds four things to an ordinary inference endpoint: a scenario, a receipt,
 a report, and a version chain.
 
 Two more terms matter once you want it to learn: the **recipe** and the
-**artifact**, highlighted below.
+**artifact**, shown below.
 
 .. flow::
 
-   Request :: served under a scenario; the recorded exchange returns a receipt
+   Request :: serve under a scenario and return a receipt
    Report :: feedback that quotes receipts
    Recipe* :: the method that turns reports into the next artifact
-   Artifact* :: what gets versioned: weights, or a harness tree
-   Version chain :: the history of artifacts it served
+   Artifact* :: what gets versioned: weights or a harness tree
+   Version chain :: the history of served artifacts
 
 Run the loop
 ------------
@@ -191,7 +191,7 @@ served it.
 
    v0 :: the starting artifact
    v1 :: first accepted update
-   v2* :: current — what requests are served by now
+   v2* :: current version serving requests
 
 Durable versions are Git-backed and can be pinned or rolled back. Between
 checkpoints, weight versions live in engine memory; their bytes are not
@@ -211,10 +211,10 @@ and whether a candidate is good enough to publish. `Write a recipe
 
 .. flow::
 
-   Records :: everything the scenario served and was told
-   Batch :: what the recipe judged eligible
-   Candidate :: an unpublished new artifact
-   Version :: published, and serving
+   Records :: requests, responses, and reports for the scenario
+   Batch :: eligible records selected by the recipe
+   Candidate :: a new unpublished artifact
+   Version :: the published artifact now serving
 
 Pick a bundled recipe from `Choosing a recipe <../user-guide/recipes.rst>`__, or write one in
 `Write a recipe <../developer-guide/write-a-recipe.rst>`__.
