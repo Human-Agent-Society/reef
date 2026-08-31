@@ -70,8 +70,9 @@ The ``reef`` section
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
    reef.checkpoint_every_n_versions | 1 | how often a version becomes durable
 
-Storage paths default under ``.reef/``, but every cookbook stack overrides them
-to ``/var/lib/reef``. Point them somewhere persistent.
+Storage paths default under ``.reef/``, which the basic and sao stacks keep;
+the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere
+persistent.
 
 .. config::
 
@@ -112,7 +113,7 @@ sections. Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
-   implementation: my_pkg.harness_evolve:CordisRecipe
+   implementation: reef.train.cordis_backend.recipe:CordisRecipe
    model:
      path: qwen3-8b
    data:
@@ -130,6 +131,37 @@ service can assemble their Ray training runtime; their fields are flat
 ``reef.<name>`` keys. Presets suit recipes whose runtime can be built from the
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
+
+Harness evolution keys
+~~~~~~~~~~~~~~~~~~~~~~
+
+``batch_size`` and ``max_score`` go under ``data:``; the rest goes under
+``evolution:``. `Evolve your harness
+<../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
+
+.. config::
+
+   data.batch_size | 1 | traces per mutation attempt
+   data.max_score | 0.0 | upper bound of the score window that batches
+
+The window has no lower bound, so the default keeps only traces at or below
+zero.
+
+.. config::
+
+   evolution.propose | a ``Proposer``, a plain callable, or a dotted ``module:attribute``
+   evolution.evaluate | an ``EpisodeScorer``, likewise
+   evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
+   evolution.tasks | non-empty list of episode prompts, scored once per tree per step
+   evolution.adapter | pi | ``opencode``, or an entry-point adapter
+   evolution.binary | overrides the adapter's binary name
+   evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
+   evolution.models | auxiliary models for the method; each key read via its ``api_key_env``
+   evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
+
+The served model's binding is appended at render time; it never enters the
+published files. The seed defines the baseline the first mutation is measured
+against.
 
 The ``services`` list
 ---------------------

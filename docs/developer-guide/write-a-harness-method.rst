@@ -92,7 +92,7 @@ The recipe config names the callables, the tasks, and the first-boot tree:
 
 .. code:: yaml
 
-   implementation: my_pkg.harness_evolve:CordisRecipe
+   implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
    model:
      path: qwen3-8b
@@ -149,7 +149,7 @@ Keep the ``tasks`` list short because it sets each step's cost. Start Reef where
 package is importable, and give ``-c`` an absolute path: Reef resolves a
 relative ``-c`` against its own repo root, not your working directory. Recovered
 tree state always wins over ``seed``. The full field list is in `harness_evolve
-<../user-guide/recipes/cordis.rst>`__.
+<../user-guide/recipes/skillclaw.rst>`__.
 
 Selection policies
 ~~~~~~~~~~~~~~~~~~

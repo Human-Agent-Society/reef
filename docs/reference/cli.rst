@@ -32,7 +32,7 @@ YAML-coerced, so ints and bools arrive as ints and bools.
      --training.checkpoint_dir /tmp/ckpt
 
 A bare key targets the ``reef`` section. A dotted key targets any other section.
-The quickstart uses this to keep state out of ``/var/lib/reef``:
+Use it to move a stack's state without editing its config:
 
 .. code:: bash
 

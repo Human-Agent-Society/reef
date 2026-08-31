@@ -13,7 +13,7 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | ``openclawrl``: multi-turn traffic,              |                                          |
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness:** prompts,   | ``cordis``: proposes edits from                  | not available                            |
+| **Harness:** prompts,   | ``skillclaw``: grows a skill pool                  | not available                            |
 | rules, skills, config   | the failures in its own served traffic           |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 
@@ -30,7 +30,7 @@ Pick by the signal your workload can produce.
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | Agent conversations without reports           | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| Feedback on individual requests, and failures | `cordis <recipes/cordis.rst>`__                 | harness tree  | no         |
+| Feedback on individual requests, and failures | `skillclaw <recipes/skillclaw.rst>`__           | harness tree  | no         |
 | worth learning from                           | (built into Reef)                               |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | No feedback yet; record only                  | ``recipe``, the core record-only recipe         | nothing       | no         |

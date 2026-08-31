@@ -46,8 +46,6 @@ objective; the driver checks it at start and refuses a mismatch.
 +----------------+-----------------------------+----------------------------+
 | Loss family    | ``--loss-type``             | Rollout log-probs          |
 +================+=============================+============================+
-| ``opd``        | ``policy_loss``             | ``--use-rollout-logprobs`` |
-+----------------+-----------------------------+----------------------------+
 | ``sao``        | ``policy_loss``             | ``--use-rollout-logprobs`` |
 +----------------+-----------------------------+----------------------------+
 | ``tttd``       | ``custom_loss``             | ``--use-rollout-logprobs`` |

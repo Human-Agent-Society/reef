@@ -58,10 +58,10 @@ behavior.
 
    Recipe                       record-only by default   reef.recipe
    ├── WeightTrainingRecipe     step preparer, loss family, TrainingRuntime
-   │   ├── SAORecipe                                        reef.sao
-   │   ├── TTTDRecipe                                       reef.tttd
-   │   └── OpenClawRLRecipe                                 reef.openclawrl
-   └── CordisRecipe      harness surface + backend   reef.train.cordis_backend
+   │   ├── SAORecipe                                        recipes.sao.recipe
+   │   ├── TTTDRecipe                                       recipes.tttd.recipe
+   │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
+   └── CordisRecipe             harness tree + episodes  reef.train.cordis_backend
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the

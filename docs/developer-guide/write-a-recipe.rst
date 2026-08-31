@@ -121,8 +121,10 @@ Gate a candidate
 ~~~~~~~~~~~~~~~~
 
 A runtime finishes training by exporting a candidate. The recipe's
-``candidate_evaluation`` decides what happens to it. A harness recipe builds
-its evaluator in code:
+``candidate_evaluation`` decides what happens to it. A weight recipe declares
+its evaluator in the deployment config; the top-level ``evaluation`` section
+serves weight recipes only, and a harness recipe builds its evaluator in code
+instead:
 
 .. code:: yaml
 

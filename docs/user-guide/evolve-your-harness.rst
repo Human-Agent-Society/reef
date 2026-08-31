@@ -112,8 +112,9 @@ Before you start
 - ``pip install reef-client``: the loop driver imports it.
 - An OpenAI-compatible endpoint serving the model under test, hosted or local.
   ``REEF_UPSTREAM_URL`` takes no ``/v1`` suffix.
-- The ``pi`` binary on ``PATH``, or named by ``REEF_PI_BINARY``
-  (``npm i -g @earendil-works/pi-coding-agent@0.84.2``).
+- The ``pi`` binary on ``PATH``
+  (``npm i -g @earendil-works/pi-coding-agent@0.84.2``); ``serve.yaml`` names
+  it under ``evolution.binary``.
 
 Run the example
 ---------------
@@ -165,7 +166,10 @@ still running:
      http://127.0.0.1:8900/reef/harness/releases
 
 One step is six episodes, three tasks on each of the two trees, and the
-reference run finished in 63 s on Qwen3-8B. The run has succeeded when one
+reference run finished in 63 s on Qwen3-8B: one failing task entered the
+window, the served model proposed a new skill beside the starter, and the gate
+scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
+notebook run repeats the arc with no GPU at all, on ollama ``qwen2.5:7b``. The run has succeeded when one
 task fails, the failing report opens the window, one evolve step runs, and
 ``GET /reef/harness`` stops returning 404. ``/reef/harness/releases`` then
 shows a published version.
