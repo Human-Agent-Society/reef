@@ -13,43 +13,53 @@ packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, or
 preparer, and, for weight methods, the ``slime/`` subpackage only the training
 plane imports. Nothing under ``reef/`` imports a method package.
 
-The packages form layers. A layer imports only the layers beneath it, so
-a change that needs to reach upward is in the wrong package:
+Reef is organized around an application kernel and three capability domains,
+not a strict stack of top-level packages. The arrows below show the primary
+composition and use paths; they are not an exhaustive Python import graph:
 
 .. code:: mermaid
 
+   %%{init: {"flowchart": {"curve": "linear", "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 42}}}%%
    flowchart TD
-       accTitle: Dependency direction between package layers
-       subgraph Methods["Methods in recipes/"]
-           direction LR
-           M["sao, tttd, openclawrl, harness_evolve<br/>recipe, processor, preparer"]
-       end
-       subgraph Orchestration["Orchestration"]
-           direction LR
-           Service["reef/service<br/>HTTP, assembly, lifecycle"]
-           Scenario["reef/scenario<br/>commit order, recovery"]
-       end
-       subgraph Contracts["Contracts"]
-           direction LR
-           Recipe["reef/recipe<br/>what a method implements"]
-           Runtime["reef/runtime<br/>inference and training"]
-           Harness["reef/harness<br/>descriptors, episodes"]
-       end
-       subgraph Engines["Engines and storage"]
-           direction LR
-           Train["reef/train<br/>trainer, processors, backends"]
-           Surfaces["reef/surface<br/>delivery of an artifact"]
-           Artifacts["reef/artifact<br/>bytes, repositories, versions"]
-       end
-       Core["reef/core: value types, wire shapes, errors"]
-       Methods --> Orchestration
-       Orchestration --> Contracts
-       Contracts --> Engines
-       Engines --> Core
+       accTitle: Reef application kernel, capability domains, and adapters
 
-Two edges skip a layer and are allowed: a method package binds ``reef/train``
-machinery directly, and ``reef/service`` imports ``reef/artifact`` to stream
-artifact bytes. Everything else follows the arrows.
+       Methods("<b>METHOD PLUG-INS</b><br/><code>recipes/*</code>")
+       Entry("<b>ENTRYPOINTS</b><br/>HTTP · CLI")
+       Policy("<b>POLICY</b><br/><code>reef/recipe</code>")
+       Service("<b>DELIVERY &amp; COMPOSITION</b><br/><code>reef/service</code>")
+       Kernel(["<b>APPLICATION KERNEL</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
+
+       subgraph Domains["CAPABILITY DOMAINS"]
+           direction LR
+           Serving("<b>SERVING</b><br/><code>runtime</code> · <code>surface</code>")
+           Evolution("<b>EVOLUTION</b><br/><code>train</code> · <code>harness</code>")
+           State("<b>STATE</b><br/><code>artifact</code> · <code>records</code>")
+       end
+
+       subgraph Adapters["CONCRETE ADAPTERS"]
+           direction LR
+           ServingAdapters[["runtime adapters<br/>surface implementations"]]
+           EvolutionAdapters[["training backends<br/>harness adapters"]]
+           StateAdapters[["Git/LFS repositories<br/>SQLite"]]
+       end
+
+       Observability(["<b>CROSS-CUTTING</b><br/><code>reef/observability</code>"])
+       Core(["<b>SHARED KERNEL</b><br/><code>reef/core</code>"])
+
+       Methods --> Policy --> Kernel
+       Entry --> Service --> Kernel
+       Kernel --> Serving & Evolution & State
+       Serving --> ServingAdapters
+       Evolution --> EvolutionAdapters
+       State --> StateAdapters
+       Kernel -. telemetry .-> Observability
+       ServingAdapters & EvolutionAdapters & StateAdapters --> Core
+
+Method packages provide policy through ``reef/recipe`` and may bind
+``reef/train`` machinery directly. HTTP and CLI entrypoints compose Reef
+through ``reef/service``; the transport-free dispatcher and scenario aggregate
+coordinate serving, evolution, and state. ``reef/service`` also imports
+``reef/artifact`` directly to stream artifact bytes.
 
 Concrete integrations may depend on shared contracts; shared contracts never
 import a concrete integration.

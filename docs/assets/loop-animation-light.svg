@@ -10,59 +10,59 @@
     .dash { stroke-dasharray: 5 6; }
     .arc { stroke-dasharray: 150; stroke-dashoffset: 0; }
     @keyframes k1 { 0%,1.11% {opacity:0} 3.06%,95.5% {opacity:1} 100% {opacity:0} }
-    .g1 { animation: k1 18s linear infinite; }
+    .g1 { animation: k1 12s linear infinite; }
     @keyframes k2 { 0%,3.33% {opacity:0} 5.28%,95.5% {opacity:1} 100% {opacity:0} }
     @keyframes d2 { 0%,3.33% {stroke-dashoffset:150} 11.11%,100% {stroke-dashoffset:0} }
-    .g2 { animation: k2 18s linear infinite, d2 18s linear infinite; }
+    .g2 { animation: k2 12s linear infinite, d2 12s linear infinite; }
     @keyframes k3 { 0%,8.33% {opacity:0} 10.28%,95.5% {opacity:1} 100% {opacity:0} }
-    .g3 { animation: k3 18s linear infinite; }
+    .g3 { animation: k3 12s linear infinite; }
     @keyframes k4 { 0%,11.39% {opacity:0} 13.33%,95.5% {opacity:1} 100% {opacity:0} }
-    .g4 { animation: k4 18s linear infinite; }
+    .g4 { animation: k4 12s linear infinite; }
     @keyframes k5 { 0%,12.22% {opacity:0} 14.17%,95.5% {opacity:1} 100% {opacity:0} }
-    .g5 { animation: k5 18s linear infinite; }
+    .g5 { animation: k5 12s linear infinite; }
     @keyframes k6 { 0%,14.44% {opacity:0} 16.39%,95.5% {opacity:1} 100% {opacity:0} }
     @keyframes d6 { 0%,14.44% {stroke-dashoffset:150} 22.22%,100% {stroke-dashoffset:0} }
-    .g6 { animation: k6 18s linear infinite, d6 18s linear infinite; }
+    .g6 { animation: k6 12s linear infinite, d6 12s linear infinite; }
     @keyframes k7 { 0%,19.44% {opacity:0} 21.39%,95.5% {opacity:1} 100% {opacity:0} }
-    .g7 { animation: k7 18s linear infinite; }
+    .g7 { animation: k7 12s linear infinite; }
     @keyframes k8 { 0%,22.5% {opacity:0} 24.44%,95.5% {opacity:1} 100% {opacity:0} }
-    .g8 { animation: k8 18s linear infinite; }
+    .g8 { animation: k8 12s linear infinite; }
     @keyframes k9 { 0%,23.33% {opacity:0} 25.28%,95.5% {opacity:1} 100% {opacity:0} }
-    .g9 { animation: k9 18s linear infinite; }
+    .g9 { animation: k9 12s linear infinite; }
     @keyframes k10 { 0%,25.56% {opacity:0} 27.5%,95.5% {opacity:1} 100% {opacity:0} }
     @keyframes d10 { 0%,25.56% {stroke-dashoffset:150} 33.33%,100% {stroke-dashoffset:0} }
-    .g10 { animation: k10 18s linear infinite, d10 18s linear infinite; }
+    .g10 { animation: k10 12s linear infinite, d10 12s linear infinite; }
     @keyframes k11 { 0%,30.56% {opacity:0} 32.5%,95.5% {opacity:1} 100% {opacity:0} }
-    .g11 { animation: k11 18s linear infinite; }
+    .g11 { animation: k11 12s linear infinite; }
     @keyframes k12 { 0%,33.61% {opacity:0} 35.56%,95.5% {opacity:1} 100% {opacity:0} }
-    .g12 { animation: k12 18s linear infinite; }
+    .g12 { animation: k12 12s linear infinite; }
     @keyframes k13 { 0%,34.44% {opacity:0} 36.39%,95.5% {opacity:1} 100% {opacity:0} }
-    .g13 { animation: k13 18s linear infinite; }
+    .g13 { animation: k13 12s linear infinite; }
     @keyframes k14 { 0%,36.67% {opacity:0} 38.61%,95.5% {opacity:1} 100% {opacity:0} }
     @keyframes d14 { 0%,36.67% {stroke-dashoffset:150} 44.44%,100% {stroke-dashoffset:0} }
-    .g14 { animation: k14 18s linear infinite, d14 18s linear infinite; }
+    .g14 { animation: k14 12s linear infinite, d14 12s linear infinite; }
     @keyframes k15 { 0%,41.67% {opacity:0} 43.61%,95.5% {opacity:1} 100% {opacity:0} }
-    .g15 { animation: k15 18s linear infinite; }
+    .g15 { animation: k15 12s linear infinite; }
     @keyframes k16 { 0%,44.72% {opacity:0} 46.67%,95.5% {opacity:1} 100% {opacity:0} }
-    .g16 { animation: k16 18s linear infinite; }
+    .g16 { animation: k16 12s linear infinite; }
     @keyframes k17 { 0%,46.11% {opacity:0} 48.06%,95.5% {opacity:1} 100% {opacity:0} }
-    .g17 { animation: k17 18s linear infinite; }
+    .g17 { animation: k17 12s linear infinite; }
     @keyframes k18 { 0%,48.89% {opacity:0} 50.83%,95.5% {opacity:1} 100% {opacity:0} }
-    .g18 { animation: k18 18s linear infinite; }
+    .g18 { animation: k18 12s linear infinite; }
     @keyframes k19 { 0%,51.11% {opacity:0} 53.06%,95.5% {opacity:1} 100% {opacity:0} }
-    .g19 { animation: k19 18s linear infinite; }
+    .g19 { animation: k19 12s linear infinite; }
     @keyframes k20 { 0%,52.5% {opacity:0} 54.44%,95.5% {opacity:1} 100% {opacity:0} }
-    .g20 { animation: k20 18s linear infinite; }
+    .g20 { animation: k20 12s linear infinite; }
     @keyframes k21 { 0%,53.89% {opacity:0} 55.83%,95.5% {opacity:1} 100% {opacity:0} }
-    .g21 { animation: k21 18s linear infinite; }
+    .g21 { animation: k21 12s linear infinite; }
     @keyframes k22 { 0%,55.28% {opacity:0} 57.22%,95.5% {opacity:1} 100% {opacity:0} }
-    .g22 { animation: k22 18s linear infinite; }
+    .g22 { animation: k22 12s linear infinite; }
     @keyframes k23 { 0%,58.33% {opacity:0} 60.28%,95.5% {opacity:1} 100% {opacity:0} }
-    .g23 { animation: k23 18s linear infinite; }
+    .g23 { animation: k23 12s linear infinite; }
     @keyframes k24 { 0%,62.22% {opacity:0} 64.17%,95.5% {opacity:1} 100% {opacity:0} }
-    .g24 { animation: k24 18s linear infinite; }
+    .g24 { animation: k24 12s linear infinite; }
     @keyframes k25 { 0%,66.67% {opacity:0} 68.61%,95.5% {opacity:1} 100% {opacity:0} }
-    .g25 { animation: k25 18s linear infinite; }
+    .g25 { animation: k25 12s linear infinite; }
     @media (prefers-reduced-motion: reduce) {
       g[class^="g"] { animation: none !important; }
       .arc { stroke-dashoffset: 0 !important; }
