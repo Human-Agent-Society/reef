@@ -224,10 +224,12 @@ function highlightedHtml(code: string, language: string) {
       },
     ],
   });
-  // One line of HTML: the RST generator re-indents every line it writes, and
-  // inside <pre> that indent becomes phantom leading spaces on nested code
-  // blocks. Line breaks come back through display:block on .line in CSS.
-  return html.replace(/\n/g, "");
+  // One line of HTML: the RST generator re-indents every literal newline it
+  // writes, and inside <pre> that indent becomes phantom leading spaces on
+  // nested code blocks. As the entity, the newline survives untouched and
+  // parses back into real text, so rendering, copying, and consumers that
+  // read textContent (the mermaid path) all see the original line breaks.
+  return html.replace(/\n/g, "&#10;");
 }
 
 // Inline markup inside figure labels and reference rows: the directive bodies
@@ -352,10 +354,7 @@ function compileRst(content: string, sourcePath: string) {
       const language = /^[a-z0-9_+#.-]+$/i.test(node.initContentText)
         ? node.initContentText.toLowerCase()
         : "text";
-      const fallback = escapeHtml(node.rawBodyText)
-        .split("\n")
-        .map((line) => `<span class="line">${line}</span>`)
-        .join("");
+      const fallback = escapeHtml(node.rawBodyText).replace(/\n/g, "&#10;");
       generatorState.writeLine(
         highlightedHtml(node.rawBodyText, language) ??
           `<pre class="code language-${escapeHtml(language)}">${fallback}</pre>`,

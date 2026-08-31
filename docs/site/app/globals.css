@@ -181,8 +181,6 @@ html[data-theme-mode="dark"] .theme-toggle .system-icon { display: none; }
 .markdown-body code, .markdown-body .literal { padding: .15em .35em; color: var(--foreground); border-radius: 4px; background: var(--card); font-family: var(--font-mono); font-size: 14px; overflow-wrap: anywhere; }
 /* In tables the wrapper scrolls, so identifiers never split mid-token. */
 .markdown-body .table-scroll code, .markdown-body .table-scroll .literal { overflow-wrap: normal; }
-/* Code lines are newline-free block spans (see highlightedHtml); 1lh keeps blank lines open. */
-.markdown-body pre .line, pre.code .line { display: block; min-height: 1lh; }
 .markdown-body pre { margin: 24px 0 32px; padding: 20px; overflow-x: auto; color: var(--code-text); border: 1px solid var(--border); border-radius: 12px; box-shadow: inset 0 1px color-mix(in srgb, var(--foreground) 4%, transparent); font: 13px/1.65 var(--font-mono); }
 .markdown-body pre, .markdown-body .table-scroll {
   /* Scroll cue: local-attached covers slide over the pinned edge shadows,
