@@ -28,10 +28,10 @@ a rollout enters training the moment its feedback arrives.
 
 .. flow::
 
-   Rollout :: one attempt at one task
-   Feedback :: reported against its receipt
-   Step* :: immediately, on its own
-   Version :: the next task is served by the updated weights
+   Rollout :: one attempt at a task
+   Feedback :: a report that refers to the receipt
+   Step* :: train immediately on that rollout
+   Version :: updated weights serve the next task
 
 How Reef implements it
 ----------------------

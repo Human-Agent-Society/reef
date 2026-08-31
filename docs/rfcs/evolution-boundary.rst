@@ -87,17 +87,17 @@ on the same version chain:
 +----------------------+--------------------------+----------------------+
 | Policy               | Examples                 | Safety net           |
 +======================+==========================+======================+
-| Ungated continual —  | ``openclawrl`` · ``sao`` | version chain +      |
-| publish every batch  | (weights); ACE-style     | rollback + receipts  |
+| Ungated continual:   | ``openclawrl``, ``sao``  | version chain,       |
+| publish every batch  | (weights); ACE-style     | rollback, receipts   |
 |                      | playbook merges          |                      |
 |                      | (artifacts, §5)          |                      |
 +----------------------+--------------------------+----------------------+
 | Compare with current | ``HarnessEvolveBackend`` | the decision, then   |
-| — select when wins   |                          | the version chain    |
+| select when wins     |                          | the version chain    |
 | exceed losses        |                          |                      |
 +----------------------+--------------------------+----------------------+
 | Population / Pareto  | GEPA-style prompt        | the frontier, then   |
-| — keep a candidate   | evolution (§5)           | the version chain    |
+| keep a candidate     | evolution (§5)           | the version chain    |
 | frontier             |                          |                      |
 +----------------------+--------------------------+----------------------+
 
@@ -131,10 +131,10 @@ decides whether to gate those publishes.
 | a GEPA prompt  | served artifact | Pareto         | Reef backend   |
 | candidate      |                 | frontier       | (§5.2)         |
 +----------------+-----------------+----------------+----------------+
-| a PUCT archive | run state       | — (algorithm   | harness        |
-| update         |                 | bookkeeping)   |                |
+| a PUCT archive | run state       | algorithm      | harness        |
+| update         |                 | bookkeeping    |                |
 +----------------+-----------------+----------------+----------------+
-| one run's      | run state       | —              | harness        |
+| one run's      | run state       | not applicable | harness        |
 | working memory |                 |                |                |
 +----------------+-----------------+----------------+----------------+
 

@@ -9,19 +9,19 @@ model weights or of the agent's harness.
 Nothing about the agent has to change except the base URL it sends requests to.
 
 .. diagram::
-   :caption: Reef serves the model and publishes both artifacts: new weights into the engine, a new harness tree back to the agent.
+   :caption: Reef serves the model, loads new weights into the engine, and sends a new harness tree to the agent.
 
    <div class="fig-lane">
      <div class="fig-node">Your agent<span class="fig-node-caption">runs the harness tree: prompts, skills, config</span></div>
      <div class="fig-edge">
-       <span>requests + feedback</span>
+       <span>requests and feedback</span>
        <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
        <svg class="fig-arrow fig-arrow-back" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H6"/><path d="m11 7-5 5 5 5"/></svg>
-       <span>answers + <strong>new harness tree</strong></span>
+       <span>answers and a <strong>new harness tree</strong></span>
      </div>
-     <div class="fig-node fig-emphasis">Reef<span class="fig-node-caption">serves, records; trains weights and evolves the harness</span></div>
+     <div class="fig-node fig-emphasis">Reef<span class="fig-node-caption">serves requests, records results, trains weights, and evolves the harness</span></div>
      <div class="fig-edge">
-       <span>inference + <strong>new weights</strong></span>
+       <span>inference and <strong>new weights</strong></span>
        <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
      </div>
      <div class="fig-node">The model<span class="fig-node-caption">runs the weights: local engine or hosted API</span></div>
@@ -39,10 +39,10 @@ Reef closes that loop in the serving lifecycle for continual learning.
 .. flow::
    :loop: the next request is served by the new version
 
-   Serve :: forward the request, keep the exchange
-   Record :: which version of the weights or harness produced this request + response
-   Learn* :: a recipe — the learning method the deployment runs — releases a candidate learned version
-   Publish :: an accepted candidate becomes the version being served
+   Serve :: forward the request and keep the exchange
+   Record :: store the artifact version that produced the response
+   Learn* :: the recipe uses records to create a candidate version
+   Publish :: an accepted candidate becomes the current version
 
 Existing inference engines and RL frameworks cover parts of that loop, but not
 the whole thing:

@@ -34,10 +34,10 @@ set session headers, or run behind a proxy.
 .. flow::
    :loop: the next session is served by the updated weights
 
-   Traffic :: recorded requests and responses
-   Sessions :: rebuilt by trace matching
-   Judge* :: each turn scored by the state that followed it
-   Step :: judged turns train the policy
+   Traffic :: requests and responses recorded by Reef
+   Sessions :: sessions rebuilt by matching traces
+   Judge* :: score each turn from the state that followed it
+   Step :: train the policy on judged turns
 
 How Reef implements it
 ----------------------

@@ -15,7 +15,7 @@ The core loop
 .. code:: mermaid
 
    sequenceDiagram
-       accTitle: The core serve, record, train, publish loop
+       accTitle: How Reef serves, records, trains, and publishes
        autonumber
        participant H as Harness
        participant S as Scenario
@@ -24,17 +24,17 @@ The core loop
        participant G as Training*
 
        opt Harness recipe: pull the served tree
-         H->>S: GET /reef/harness + scenario
-         S-->>H: Harness tree + artifact version
+         H->>S: GET /reef/harness for scenario
+         S-->>H: Harness tree and artifact version
          Note over H: Agent runs on that tree
        end
        Note over H,I: Serve and record each request
-       H->>S: Inference request + scenario
+       H->>S: Inference request for scenario
        S->>S: Freeze current artifact version
        S->>I: Provider-native request
        I-->>S: Provider response
-       S->>S: Validate frozen version + store
-       S-->>H: Response + receipt
+       S->>S: Validate frozen version and store record
+       S-->>H: Response and receipt
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
        opt Processor has a batch
@@ -146,21 +146,21 @@ stored durably either way.
 .. code:: mermaid
 
    flowchart TB
-       accTitle: Version durability: start, stage, commit, recover
-       subgraph START["1 · DURABLE START"]
+       accTitle: When artifact versions become durable
+       subgraph START["1. Durable start"]
            direction LR
            C0[("Checkpoint r0")] -->|"scenario starts"| S0["Serving r0"]
        end
-       subgraph LIVE["2 · ENGINE MEMORY · RESTART RESTORES r0"]
+       subgraph LIVE["2. Engine memory (restart restores r0)"]
            direction LR
-           V1["Live v1"] -->|"step 2 · train + sync"| V2["Live v2"]
+           V1["Live v1"] -->|"step 2: train and sync"| V2["Live v2"]
        end
-       subgraph NEXT["3 · NEXT DURABLE VERSION"]
+       subgraph NEXT["3. Next durable version"]
            direction LR
            C1[("Checkpoint r1")] -->|"continue serving"| S1["Serving r1"]
        end
-       START -->|"step 1 · train + sync"| LIVE
-       LIVE -->|"step 3 · export + publish"| NEXT
+       START -->|"step 1: train and sync"| LIVE
+       LIVE -->|"step 3: export and publish"| NEXT
        class C0,C1 durable
        class V1,V2 volatile
 

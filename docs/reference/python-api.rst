@@ -250,19 +250,19 @@ Reported feedback
 .. code:: mermaid
 
    sequenceDiagram
-       accTitle: How the reported-feedback processor turns records into a typed batch
+       accTitle: How reported feedback becomes a typed batch
        participant Reef as Reported-feedback processor
        participant Method as Method processor
        Reef->>Method: judge(ReportContext)
        alt referenced inference is missing
-           Method-->>Reef: WAIT — park this report
+           Method-->>Reef: WAIT: park this report
        else report can never train
-           Method-->>Reef: NEVER — release this report
+           Method-->>Reef: NEVER: release this report
        else report is accepted
            Method-->>Reef: ReportDecision.train(value, ...)
            opt group_key supplied
                Reef->>Method: decide_group(key, candidates)
-               Method-->>Reef: GroupDecision<br/>INCOMPLETE · READY · DISCARD
+               Method-->>Reef: GroupDecision<br/>INCOMPLETE / READY / DISCARD
            end
            Reef->>Method: make_batch(ready units, batch_number)
        end

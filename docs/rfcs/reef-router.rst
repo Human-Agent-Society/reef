@@ -96,9 +96,9 @@ it.
    flowchart LR
        C[Client] --> G[Gateway authentication]
        G --> S{Bound scenario}
-       subgraph SR[One Semantic Router process]
-         RA[entrypoint A → SR recipe A]
-         RB[entrypoint B → SR recipe B]
+       subgraph SR[Shared Semantic Router process]
+         RA[Scenario A entrypoint and router recipe]
+         RB[Scenario B entrypoint and router recipe]
        end
        S -->|tenant A| RA
        S -->|tenant B| RB
@@ -132,13 +132,13 @@ Architecture
 
    flowchart LR
        C[Client] --> E[Envoy tenant route]
-       E <-->|ext_proc gRPC| SR[Scenario entrypoint + SR recipe]
-       SR -->|selected role + resolved model + routing version| E
+       E <-->|ext_proc gRPC| SR[Scenario entrypoint and router recipe]
+       SR -->|selected role, resolved model, and routing version| E
        E --> R[Reef routed ingress]
        R -->|validated provider model| G[Provider gateway]
        G --> W[Ready worker]
        W --> R
-       R -->|validated response + AgentRecord| C
+       R -->|persist AgentRecord, then return response| C
 
 .. list-table::
    :header-rows: 1
@@ -200,11 +200,11 @@ closed.
 .. code:: mermaid
 
    flowchart LR
-       T[Authenticated tenant] --> S[Scenario tenant-a]
-       S --> R[Router config for tenant-a]
+       T[Authenticated tenant] --> S[Scenario: tenant-a]
+       S --> R[Router configuration for tenant-a]
        Q[Request] --> R
-       R --> M[Selected alias tenant-a/student]
-       M --> P[Resolved model tenant-a/student-v7]
+       R --> M[Selected alias: tenant-a/student]
+       M --> P[Resolved model: tenant-a/student-v7]
        P --> A[Validate snapshot and admit]
 
 The resolved model must already be ready at the provider gateway. Reef never
@@ -260,16 +260,16 @@ itself; Replay lookup is scoped by scenario and routing version.
        participant R as Reef scenario
        participant B as Backend
 
-       C->>G: inference request + tenant credential
+       C->>G: inference request and tenant credential
        G->>G: authenticate; bind scenario
        G->>SR: request in scenario namespace
-       SR-->>G: qualified role alias + body model + version + replay ID
-       G->>R: fixed scenario + routed request
+       SR-->>G: role alias, body model, version, and replay ID
+       G->>R: fixed scenario and routed request
        R->>R: validate alias, body model, and snapshot
        R->>R: retain routed target; acquire serving state
        R->>B: unchanged resolved-model request
-       Note over R,B: pause/update may resume this same request
-       B-->>R: response + serving identity
+       Note over R,B: A pause or update may resume this request
+       B-->>R: response and serving identity
        R->>R: validate and append AgentRecord
        R-->>C: response through gateway
 
@@ -493,7 +493,7 @@ roles inside one tenant-bound scenario.
        V -->|yes| O[Return student answer]
        V -->|no| T[Escalate to teacher role]
        T --> O2[Return teacher answer]
-       T -. distill .-> S2[Next student version]
+       T -. distill teacher output .-> S2[Next student version]
 
 Both roles, their resolved models, and every resulting record stay in one
 scenario. The target is teacher-comparable task quality at lower average
@@ -699,7 +699,7 @@ Testing
        ID, or fallback are rejected.
    * - GPU smoke
      - Route between two roles bound to ready models in one scenario while a
-       second scenario remains isolated. #435 additionally reproduces
+       second scenario remains isolated. #435 also reproduces
        ``recipes/<method>/examples/opd_router/``.
 
 The RFC itself requires no GPU.

@@ -59,10 +59,10 @@ The loop
 .. flow::
    :loop: publish the winner, or restore the snapshot
 
-   Batch :: scored reports the score window kept
+   Batch :: scored reports retained by the score window
    ``propose`` :: one mutation, or ``None``
-   Episodes* :: candidate vs current, on your tasks
-   Verdict :: publish a new version, or revert
+   Episodes* :: run the candidate and current tree on the same tasks
+   Verdict :: publish the candidate or restore the snapshot
 
 No evolution runs while traffic flows. A report whose score is at or below
 ``max_score`` enters the *window*; the default for harness evolution keeps

@@ -4,16 +4,16 @@ Choosing a recipe
 A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 
 +-------------------------+--------------------------------------------------+------------------------------------------+
-|                         | **Reactive** — learns from the traffic           | **Proactive** — generates its own        |
+|                         | **Reactive:** learns from the traffic            | **Proactive:** generates its own         |
 |                         | it already serves                                | attempts                                 |
 +=========================+==================================================+==========================================+
-| **Model weights**       | ``sao`` — feedback on each attempt over a stream | ``tttd`` — repeated attempts at one      |
+| **Model weights**       | ``sao``: feedback on each attempt over a stream  | ``tttd``: repeated attempts at one       |
 |                         | of tasks                                         | problem, at test time                    |
 |                         |                                                  |                                          |
-|                         | ``openclawrl`` — multi-turn traffic,             |                                          |
+|                         | ``openclawrl``: multi-turn traffic,              |                                          |
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness** — prompts,  | ``harness_evolve`` — proposes edits from         | —                                        |
+| **Harness:** prompts,   | ``harness_evolve``: proposes edits from          | not available                            |
 | rules, skills, config   | the failures in its own served traffic           |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 
@@ -28,13 +28,12 @@ Pick by the signal your workload can produce.
 | A fixed grid of sibling attempts at one       | `tttd <recipes/tttd.rst>`__                     | model weights | yes        |
 | problem                                       |                                                 |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| Nothing on the wire — just agent              | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
-| conversations                                 |                                                 |               |            |
+| Agent conversations without reports           | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | Feedback on individual requests, and failures | `harness_evolve <recipes/harness-evolve.rst>`__ | harness tree  | no         |
 | worth learning from                           |                                                 |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| None yet — you only want the records          | ``recipe``, the base kind                       | nothing       | no         |
+| No feedback yet; record only                  | ``recipe``, the base kind                       | nothing       | no         |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 
 How a recipe is selected
