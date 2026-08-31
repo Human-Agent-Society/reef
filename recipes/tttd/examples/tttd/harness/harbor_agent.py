@@ -1,7 +1,7 @@
 """Harbor ``BaseAgent`` subclass for TTT-Discover.
 
 This module depends on the external ``harbor`` package and is only imported
-when Harbor/tide loads the agent at runtime. The remaining harness modules
+when Harbor/REEF Eval loads the agent at runtime. The remaining harness modules
 have no Harbor dependency and can be imported standalone (e.g. in tests).
 """
 

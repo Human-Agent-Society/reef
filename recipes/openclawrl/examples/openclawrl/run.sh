@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The reef training stack (docker-compose.yaml), then the 72-session GSM8K
-# stream through tide. Setup (once): see README. State goes to $RUN_DIR.
+# stream through REEF Eval. Setup (once): see README. State goes to $RUN_DIR.
 #
 # The stack is left running and a healthy one is reused, so a re-run continues
 # where the lab left off; `docker compose down` stops it. A trained
@@ -45,7 +45,7 @@ echo "==> [1/2] the reef stack at $REEF_URL (a cold boot takes ~6 minutes on B20
     docker compose up -d --wait
 ) || { echo "run.sh: the stack never became healthy; docker compose logs" >&2; exit 1; }
 
-# 2. The stream, through tide in an ephemeral uvx environment
+# 2. The stream, through REEF Eval in an ephemeral uvx environment
 
 # Per-session accept/style metrics, when a key is present: learning_curve.py tails
 # the lab, because the judge's verdict lands there rather than in reef.
@@ -58,15 +58,15 @@ fi
 
 echo "==> [2/2] streaming $TASKS as '$STREAM_NAME' (agent: harness:HermesStreamAgent)"
 REEF_TOKEN="$REEF_TOKEN" uvx \
-    --from "tide-eval[harbor]" \
+    --from "reef-eval[harbor]" \
     --with-editable "$PWD" \
     --with reef-client \
-    tide stream "$STREAM_NAME" "$TASKS" \
+    reef-eval stream "$TASKS" --name "$STREAM_NAME" \
         --agent harness:HermesStreamAgent \
         --agent-arg kwargs="{\"reef_url\": \"$REEF_URL\"}" \
         --agent-arg extra_allowed_hosts="[\"$HOST_IP\"]" \
         --lab "$RUN_DIR/lab" \
         "$@"
 
-echo "==> done; tide lab at $RUN_DIR/lab (stack still serving at $REEF_URL)"
-echo "    sessions-to-adaptation = tide.metrics.learning_curve over the stream's rewards"
+echo "==> done; REEF Eval lab at $RUN_DIR/lab (stack still serving at $REEF_URL)"
+echo "    sessions-to-adaptation = reef_eval.metrics.learning_curve over the stream's rewards"

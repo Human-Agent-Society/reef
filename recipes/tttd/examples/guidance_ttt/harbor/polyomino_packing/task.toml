@@ -3,7 +3,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "tide/guidance-ttt-polyomino-packing"
+name = "reef-eval/guidance-ttt-polyomino-packing"
 description = "Pack polyominoes into the smallest board. A trainable Qwen policy writes only guidance; a frozen executor turns that guidance into a C++17 program that FrontierCS/go-judge scores."
 
 [metadata]

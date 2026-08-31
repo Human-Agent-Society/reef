@@ -48,7 +48,7 @@ skillclaw/
                       embeds the Reef service, runs the docker day, reports
                       every grade, and seals rounds; `run.py report`
                       prints the gain table; `run.py solve` runs the
-                      harbor/ task once through tide (the smoke)
+                      harbor/ task once through REEF Eval (the smoke)
   run.sh              materializes the benchmark checkout (ensure_benchmark)
                       before day one, then runs the driver
   pyproject.toml      makes harness/ an installable package
@@ -106,7 +106,7 @@ Each run resumes after its last sealed round, so a crashed or interrupted campai
 
 ## The Harbor smoke task
 
-`harbor/` is one task in the Harbor format every sibling example uses, and `python3 run.py solve` is the standard one-episode smoke over it (`pip install "tide-eval[harbor]"` first; docker required, the campaign env vars apply). The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
+`harbor/` is one task in the Harbor format every sibling example uses, and `python3 run.py solve` is the standard one-episode smoke over it (`pip install "reef-eval[harbor]"` first; docker required, the campaign env vars apply). The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
 
 The solve agent (`harness/harbor_agent.py`) is deliberately minimal, one recorded model call through the same embedded service the campaign runs - the smoke proves the task contract end to end, not agent quality. Expect a low reward: a one-shot completion cannot work the mock APIs.
 

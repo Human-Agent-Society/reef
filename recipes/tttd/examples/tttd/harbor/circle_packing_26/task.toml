@@ -3,7 +3,7 @@ schema_version = "1.4"
 artifacts = []
 
 [task]
-name = "tide/tttd-circle-packing-26"
+name = "reef-eval/tttd-circle-packing-26"
 description = "Pack 26 non-overlapping circles inside the unit square to maximize the sum of their radii. The agent writes a Python program whose run_packing() returns (centers, radii, sum_radii)."
 
 [metadata]

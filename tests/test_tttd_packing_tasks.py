@@ -72,7 +72,7 @@ def test_packing_harbor_tasks_are_self_contained(task: str, expected: dict[str, 
         assert (task_root / relative_path).is_file()
 
     config = tomllib.loads((task_root / "task.toml").read_text())
-    assert config["task"]["name"] == f"tide/tttd-circle-packing-{expected['count']}"
+    assert config["task"]["name"] == f"reef-eval/tttd-circle-packing-{expected['count']}"
     assert config["environment"]["cpus"] == 1
 
 
