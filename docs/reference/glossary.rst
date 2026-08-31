@@ -12,6 +12,13 @@ every other scenario. The first request carrying a new ``x-reef-scenario``
 creates it and permanently binds its recipe. The request may also bind a
 starting artifact version.
 
+Agent
+-----
+
+The complete system that acts: **model + harness**. The model supplies the
+learned behavior; the harness supplies the control loop and context around it.
+Reef improves an agent by updating either model weights or the harness tree.
+
 Agent record
 ------------
 
@@ -60,8 +67,8 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The versioned thing: a model checkpoint, or a tree of text files such as a
-harness or skill set. An ``ArtifactRef`` identifies one version. Between
+The versioned thing: a model checkpoint or a harness tree. An ``ArtifactRef``
+identifies one version. Between
 checkpoints a live weight artifact exists only in engine memory; a durable one
 stores its bytes in Git.
 
@@ -115,13 +122,17 @@ The tensor objective the training backend runs, declared by
 Harness
 -------
 
-Two meanings, both in use here.
+The part of an agent around the model. It owns the control loop, prompts,
+conversations, tools, environment integration, and grading, and calls the model
+through an inference runtime.
 
-1. **Your harness:** the agent program around the model, owning prompts,
-   conversations, tools, environments, and grading. It runs outside Reef.
-2. **The harness tree:** Reef's deliverable, a versioned artifact of config,
-   rules, prompt templates, skills, and extension code, served over
-   ``GET /reef/harness``.
+Harness tree
+------------
+
+Reef's versioned representation of the mutable files in a harness: config,
+rules, prompt templates, skills, and extension code. Reef serves it over
+``GET /reef/harness``. An adapter combines the rendered tree with a harness
+executable; that harness and its configured model form the running agent.
 
 Skill
 -----
@@ -199,8 +210,9 @@ scenario; ``harness_evolve`` is one mechanism running many possible methods.
 Adapter
 -------
 
-Two meanings. For harness evolution, the descriptor that turns a rendered tree
-into a running agent (`Harness adapters <../developer-guide/harness-adapters.rst>`__). For weight
+Two meanings. For harness evolution, the descriptor that combines a rendered
+tree with an executable to make a running harness (`Harness adapters
+<../developer-guide/harness-adapters.rst>`__). For weight
 serving, a LoRA/PEFT adapter layered on a frozen base model.
 
 Episode
