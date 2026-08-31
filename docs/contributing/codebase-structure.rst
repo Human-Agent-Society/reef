@@ -19,32 +19,31 @@ composition and use paths; they are not an exhaustive Python import graph:
 
 .. code:: mermaid
 
-   %%{init: {"flowchart": {"curve": "linear", "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 42}}}%%
    flowchart TD
        accTitle: Reef application kernel, capability domains, and adapters
 
-       Methods("<b>METHOD PLUG-INS</b><br/><code>recipes/*</code>")
-       Entry("<b>ENTRYPOINTS</b><br/>HTTP · CLI")
-       Policy("<b>POLICY</b><br/><code>reef/recipe</code>")
-       Service("<b>DELIVERY &amp; COMPOSITION</b><br/><code>reef/service</code>")
-       Kernel(["<b>APPLICATION KERNEL</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
+       Methods("<b>Method plug-ins</b><br/><code>recipes/*</code>")
+       Entry("<b>Entrypoints</b><br/>HTTP · CLI")
+       Policy("<b>Policy</b><br/><code>reef/recipe</code>")
+       Service("<b>Delivery &amp; composition</b><br/><code>reef/service</code>")
+       Kernel(["<b>Application kernel</b><br/><code>reef/dispatcher</code> · <code>reef/scenario</code>"])
 
-       subgraph Domains["CAPABILITY DOMAINS"]
+       subgraph Domains["Capability domains"]
            direction LR
-           Serving("<b>SERVING</b><br/><code>runtime</code> · <code>surface</code>")
-           Evolution("<b>EVOLUTION</b><br/><code>train</code> · <code>harness</code>")
-           State("<b>STATE</b><br/><code>artifact</code> · <code>records</code>")
+           Serving("<b>Serving</b><br/><code>runtime</code> · <code>surface</code>")
+           Evolution("<b>Evolution</b><br/><code>train</code> · <code>harness</code>")
+           State("<b>State</b><br/><code>artifact</code> · <code>records</code>")
        end
 
-       subgraph Adapters["CONCRETE ADAPTERS"]
+       subgraph Adapters["Concrete adapters"]
            direction LR
-           ServingAdapters[["runtime adapters<br/>surface implementations"]]
-           EvolutionAdapters[["training backends<br/>harness adapters"]]
-           StateAdapters[["Git/LFS repositories<br/>SQLite"]]
+           ServingAdapters("runtime adapters<br/>surface implementations")
+           EvolutionAdapters("training backends<br/>harness adapters")
+           StateAdapters("Git/LFS repositories<br/>SQLite")
        end
 
-       Observability(["<b>CROSS-CUTTING</b><br/><code>reef/observability</code>"])
-       Core(["<b>SHARED KERNEL</b><br/><code>reef/core</code>"])
+       Observability(["<b>Cross-cutting</b><br/><code>reef/observability</code>"])
+       Core(["<b>Shared kernel</b><br/><code>reef/core</code>"])
 
        Methods --> Policy --> Kernel
        Entry --> Service --> Kernel

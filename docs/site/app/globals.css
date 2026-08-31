@@ -24,6 +24,7 @@
   --brand-strong: #7a1f1a;
   --brand-soft: #fbf2f0;
   --coral: #a03729;
+  --diagram-line: #cec7bb;
   --diagram-emphasis: #dceeea;
   --diagram-emphasis-border: #3f8077;
   --diagram-emphasis-text: #21433f;
@@ -65,6 +66,7 @@ html[data-theme="dark"] {
   --brand-strong: #eeb2a5;
   --brand-soft: #241a18;
   --coral: #d99183;
+  --diagram-line: #443d34;
   --diagram-emphasis: #21423c;
   --diagram-emphasis-border: #68a79d;
   --diagram-emphasis-text: #d9eee9;
@@ -277,6 +279,34 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .markdown-body .mermaid-error figcaption { color: var(--muted); }
 .markdown-body .mermaid-error pre { margin-bottom: 0; }
 .markdown-body .mermaid-loading { min-height: 240px; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+/* Diagram typography. Mermaid ships its own type system: its default face, one
+   uniform weight for every label, and inline code wearing the brand red it
+   earns in prose, where it is rare and not repeated eleven times inside one
+   frame. These rules put diagram text back on the page's scale, and set group
+   titles in the same micro-label idiom as .page-brief dt so the group headings
+   are the only uppercase in the frame. Mermaid draws a subgraph title inside
+   the band without reserving a row for it, so the row comes from
+   `subGraphTitleMargin` in the diagram config; it also sizes the label box from
+   its own defaults before these rules apply, so the box is too narrow once the
+   title is uppercased and tracked and is allowed to overflow rather than wrap.
+   The title chip is the band's own fill, so a connector entering the group is
+   masked instead of striking through it. */
+.markdown-body .mermaid-diagram .nodeLabel, .markdown-body .mermaid-diagram .edgeLabel, .markdown-body .mermaid-diagram .cluster-label { font-family: var(--font-sans); }
+.markdown-body .mermaid-diagram .nodeLabel { color: var(--foreground); font-size: 12.5px; font-weight: 500; line-height: 1.45; }
+.markdown-body .mermaid-diagram .nodeLabel b, .markdown-body .mermaid-diagram .nodeLabel strong { font-weight: 600; letter-spacing: .005em; }
+.markdown-body .mermaid-diagram .nodeLabel code, .markdown-body .mermaid-diagram .nodeLabel .literal, .markdown-body .mermaid-diagram .edgeLabel code { padding: 0; color: var(--muted); border-radius: 0; background: none; font-size: 11px; font-weight: 400; overflow-wrap: normal; }
+.markdown-body .mermaid-diagram .edgeLabel, .markdown-body .mermaid-diagram .edgeLabel p { color: var(--muted); font-size: 11px; line-height: 1.3; }
+.markdown-body .mermaid-diagram .cluster-label foreignObject { overflow: visible; }
+/* Mermaid colors this span from an id-scoped rule, so the title needs the
+   override to stay a label rather than a second heading. */
+.markdown-body .mermaid-diagram .cluster-label .nodeLabel { display: inline-block; padding: 0 9px; color: var(--muted) !important; background: var(--accent); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; white-space: nowrap; }
+/* The title is a <p> inside an inline <span>; without this the span fragments
+   around the block child and paints a stray chip beside the title. */
+.markdown-body .mermaid-diagram .cluster-label p { padding: 0; background: none; }
+.markdown-body .mermaid-diagram .flowchart-link { stroke-width: 1.1px; }
+.markdown-body .mermaid-diagram marker path { fill: var(--muted); stroke: none; }
+.markdown-body .mermaid-diagram .cluster rect { stroke-width: 1px; }
+.markdown-body .mermaid-diagram .node rect, .markdown-body .mermaid-diagram .node polygon, .markdown-body .mermaid-diagram .node path { stroke-width: 1px; }
 
 /* Documentation components */
 .markdown-body .fig { margin: 28px 0 36px; padding: 24px 18px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
