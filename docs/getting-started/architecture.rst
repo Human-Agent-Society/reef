@@ -160,7 +160,7 @@ way.
        end
        subgraph NEXT["3. Next durable release"]
            direction LR
-           C1[("Checkpoint r1")] -->|"continue serving"| S1["Serving r1"]
+           C1[("Checkpoint r3")] -->|"continue serving"| S1["Serving r3"]
        end
        START -->|"step 1: train and sync"| LIVE
        LIVE -->|"step 3: export and publish"| NEXT
