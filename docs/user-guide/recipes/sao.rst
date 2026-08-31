@@ -2,7 +2,9 @@ sao
 ===
 
 Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
-<https://arxiv.org/abs/2607.07508>`__). One graded rollout is one training step.
+<https://arxiv.org/abs/2607.07508>`__) trains on one graded rollout at a
+time. Each rollout is one training step, and the next attempt runs on the
+weights it produced.
 
 +-------------+------------------------------------------------------------+
 | Evolves     | model weights                                              |
@@ -23,50 +25,59 @@ Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
 What it does
 ------------
 
-SAO drops the sibling group. There is no comparison baseline and no barrier, so
-a rollout enters training the moment its feedback arrives.
+SAO has no comparison group. A rollout enters training as soon as its score
+arrives without waiting for siblings and without a barrier. It can be used for a
+stream of tasks where each attempt gets its own score.
 
 .. flow::
+   :loop: the next attempt runs on the updated weights
 
    Rollout :: one attempt at a task
-   Feedback :: a report that refers to the receipt
-   Step* :: train immediately on that rollout
-   Version :: updated weights serve the next task
+   Feedback :: a score reported against the rollout's receipt
+   Step* :: train on that rollout immediately
+   Version :: publish the updated weights to the engine
 
 How Reef implements it
 ----------------------
 
-The processor accepts every eligible ``ScoredRolloutReport`` and emits one
-``PolicySample`` per report. The ``sao`` step preparer turns the batch into a
-``StepSignal`` on the ``sao`` loss family, which runs Slime's ``policy_loss``
-with a custom per-token primitive and a colocated critic.
+The processor turns every eligible ``ScoredRolloutReport`` into one
+``PolicySample``. With the default ``batch_size`` of 1, each sample is its
+own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
+SAO's per-token primitive and a critic colocated on the actor GPUs. The
+critic supplies the values, and skip-observation GAE builds the advantages
+inside the training backend.
 
-The DIS ratio needs generation-time log-probabilities as its behaviour proxy, so
-SAO requires an inference backend that attaches engine-native tensors.
+The DIS ratio compares the current policy against the log-probabilities
+recorded when the rollout was generated. SAO therefore requires an inference
+backend that attaches engine-native tensors.
 
 Configuration
 -------------
 
 .. config::
 
-   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size``: each sample is its own data-parallel unit. Env ``REEF_SAO_BATCH_SIZE``.
-   max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
-
-An ``optimization:`` section is rejected outright. Clipping bounds, critic
-cadence, and GAE parameters belong to the backend, in ``training.slime_flags``.
+   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   max_staleness | 0 | accepted lag between the producing and serving version.
 
 Run the example
 ---------------
+
+The `example <../../../recipes/sao/examples/sao>`__ runs three IMOAnswerBench
+problems in order on a two-GPU stack. For each problem the agent makes six
+attempts through Reef, extracts the ``\boxed{}`` answer, then checks it against
+the gold answer for a binary reward and finally reports the result against its
+receipt. The next problem is served by the weights the previous one produced.
 
 .. code:: bash
 
    cd recipes/sao/examples/sao
    pip install -e . "reef-eval[harbor]"
+   hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh
 
-The example runs three IMOAnswerBench problems in order. Each drives six
-independent attempts through Reef, extracts the ``\boxed{}`` answer, checks it
-against gold for a binary reward, and reports the result against its receipt.
+``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
+with the critic colocated on it and one SGLang rollout engine. Each scored
+rollout adds one ``training`` entry to the scenario's version chain:
 
 .. code:: bash
 
@@ -74,29 +85,19 @@ against gold for a binary reward, and reports the result against its receipt.
      http://127.0.0.1:8900/reef/scenarios/sao-smoke/versions
    # {"scenario": "sao-smoke", "versions": [{"kind": "training", "step": 1, ...}, ...]}
 
-Each scored rollout adds one ``training`` entry to the chain. The runtime
-surfaces ``pg_clipfrac``, ``critic/explained_variance``, actor and critic
-``grad_norm``, and the async telemetry ``sao/policy_lag_*``,
+The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
+critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
 ``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
 
 Results
 -------
 
-`recipes/sao/examples/sao/README.md
-<../../../recipes/sao/examples/sao/README.md>`__ records two runs.
+The example's README records two runs.
 
-The budget-limited comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS)
-control from the same checkpoint, on the same three problems, with 48 scored
-rollouts per arm. Mean reward orders as the paper predicts at this budget:
-SAO 0.479, base 0.458, GRPO(+DIS) 0.417. Read it as an ordering check, not a
-convergence result; the README lists every protocol deviation from the paper.
+The comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS) control from the
+same checkpoint on the same three problems with 48 scored rollouts per arm.
+The mean rewards order as the paper predicts, SAO at 0.479 above the
+untrained base at 0.458 above GRPO(+DIS) at 0.417.
 
 .. image:: ../../assets/sao/learning-curve.png
    :alt: Cumulative mean reward over the 48 scored rollouts per arm
-
-The committed smoke configuration has one recorded run of its own
-(``results/smoke-2026-08-30/``): all 18 scored rollouts became committed
-training steps with no stale drops, which is the acceptance criterion for the
-smoke. Every score is 0.0 because Qwen2.5-1.5B-Instruct does not solve these
-problems. The useful output is the per-step training metrics, exported from an
-offline W&B run.
