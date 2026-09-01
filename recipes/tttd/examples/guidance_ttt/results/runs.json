@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-31",
+  "runs": [
+    {
+      "task": "polyomino",
+      "task_id": "polyomino_packing",
+      "run_name": "polyomino-qwen3-14b-openrouter-glm52-g8x16-s30-20260814",
+      "framework": "Reef",
+      "status": "completed",
+      "models": {
+        "guidance": "Qwen/Qwen3-14B",
+        "executor": "z-ai/glm-5.2"
+      },
+      "search": {
+        "updates": 30,
+        "groups_per_update": 8,
+        "rollouts_per_group": 16,
+        "sampled_rollouts": 3840,
+        "valid_rollouts": 3573,
+        "well_formed_guidance": 3840,
+        "score_direction": "max",
+        "seed_score": 27.810517627142843,
+        "best_score": 89.79648748142856,
+        "best_update": 30,
+        "elapsed_seconds": 44488.25737268198,
+        "sampling_seed": 0
+      },
+      "training": {
+        "gpu": "NVIDIA B200",
+        "lora_rank": 32,
+        "guidance_max_tokens": 8192,
+        "sequence_length": 12288,
+        "policy_concurrency": 16,
+        "verifier_concurrency": 16
+      },
+      "evaluation": {
+        "score": "FrontierCS problem 0 aggregate score",
+        "suite": "70-case pinned FrontierCS/go-judge suite",
+        "problem_id": "0",
+        "timeout_seconds": 340
+      },
+      "selected_case": {
+        "update": 3,
+        "entry_id": "7223721c-9237-4f03-b4d9-a39ae7ff0d36",
+        "node_id": "c4e1a74c-31a3-47e4-9450-c15cf79baa91",
+        "parent_score": 80.13277726857143,
+        "candidate_score": 86.76461186714288
+      },
+      "provenance": {
+        "result_sha256": "538953f88ed11ee065f50683fe99ba82b307990becda2578a7be08376c886f9a",
+        "resume_state_sha256": "8f294d7b5ca9fad5ea0d8f7e060f822551b3183b5f98617746038c1f374c55e1",
+        "committed_library_sha256": "58494d7531722642b1befac6f3e75792f93b604f1402acf58fce8ac2e3b291e7",
+        "seed_sha256": "4f9e39ff3160d453c58163075deb029215570d2fedbb8edb839591f5f77a9a9a"
+      }
+    },
+    {
+      "task": "trimul",
+      "task_id": "trimul",
+      "run_name": "trimul-qwen3-14b-openrouter-glm52-g8x16-s30-20260815",
+      "framework": "Reef",
+      "status": "completed",
+      "models": {
+        "guidance": "Qwen/Qwen3-14B",
+        "executor": "z-ai/glm-5.2"
+      },
+      "search": {
+        "updates": 30,
+        "groups_per_update": 8,
+        "rollouts_per_group": 16,
+        "sampled_rollouts": 3840,
+        "valid_rollouts": 2648,
+        "well_formed_guidance": 3839,
+        "score_direction": "min",
+        "seed_score": 10177.396849081848,
+        "best_score": 1110.8531360423483,
+        "best_update": 25,
+        "score_unit": "microseconds",
+        "elapsed_seconds": 8271.445309647825,
+        "sampling_seed": 0
+      },
+      "training": {
+        "gpu": "NVIDIA B200",
+        "lora_rank": 32,
+        "guidance_max_tokens": 10240,
+        "sequence_length": 16384,
+        "policy_concurrency": 16,
+        "verifier_concurrency": 16
+      },
+      "evaluation": {
+        "score": "mean latency over seven leaderboard shapes after correctness checks",
+        "suite": "18 correctness tests and 7 leaderboard shapes",
+        "gpu": "NVIDIA H100 80GB HBM3",
+        "reward_scale": 1500.0,
+        "timeout_seconds": 1160
+      },
+      "selected_case": {
+        "update": 17,
+        "entry_id": "446edddc-af97-4883-8cf6-520d64a641c4",
+        "node_id": "650fa7bf-4005-4079-aa95-716f6399ff01",
+        "parent_score": 1180.622684202567,
+        "candidate_score": 1128.0291309762747,
+        "score_unit": "microseconds"
+      },
+      "fixed_candidate_reevaluation": {
+        "protocol": "three sequential repeats in one H100 container",
+        "all_correct": true,
+        "scores_microseconds": [
+          1155.293830867076,
+          1157.465873356478,
+          1162.6204388263811
+        ],
+        "mean_microseconds": 1158.4600476833116,
+        "sample_std_microseconds": 3.7631214425580333,
+        "runtime": {
+          "cuda": "12.8",
+          "python": "3.13.0",
+          "torch": "2.7.1+cu128",
+          "triton": "3.3.1"
+        },
+        "solution_sha256": "0fa4dc2399a9cb70457e9fb2f8b5a382664807fe78d2f84d06f1539cc3b6e116",
+        "results_sha256": "f9ad02cfe7b286ca8ccc746b87220b9a647bce61cc1515de93fe8449c57e0647"
+      },
+      "provenance": {
+        "result_sha256": "b414ac0df6e323ba6eeca7d6edfd1602f78a8fa14672f6249c1443833bee0c2f",
+        "resume_state_sha256": "ad7d3acc00ad91cc7f1814194a4f6a6e3b957508f6dcd007e5886017a6ec84c8",
+        "committed_library_sha256": "5bb5970a004708bbc5e2ca69efa25ab43e6054d64132ae6672c2cb9149e881e1",
+        "seed_sha256": "7beebf87edde88782dabb3a7781a220031fbe25c29689136cb3184e446fcb7c1"
+      }
+    }
+  ]
+}
