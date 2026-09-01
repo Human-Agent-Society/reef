@@ -86,13 +86,18 @@ RUN pip uninstall -y numpy && \
     pip install --no-cache-dir "numpy==1.26.4" scipy && \
     python -c "import numpy, scipy.linalg; assert numpy.__version__ == '1.26.4', numpy.__version__"
 
-# Prepend the pinned SGLang, /workspace/Reef, and the base image's Megatron-LM
-# source checkout (megatron.training is NOT pip-installed; the base ships it at
+# Prepend the pinned SGLang and the base image's Megatron-LM source checkout
+# (megatron.training is NOT pip-installed; the base ships it at
 # /root/Megatron-LM without exporting PYTHONPATH as an ENV, so the
 # ${PYTHONPATH:+...} preserve-trick expands to nothing at build time and the
 # Slime driver dies on `import megatron.training` — verified 2026-07-28 on
 # slimerl/slime:latest).
-ENV PYTHONPATH=/opt/sglang/python:/workspace/Reef:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
+# /workspace/Reef stays OFF this path: the editable install above already
+# resolves `reef`, and a PYTHONPATH entry would win over any `pip install -e`
+# of a mounted checkout, silently running the baked-in copy instead (observed
+# 2026-09-01). The `recipes` cookbook resolves from the working directory the
+# stack runs in, matching a from-checkout deployment.
+ENV PYTHONPATH=/opt/sglang/python:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
     PYTHONUNBUFFERED=1 \
     SGLANG_DISABLE_CUDNN_CHECK=1
 
