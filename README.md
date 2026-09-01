@@ -11,7 +11,6 @@
 [![Docker](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml)
 [![Docs Build](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml)
 
-[![GitHub](https://img.shields.io/badge/GitHub-Star%20Reef-181717?logo=github&logoColor=white)](https://github.com/Human-Agent-Society/reef)
 [![Docs](https://img.shields.io/badge/docs-reefinfra.ai-0E7490?logo=readthedocs&logoColor=white)](https://reefinfra.ai)
 [![Discord](https://img.shields.io/badge/Discord-Talk%20to%20the%20builders-5865F2?logo=discord&logoColor=white)](https://discord.gg/8k4WeVuTb)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
@@ -32,8 +31,7 @@ better and better results without having to do anything.
 </div>
 
 **[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) ·
-[Join Discord](https://discord.gg/8k4WeVuTb) ·
-[Star Reef](https://github.com/Human-Agent-Society/reef)**
+[Join Discord](https://discord.gg/8k4WeVuTb)**
 
 </div>
 
@@ -247,4 +245,4 @@ Building an agent that should improve from real-world feedback?
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
 
-If Reef looks useful to you, give it a [⭐ on GitHub](https://github.com/Human-Agent-Society/reef) — it helps more agent builders discover the project.
+If Reef looks useful to you, give it a ⭐ — it helps more agent builders discover the project.
