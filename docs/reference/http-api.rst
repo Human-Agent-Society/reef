@@ -91,9 +91,10 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "recipe", "release_id"?}``          |
-|                                             | → ``{scenario, recipe, release_id, content_id}``;   |
-|                                             | 201 created, 200 already existed            |
+| ``POST /reef/scenarios``                    | ``{"name", "recipe", "release_id"?}``       |
+|                                             | → ``{scenario, recipe, release_id,          |
+|                                             | content_id}``; 201 created, 200 already     |
+|                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario with its recipe and    |
 |                                             | current release once loaded                 |
@@ -184,7 +185,7 @@ Harness artifacts
 | Route                          | Response                                                      |
 +================================+===============================================================+
 | ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files, gate}``, |
-|                                | plus an ``x-reef-release-id`` response header           |
+|                                | plus an ``x-reef-release-id`` response header                 |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
 |                                | carrying the gate metrics of the step that published it       |
@@ -264,7 +265,7 @@ Status codes
 |        | authorization belongs to the gateway in front of Reef.      |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (with implicit creation off), unknown      |
-|        | release, unknown adapter, no configured harness    |
+|        | release, unknown adapter, no configured harness             |
 |        | recipe, or a scenario that serves no files                  |
 +--------+-------------------------------------------------------------+
 | 409    | a recipe or base artifact conflicting with the binding, a   |
