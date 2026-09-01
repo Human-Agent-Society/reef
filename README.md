@@ -33,19 +33,19 @@ better and better results without having to do anything.
 
 ## Installation
 
+> 💡 **Note**
+>
+> Reef's artifact and checkpoint functionality requires the `git-lfs` system
+> package. Reef initializes Git LFS locally for its artifact repositories.
+
+
 ### From PyPI
 
 ```bash
 pip install reef-infra
 
-python -c "import reef"
+python3 -c "import reef; print(reef.__version__)"
 ```
-
-> 💡 **Note**
->
-> Reef's artifact and checkpoint functionality requires the `git-lfs` system
-> package. When installing from PyPI, you do not need to run `git lfs install`
-> manually; Reef initializes Git LFS locally for its repositories.
 
 ### From source
 
@@ -54,10 +54,10 @@ git lfs install
 git clone https://github.com/Human-Agent-Society/reef.git
 cd reef
 pip install -e .
+python3 -c "import reef; print(reef.__version__)"
 ```
 
-Use the source checkout for development and for the training examples below,
-which also depend on the cookbook recipes and GPU runtime.
+Use the source checkout for development and for the training examples below.
 
 
 ## How it works
