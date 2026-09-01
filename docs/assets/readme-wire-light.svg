@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1760" height="680" viewBox="0 0 880 340" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <style>
+    text { font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; fill: #22363E; }
+    .m { fill: #7A929A; } .f { fill: #AABDC3; } .a { fill: #0E7490; }
+    .lab { font-size: 14px; font-weight: 600; } .sm { font-size: 12.5px; } .xs { font-size: 11.5px; }
+    .b { fill: none; stroke: #22363E; stroke-width: 2; }
+    .b-a { fill: none; stroke: #0E7490; stroke-width: 2; }
+    .b-f { fill: none; stroke: #AABDC3; stroke-width: 2; }
+    .w { fill: none; stroke: #22363E; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .w-f { fill: none; stroke: #AABDC3; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .w-a { fill: none; stroke: #0E7490; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+  <defs>
+    <marker id="w-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#22363E"/>
+    </marker>
+    <marker id="w-faint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#AABDC3"/>
+    </marker>
+    <marker id="w-acc" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0E7490"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="44" class="sm f">same body, new base URL, one extra header</text>
+  <rect x="40" y="132" width="160" height="56" rx="8" class="b"/>
+  <text x="120" y="165" text-anchor="middle" class="lab">your agent</text>
+  <rect x="360" y="132" width="160" height="56" rx="8" class="b-a"/>
+  <text x="440" y="165" text-anchor="middle" class="lab a">reef</text>
+  <rect x="680" y="132" width="160" height="56" rx="8" class="b-f"/>
+  <text x="760" y="158" text-anchor="middle" class="lab f">your model</text>
+  <text x="760" y="176" text-anchor="middle" class="lab f">provider</text>
+
+  <!-- harness recipes pull the served tree before they run -->
+  <path d="M440 128 V102 Q440 96 434 96 H126 Q120 96 120 102 V124" class="w-a" marker-end="url(#w-acc)"/>
+  <text x="280" y="86" text-anchor="middle" class="xs a">GET /reef/harness &#8594; the served tree</text>
+
+  <!-- the request goes to reef instead of the provider -->
+  <path d="M204 160 H352" class="w" marker-end="url(#w-ink)"/>
+  <text x="278" y="149" text-anchor="middle" class="xs m">POST /v1/chat/completions</text>
+  <text x="278" y="178" text-anchor="middle" class="xs m">+ x-reef-scenario</text>
+
+  <!-- reef forwards it and records what comes back -->
+  <path d="M524 150 H672" class="w-f" marker-end="url(#w-faint)"/>
+  <text x="598" y="140" text-anchor="middle" class="xs f">forwarded, unchanged</text>
+  <path d="M672 172 H524" class="w-f" marker-end="url(#w-faint)"/>
+  <text x="598" y="190" text-anchor="middle" class="xs f">the provider&#8217;s answer</text>
+
+  <!-- the answer comes back carrying a receipt -->
+  <path d="M440 192 V222 Q440 228 434 228 H126 Q120 228 120 222 V196" class="w" marker-end="url(#w-ink)"/>
+  <text x="330" y="246" text-anchor="middle" class="xs m">the response + x-reef-agent-record-id, the receipt</text>
+
+  <!-- any grader you already have becomes feedback on that receipt -->
+  <path d="M160 192 V279 Q160 285 166 285 H464 Q470 285 470 279 V196" class="w" marker-end="url(#w-ink)"/>
+  <text x="330" y="303" text-anchor="middle" class="xs m">POST /reef/report &#8212; a score, references: [receipt]</text>
+
+
+</svg>
