@@ -198,6 +198,7 @@ and do not ship in the Reef wheel.
 | A stream of tasks scored by tests or a verifier | SAO, `sao` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
 | Agent traffic with useful next-state signals and no explicit reports | OpenClaw-RL, `openclawrl` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
 | Repeated, scored attempts at one problem | TTT-Discover, `tttd` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
+| Scored code search with a trainable guidance model and a frozen executor | Guidance-TTT, `tttd` | Guidance-model weights | [Example and Reef results](recipes/tttd/examples/guidance_ttt/README.md) |
 | Scored agent interactions used to improve prompts, rules, skills, or configuration | Harness evolution, `harness_evolve` | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
 
 

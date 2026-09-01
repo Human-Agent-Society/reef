@@ -125,6 +125,28 @@ parameter, and a Megatron checkpoint on disk. Only then is the post-step
 archive copied to `committed-library.json`, which is the sole archive a
 resumed run restores.
 
+## Results from complete Reef runs
+
+Two full `8 × 16` searches were recovered from the Reef run artifacts and
+checked against their committed archives:
+
+| Task | Search trajectory | Valid rollouts | Evaluation check |
+|---|---:|---:|---|
+| Polyomino Packing | 27.8105 → 89.7965 | 3,573 / 3,840 | Deterministic 70-case FrontierCS suite |
+| TriMul | 10,177.40 → 1,110.85 µs | 2,648 / 3,840 | Fixed final kernel: 1,158.46 ± 3.76 µs over three H100 repeats |
+
+Both runs used Qwen3-14B for guidance, GLM-5.2 for execution, and 30 Reef
+updates. They are single-run records, so the trajectories describe these runs
+rather than variance across random seeds. For TriMul, the repeat measurement
+is the stable latency result; the lower search-time value is retained to show
+how the archive evolved.
+
+The compact records, per-update trajectories, provenance hashes, and one
+guidance-to-candidate case from each task are in [`results/`](results/). The
+Polyomino case changes piece selection from a fixed order to a skyline-aware
+decision. The TriMul case removes a global-memory round trip by reusing one
+gated tile across three output blocks.
+
 ## Execution backends
 
 Two frozen backends are built in:
