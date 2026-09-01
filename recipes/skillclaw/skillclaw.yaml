@@ -7,10 +7,10 @@
 # loader; run.sh exports the defaults and REEF_SC_SKILLS (the benchmark's
 # shipped skills library) after materializing the WildClawBench checkout.
 
-# The method package's own recipe class: harness_evolve plus the
-# catalog-injecting delivery surface (harness/skillclaw_recipe.py, imported
-# from this directory - the driver runs with it as the working directory).
-implementation: harness.skillclaw_recipe:SkillClawRecipe
+# The cookbook method's recipe class: harness_evolve plus the
+# catalog-injecting delivery surface. The entry point follows the same
+# recipes.<method>.recipe convention as the other cookbook methods.
+implementation: recipes.skillclaw.recipe:SkillClawRecipe
 
 model:
   path: ${REEF_MODEL}

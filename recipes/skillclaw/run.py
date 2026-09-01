@@ -24,9 +24,11 @@ and the served pool survives restarts as pool-current with the commit log as
 the authority (_committed_pool).
 
 ``python3 run.py report`` prints the gain table over both runs' sealed
-rounds (``stats.py``, the preregistered criterion). ``python3 run.py solve``
-runs the bundled ``harbor/`` task once through reef-eval instead - the sibling
-examples' smoke idiom - against the same embedded service.
+rounds (``stats.py``, the preregistered criterion).
+``PYTHONPATH=../.. python3 run.py solve`` runs the bundled ``harbor/`` task
+once through reef-eval instead - the sibling examples' smoke idiom - against
+the same embedded service. The repository root on ``PYTHONPATH`` exposes the
+cookbook recipe's canonical ``recipes.skillclaw.recipe`` module.
 """
 
 from __future__ import annotations

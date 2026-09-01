@@ -1,7 +1,7 @@
-"""SkillClaw's recipe: harness evolution plus the pool's own delivery surface.
+"""SkillClaw's recipe: harness evolution plus the pool's delivery surface.
 
 ``skillclaw.yaml`` names this class as its dotted recipe reference
-(``harness.skillclaw_recipe:SkillClawRecipe``). It changes exactly two things over
+(``recipes.skillclaw.recipe:SkillClawRecipe``). It changes three things over
 the stock ``CordisRecipe`` implementation:
 
 - ``build_surface`` returns ``create_skill_surface([SkillCatalogModule(...)])``, so
@@ -23,13 +23,12 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
+from recipes.skillclaw.harness.catalog import SkillCatalogModule
+from recipes.skillclaw.harness.config import PUBLIC_SKILL_ROOT
 from reef.recipe.errors import RecipeConfigError
 from reef.surface import Surface
 from reef.surface.skills import SkillValidator, create_skill_surface
 from reef.train.cordis_backend import CordisRecipe
-
-from .catalog import SkillCatalogModule
-from .config import PUBLIC_SKILL_ROOT
 
 
 def seed_skill_entries(skills_dir: Path) -> tuple[dict[str, Any], ...]:
