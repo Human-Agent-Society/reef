@@ -125,7 +125,8 @@ training goes on, and the run reaches the paper's adaptation criterion
 (three passed sessions in a row) at session 14.
 
 .. image:: ../../assets/openclawrl/demo.gif
-   :alt: Five sessions replayed from the run, with the student's ask, the agent's reply, and the student's reaction
+   :alt: A failing and a passing session replayed from the run, with the student's ask, the agent's reply, and the student's reaction
 
-The demo above replays five sessions from the same run. Early replies draw
-complaints for their formatting, and later first replies pass directly.
+The demo above replays two sessions from the same run. In session 1 the
+student rejects a formatted reply, reef keeps the training going, and by
+session 16 the first reply passes directly.
