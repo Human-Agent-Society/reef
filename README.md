@@ -17,6 +17,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
+<div align="left">
+
 Reef is infrastructure that serves an entire continual learning backend. Reef
 exposes standardized http endpoints so that you can download agents just like
 how you download `codex` or `opencode` using `curl`, and so that your agent can
@@ -25,6 +27,8 @@ send its model requests to Reef's inference endpoint instead of the provider's.
 The only difference is that, Reef constantly evaluates your agent behavior
 and improves the served harness and model weights in the backend. You keep getting
 better and better results without having to do anything.
+
+</div>
 
 </div>
 
@@ -43,10 +47,10 @@ modules implement each step.
 
 | Step | What happens | Core code |
 |---|---|---|
-| 1&nbsp;·&nbsp;Serve | Forward a request to the model provider and store the interaction. | [`service/`](reef/service) implements HTTP routes, authentication, and streaming. [`runtime/`](reef/runtime) connects Reef to the model provider. |
-| 2&nbsp;·&nbsp;Observe | Associate each report with the stored interactions referenced by its receipts. | [`core/`](reef/core) defines the stored record types. [`dispatcher.py`](reef/dispatcher.py) sends each record to its scenario. |
-| 3&nbsp;·&nbsp;Grow | Build a batch from eligible records and use it to update model weights or harness files. | [`sao/`](recipes/sao), [`tttd/`](recipes/tttd), [`openclawrl/`](recipes/openclawrl), [`harness_evolve/`](reef/train/cordis_backend) are the learning methods, one package each; [`infra/recipe/`](reef/recipe) is the contract they implement and [`infra/train/`](reef/train) prepares batches and runs training jobs. |
-| 4&nbsp;·&nbsp;Commit | Gate the candidate against your tasks, then record an accepted update as a new version and make it available for serving. | [`train/evaluation/`](reef/train/evaluation) evaluates each candidate and decides whether to accept it. [`artifact/`](reef/artifact) stores the Git-backed version history. [`surface/`](reef/surface) delivers each artifact to the serving runtime or harness client. |
+| 1&nbsp;·&nbsp;Serve | Serve agent requests and record interactions. | [`service/`](reef/service) receives agent requests, returns model responses, and records each interaction. [`runtime/`](reef/runtime) runs inference and manages artifact updates. |
+| 2&nbsp;·&nbsp;Observe | Match feedback to recorded interactions. | [`records.py`](reef/records.py) stores agent interactions and feedback. [`train/processors/`](reef/train/processors) matches reports with the interactions they reference and decides what can be used for learning. |
+| 3&nbsp;·&nbsp;Grow | Produce an update from eligible records. | [`recipe/`](reef/recipe) defines how learning recipes plug into Reef. [`train/`](reef/train) builds batches and runs update jobs. |
+| 4&nbsp;·&nbsp;Commit | Evaluate and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) evaluates each candidate and decides whether to accept it. [`artifact/`](reef/artifact) stores the Git-backed version history. [`surface/`](reef/surface) delivers each artifact to the serving runtime. |
 
 
 ## Using Reef
