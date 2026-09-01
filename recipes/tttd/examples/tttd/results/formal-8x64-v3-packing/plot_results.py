@@ -9,13 +9,47 @@ import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Circle, Rectangle
 
-
 ROOT = Path(__file__).resolve().parent
-COLORS = {"packing26": "#2563a6", "packing32": "#d97706"}
-LABELS = {"packing26": "Packing 26", "packing32": "Packing 32"}
 TOLERANCE = 1e-12
+
+# Figure style shared with the docs site (paper surface, warm ink, hairline
+# grid, and the site's brand red / blue / green as the fixed series order).
+PAPER = "#fbfaf8"
+INK = "#302c28"
+MUTED = "#716b65"
+HAIRLINE = "#ddd8d0"
+BRAND, BLUE, GREEN = "#a03729", "#2e5fa6", "#3f7d44"
+STYLE = {
+    "figure.facecolor": PAPER,
+    "savefig.facecolor": PAPER,
+    "axes.facecolor": PAPER,
+    "text.color": INK,
+    "axes.titlecolor": INK,
+    "axes.titleweight": "normal",
+    "axes.labelcolor": MUTED,
+    "xtick.color": MUTED,
+    "ytick.color": MUTED,
+    "axes.edgecolor": HAIRLINE,
+    "axes.linewidth": 1.0,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "axes.grid.axis": "y",
+    "grid.color": HAIRLINE,
+    "grid.linewidth": 1.0,
+    "axes.axisbelow": True,
+    "lines.linewidth": 2.0,
+    "lines.solid_capstyle": "round",
+    "legend.frameon": False,
+    "legend.labelcolor": INK,
+    "font.size": 11,
+}
+COLORS = {"packing26": BRAND, "packing32": BLUE}
+LABELS = {"packing26": "Packing 26", "packing32": "Packing 32"}
+RADIUS_RAMP = LinearSegmentedColormap.from_list("brand", ["#f2e0dc", BRAND])
 
 
 def read_numeric_csv(path: Path):
@@ -62,29 +96,30 @@ def plot_packings():
     figure, axes = plt.subplots(1, 2, figsize=(11.2, 5.6), constrained_layout=True)
     for index, task in enumerate(("packing26", "packing32")):
         axis = axes[index]
+        axis.grid(False)
         circles = read_circles(task)
         radii = [row["radius"] for row in circles]
         minimum, maximum = min(radii), max(radii)
         scale = maximum - minimum or 1
         for row in circles:
-            shade = 0.18 + 0.64 * (row["radius"] - minimum) / scale
+            shade = 0.15 + 0.75 * (row["radius"] - minimum) / scale
             axis.add_patch(
                 Circle(
                     (row["x"], row["y"]),
                     row["radius"],
-                    facecolor=plt.cm.Blues(shade),
-                    edgecolor="#16324f",
-                    linewidth=0.7,
+                    facecolor=RADIUS_RAMP(shade),
+                    edgecolor=PAPER,
+                    linewidth=1.0,
                 )
             )
-        axis.add_patch(Rectangle((0, 0), 1, 1, fill=False, edgecolor="#202020", linewidth=1.2))
+        axis.add_patch(Rectangle((0, 0), 1, 1, fill=False, edgecolor=MUTED, linewidth=1.2))
         axis.set(xlim=(-0.02, 1.02), ylim=(-0.02, 1.02), aspect="equal")
         axis.set_xticks([0, 0.5, 1])
         axis.set_yticks([0, 0.5, 1])
         axis.set_title(f"{LABELS[task]}\ncertified sum = {certified_score(task):.12f}")
         axis.set_xlabel("x")
         axis.set_ylabel("y")
-    figure.suptitle("Verified circle-packing configurations", fontsize=15)
+    figure.suptitle("Verified circle-packing configurations", fontsize=15, fontweight="bold")
     figure.savefig(ROOT / "packing_configurations.png", dpi=180)
     plt.close(figure)
 
@@ -116,23 +151,57 @@ def plot_wandb_metrics():
                 [row["reef/step"] for row in history],
                 [transform(row[metric]) for row in history],
                 color=COLORS[task],
-                linewidth=1.5,
-                marker="o",
-                markersize=2.5,
                 label=LABELS[task],
             )
         axis.set_title(title)
         axis.set_xlabel("Committed training step")
-        axis.grid(alpha=0.25)
-    axes[0, 0].legend(frameon=False)
-    figure.suptitle("REEF-TTT training metrics exported from W&B", fontsize=15)
+    axes[0, 0].legend()
+    figure.suptitle("REEF-TTT training metrics exported from W&B", fontsize=15, fontweight="bold")
     figure.savefig(ROOT / "wandb_training_metrics.png", dpi=180)
     plt.close(figure)
 
 
+def plot_best_solution_history():
+    rows = read_numeric_csv(ROOT / "best_solution_history.csv")
+    figure, axes = plt.subplots(1, 2, figsize=(12, 5.2), constrained_layout=True)
+    for axis, task in zip(axes, ("packing26", "packing32"), strict=False):
+        history = sorted((row for row in rows if row["task"] == task), key=lambda row: row["iteration"])
+        if not history:
+            raise RuntimeError(f"best_solution_history.csv has no rows for {task}")
+        axis.plot(
+            [row["iteration"] for row in history],
+            [row["best_score_so_far"] for row in history],
+            color=COLORS[task],
+        )
+        axis.set_title(LABELS[task])
+        axis.set_xlabel("Search iteration")
+        axis.set_ylabel("Best verified score found so far")
+        axis.ticklabel_format(axis="y", useOffset=False, style="plain")
+    figure.suptitle("Best circle-packing solution by search iteration", fontsize=15, fontweight="bold")
+    figure.savefig(ROOT / "best_solution_history.png", dpi=180)
+    plt.close(figure)
+
+    for task in ("packing26", "packing32"):
+        history = sorted((row for row in rows if row["task"] == task), key=lambda row: row["iteration"])
+        figure, axis = plt.subplots(figsize=(10, 4.6), constrained_layout=True)
+        axis.plot(
+            [row["iteration"] for row in history],
+            [row["best_score_so_far"] for row in history],
+            color=COLORS[task],
+        )
+        axis.set_xlabel("Search iteration")
+        axis.set_ylabel("Best verified score found so far")
+        axis.ticklabel_format(axis="y", useOffset=False, style="plain")
+        figure.suptitle(f"Best {LABELS[task]} solution by search iteration", fontsize=15, fontweight="bold")
+        figure.savefig(ROOT / task / "best_solution_history.png", dpi=180)
+        plt.close(figure)
+
+
 def main():
+    plt.rcParams.update(STYLE)
     plot_packings()
     plot_wandb_metrics()
+    plot_best_solution_history()
 
 
 if __name__ == "__main__":
