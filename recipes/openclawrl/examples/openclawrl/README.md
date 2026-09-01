@@ -216,5 +216,5 @@ A session passes when the agent's first solution reply already matches the stude
 ![A failing and a passing session replayed from the run](results/2026-08-27-gsm8k-stream-qwen3-4b-thinking/demo.gif)
 
 The demo above replays two sessions from this run. In session 1 the student
-rejects a formatted reply, the training in between is fast-forwarded, and by
-session 16 the first reply passes directly.
+rejects a formatted reply, reef keeps the training going, and by session 16
+the first reply passes directly.

@@ -128,5 +128,5 @@ training goes on, and the run reaches the paper's adaptation criterion
    :alt: A failing and a passing session replayed from the run, with the student's ask, the agent's reply, and the student's reaction
 
 The demo above replays two sessions from the same run. In session 1 the
-student rejects a formatted reply, the training in between is
-fast-forwarded, and by session 16 the first reply passes directly.
+student rejects a formatted reply, reef keeps the training going, and by
+session 16 the first reply passes directly.
