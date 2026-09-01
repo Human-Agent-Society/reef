@@ -37,7 +37,7 @@ Start with Recipe and add only what the method actually needs.
 | gate a produced candidate                   | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | a new tensor objective                      | `Loss family                                     | rarely                       |
-|                                             | <../developer-guide/loss-families.rst>`__                           |                              |
+|                                             | <../developer-guide/loss-families.rst>`__        |                              |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 
 Method code should depend only on what this page documents. Anything else under
@@ -75,7 +75,7 @@ recipe to remain record-only.
 +---------------------------------+------------------------------------------------------+
 | train and publish weights       | subclass ``WeightTrainingRecipe``                    |
 +---------------------------------+------------------------------------------------------+
-| use Reef's harness loop         | configure ``CordisRecipe``; subclass it only  |
+| use Reef's harness loop         | configure ``CordisRecipe``; subclass it only         |
 |                                 | for a named preset or extra validation               |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |

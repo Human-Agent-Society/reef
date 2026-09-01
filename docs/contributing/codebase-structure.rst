@@ -85,10 +85,10 @@ import a concrete integration.
 | ``reef/runtime/``    | backend-neutral inference and training                   | a concrete training stack                  |
 |                      | contracts                                                | integration                                |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/surface/``   | delivering a published artifact to the                   | proposing, evaluating, or                  |
+| ``reef/surface/``   | delivering a published artifact to the                   | proposing, evaluating, or                   |
 |                      | process or client that uses it                           | selecting updates                          |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/artifact/``  | artifact bytes, repositories,                            | commit policy or delivery                  |
+| ``reef/artifact/``  | artifact bytes, repositories,                            | commit policy or delivery                   |
 |                      | materialization, release heads                           | behavior                                   |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``    | harness descriptors, tree rendering,                     | recipe policy, the release chain           |

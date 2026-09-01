@@ -99,7 +99,7 @@ on the same release chain:
 |                      | playbook merges          |                      |
 |                      | (artifacts, §5)          |                      |
 +----------------------+--------------------------+----------------------+
-| Compare with current | ``CordisBackend`` | the decision, then   |
+| Compare with current | ``CordisBackend`` | the decision, then          |
 | select when wins     |                          | the release chain    |
 | exceed losses        |                          |                      |
 +----------------------+--------------------------+----------------------+

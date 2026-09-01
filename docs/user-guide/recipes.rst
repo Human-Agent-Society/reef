@@ -13,7 +13,7 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | ``openclawrl``: multi-turn traffic,              |                                          |
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness:** prompts,   | ``skillclaw``: grows a skill pool                  | not available                            |
+| **Harness:** prompts,   | ``skillclaw``: grows a skill pool                  | not available                          |
 | rules, skills, config   | the failures in its own served traffic           |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 

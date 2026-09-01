@@ -132,6 +132,29 @@ for (const file of rstFiles) {
   const content = readFileSync(file, "utf8");
   for (const match of content.matchAll(/<([^<>\s]+)>`__?/g)) validateLink(file, match[1]);
   for (const match of content.matchAll(/^\.\. (?:image|figure)::\s+(\S+)/gm)) validateLink(file, match[1]);
+  validateGridTables(file, content);
+}
+
+// A grid table line whose width differs from its border is silently dropped
+// by the compiler, so the row vanishes from the site instead of failing the
+// build. Every line of one table must be exactly as wide as its borders.
+function validateGridTables(file, content) {
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*\+[-=]/.test(lines[i])) continue;
+    const start = i;
+    const indent = lines[i].match(/^\s*/)[0];
+    const width = lines[i].trimEnd().length;
+    while (i < lines.length && /^\s*[+|]/.test(lines[i])) {
+      const line = lines[i].trimEnd();
+      if (line.length !== width || !line.startsWith(indent)) {
+        failures.push(
+          `misaligned grid table: ${relative(repoRoot, file)}:${i + 1} is ${line.length} chars, the table opened at line ${start + 1} with ${width}`,
+        );
+      }
+      i++;
+    }
+  }
 }
 
 function docSlug(file) {
