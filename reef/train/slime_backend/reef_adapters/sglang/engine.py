@@ -110,7 +110,14 @@ class ReefSGLangEngine(SGLangEngine):
         return response.json()
 
     def get_runtime_load_id(self):
-        """Read the supported model-info endpoint instead of Slime's deprecated route."""
+        """Read the supported model-info endpoint instead of Slime's deprecated route.
+
+        SGLang spells the runtime-load-ID ``weight_version`` on every wire
+        surface (``ServerArgs``, ``/model_info``, ``/update_weight_version``,
+        the ``UpdateWeights*ReqInput`` structs). The exchange with the server
+        must keep SGLang's field name; only Reef's side of the boundary calls
+        the identity a runtime-load-ID.
+        """
         if self.node_rank != 0:
             return None
         response = requests.get(
@@ -118,19 +125,19 @@ class ReefSGLangEngine(SGLangEngine):
             timeout=min(30.0, self._weight_update_timeout_s()),
         )
         response.raise_for_status()
-        version = response.json().get("runtime_load_id")
+        version = response.json().get("weight_version")
         if not isinstance(version, str) or not version:
-            raise RuntimeError("SGLang model_info reports no runtime_load_id")
+            raise RuntimeError("SGLang model_info reports no weight_version (runtime-load-ID)")
         return version
 
     def _sync_scheduler_runtime_load_id(self, runtime_load_id: str | None) -> None:
         if self.node_rank != 0:
             return
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
-            raise RuntimeError("SGLang model_info must report a non-empty runtime_load_id")
+            raise RuntimeError("SGLang model_info must report a non-empty weight_version (runtime-load-ID)")
         updated = self._make_request(
             "set_internal_state",
-            {"server_args": {"runtime_load_id": runtime_load_id}},
+            {"server_args": {"weight_version": runtime_load_id}},
         )
         if not isinstance(updated, list) or not updated or any(value is not True for value in updated):
             raise RuntimeError(
@@ -159,7 +166,7 @@ class ReefSGLangEngine(SGLangEngine):
     def set_runtime_load_id(self, runtime_load_id: str):
         version = str(runtime_load_id)
         result = self._make_request(
-            "update_runtime_load_id",
+            "update_weight_version",
             {"new_version": version, "abort_all_requests": False},
         )
         self._sync_scheduler_runtime_load_id(version)
@@ -226,7 +233,7 @@ class ReefSGLangEngine(SGLangEngine):
         if load_format is not None:
             payload["load_format"] = load_format
         if runtime_load_id is not None:
-            payload["runtime_load_id"] = runtime_load_id
+            payload["weight_version"] = runtime_load_id
         if files is not None:
             payload["files"] = files
         return self._make_request("update_weights_from_disk", payload)

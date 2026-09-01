@@ -111,7 +111,7 @@ def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) ->
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
-                        "runtime_load_id": "wv-7",
+                        "weight_version": "wv-7",
                     },
                 }
             )
@@ -178,7 +178,7 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
                         "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
                         # Tokenizer metadata can move after the final decode;
                         # the scheduler-owned list remains exact.
-                        "runtime_load_id": "engine:8",
+                        "weight_version": "engine:8",
                         "_reef_token_runtime_load_ids": ["engine:6", "engine:7", "engine:7"],
                     },
                 }
@@ -227,7 +227,7 @@ def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20]],
                         # The tokenizer may move first while draining output.
-                        "runtime_load_id": "engine:7",
+                        "weight_version": "engine:7",
                         "_reef_token_runtime_load_ids": ["engine:6"],
                     },
                 }
@@ -271,7 +271,7 @@ def test_live_chat_rejects_tokenizer_only_runtime_load_ids() -> None:
                         "finish_reason": {"type": "stop"},
                         "completion_tokens": 1,
                         "output_token_logprobs": [[-0.1, 20]],
-                        "runtime_load_id": "engine:7",
+                        "weight_version": "engine:7",
                     },
                 }
             )
@@ -312,7 +312,7 @@ def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20], [-0.2, 21]],
-                        "runtime_load_id": "wv-tools",
+                        "weight_version": "wv-tools",
                     },
                 }
             )
@@ -418,7 +418,7 @@ def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcr
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.2, 20], [-0.4, 21]],
-                        "runtime_load_id": "wv-anthropic",
+                        "weight_version": "wv-anthropic",
                     },
                 }
             )
@@ -526,7 +526,7 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.1, 20]],
-                        "runtime_load_id": "wv-tools",
+                        "weight_version": "wv-tools",
                     },
                 }
             )
@@ -651,7 +651,7 @@ def test_streaming_chat_keeps_exact_training_response_for_recording(tmp_path) ->
                     "finish_reason": {"type": "stop"},
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "runtime_load_id": "engine:6",
+                    "weight_version": "engine:6",
                     "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
@@ -711,7 +711,7 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
                     "finish_reason": None,
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "runtime_load_id": "engine:6",
+                    "weight_version": "engine:6",
                     "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
@@ -724,7 +724,7 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
                     "finish_reason": {"type": "length"},
                     "completion_tokens": 2,
                     "output_token_logprobs": [[-0.25, 21]],
-                    "runtime_load_id": "engine:8",
+                    "weight_version": "engine:8",
                     "_reef_token_runtime_load_ids": ["engine:7"],
                 },
             }
@@ -892,7 +892,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                     "finish_reason": {"type": "stop"},
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
-                    "runtime_load_id": "wv-tools",
+                    "weight_version": "wv-tools",
                 },
             }
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -1024,7 +1024,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path) -> None:
                     "meta_info": {
                         "finish_reason": {"type": "stop"},
                         "output_token_logprobs": [[-0.25, 20], [-0.5, 21], [-0.75, 22]],
-                        "runtime_load_id": "wv-9",
+                        "weight_version": "wv-9",
                     },
                 }
             )

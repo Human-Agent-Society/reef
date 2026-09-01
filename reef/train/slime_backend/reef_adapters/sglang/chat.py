@@ -597,7 +597,9 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
             raise ValueError("SGLang /generate response lacks output token log probabilities")
         stamped = meta.get("_reef_token_runtime_load_ids")
         if stamped is None and not exact_runtime_load_ids_required:
-            version = meta.get("runtime_load_id")
+            # Raw SGLang meta_info carries the runtime-load-ID under SGLang's
+            # own field name; the normalized meta below re-keys it for Reef.
+            version = meta.get("weight_version")
             stamped = [version] * len(pairs)
         if (
             not isinstance(stamped, list)
