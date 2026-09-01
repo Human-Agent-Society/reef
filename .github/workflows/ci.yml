@@ -121,6 +121,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # setuptools-scm derives the version from the nearest tag.
+          fetch-depth: 0
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
@@ -132,7 +134,7 @@ jobs:
       - run: python -m build
       - run: python -m twine check dist/*
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install dist/reef-[0-9]*.whl
+      - run: python -m pip install dist/reef_infra-[0-9]*.whl
       - name: Check distribution and dependency boundaries
         working-directory: ${{ runner.temp }}
         run: |
@@ -145,8 +147,10 @@ jobs:
           from packaging.requirements import Requirement
           from packaging.utils import canonicalize_name
 
-          reef = distribution("reef")
-          assert reef.metadata["Name"] == "reef"
+          # PyPI distribution `reef-infra`; the import package is `reef`.
+          reef = distribution("reef-infra")
+          assert reef.metadata["Name"] == "reef-infra"
+          assert importlib.util.find_spec("reef") is not None
           # The protocol client is its own distribution and stays
           # dependency-free: harnesses cannot take the reef wheel's deps.
           client = distribution("reef-client")
