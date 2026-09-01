@@ -97,9 +97,17 @@ RUN pip uninstall -y numpy && \
 # of a mounted checkout, silently running the baked-in copy instead (observed
 # 2026-09-01). The `recipes` cookbook resolves from the working directory the
 # stack runs in, matching a from-checkout deployment.
+# The base ships uv but no uv-side counterpart to its /etc/pip.conf
+# (`break-system-packages = true`), so `uv pip install` fails on the PEP 668
+# marker of the system interpreter unless told otherwise. These two mirror
+# the pip setting: install into the system interpreter (and never into a
+# `.venv` that happens to be bind-mounted with a checkout) and ignore the
+# marker, so the README's `uv pip install ...` lines work unmodified.
 ENV PYTHONPATH=/opt/sglang/python:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
     PYTHONUNBUFFERED=1 \
-    SGLANG_DISABLE_CUDNN_CHECK=1
+    SGLANG_DISABLE_CUDNN_CHECK=1 \
+    UV_SYSTEM_PYTHON=1 \
+    UV_BREAK_SYSTEM_PACKAGES=1
 
 # The slime driver's first import chain (sglang server args -> transformers ->
 # scipy) is exactly where a broken compiled stack surfaces at runtime; walking

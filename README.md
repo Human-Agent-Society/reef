@@ -38,12 +38,14 @@ better and better results without having to do anything.
 > Reef's artifact and checkpoint functionality requires the `git-lfs` system
 > package. Reef initializes Git LFS locally for its artifact repositories.
 
+We recommend [uv](https://docs.astral.sh/uv/) for managing packages, and the
+commands below use it.
 
 ### From PyPI
 
 ```bash
-pip install reef-infra
-
+uv venv && source .venv/bin/activate
+uv pip install reef-infra
 python3 -c "import reef; print(reef.__version__)"
 ```
 
@@ -53,7 +55,8 @@ python3 -c "import reef; print(reef.__version__)"
 git lfs install
 git clone https://github.com/Human-Agent-Society/reef.git
 cd reef
-pip install -e .
+uv venv && source .venv/bin/activate
+uv pip install -e .
 python3 -c "import reef; print(reef.__version__)"
 ```
 
@@ -92,7 +95,7 @@ from a Reef checkout in an environment that satisfies the GPU requirements in
 [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/).
 
 ```bash
-pip install -e ".[slime]" && pip install --no-deps --group runtime
+uv pip install -e ".[slime]" && uv pip install --no-deps --group runtime
 
 export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
