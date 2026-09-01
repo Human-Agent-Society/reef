@@ -33,6 +33,11 @@ better and better results without having to do anything.
 
 ## Installation
 
+We recommend [uv](https://docs.astral.sh/uv/) for managing packages, and the
+commands below use it. `uv pip` installs into the active virtual environment,
+so create one with `uv venv` first if you do not have one. Plain `pip` accepts
+the same arguments.
+
 ### From PyPI
 
 ```bash
@@ -41,9 +46,6 @@ uv pip install reef-infra
 
 The distribution name is `reef-infra`; the Python package and CLI remain
 `reef`.
-
-`uv pip` installs into the active virtual environment; create one with
-`uv venv` first if you do not have one.
 
 ### From source
 
