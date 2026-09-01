@@ -11,8 +11,9 @@
 [![Docker](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml)
 [![Docs Build](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml)
 
+[![GitHub](https://img.shields.io/badge/GitHub-Star%20Reef-181717?logo=github&logoColor=white)](https://github.com/Human-Agent-Society/reef)
 [![Docs](https://img.shields.io/badge/docs-reefinfra.ai-0E7490?logo=readthedocs&logoColor=white)](https://reefinfra.ai)
-[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/8k4WeVuTb)
+[![Discord](https://img.shields.io/badge/Discord-Talk%20to%20the%20builders-5865F2?logo=discord&logoColor=white)](https://discord.gg/8k4WeVuTb)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
@@ -29,6 +30,10 @@ and improves the served harness and model weights in the backend. You keep getti
 better and better results without having to do anything.
 
 </div>
+
+**[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) ·
+[Join Discord](https://discord.gg/8k4WeVuTb) ·
+[Star Reef](https://github.com/Human-Agent-Society/reef)**
 
 </div>
 
@@ -233,8 +238,13 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Architecture](https://reefinfra.ai/docs/getting-started/architecture/): Overall architecture of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
-## Contribute
+## Community & Contributing
 
-- Start with the [contribution guide](CONTRIBUTING.md)
-- Write RFCs directly in [GitHub issues](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) for design discussions.
+Building an agent that should improve from real-world feedback?
+
+- [Join Discord](https://discord.gg/8k4WeVuTb) to share your setup, ask implementation questions, and discuss new learning recipes.
+- Start contributing with the [contribution guide](CONTRIBUTING.md).
+- Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
+
+If Reef looks useful to you, give it a [⭐ on GitHub](https://github.com/Human-Agent-Society/reef) — it helps more agent builders discover the project.
