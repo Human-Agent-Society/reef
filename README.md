@@ -197,13 +197,13 @@ artifact that should be updated. These implementations live in this
 repository's `recipes/` cookbook; they are selected by dotted class reference
 and do not ship in the Reef wheel.
 
-| Workload | Method / recipe module | Updated artifact | Documentation |
+| Workload | Recipe module | Updated artifact | Documentation |
 |---|---|---|---|
-| A stream of tasks scored by tests or a verifier | SAO<br><code>recipes.<wbr>sao.<wbr>recipe:<wbr>SAORecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
-| Agent traffic with useful next-state signals and no explicit reports | OpenClaw-RL<br><code>recipes.<wbr>openclawrl.<wbr>recipe:<wbr>OpenClawRLRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
-| Repeated, scored attempts at one problem | TTT-Discover<br><code>recipes.<wbr>tttd.<wbr>recipe:<wbr>TTTDRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
-| Scored code search with a trainable guidance model and a frozen executor | Guidance-TTT<br><code>recipes.<wbr>tttd.<wbr>recipe:<wbr>TTTDRecipe</code> | Guidance-model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/guidance_ttt/README.md) |
-| Scored agent interactions used to improve prompts, rules, skills, or configuration | Harness evolution<br><code>reef.<wbr>train.<wbr>cordis_backend.<wbr>recipe:<wbr>CordisRecipe</code> | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
+| A stream of tasks scored by tests or a verifier | <code>recipes.sao.recipe:SAORecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
+| Agent traffic with useful next-state signals and no explicit reports | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
+| Repeated, scored attempts at one problem | <code>recipes.tttd.recipe:TTTDRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
+| Scored code search with a trainable guidance model and a frozen executor | <code>recipes.tttd.recipe:TTTDRecipe</code> | Guidance-model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/guidance_ttt/README.md) |
+| Scored agent interactions used to improve prompts, rules, skills, or configuration | <code>reef.train.cordis_backend.recipe:CordisRecipe</code> | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
 
 
 ## How is Reef different?
