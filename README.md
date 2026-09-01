@@ -36,11 +36,14 @@ better and better results without having to do anything.
 ### From PyPI
 
 ```bash
-pip install reef-infra
+uv pip install reef-infra
 ```
 
 The distribution name is `reef-infra`; the Python package and CLI remain
 `reef`.
+
+`uv pip` installs into the active virtual environment; create one with
+`uv venv` first if you do not have one.
 
 ### From source
 
@@ -48,7 +51,7 @@ The distribution name is `reef-infra`; the Python package and CLI remain
 git lfs install
 git clone https://github.com/Human-Agent-Society/reef.git
 cd reef
-pip install -e .
+uv pip install -e .
 ```
 
 Use the source checkout for development and for the training examples below,
@@ -87,7 +90,7 @@ from a Reef checkout in an environment that satisfies the GPU requirements in
 [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/).
 
 ```bash
-pip install -e ".[slime]" && pip install --no-deps --group runtime
+uv pip install -e ".[slime]" && uv pip install --no-deps --group runtime
 
 export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
