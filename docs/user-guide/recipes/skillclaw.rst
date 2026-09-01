@@ -6,23 +6,23 @@ agent's skill pool from the agent's own traffic. By day the agent drains a
 frozen task list against the current pool. By night one decision per
 observation changes the pool, and the next day measures what changed.
 
-+-------------+------------------------------------------------------------+
-| Evolves     | the harness tree: the agent's skill pool                    |
-+-------------+------------------------------------------------------------+
-| Signal      | one report per task, with the day's last report closing     |
-|             | the batch                                                  |
-+-------------+------------------------------------------------------------+
-| Loss family | none (no weight training)                                   |
-+-------------+------------------------------------------------------------+
-| Package     | ``recipes/skillclaw/``                                     |
-+-------------+------------------------------------------------------------+
-| Processor   | reported feedback, producing a ``TraceBatch``              |
-+-------------+------------------------------------------------------------+
-| Needs       | a Reef process, the ``pi`` binary, and Docker for the      |
-|             | Harbor tasks. Reef itself needs no GPU.                    |
-+-------------+------------------------------------------------------------+
-| Example     | ``recipes/skillclaw/``                                     |
-+-------------+------------------------------------------------------------+
++-------------+--------------------------------------------------------------+
+| Evolves     | the harness tree: the agent's skill pool                     |
++-------------+--------------------------------------------------------------+
+| Signal      | one report per task, with the day's last report closing      |
+|             | the batch                                                    |
++-------------+--------------------------------------------------------------+
+| Loss family | none (no weight training)                                    |
++-------------+--------------------------------------------------------------+
+| Package     | ``recipes/skillclaw/``                                       |
++-------------+--------------------------------------------------------------+
+| Processor   | reported feedback, producing a ``TraceBatch``                |
++-------------+--------------------------------------------------------------+
+| Needs       | a Reef process, the ``pi`` binary, and Docker for the        |
+|             | Harbor tasks. Reef itself needs no GPU.                      |
++-------------+--------------------------------------------------------------+
+| Example     | ``recipes/skillclaw/``                                       |
++-------------+--------------------------------------------------------------+
 
 What it does
 ------------
