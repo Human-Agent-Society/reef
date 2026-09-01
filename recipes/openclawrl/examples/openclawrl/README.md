@@ -213,8 +213,8 @@ uv run --no-project --with matplotlib \
 
 A session passes when the agent's first solution reply already matches the student's preferences, with the work shown and the correct answer. The student wants homework that does not look AI-written, so a reply that uses bold text or a bullet or numbered list draws a complaint. The bold rate and the list rate measure this habit over the run, as the fraction of the last ten sessions whose first reply still contains bold text or a list. From the curves we see both fall as training goes on, and the run reaches the paper's adaptation criterion (three passed sessions in a row) at session 14.
 
-![Five sessions replayed from the run](results/2026-08-27-gsm8k-stream-qwen3-4b-thinking/demo.gif)
+![A failing and a passing session replayed from the run](results/2026-08-27-gsm8k-stream-qwen3-4b-thinking/demo.gif)
 
-The demo above replays five sessions from this run: the student brings a homework
-problem, the agent answers, and the student reacts. Early replies draw
-complaints for their formatting; later first replies pass directly.
+The demo above replays two sessions from this run. In session 1 the student
+rejects a formatted reply, the training in between is fast-forwarded, and by
+session 16 the first reply passes directly.
