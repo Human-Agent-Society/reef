@@ -35,7 +35,9 @@ def install_scheduler_runtime_load_id_tracking() -> None:
     original_accept = _GenerationStreamAccumulator.accept
 
     def current_runtime_load_id() -> str | None:
-        version = getattr(get_global_server_args(), "runtime_load_id", None)
+        # SGLang's ServerArgs spells the runtime-load-ID "weight_version";
+        # the attribute name is SGLang's, not Reef's.
+        version = getattr(get_global_server_args(), "weight_version", None)
         return str(version) if version is not None and str(version) else None
 
     def accept_with_runtime_load_id(self: Any, *, req: Any):
@@ -79,14 +81,14 @@ def install_scheduler_runtime_load_id_tracking() -> None:
     original_set_internal_state = Scheduler.set_internal_state
 
     def set_internal_state_with_runtime_load_id(self: Any, recv_req: Any):
-        version = recv_req.server_args.pop("runtime_load_id", None)
+        version = recv_req.server_args.pop("weight_version", None)
         result = original_set_internal_state(self, recv_req)
         if version is not None and result.updated:
             if not isinstance(version, str) or not version:
                 result.updated = False
             else:
-                get_global_server_args().runtime_load_id = version
-                result.server_args["runtime_load_id"] = version
+                get_global_server_args().weight_version = version
+                result.server_args["weight_version"] = version
         return result
 
     _GenerationStreamAccumulator.accept = accept_with_runtime_load_id
@@ -133,7 +135,7 @@ def _weight_update_session(updater: Any) -> Iterator[None]:
 def _install_runtime_load_id_updates() -> None:
     """Commit scheduler stamps with successful weight mutations.
 
-    SGLang updates the tokenizer manager's ``runtime_load_id`` after a load,
+    SGLang updates the tokenizer manager's ``weight_version`` after a load,
     while generation happens in separate scheduler processes. Keep each
     scheduler's stamp in the same success branch as its local weight update,
     and reject a delayed delta before it can overwrite a recovered full load.
@@ -154,24 +156,23 @@ def _install_runtime_load_id_updates() -> None:
     original_tensor = SchedulerWeightUpdaterManager.update_weights_from_tensor
 
     def commit_version(recv_req: Any, result: Any) -> Any:
-        version = getattr(recv_req, "runtime_load_id", None)
+        # Weight-update requests and ServerArgs both use SGLang's field name
+        # "weight_version" for what Reef calls the runtime-load-ID.
+        version = getattr(recv_req, "weight_version", None)
         if getattr(result, "success", False) and version is not None:
             if not isinstance(version, str) or not version:
                 result.success = False
-                result.message = "runtime_load_id must be a non-empty string"
+                result.message = "weight_version must be a non-empty string"
             else:
-                get_global_server_args().runtime_load_id = version
+                get_global_server_args().weight_version = version
         return result
 
     @wraps(original_disk)
     def update_weights_from_disk(self: Any, recv_req: Any):
-        if (
-            getattr(recv_req, "load_format", None) == "delta"
-            and getattr(recv_req, "runtime_load_id", None) is not None
-        ):
+        if getattr(recv_req, "load_format", None) == "delta" and getattr(recv_req, "weight_version", None) is not None:
             try:
-                incoming = RuntimeLoadId.parse(recv_req.runtime_load_id)
-                current = RuntimeLoadId.parse(get_global_server_args().runtime_load_id)
+                incoming = RuntimeLoadId.parse(recv_req.weight_version)
+                current = RuntimeLoadId.parse(get_global_server_args().weight_version)
             except (TypeError, ValueError):
                 return UpdateWeightFromDiskReqOutput(
                     success=False,

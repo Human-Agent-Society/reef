@@ -64,7 +64,7 @@ from a Reef checkout in an environment that satisfies the GPU requirements in
 ```bash
 pip install -e ".[slime]" && pip install --no-deps --group runtime
 
-export MODEL_PATH="Qwen/Qwen3-8B"
+export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \

@@ -10,7 +10,12 @@
 #
 # Reduced-model smoke: 2 GPUs, Qwen2.5-1.5B-Instruct. Scale seq-length,
 # model, and GPU counts up for a real run; the objective settings below are the
-# paper's reasoning-domain values and do not change with model size.
+# paper's reasoning-domain values and do not change with model size. Changing
+# the model family means updating the model-specific flags in slime_flags
+# (--padded-vocab-size, --add-qkv-bias, --normalization, ...) to match: Reef
+# derives only size and topology flags from the HF config, and e.g. Qwen3
+# models have no QKV bias, so pointing model_path at one while these flags
+# stay fails the HF-to-Megatron load.
 #
 # Started by run.sh; state under ./work.
 
@@ -63,6 +68,9 @@ training:
   ray_port: 6379
   ray_dashboard_port: 8265
   sglang_port: "30000"
+  # Relative paths resolve against the directory reef serve runs from. The
+  # checkpoint preflight requires roughly 16x the HF model size free on this
+  # filesystem before the stack boots (the critic doubles the training state).
   checkpoint_dir: work/checkpoints
   global_batch_size: 1
   # SAO objective as slime flags: --use-critic creates the value-model group;
