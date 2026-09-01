@@ -123,3 +123,9 @@ the list rate measure this habit over the run, as the fraction of the last
 ten sessions whose first reply still contains bold text or a list. From the curves we see both fall as
 training goes on, and the run reaches the paper's adaptation criterion
 (three passed sessions in a row) at session 14.
+
+.. image:: ../../assets/openclawrl/demo.gif
+   :alt: Five sessions replayed from the run, with the student's ask, the agent's reply, and the student's reaction
+
+The demo above replays five sessions from the same run. Early replies draw
+complaints for their formatting, and later first replies pass directly.
