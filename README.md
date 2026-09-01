@@ -33,17 +33,21 @@ better and better results without having to do anything.
 
 ## Installation
 
+> 💡 **Note**
+>
+> Reef's artifact and checkpoint functionality requires the `git-lfs` system
+> package. Reef initializes Git LFS locally for its artifact repositories.
+
 We recommend [uv](https://docs.astral.sh/uv/) for managing packages, and the
 commands below use it.
 
 ### From PyPI
 
 ```bash
-uv venv && uv pip install reef-infra
+uv venv && source .venv/bin/activate
+uv pip install reef-infra
+python3 -c "import reef; print(reef.__version__)"
 ```
-
-The distribution name is `reef-infra`; the Python package and CLI remain
-`reef`.
 
 ### From source
 
@@ -51,11 +55,12 @@ The distribution name is `reef-infra`; the Python package and CLI remain
 git lfs install
 git clone https://github.com/Human-Agent-Society/reef.git
 cd reef
-uv venv && pip install -e .
+uv venv && source .venv/bin/activate
+uv pip install -e .
+python3 -c "import reef; print(reef.__version__)"
 ```
 
-Use the source checkout for development and for the training examples below,
-which also depend on the cookbook recipes and GPU runtime.
+Use the source checkout for development and for the training examples below.
 
 
 ## How it works
