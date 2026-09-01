@@ -25,7 +25,7 @@ better and better results without having to do anything.
 </div>
 
 **[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) ·
-[Join Discord](https://discord.gg/8k4WeVuTb)**
+[Join Discord](https://discord.gg/5y8e5f937k)**
 
 </div>
 
@@ -234,7 +234,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 
 Working on continual self-improving agent?
 
-- [Join Discord](https://discord.gg/8k4WeVuTb) to share your recipes, ask implementation questions, and discuss new features.
+- [Join Discord](https://discord.gg/5y8e5f937k) to share your recipes, ask implementation questions, and discuss new features.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
