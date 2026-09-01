@@ -13,7 +13,7 @@ from pathlib import Path
 
 from reef.harness.descriptor import AdapterDescriptor, DescriptorError, external_descriptors, load_descriptor
 
-BUILTIN_ADAPTERS = ("opencode", "pi")
+BUILTIN_ADAPTERS = ("claude", "opencode", "pi")
 
 _cache: dict[str, AdapterDescriptor] = {}
 

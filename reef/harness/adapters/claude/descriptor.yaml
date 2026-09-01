@@ -1,0 +1,72 @@
+# Claude Code, driven headless per episode.
+#
+# CLAUDE_CONFIG_DIR relocates the whole config tree (settings.json, CLAUDE.md,
+# skills/, commands/, plugins/, and the session transcripts under projects/)
+# into the episode root, so nothing is read from or written to the user's real
+# ~/.claude and the directory-trust prompt never fires. The three DISABLE_*
+# variables stop the startup network work (auto-update, telemetry, and the
+# non-essential background traffic) that would otherwise make episodes
+# non-deterministic. `-p --output-format json` is Claude Code's headless
+# mode; `--permission-mode bypassPermissions` is the non-interactive
+# equivalent of trusting the isolated episode root, matching opencode's
+# `--auto` and pi's json mode.
+name: claude
+binary: claude
+# The vendor's install channel at the pinned version; consumed by the
+# GET /reef/harness/install script, never by episode runs.
+install:
+  kind: npm
+  package: "@anthropic-ai/claude-code"
+  version: "2.1.257"
+  binary_path: "node_modules/.bin/claude"
+argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "bypassPermissions"]
+env:
+  CLAUDE_CONFIG_DIR: "{root}/claude"
+  DISABLE_AUTOUPDATER: "1"
+  DISABLE_TELEMETRY: "1"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+files:
+  config:
+    primary:
+      path: "claude/settings.json"
+      defaults:
+        # Keep episodes hermetic: no auto-update mid-campaign, and no
+        # Co-Authored-By trailer written into commits an episode makes.
+        includeCoAuthoredBy: false
+  rules: "claude/CLAUDE.md"
+  agent_command: "claude/commands/{name}.md"
+  skill: "claude/skills/{name}/SKILL.md"
+  # Claude Code's code surface is a plugin: a directory with an entry file.
+  # The evolved node renders as that entry file; activating it still needs a
+  # marketplace/settings reference, so treat this as the least-used node kind
+  # for now (skills, commands, and rules carry the harness).
+  code_extension: "claude/plugins/{name}/index.js"
+trajectory:
+  # Claude Code writes one JSONL transcript per session under
+  # CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl, one event per
+  # line — the same shape pi uses, read by the claude-session-jsonl reader.
+  format: claude-session-jsonl
+  path: "claude/projects"
+cleanup_whitelist:
+  - "claude/projects/**"
+  # Claude Code's boot persists local state beside the rendered config:
+  # a top-level state file, feature-gate cache, per-session todo lists, and
+  # captured shell snapshots. Episode state, not residue.
+  - "claude/.claude.json"
+  - "claude/statsig/**"
+  - "claude/todos/**"
+  - "claude/shell-snapshots/**"
+quirks: reef.harness.adapters.claude.quirks
+# How to point Claude Code at a model endpoint. Claude Code speaks the
+# Anthropic Messages API natively, so only the anthropic dialect is bound:
+# settings.json's `env` block redirects the client at Reef's endpoint, which
+# is Anthropic-compatible at {base_url}/v1/messages. Reef appends this set
+# when it runs evaluation episodes; the served tree never carries a provider.
+model_binding:
+  anthropic:
+    - target: primary
+      data:
+        env:
+          ANTHROPIC_BASE_URL: "{base_url}"
+          ANTHROPIC_AUTH_TOKEN: "{api_key}"
+          ANTHROPIC_MODEL: "{model}"
