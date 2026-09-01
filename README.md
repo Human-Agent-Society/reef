@@ -37,10 +37,15 @@ better and better results without having to do anything.
 
 ```bash
 pip install reef-infra
+
+python -c "import reef"
 ```
 
-The distribution name is `reef-infra`; the Python package and CLI remain
-`reef`.
+> 💡 **Note**
+>
+> Reef's artifact and checkpoint functionality requires the `git-lfs` system
+> package. When installing from PyPI, you do not need to run `git lfs install`
+> manually; Reef initializes Git LFS locally for its repositories.
 
 ### From source
 
