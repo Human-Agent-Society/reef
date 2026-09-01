@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -324,9 +325,14 @@ def _install_pg_primitive(args) -> None:
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:
-    """Merge numeric worker metrics for the bridge's next drain."""
+    """Merge numeric worker metrics for the bridge's next drain.
+
+    Non-finite values are dropped: a loss family may log NaN for a metric
+    whose phase is absent from a step, and the drained metrics are written
+    into the durable training-job marker with ``allow_nan=False``.
+    """
     for name, value in metrics.items():
-        if isinstance(value, int | float) and not isinstance(value, bool):
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value):
             _WORKER_METRICS[str(name)] = float(value)
 
 
@@ -335,7 +341,7 @@ def record_worker_step(metrics: Mapping[str, Any]) -> None:
     numeric = {
         str(name): float(value)
         for name, value in metrics.items()
-        if isinstance(value, int | float) and not isinstance(value, bool)
+        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
     }
     if numeric:
         _WORKER_STEP_METRICS.append(numeric)
