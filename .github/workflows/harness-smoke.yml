@@ -1,15 +1,15 @@
 name: harness-smoke
 
-# Runs the real pinned pi binary through render, run_episode, and the
-# trajectory reader against a stub model server (tests/smoke/test_real_pi.py):
-# the guard against a pi release changing a format the hermetic fakes only
-# imitate. Non-blocking: not in the required check set until stable.
+# Runs the real pinned pi binary through the core episode contract and the
+# Meta-Harness Harbor bridge against stub model servers. These guard formats
+# that hermetic fakes only imitate. Non-blocking until stable.
 
 on:
   pull_request:
     paths:
       - "reef/harness/**"
       - "reef/train/cordis_backend/**"
+      - "recipes/meta_harness/**"
       - "tests/smoke/**"
       - ".github/workflows/harness-smoke.yml"
   workflow_dispatch:
@@ -39,7 +39,7 @@ jobs:
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
       - run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
-      - run: python -m pytest tests/smoke/test_real_pi.py
+      - run: python -m pytest tests/smoke/test_real_pi.py tests/smoke/test_meta_harness_pi_bridge.py
         env:
           REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
           REEF_REAL_PI_SESSION_OUT: ${{ runner.temp }}/real-pi-session.jsonl
