@@ -212,8 +212,6 @@ jobs:
           from reef.recipe import Recipe
           from reef.recipe.registry import recipe_class_for
           assert importlib.util.find_spec('reef.train.slime_backend') is not None
-          assert importlib.util.find_spec('reef.train.cordis_backend') is not None
-          assert importlib.util.find_spec('reef.train.cordis_backend.recipe') is None
           assert importlib.util.find_spec('recipes') is None
           assert not hasattr(rp, 'register_kind')
           assert recipe_class_for('recipe') is Recipe

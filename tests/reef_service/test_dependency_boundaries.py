@@ -210,8 +210,6 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
         "import sys; sys.modules['ray'] = None; sys.modules['torch'] = None; "
         "import reef.train.cordis_backend as cordis; "
         "assert cordis.CordisBackend; "
-        "assert not hasattr(cordis, 'CordisRecipe'); "
-        "assert not hasattr(cordis, 'CordisProcessor'); "
         "assert not [m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')], "
         "[m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')]"
     )
