@@ -15,24 +15,22 @@ then runs the evaluator three times. It is the better number to use when
 reporting stable latency. Polyomino's evaluator is deterministic, so it does
 not need a timing repeat.
 
-These are single completed runs, not estimates over random seeds. The
-trajectories show what happened in these runs; they do not by themselves
-establish that every gain was caused by policy training. The case studies make
-a narrower claim: they pair a guidance message with the child produced from
-that parent and the score returned by the verifier.
+These are single completed runs, not estimates over random seeds. The records
+show what happened in these runs; they do not by themselves establish that
+every gain was caused by policy training. The case studies make a narrower
+claim: they pair a guidance message with the child produced from that parent
+and the score returned by the verifier.
 
 ## Files
 
 - [`runs.json`](runs.json) contains configurations, summary metrics, selected
   archive identifiers, reevaluation values, and SHA-256 provenance.
-- [`trajectory.csv`](trajectory.csv) contains the cumulative best score and
-  valid-rollout count for every update.
 - [`polyomino.md`](polyomino.md) follows one guidance-to-candidate transition in
   the packing run.
 - [`trimul.md`](trimul.md) follows one guidance-to-kernel transition in the
   Triton run.
-- [`check_results.py`](check_results.py) checks trajectory monotonicity, rollout
-  totals, endpoint values, and the TriMul repeat statistics.
+- [`check_results.py`](check_results.py) checks the run set and the TriMul repeat
+  statistics.
 
 Run the compact-record checks from this directory:
 
