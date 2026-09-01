@@ -213,10 +213,5 @@
     "name": "stale",
     "color": "ededed",
     "description": "Inactive and awaiting confirmation that the work remains relevant"
-  },
-  {
-    "name": "breaking",
-    "color": "b60205",
-    "description": "Incompatible change to a public API, wire contract, config schema, or CLI"
   }
 ]

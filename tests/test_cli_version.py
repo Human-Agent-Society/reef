@@ -14,8 +14,3 @@ def test_version_flag_prints_package_version() -> None:
         check=True,
     )
     assert result.stdout.strip() == f"reef {reef.__version__}"
-
-
-def test_version_is_pep440_like() -> None:
-    # setuptools-scm output: a tag ("0.0.1") or a dev version past one.
-    assert reef.__version__[0].isdigit()

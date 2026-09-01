@@ -10,12 +10,11 @@ installed Reef package.
 """
 
 # isort: skip_file
-# Written by setuptools-scm at install time from the git tag (see
-# [tool.setuptools_scm] in pyproject.toml); absent only on an uninstalled
-# checkout imported straight off the tree.
+from importlib.metadata import PackageNotFoundError, version
+
 try:
-    from reef._version import __version__
-except ImportError:
+    __version__ = version("reef-infra")
+except PackageNotFoundError:
     __version__ = "0.0.0.dev0"
 
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError

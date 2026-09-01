@@ -11,7 +11,6 @@ For a released version:
 .. code:: bash
 
    pip install reef-infra        # the import package is `reef`
-   git lfs install
 
 Or, to work on Reef itself:
 
@@ -45,8 +44,7 @@ supported way to get them is the image:
 
 .. code:: bash
 
-   docker build -f docker/Dockerfile.reef -t reef \
-     --build-arg REEF_VERSION="$(git describe --tags | sed s/^v//)" .
+   docker build -f docker/Dockerfile.reef -t reef .
 
 `docker/README.md <../../docker/README.md>`__ covers the GPU prerequisites and
 how to start the container; `Evolve your model <../user-guide/evolve-your-model.rst>`__

@@ -66,16 +66,10 @@ RUN rm -rf /opt/sglang && \
 
 COPY . .
 
-# .dockerignore drops .git, so setuptools-scm cannot read the tag here. Pass
-# the version in:  --build-arg REEF_VERSION="$(git describe --tags)"
-# (strip the leading v). Unset, the install falls back to 0.0.0.dev0.
-ARG REEF_VERSION
-ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_REEF_INFRA=${REEF_VERSION}
-
 # Replace the image's Slime distribution with Reef's exact pin. Keep
 # the base image's CUDA-matched dependency set by resolving neither package's
 # dependencies here.
-RUN pip uninstall -y slime reef reef-infra && \
+RUN pip uninstall -y slime reef && \
     pip install --no-cache-dir --no-deps --group runtime && \
     pip install -e . --no-deps && \
     pip install reef-client --no-deps
