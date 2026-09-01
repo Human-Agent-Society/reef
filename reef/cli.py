@@ -26,6 +26,7 @@ usage: reef <command> [options]
   serve  Start a stack from a config
 
   -c CONFIG   Config file (default: reef.yaml or $REEF_CONFIG)
+  --version   Print the installed reef version
 
 Examples:
   reef serve -c path/to/local-sglang.yaml
@@ -39,6 +40,12 @@ def main(argv=None):
     if not argv or argv[0] in ("-h", "--help"):
         print(_help_text())
         sys.exit(0 if argv else 1)
+
+    if argv[0] in ("-V", "--version"):
+        from reef import __version__
+
+        print(f"reef {__version__}")
+        sys.exit(0)
 
     cmd = argv[0]
     rest = argv[1:]

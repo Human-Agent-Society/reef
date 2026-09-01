@@ -69,7 +69,7 @@ COPY . .
 # Replace the image's Slime distribution with Reef's exact pin. Keep
 # the base image's CUDA-matched dependency set by resolving neither package's
 # dependencies here.
-RUN pip uninstall -y slime reef && \
+RUN pip uninstall -y slime && \
     pip install --no-cache-dir --no-deps --group runtime && \
     pip install -e . --no-deps && \
     pip install reef-client --no-deps

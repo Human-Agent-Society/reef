@@ -10,6 +10,13 @@ installed Reef package.
 """
 
 # isort: skip_file
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("reef-infra")
+except PackageNotFoundError:
+    __version__ = "0.0.0.dev0"
+
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.records import RecordStore

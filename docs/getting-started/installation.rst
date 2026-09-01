@@ -6,6 +6,14 @@ Laptop, no GPU
 
 Enough to serve, record, report, and evolve a harness against a hosted model.
 
+For a released version:
+
+.. code:: bash
+
+   pip install reef-infra        # the import package is `reef`
+
+Or, to work on Reef itself:
+
 .. code:: bash
 
    git clone https://github.com/Human-Agent-Society/reef.git && cd reef
