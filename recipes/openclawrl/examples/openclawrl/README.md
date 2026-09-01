@@ -61,10 +61,13 @@ its model endpoint from its own config and sends OpenAI-compatible chat
 requests; it knows nothing about Reef, scenarios, or training.
 
 The judge sidecar plays the student. `student_server.py` runs the persona
-from `personas.py`, reacts to each reply, and records the session. By default
-the reactions are scripted: a styled reply gets the complaint, a clean one
-gets the request to save the file. With `OPENCLAWRL_USER_LLM_URL` set, the
-reactions come from the Qwen3-32B persona.
+from `personas.py`, reacts to each reply, and records the session. The
+reactions come from the Qwen3-32B persona served by the stack, named by
+`OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL`; the task
+environments require both. A scripted line is the fallback when the LLM call
+fails or when the LLM student starts dictating the math, which the persona
+forbids: a styled reply gets the complaint, a clean one gets the request to
+save the file.
 
 ## The homework stream
 
@@ -135,7 +138,7 @@ pip install uv
 
 Qwen3-4B-Thinking-2507 serves as both the policy and the PRM, as in the
 reference run script. The PRM is the frozen base model on its own engine;
-the policy is trained. Qwen3-32B is only needed for the LLM student.
+the policy is trained. Qwen3-32B plays the student.
 
 Two more things to check on a host you did not set up yourself. reef-eval needs
 Python 3.12 or newer; if `uvx` picks an older interpreter, set
@@ -146,6 +149,8 @@ installed package's entry points, which stops the sglang plugin from loading.
 ## Run
 
 ```bash
+OPENCLAWRL_USER_LLM_URL=http://<host-ip>:30001 \
+OPENCLAWRL_USER_LLM_MODEL=qwen3-32b-user-llm \
 bash recipes/openclawrl/examples/openclawrl/run.sh
 ```
 
@@ -157,8 +162,14 @@ reuses the healthy stack.
 
 The paths and names are constants at the top of `run.sh`: the models under
 `~/models`, checkpoints under `~/reef-run`, and the task list (all 72 GSM8K
-tasks). For live W&B tracking, set the following:
+tasks). A few settings come from the environment, because the task
+environments and other processes read them:
 
+- `OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL` name the student
+  model the stack serves on port 30001. The task environments require both,
+  and reef-eval rejects every task when either is unset. Use the host's
+  address, not localhost, because the sidecar calls it from inside a
+  container.
 - `WANDB_API_KEY=...` is forwarded into the stack for live training curves
   (also set `observability.wandb.enabled: true` in `serve.yaml`) and starts
   `results/learning_curve.py`, which logs the per-session verdicts into the same
