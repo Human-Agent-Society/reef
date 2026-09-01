@@ -46,7 +46,7 @@ Reef processes each learning cycle in four steps. The table also shows which
 modules implement each step.
 
 | Step | What happens | Where it lives |
-|:---:|---|---|
+|---|---|---|
 | **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
 | **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`records.py`](reef/records.py) — stored interactions and feedback<br>[`train/processors/`](reef/train/processors) — feedback matching and eligibility |
 | **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — batches and update jobs |
