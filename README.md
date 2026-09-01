@@ -203,7 +203,7 @@ and do not ship in the Reef wheel.
 | Agent traffic with useful next-state signals and no explicit reports | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
 | Repeated, scored attempts at one problem | <code>recipes.tttd.recipe:TTTDRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
 | Scored code search with a trainable guidance model and a frozen executor | <code>recipes.tttd.recipe:TTTDRecipe</code> | Guidance-model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/guidance_ttt/README.md) |
-| Scored agent interactions used to improve prompts, rules, skills, or configuration | <code>reef.train.cordis_backend.recipe:CordisRecipe</code> | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
+| Agent feedback used to evolve its skill pool | <code>harness.skillclaw_recipe:SkillClawRecipe</code> | Skill pool (harness tree); no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) · [Example](recipes/skillclaw/README.md) |
 
 
 ## How is Reef different?
