@@ -215,6 +215,6 @@ A session passes when the agent's first solution reply already matches the stude
 
 ![Five sessions replayed from the run](results/2026-08-27-gsm8k-stream-qwen3-4b-thinking/demo.gif)
 
-`demo.gif` replays five sessions from this run: the student brings a homework
+The demo above replays five sessions from this run: the student brings a homework
 problem, the agent answers, and the student reacts. Early replies draw
 complaints for their formatting; later first replies pass directly.
