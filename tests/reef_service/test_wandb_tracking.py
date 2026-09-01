@@ -385,3 +385,25 @@ def test_wandb_optimizer_step_counter_resumes_from_the_run_summary() -> None:
     step_rows = [m for m, _ in client.runs[0].logged if "step/step" in m]
     assert [row["step/step"] for row in step_rows] == [40]
     assert client.runs[0].summary["reef/optimizer_steps"] == 41
+
+
+@pytest.mark.unit
+def test_backend_train_step_in_metrics_never_overrides_the_run_step_axis() -> None:
+    # Slime drains its own "train/step" (rollout_id * num_steps_per_rollout +
+    # step_id) up with the job metrics; it is not monotonic when rollouts have
+    # varying step counts, so the job row must keep the context's run_step.
+    client = _StubClient()
+    tracker = _tracker(client)
+    event = dataclasses.replace(
+        _event(step=3, run_step=2),
+        metrics={"train/loss": 0.2, "train/step": 76, "train_steps": [{"train/loss": 0.3, "train/step": 76}]},
+    )
+
+    tracker.record(event)
+
+    run = client.runs[0]
+    rows = [metrics for metrics, _ in run.logged]
+    job_row = next(row for row in rows if "train/loss" in row and "step/loss" not in row)
+    assert job_row["train/step"] == 2
+    step_row = next(row for row in rows if "step/loss" in row)
+    assert step_row["step/step"] == 0

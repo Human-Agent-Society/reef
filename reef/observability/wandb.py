@@ -289,11 +289,15 @@ class WandbExperimentTracker(ExperimentTracker):
         self._update_run_config(run, event.context)
         metadata = self._event_metadata(event, run_id)
         self._record_optimizer_steps(run, event)
+        # The backend's drained metrics may themselves carry a "train/step"
+        # (Slime's accumulated_step_id, which is not monotonic across jobs of
+        # varying length); list the authoritative context counters last so
+        # they win the dict merge and the train/* step axis stays monotonic.
         values: dict[str, Any] = {
-            "train/step": event.context.run_step,
-            "reef/step": event.context.step,
             **_numeric_metrics(event.metrics),
             **{f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "step"},
+            "train/step": event.context.run_step,
+            "reef/step": event.context.step,
         }
         try:
             run.log(values)
