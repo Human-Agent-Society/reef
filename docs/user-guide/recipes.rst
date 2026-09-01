@@ -13,7 +13,7 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | ``openclawrl``: multi-turn traffic,              |                                          |
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness:** prompts,   | ``skillclaw``: grows a skill pool                  | not available                            |
+| **Harness:** prompts,   | ``harness_evolve``: improves a composition from    | not available                            |
 | rules, skills, config   | the failures in its own served traffic           |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 
@@ -30,8 +30,8 @@ Pick by the signal your workload can produce.
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | Agent conversations without reports           | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| Feedback on individual requests, and failures | `skillclaw <recipes/skillclaw.rst>`__           | harness tree  | no         |
-| worth learning from                           | (built into Reef)                               |               |            |
+| Feedback on individual requests, and failures | `harness_evolve <evolve-your-harness.rst>`__    | harness tree  | no         |
+| worth learning from                           | cookbook recipe; ``skillclaw`` extends it       |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 
 How a recipe is selected

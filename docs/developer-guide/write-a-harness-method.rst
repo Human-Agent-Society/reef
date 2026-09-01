@@ -92,7 +92,7 @@ The recipe config names the callables, the tasks, and the first-boot tree:
 
 .. code:: yaml
 
-   implementation: reef.train.cordis_backend.recipe:CordisRecipe
+   implementation: recipes.harness_evolve.recipe:HarnessEvolveRecipe
 
    model:
      path: qwen3-8b

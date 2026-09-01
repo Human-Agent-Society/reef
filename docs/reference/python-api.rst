@@ -49,7 +49,7 @@ Recipe
 .. code:: python
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
-   from reef.train.cordis_backend import CordisRecipe
+   from recipes.harness_evolve import HarnessEvolveRecipe
 
 A recipe is one frozen dataclass binding a scenario to its serving and evolution
 behavior.
@@ -61,7 +61,7 @@ behavior.
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── CordisRecipe             harness tree + episodes  reef.train.cordis_backend
+   └── HarnessEvolveRecipe      harness tree + episodes  recipes.harness_evolve
        └── SkillClawRecipe                               recipes.skillclaw.harness
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
@@ -75,7 +75,7 @@ recipe to remain record-only.
 +---------------------------------+------------------------------------------------------+
 | train and publish weights       | subclass ``WeightTrainingRecipe``                    |
 +---------------------------------+------------------------------------------------------+
-| use Reef's harness loop         | configure ``CordisRecipe``; subclass it only  |
+| use Reef's harness loop         | configure ``HarnessEvolveRecipe``; subclass it only  |
 |                                 | for a named preset or extra validation               |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
@@ -521,7 +521,7 @@ Surface
 
 A surface binds one frozen release to its consumers.
 ``WeightTrainingRecipe.build_surface()`` already calls
-``create_weight_surface()``, and ``CordisRecipe`` calls
+``create_weight_surface()``, and ``HarnessEvolveRecipe`` calls
 ``create_harness_surface()``, so most methods never touch this.
 
 ``Surface`` is a frozen dataclass whose capabilities are fields, not subclass

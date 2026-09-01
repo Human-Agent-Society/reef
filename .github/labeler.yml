@@ -30,6 +30,7 @@
           - "recipes/sao/**"
           - "recipes/tttd/**"
           - "recipes/openclawrl/**"
+          - "recipes/harness_evolve/**"
           - "reef/train/cordis_backend/**"
           - "reef/surface/**"
           - "third_party/cordis/**"

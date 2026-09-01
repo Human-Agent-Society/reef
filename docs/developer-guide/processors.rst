@@ -122,10 +122,10 @@ Every file under ``reef/train/processors/`` is framework: ``base``,
 ``reported``, ``computed``, and ``common`` (shared report readers and sample
 builders). A method that owns its judgment writes
 ``recipes/<name>/processor.py``, and that file should show its data flow from
-top to bottom. A method that delegates to an engine backend writes none: the
-backend owns its concrete processor (``reef/train/cordis_backend/processor.py``)
-and wires it in its ``build``, which is why ``recipes/skillclaw/`` ships no
-processor file. Machinery beyond that file's job sits beside it as
+top to bottom. The reusable harness-evolution method owns
+``recipes/harness_evolve/processor.py`` and wires the Cordis backend in its
+recipe; ``recipes/skillclaw/`` inherits that processor rather than copying it.
+Machinery beyond a processor file's job sits beside it as
 modules named by concern (``recipes/openclawrl/``: ``sessions``, ``turns``,
 ``prm``), never in the processor file and never in a ``utils`` grab-bag.
 
@@ -151,7 +151,7 @@ Cookbook processors
 |                                             |          | scenario's grid; the step is the group, ready only when every    |                        |
 |                                             |          | ``groups_per_step`` x ``rollouts_per_group`` slot is filled      |                        |
 +---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``reef/train/cordis_backend/processor.py``  | reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
+| ``recipes/harness_evolve/processor.py``     | reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
 |                                             |          | and a score inside ``[min_score, max_score]``; the recorded      |                        |
 |                                             |          | request is the sample, unmodified                                |                        |
 +---------------------------------------------+----------+------------------------------------------------------------------+------------------------+

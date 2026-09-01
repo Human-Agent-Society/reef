@@ -8,8 +8,9 @@ Choose a destination
 --------------------
 
 ``reef/`` holds every shared mechanism, including the harness evolution engine
-at ``reef/train/cordis_backend/``. Paper-backed methods live in separate
-packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
+at ``reef/train/cordis_backend/``. Recipe implementations live in separate
+packages under ``recipes/`` (``harness_evolve``, ``sao``, ``tttd``,
+``openclawrl``, ``skillclaw``)
 with that method's recipe, processor, step preparer, and, for weight methods,
 the ``slime/`` subpackage only the training plane imports. Nothing under
 ``reef/`` imports a method package.

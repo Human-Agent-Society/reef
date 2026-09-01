@@ -122,7 +122,7 @@ Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
-   implementation: reef.train.cordis_backend.recipe:CordisRecipe
+   implementation: recipes.harness_evolve.recipe:HarnessEvolveRecipe
    model:
      path: qwen3-8b
    data:

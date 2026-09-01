@@ -13,13 +13,14 @@ from types import ModuleType
 import pytest
 import yaml
 
+from recipes.harness_evolve import HarnessEvolveRecipe
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBindingError
 from reef.recipe import load_recipe_config
 from reef.records import RecordStore
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.train.cordis_backend import Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
@@ -163,7 +164,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     from reef.service.assembly import _upstream_runtime
 
     settings = load_recipe_config(materialized)
-    built = CordisRecipe.from_environment({}, config=settings, runtime=_upstream_runtime(service))
+    built = HarnessEvolveRecipe.from_environment({}, config=settings, runtime=_upstream_runtime(service))
     assert built.adapter == "pi"
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3

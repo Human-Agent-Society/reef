@@ -15,7 +15,7 @@ Starting Reef
 
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits ``ready_timeout`` seconds (3600 by default) before giving up. Read that service's log under ``run_dir``. For a training stack, the usual causes are a model that is still downloading, a ``reef.inference_url`` override that does not match where Slime bound its router (leave it unset; Reef takes the address from the training actor), or GPUs already in use.
 
-**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
+**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Cookbook recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
 
 **Boot fails naming a credential in the tree.** A harness-evolution seed, proposal, or recovered state holding a literal key (``apiKey``, ``token``, and their plural and list forms) is refused, because tree state is persisted and published. Rotate the key, remove it from the entry, and keep credentials in ``reef.upstream_api_key`` or an ``api_key_env``.
 
@@ -39,7 +39,7 @@ Reports and training
 
 **A report was accepted but nothing trains.** In order of likelihood: the recipe's step trigger is not reached yet (``batch_size`` reports, or a full ``groups_per_step × rollouts_per_group`` grid for ``tttd``); the report carries no finite ``score`` and the recipe requires one; ``metadata.training.eligible`` is ``false``; or the referenced receipts were already consumed by an earlier step, in which case the report is accepted and ignored. ``GET /reef/scenarios/{scenario}/contract`` shows what the recipe consumes; ``/reef/status`` shows whether a batch is ready.
 
-**400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
+**400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Cookbook recipes <recipes.rst>`__ lists each schema.
 
 **409 on a report.** The client-chosen ``agent_record_id`` was sent before with different content. Use a new id, or resend identical content.
 

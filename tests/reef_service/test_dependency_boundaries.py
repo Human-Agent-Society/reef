@@ -74,6 +74,19 @@ def test_infra_never_imports_a_method_package() -> None:
     assert offenders == []
 
 
+def test_training_integrations_do_not_define_recipe_implementations() -> None:
+    """Backends expose machinery; concrete recipe policy lives in recipes/."""
+    offenders: list[str] = []
+    for path in sorted((REPO_ROOT / "reef" / "train").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        offenders.extend(
+            f"{path.relative_to(REPO_ROOT)} -> {node.name}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and node.name.endswith("Recipe")
+        )
+    assert offenders == []
+
+
 def test_scenario_domain_does_not_depend_on_recipes() -> None:
     module = importlib.import_module("reef.scenario.scenario")
     tree = ast.parse(inspect.getsource(module))
@@ -195,8 +208,12 @@ def test_slime_step_preparation_resolves_tttd_torch_lazily() -> None:
 def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; sys.modules['torch'] = None; "
-        "from reef.train.cordis_backend import CordisBackend; "
-        "assert CordisBackend"
+        "import reef.train.cordis_backend as cordis; "
+        "assert cordis.CordisBackend; "
+        "assert not hasattr(cordis, 'CordisRecipe'); "
+        "assert not hasattr(cordis, 'CordisProcessor'); "
+        "assert not [m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')], "
+        "[m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')]"
     )
 
 

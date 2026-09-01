@@ -16,13 +16,13 @@ from typing import Any
 import pytest
 import yaml
 
+from recipes.harness_evolve import HarnessEvolveProcessor
 from reef.core import AgentRecord, RequestType
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import AlwaysSelect
 from reef.train.types import ProcessorContext, TraceSample
@@ -404,7 +404,7 @@ def test_the_days_last_report_completes_the_batch_passes_included() -> None:
             agent_record_id=agent_record_id,
         )
 
-    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 3}))
+    processor = HarnessEvolveProcessor(ProcessorContext("s", {"batch_size": 3}))
     for index, score in enumerate((1.0, 0.0), start=1):
         processor.ingest(_inference(f"inf-{index}"))
         processor.ingest(_report(f"rep-{index}", score, f"inf-{index}"))

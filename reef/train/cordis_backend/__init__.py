@@ -487,14 +487,3 @@ def _write_rendered_files(files: Mapping[str, str]) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     return directory
-
-
-# Re-exports of the engine's method shell; the ``as`` form marks them as
-# public per PEP 484, which keeps the unused-import hooks off them. Imported
-# last: recipe.py imports CordisBackend from this module.
-
-
-# Re-exports of the engine's method shell, imported last because recipe.py
-# imports CordisBackend from this module.
-from reef.train.cordis_backend.processor import CordisProcessor  # noqa: F401
-from reef.train.cordis_backend.recipe import CordisRecipe  # noqa: F401
