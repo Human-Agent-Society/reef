@@ -38,8 +38,9 @@ Capabilities and call sites
 
 ``Surface`` is a frozen composition of optional capabilities; ``None`` means
 the scenario does not support one. Callers inspect fields, never types, and a
-recipe never subclasses ``Surface``. Each capability has exactly one place it
-is called from:
+recipe never subclasses ``Surface``. Every call site for each capability is
+listed here; ``loader.activate`` alone is invoked from more than one module,
+once per lifecycle event that makes a version servable:
 
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | Capability                                        | Called from                         | Meaning                                                              |

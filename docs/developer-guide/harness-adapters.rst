@@ -28,10 +28,10 @@ agent.
    argv | the argument list for one headless prompt; ``{prompt}`` is substituted
    files | where each node kind renders, like ``skills/{name}/SKILL.md``
    trajectory | the format and path of the session log Reef reads back
-   env | variables pointing the agent's state under the episode root
-   install | the npm package and version the one-command install pins
-   model_binding | per provider dialect, the config that points the agent at the served model
-   cleanup_whitelist | files the agent's own boot creates, tolerated instead of read as drift
+   env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
+   install | the one-command install pin: ``kind`` (``npm`` only), ``package``, ``version``, and ``binary_path`` under the install prefix
+   model_binding | per API dialect (``openai``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 
 Connect a new agent
@@ -48,13 +48,17 @@ To connect an agent that has no adapter yet:
       (`reef/harness/trajectory.py <../../reef/harness/trajectory.py>`__) and
       registers with ``@register_trajectory_reader``.
    #. The files its first boot creates go in ``cleanup_whitelist``, so a fresh
-      episode root is treated as clean.
+      episode root is treated as clean. ``dir/**`` tolerates a whole subtree
+      (session storage, ``node_modules``); any other entry is a glob against
+      the root-relative path, so anchor a single file with its full path, like
+      ``pi-agent/auth.json``. A bare directory name matches nothing under it.
 
 `reef/harness/descriptor.py <../../reef/harness/descriptor.py>`__ validates every
 descriptor at load, and the two bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. A third-party adapter
-registers on the ``reef.harness_adapters`` entry-point group. ``version_check:
-true`` writes an update prompt into the tree and ships for ``pi`` only. The
+registers on the ``reef.harness_adapters`` entry-point group.
+``evolution.version_check: true`` in the recipe config writes an update
+prompt into the tree and ships for ``pi`` only. The
 prompt offers to run the update or skip in interactive mode and prints the
 instructions in headless mode. An ``opencode`` recipe that sets it refuses to
 boot. An evolved tree is adapter-specific: ``config`` node contents follow each

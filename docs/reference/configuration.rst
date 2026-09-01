@@ -29,9 +29,10 @@ log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
 Start from a cookbook stack
 ---------------------------
 
-The source checkout's runnable stacks live under the ``recipes/`` cookbook:
-the learn-nothing ones use the core ``recipe`` implementation in
-``recipes/basic/``, and each method owns its examples.
+The source checkout's runnable stacks live under the ``recipes/`` cookbook
+and ``tutorials/``: the learn-nothing ones use the core ``recipe``
+implementation in ``recipes/basic/``, each weight-training method owns its
+examples, and harness evolution ships as a tutorial.
 
 +-------------------------------------------------------------+----------------------------------------------------------+
 | File                                                        | What it starts                                           |
@@ -43,6 +44,9 @@ the learn-nothing ones use the core ``recipe`` implementation in
 +-------------------------------------------------------------+----------------------------------------------------------+
 | ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: Ray head, Slime driver, Reef, and the   |
 |                                                             | method's own services                                    |
++-------------------------------------------------------------+----------------------------------------------------------+
+| ``tutorials/harness_evolve/serve.yaml``                     | harness evolution: one Reef process, no GPU; ``run.sh``  |
+|                                                             | materializes its recipe preset and starts the stack      |
 +-------------------------------------------------------------+----------------------------------------------------------+
 
 Each weight-training example ships its stack as ``serve.yaml``.
@@ -86,10 +90,13 @@ persistent.
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
 
-Recipe settings such as ``batch_size`` and ``min_score`` sit beside these in
-the same section, along with any others the recipe declares with
-``config_field``. Keys
-the service does not recognize are handed to the recipe.
+Recipe settings such as ``batch_size`` sit beside these in the same section,
+along with any others the recipe declares with ``config_field``. When
+``reef.recipe`` is a dotted weight-training class, keys the service does not
+recognize are handed to the recipe, and the recipe rejects any key it does
+not declare. With the core ``recipe`` or a named preset, the recipe reads its
+configuration from the preset, and unrecognized keys here are silently
+ignored.
 
 Recipe configuration
 --------------------
@@ -108,8 +115,10 @@ is always a preset name; it never imports a learning method implicitly.
 **no default**: a bare recipe name resolves to a preset only when it is set.
 
 A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
-in a preset. A preset carries its own ``implementation``, ``model``, and ``data``
-sections. Harness-evolution presets also carry an ``evolution`` section:
+in a preset. A preset carries its own ``implementation``, ``model``, and
+``data`` sections, plus an optional ``runtime`` section when the recipe
+builds its own runtime instead of using the deployment's upstream proxy.
+Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
 
@@ -156,7 +165,7 @@ zero.
    evolution.adapter | pi | ``opencode``, or an entry-point adapter
    evolution.binary | overrides the adapter's binary name
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
-   evolution.models | auxiliary models for the method; each key read via its ``api_key_env``
+   evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
 
 The served model's binding is appended at render time; it never enters the
@@ -173,6 +182,7 @@ Each entry is one process.
    services[].name | the service's id, used by ``depends_on``
    services[].command | the command line to run
    services[].ready | a shell command that succeeds once the service is up
+   services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
    services[].cuda | the value of ``CUDA_VISIBLE_DEVICES`` for this process
    services[].env | extra environment variables
@@ -199,9 +209,12 @@ Slime fills architecture flags such as layer counts and hidden sizes from
 The ``evaluation`` section
 --------------------------
 
-Absent by default, in which case a successful training step publishes without a
-gate. When present, Reef calls the named factory once per scenario and hands the
-plugin the exported but unpublished checkpoint.
+Only weight-training recipes read this section; a deployment that pairs it
+with any other recipe fails at startup, because a harness recipe builds its
+evaluator in code. Absent by default, in which case a successful
+weight-training step publishes without a gate. When present, Reef calls the
+named factory once per scenario and hands the plugin the exported but
+unpublished checkpoint.
 
 .. config::
 

@@ -62,6 +62,7 @@ behavior.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── CordisRecipe             harness tree + episodes  reef.train.cordis_backend
+       └── SkillClawRecipe                               recipes.skillclaw.harness
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the
@@ -114,10 +115,11 @@ Common members
 |                                                   |                             | ``/reef/status``               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 
-Weight-training recipes add ``training_spec()``, which binds the processor, the
-registered or dotted step preparer, and the backend loss family;
-``report_type``, the declared ``ReportBase`` subclass; ``max_staleness``, the
-accepted producing-to-serving version lag, which must match the runtime; and
+Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
+reports parse as (``None`` keeps ingress open). Weight-training recipes add
+``training_spec()``, which binds the processor, the registered or dotted step
+preparer, and the backend loss family; ``max_staleness``, the accepted
+producing-to-serving version lag, which must match the runtime; and
 ``candidate_evaluation``, the optional plugin configured by the deployment's
 ``evaluation`` section.
 
@@ -154,10 +156,11 @@ parser, and an optional environment fallback:
    batch_size: int = config_field(4, env="REEF_MY_METHOD_BATCH_SIZE")
 
 Precedence is explicit configuration, then environment, then the default.
-``from_environment()`` builds the recipe; ``service_config()`` forwards declared
-fields and shared artifact settings from the service configuration. Override
-``processor_config()`` when a processor needs renamed or derived keys. Never
-read deployment YAML from inside a processor.
+``from_environment()`` builds the recipe. On weight-training recipes,
+``service_config()`` forwards declared fields and shared artifact settings
+from the service configuration; override ``processor_config()`` when a
+processor needs renamed or derived keys. Never read deployment YAML from
+inside a processor.
 
 Report
 ------
@@ -422,7 +425,8 @@ its module must be importable in both the service and the training process.
 +--------------------------+-------------------------------------------------+
 | ``scheduling``           | how a runtime materializes a grouped batch:     |
 |                          | ``unit`` is ``comparison_set`` or ``sample``,   |
-|                          | ``batch_size`` is ``configured`` or ``actual``  |
+|                          | ``batch_size`` is ``configured``, ``actual``,   |
+|                          | or a positive int                               |
 +--------------------------+-------------------------------------------------+
 
 A preparer owns method math and nothing else. It must not import a runtime, Ray,

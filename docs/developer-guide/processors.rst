@@ -120,34 +120,41 @@ Where a processor lives
 
 Every file under ``reef/train/processors/`` is framework: ``base``,
 ``reported``, ``computed``, and ``common`` (shared report readers and sample
-builders). A method's processor is ``recipes/<name>/processor.py`` and should
-show its data flow from top to bottom. Machinery beyond that file's job sits beside it as
+builders). A method that owns its judgment writes
+``recipes/<name>/processor.py``, and that file should show its data flow from
+top to bottom. A method that delegates to an engine backend writes none: the
+backend owns its concrete processor (``reef/train/cordis_backend/processor.py``)
+and wires it in its ``build``, which is why ``recipes/skillclaw/`` ships no
+processor file. Machinery beyond that file's job sits beside it as
 modules named by concern (``recipes/openclawrl/``: ``sessions``, ``turns``,
 ``prm``), never in the processor file and never in a ``utils`` grab-bag.
 
 Each structure the engines keep answers one requirement of continual
-serving; delete one and a documented failure returns. The list, naming the
-attribute each requirement forces, is in the module docstrings of
-``reported.py`` and ``computed.py``.
+serving; delete one and a documented failure returns. The list for the
+reported engine, naming the attribute each requirement forces, is in the
+module docstring of ``reported.py``; the computed engine names its per-state
+structures on ``ComputedFeedbackProcessor`` itself.
 
 Cookbook processors
 -------------------
 
-+---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| File                                  | Tier     | What its ``judge`` accepts                                       | Batch                  |
-+=======================================+==========+==================================================================+========================+
-| ``recipes/sao/processor.py``          | reported | a trainable, finitely scored report with exactly one referenced  | ``PolicyBatch``        |
-|                                       |          | inference whose assembled sample passes the action-mask check;   |                        |
-|                                       |          | one rollout, one unit                                            |                        |
-+---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``recipes/tttd/processor.py``         | reported | a report parsing as ``TTTDGroupedRolloutReport`` on this         | ``GroupedPolicyBatch`` |
-|                                       |          | scenario's grid; the step is the group, ready only when every    |                        |
-|                                       |          | ``groups_per_step`` × ``rollouts_per_group`` slot is filled      |                        |
-+---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``reef/train/cordis_backend/processor.py``| reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
-|                                       |          | and a score inside ``[min_score, max_score]``; the recorded      |                        |
-|                                       |          | request is the sample, unmodified                                |                        |
-+---------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``recipes/openclawrl/processor.py``   | computed | a main turn whose next state the PRM scores ±1, or for which the | ``PolicyBatch``        |
-|                                       |          | teacher scored an accepted hindsight hint                        |                        |
-+---------------------------------------+----------+------------------------------------------------------------------+------------------------+
++---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
+| File                                        | Tier     | What its ``judge`` accepts                                       | Batch                  |
++=============================================+==========+==================================================================+========================+
+| ``recipes/sao/processor.py``                | reported | a trainable, finitely scored report whose assembled sample       | ``PolicyBatch``        |
+|                                             |          | passes the action-mask check; one referenced inference, or       |                        |
+|                                             |          | several assembled into one multi-turn sample when                |                        |
+|                                             |          | ``accept_multi_turn_policy_samples`` is set; one rollout,        |                        |
+|                                             |          | one unit                                                         |                        |
++---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
+| ``recipes/tttd/processor.py``               | reported | a report parsing as ``TTTDGroupedRolloutReport`` on this         | ``GroupedPolicyBatch`` |
+|                                             |          | scenario's grid; the step is the group, ready only when every    |                        |
+|                                             |          | ``groups_per_step`` x ``rollouts_per_group`` slot is filled      |                        |
++---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
+| ``reef/train/cordis_backend/processor.py``  | reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
+|                                             |          | and a score inside ``[min_score, max_score]``; the recorded      |                        |
+|                                             |          | request is the sample, unmodified                                |                        |
++---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
+| ``recipes/openclawrl/processor.py``         | computed | a main turn whose next state the PRM scores +/-1, or for which   | ``PolicyBatch``        |
+|                                             |          | the teacher scored an accepted hindsight hint                    |                        |
++---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
