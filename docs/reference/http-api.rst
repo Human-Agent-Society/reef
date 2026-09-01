@@ -59,9 +59,12 @@ Headers
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
 |                                   | configured.                                             |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-release-id``             | optional: pin inference to this release, or bind a new  |
-|                                   | scenario to this starting release. A later request      |
-|                                   | naming a different one is HTTP 409.                     |
+| ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
+|                                   | on an existing scenario it must name the bound starting |
+|                                   | release, or the request is HTTP 409. Inference always   |
+|                                   | answers from the scenario's current release; to pull a  |
+|                                   | specific release, use ``?release_id=`` on the harness   |
+|                                   | manifest or install route.                              |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: opaque key/value context stored  |
 |                                   | on the record under ``metadata.tags``, for a processor  |
@@ -102,9 +105,12 @@ unknown scenario returns HTTP 404 and you create it first:
 Inference
 ---------
 
-Send the same body you would send to the provider. Reef adds and changes
-nothing, sampling parameters included. Set ``"stream": true`` and read the SSE
-response for streaming.
+Send the same body you would send to the provider. Reef never touches your
+sampling parameters. On a weight-serving deployment it adds engine
+bookkeeping keys: ``lora_path`` to address the served adapter and
+``return_meta_info`` so the record proves which weights answered; a body
+naming a different ``lora_path`` is refused. Set ``"stream": true`` and read
+the SSE response for streaming.
 
 The receipt identifies the stored record:
 
@@ -135,7 +141,8 @@ data inside ``metadata`` or ``feedback``.
 | ``feedback``   | string or object | no       | opaque to Reef's core: a rubric, judge    |
 |                |                  |          | output, plain text                        |
 +----------------+------------------+----------+-------------------------------------------+
-| ``references`` | list of strings  | yes      | the receipts this report grades           |
+| ``references`` | list of strings  | no       | the receipts this report grades; a report |
+|                |                  |          | without them is accepted but never trains |
 +----------------+------------------+----------+-------------------------------------------+
 | ``metadata``   | object           | no       | opaque, except                            |
 |                |                  |          | ``training.eligible`` (default ``true``)  |
@@ -236,8 +243,9 @@ an update is being trained or published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
-``serving`` is runtime-wide but recipe-shaped. A LoRA deployment reports each
-scenario's ``adapter_runtime_load_id`` under it.
+``serving`` is runtime-wide but recipe-shaped: a LoRA deployment reports the
+engine's shared adapter residency there, keyed by recipe. Each scenario's
+``adapter_runtime_load_id`` appears in its own ``scenarios`` block.
 
 Status codes
 ------------
@@ -260,8 +268,9 @@ Status codes
 |        | recipe, or a scenario that serves no files                  |
 +--------+-------------------------------------------------------------+
 | 409    | a recipe or base artifact conflicting with the binding, a   |
-|        | record id resent with different content, or an engine that  |
-|        | reports no serving runtime load ID                           |
+|        | record id resent with different content, a rollback naming  |
+|        | a release that is not restorable, or an engine that reports |
+|        | no serving runtime load ID                                  |
 +--------+-------------------------------------------------------------+
 | 502    | the upstream provider failed on its own account             |
 +--------+-------------------------------------------------------------+
@@ -269,4 +278,6 @@ Status codes
 |        | the weight-update race until its deadline                   |
 +--------+-------------------------------------------------------------+
 
-Reef relays upstream 4xx responses with the provider's original message.
+Reef relays upstream 4xx failures with the provider's original message; the
+common client statuses (400, 401, 403, 404, 408, 409, 422, 429) keep their
+status code, and any other upstream 4xx comes back as 400.

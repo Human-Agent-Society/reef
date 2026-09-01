@@ -61,14 +61,19 @@ The loop
    :loop: publish the winner, or restore the snapshot
 
    Batch :: scored reports retained by the score window
-   ``propose`` :: one mutation, or ``None``
+   ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
    Episodes* :: run the candidate and current tree on the same tasks
    Verdict :: publish the candidate or restore the snapshot
 
-No evolution runs while traffic flows. A report whose score is at or below
-``max_score`` enters the *window*; the default for harness evolution keeps
-only failures. When ``batch_size`` such reports have accumulated, one step
-runs the loop once. Both keys live under ``data:`` in the recipe config.
+No evolution runs while traffic flows. A report enters the *window* when it
+references exactly one receipt and its score is at or below ``max_score``;
+the default for harness evolution keeps only failures. A report that
+references several receipts never batches, whatever its score. ``reef-pi
+report`` sends every receipt from the last run in one report, so only a run
+with a single model call can trigger a step; report each result against its
+own receipt, as ``run.py`` does. When ``batch_size`` such reports have
+accumulated, one step runs the loop once. ``batch_size`` and ``max_score``
+live under ``data:`` in the recipe config.
 
 Most of a step's cost is the evaluation. Every task runs twice, once against
 the candidate tree and once against the current one, which makes
@@ -175,10 +180,15 @@ task fails, the failing report opens the window, one evolve step runs, and
 shows a published version.
 
 If ``/reef/harness`` still returns 404 after a few minutes, the run has
-failed. A missing model server or a missing ``pi`` binary does not fail at
-config time. Instead every episode fails, both sides tie, no candidate ever
-wins, and the route stays 404. Confirm that the endpoint answers and that
-``pi --version`` runs before suspecting the recipe.
+failed. A missing ``pi`` binary or a server without tool calling does not
+fail at config time: every episode fails, both sides tie, no candidate ever
+wins, and the route stays 404. Confirm that ``pi --version`` runs and that
+the server accepts tool calls before suspecting the recipe; vLLM needs
+``--enable-auto-tool-choice --tool-call-parser hermes``, and without those
+flags it rejects pi's ``tool_choice: "auto"`` requests with a 400 while
+still answering plain requests. A missing model server does not produce
+this symptom: the record phase raises on its first call and ``run.py``
+exits with the upstream error before any evolve step runs.
 
 A model that answers all three tasks correctly also leaves the route at 404,
 because nothing fails, so nothing batches and no step runs. ``run.py`` prints

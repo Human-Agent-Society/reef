@@ -133,6 +133,7 @@ the one to copy:
    reef:
      recipe: <name>                      # resolves to recipes/<name>.yaml
      token: reef-local
+     port: 8900                          # the ready probe's ${reef.port} resolves against this
      upstream_url: ${REEF_UPSTREAM_URL}  # interpolated here, unlike the preset
      upstream_api_key: ${REEF_UPSTREAM_API_KEY}
      upstream_model: ${REEF_MODEL}
@@ -148,8 +149,8 @@ See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`
 Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
 package is importable, and give ``-c`` an absolute path: Reef resolves a
 relative ``-c`` against its own repo root, not your working directory. Recovered
-tree state always wins over ``seed``. The full field list is in `harness_evolve
-<../user-guide/recipes/skillclaw.rst>`__.
+tree state always wins over ``seed``. The full field list is in `Harness
+evolution keys <../reference/configuration.rst#harness-evolution-keys>`__.
 
 Selection policies
 ~~~~~~~~~~~~~~~~~~
