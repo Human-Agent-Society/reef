@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-meta-harness-reproduction"
+version = "0.1.0"
+description = "Pinned Meta-Harness reproduction over Reef harness compositions"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "harbor==0.3.0",
+    "terminal-bench==0.2.18",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]
