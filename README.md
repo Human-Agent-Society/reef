@@ -17,6 +17,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
+<div align="left">
+
 Reef is infrastructure that serves an entire continual learning backend. Reef
 exposes standardized http endpoints so that you can download agents just like
 how you download `codex` or `opencode` using `curl`, and so that your agent can
@@ -25,6 +27,8 @@ send its model requests to Reef's inference endpoint instead of the provider's.
 The only difference is that, Reef constantly evaluates your agent behavior
 and improves the served harness and model weights in the backend. You keep getting
 better and better results without having to do anything.
+
+</div>
 
 </div>
 
@@ -41,12 +45,12 @@ better and better results without having to do anything.
 Reef processes each learning cycle in four steps. The table also shows which
 modules implement each step.
 
-| Step | What happens | Core code |
+| Step | What happens | Where it lives |
 |---|---|---|
-| 1&nbsp;·&nbsp;Serve | Forward a request to the model provider and store the interaction. | [`service/`](reef/service) implements HTTP routes, authentication, and streaming. [`runtime/`](reef/runtime) connects Reef to the model provider. |
-| 2&nbsp;·&nbsp;Observe | Associate each report with the stored interactions referenced by its receipts. | [`core/`](reef/core) defines the stored record types. [`dispatcher.py`](reef/dispatcher.py) sends each record to its scenario. |
-| 3&nbsp;·&nbsp;Grow | Build a batch from eligible records and use it to update model weights or harness files. | [`sao/`](recipes/sao), [`tttd/`](recipes/tttd), [`openclawrl/`](recipes/openclawrl), [`harness_evolve/`](reef/train/cordis_backend) are the learning methods, one package each; [`infra/recipe/`](reef/recipe) is the contract they implement and [`infra/train/`](reef/train) prepares batches and runs training jobs. |
-| 4&nbsp;·&nbsp;Commit | Gate the candidate against your tasks, then record an accepted update as a new version and make it available for serving. | [`train/evaluation/`](reef/train/evaluation) evaluates each candidate and decides whether to accept it. [`artifact/`](reef/artifact) stores the Git-backed version history. [`surface/`](reef/surface) delivers each artifact to the serving runtime or harness client. |
+| **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
+| **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`records.py`](reef/records.py) — stored interactions and feedback<br>[`train/processors/`](reef/train/processors) — feedback matching and eligibility |
+| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — batches and update jobs |
+| **4&nbsp;·&nbsp;Commit** | Evaluate and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
 ## Using Reef
@@ -193,13 +197,13 @@ artifact that should be updated. These implementations live in this
 repository's `recipes/` cookbook; they are selected by dotted class reference
 and do not ship in the Reef wheel.
 
-| Workload | Method and recipe | Updated artifact | Documentation |
+| Workload | Recipe module | Updated artifact | Documentation |
 |---|---|---|---|
-| A stream of tasks scored by tests or a verifier | SAO, `sao` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
-| Agent traffic with useful next-state signals and no explicit reports | OpenClaw-RL, `openclawrl` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
-| Repeated, scored attempts at one problem | TTT-Discover, `tttd` | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
-| Scored code search with a trainable guidance model and a frozen executor | Guidance-TTT, `tttd` | Guidance-model weights | [Example and Reef results](recipes/tttd/examples/guidance_ttt/README.md) |
-| Scored agent interactions used to improve prompts, rules, skills, or configuration | Harness evolution, `harness_evolve` | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
+| A stream of tasks scored by tests or a verifier | <code>recipes.sao.recipe:SAORecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
+| Agent traffic with useful next-state signals and no explicit reports | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
+| Repeated, scored attempts at one problem | <code>recipes.tttd.recipe:TTTDRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
+| Scored code search with a trainable guidance model and a frozen executor | <code>recipes.tttd.recipe:TTTDRecipe</code> | Guidance-model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/guidance_ttt/README.md) |
+| Scored agent interactions used to improve prompts, rules, skills, or configuration | <code>reef.train.cordis_backend.recipe:CordisRecipe</code> | Harness tree; no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) · [Example](tutorials/harness_evolve/README.md) |
 
 
 ## How is Reef different?
