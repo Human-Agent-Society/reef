@@ -232,11 +232,11 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 
 ## Community & Contributing
 
-Building an agent that should improve from real-world feedback?
+Working on continual self-improving agent?
 
-- [Join Discord](https://discord.gg/8k4WeVuTb) to share your setup, ask implementation questions, and discuss new learning recipes.
+- [Join Discord](https://discord.gg/8k4WeVuTb) to share your recipes, ask implementation questions, and discuss new features.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
 
-If Reef looks useful to you, give it a ⭐ — it helps more agent builders discover the project.
+If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
