@@ -85,6 +85,14 @@ WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
 one-episode reef-eval smoke over it.
 
+[Meta-Harness](meta_harness/examples/terminal_bench/README.md) adapts
+persistent-population harness search to provider-free Reef compositions. A
+Codex proposer branches from retained candidates, Pi runs the rendered harness
+against a pinned Terminal-Bench subset through Harbor, and frozen,
+incumbent-only, and full-history cells receive equal target-episode budgets.
+The runner keeps proposals, trajectories, selection decisions, held-out
+results, and the published tree in a resumable experiment record.
+
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings
 72 GSM8K homework problems to a Hermes agent whose model calls go through
