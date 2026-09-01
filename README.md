@@ -265,3 +265,13 @@ Working on continual self-improving agent?
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
 
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
+
+
+## Acknowledgements
+
+We are grateful to the contributors and communities behind these projects,
+which power important parts of Reef:
+
+- [SGLang](https://github.com/sgl-project/sglang) — high-performance inference
+- [slime](https://github.com/THUDM/slime) — RL training
+- [cordis](https://github.com/cordiverse/cordis) — the composition foundation behind harness evolution
