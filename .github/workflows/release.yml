@@ -2,7 +2,7 @@ name: release
 
 # Cut a release by pushing a tag:
 #
-#   git tag -a v0.4.0 -m "reef 0.4.0" && git push origin v0.4.0
+#   git tag -a v0.0.1 -m "reef 0.0.1" && git push origin v0.0.1
 #
 # The version is the tag (setuptools-scm, see pyproject.toml); nothing in the
 # tree is edited. The tag builds the sdist and wheel, smoke-installs the wheel,
@@ -37,7 +37,7 @@ jobs:
       - run: python -m build
       - run: python -m twine check dist/*
       # The wheel's version must be exactly the tag: a tag on an untagged
-      # commit range or a dirty tree would otherwise ship as 0.4.1.devN.
+      # commit range or a dirty tree would otherwise ship as 0.0.2.devN.
       - name: Check the wheel version matches the tag
         env:
           TAG: ${{ github.ref_name }}

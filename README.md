@@ -30,6 +30,19 @@ better and better results without having to do anything.
 </div>
 
 
+## Installation
+
+Install the released core package from PyPI:
+
+```bash
+pip install reef-infra
+```
+
+The distribution name is `reef-infra`; the Python package and CLI remain
+`reef`. The training examples below use the repository checkout because they
+also depend on the cookbook recipes and GPU runtime.
+
+
 ## How it works
 
 <div align="center">

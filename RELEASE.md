@@ -2,8 +2,8 @@
 
 Reef's version is the git tag. Nothing in the tree carries a version string:
 `setuptools-scm` derives it at build time (`[tool.setuptools_scm]` in
-`pyproject.toml`), so a build of a tagged commit is `0.4.0` and a build of
-the third commit after it is `0.4.1.dev3+g<sha>` — newer than the release,
+`pyproject.toml`), so a build of a tagged commit is `0.0.1` and a build of
+the third commit after it is `0.0.2.dev3+g<sha>` — newer than the release,
 older than the next one, and traceable to its commit. `reef --version` and
 `reef.__version__` report it.
 
@@ -11,10 +11,11 @@ older than the next one, and traceable to its commit. `reef --version` and
 
 `vMAJOR.MINOR.PATCH`, on `0.x` while public interfaces still move.
 
-- **Minor** (`0.4.0`): the regular release, cut from `main` about once a
+- The first public release is **`v0.0.1`**.
+- **Minor** (`0.1.0`): the regular release, cut from `main` about once a
   month. Carries new features and, on `0.x`, any breaking change — every one
   listed under *Breaking changes* in the notes.
-- **Patch** (`0.4.1`): only from a release branch, only fixes (below). A
+- **Patch** (`0.1.1`): only from a release branch, only fixes (below). A
   patch never removes or renames anything.
 - A commit between tags is a `.devN` pre-release. Nightly wheels, when they
   exist, carry this form and never go to PyPI.
@@ -28,16 +29,16 @@ interface takes two minors: warn in one, remove in the next.
 `pyproject.toml` pins the minimum client Reef speaks to; a wire change bumps
 that pin and ships in both projects' notes.
 
-## Cutting a minor release
+## Cutting the first release
 
 1. Pick a `main` commit whose `ci` run is green.
 2. Cut the branch and the tag from it:
 
    ```bash
-   git switch -c release/v0.4 <sha>
-   git push -u origin release/v0.4
-   git tag -a v0.4.0 -m "reef 0.4.0"
-   git push origin v0.4.0
+   git switch -c release/v0.0 <sha>
+   git push -u origin release/v0.0
+   git tag -a v0.0.1 -m "reef 0.0.1"
+   git push origin v0.0.1
    ```
 
 3. The `release` workflow builds the sdist and wheel, checks the wheel
@@ -52,27 +53,27 @@ that pin and ships in both projects' notes.
    base image does not fit a hosted runner):
 
    ```bash
-   git checkout v0.4.0
-   docker build -f docker/Dockerfile.reef -t <registry>/reef:0.4.0 \
-     --build-arg REEF_VERSION=0.4.0 .
-   docker push <registry>/reef:0.4.0
+   git checkout v0.0.1
+   docker build -f docker/Dockerfile.reef -t <registry>/reef:0.0.1 \
+     --build-arg REEF_VERSION=0.0.1 .
+   docker push <registry>/reef:0.0.1
    ```
 
 6. When `REEF_PYPI_PUBLISH` is on (below), the workflow also uploads to PyPI.
-   Check `pip install reef-infra==0.4.0` in a clean environment.
+   Check `pip install reef-infra==0.0.1` in a clean environment.
 
 ## Patch releases
 
 A patch fixes something in a release without carrying `main` forward.
 
-- Land the fix on `main` first. Cherry-pick it onto `release/v0.4` in a PR
-  titled `[Cherry-pick to release/v0.4] <original title>`.
+- Land the fix on `main` first. Cherry-pick it onto `release/v0.0` in a PR
+  titled `[Cherry-pick to release/v0.0] <original title>`.
 - Accepted: a regression against the previous release; a critical fix (crash,
   wrong result, data loss, security); a fix to a feature introduced in this
   minor; documentation; changes only the release branch needs.
 - Not accepted: features, refactors, dependency bumps beyond what a fix
   requires, anything that changes a covered interface.
-- Tag `v0.4.1` on the branch and follow steps 3–6.
+- Tag `v0.0.2` on the branch and follow steps 3–6.
 
 Release branches are never merged back to `main`.
 

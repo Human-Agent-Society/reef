@@ -17,5 +17,5 @@ def test_version_flag_prints_package_version() -> None:
 
 
 def test_version_is_pep440_like() -> None:
-    # setuptools-scm output: a tag ("0.4.0") or a dev version past one.
+    # setuptools-scm output: a tag ("0.0.1") or a dev version past one.
     assert reef.__version__[0].isdigit()
