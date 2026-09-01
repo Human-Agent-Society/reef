@@ -141,21 +141,27 @@ def test_one_scenarios_failure_reloads_only_that_scenario(tmp_path) -> None:
 
     runtime = FlakyRuntime()
     dispatcher = build_training_dispatcher(
-        runtime, tmp_path, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+        runtime,
+        tmp_path,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        agent_record_dir=tmp_path / "agent-record",
     )
     try:
+        math = dispatcher.get_or_create_scenario("math", "test_policy")
+        code = dispatcher.get_or_create_scenario("code", "test_policy")
         _feed(dispatcher, "math", 1)
         _feed(dispatcher, "code", 1)
         wait_for_step(dispatcher, 1, scenario="math")
         for _ in range(1000):
-            if "code" in runtime.scenarios:
+            reloaded_code = dispatcher.get_or_create_scenario("code")
+            if reloaded_code is not code:
                 break
             time.sleep(0.001)
-        assert runtime.scenarios.count("code") >= 1, "the failing scenario was attempted"
-        assert dispatcher.get_or_create_scenario("math").scenario_step == 1, "math committed despite code's failure"
-        # The failed turn reloaded code alone; its next accept retries the batch.
-        _feed(dispatcher, "code", 2)
+        else:
+            raise AssertionError("the failing scenario was not reloaded")
+
         wait_for_step(dispatcher, 1, scenario="code")
-        assert dispatcher.get_or_create_scenario("math").scenario_step == 1
+        assert dispatcher.get_or_create_scenario("math") is math, "code's failure reloaded math"
+        assert math.scenario_step == 1, "math did not retain its committed step"
     finally:
         dispatcher.close()
