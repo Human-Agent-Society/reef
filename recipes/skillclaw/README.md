@@ -8,6 +8,10 @@ This example rebuilds the SkillClaw method from [Evolving Skills for Autonomous 
 skillclaw/
   skillclaw.yaml      the recipe the driver boots: explicit implementation, selection
                       always, batch_size 60, probe tasks, seed composition
+  recipe.py           the Reef recipe subclass: build_surface returns
+                      create_skill_surface([SkillCatalogModule(...)]) so every /v1
+                      request carries the pool catalog; seed_skills seeds
+                      the benchmark's shipped skills library
   harbor/             one Harbor-format task (the standard layout the
                       sibling examples follow): the benchmark's
                       meeting-negotiation task vendored at the pin -
@@ -22,10 +26,6 @@ skillclaw/
     day.py            the pinned WildClawBench checkout (ensure_benchmark),
                       the docker task lifecycle, and the benchmark's
                       grading loop
-    skillclaw_recipe.py the recipe subclass: build_surface returns
-                      create_skill_surface([SkillCatalogModule(...)]) so every /v1
-                      request carries the pool catalog; seed_skills seeds
-                      the benchmark's shipped skills library
     catalog.py        SkillCatalogModule, ported from the sealed campaign:
                       the OpenClaw catalog format, eligibility rules, and
                       the catalog_names inverse
@@ -106,7 +106,7 @@ Each run resumes after its last sealed round, so a crashed or interrupted campai
 
 ## The Harbor smoke task
 
-`harbor/` is one task in the Harbor format every sibling example uses, and `python3 run.py solve` is the standard one-episode smoke over it (`pip install -e .` first; docker required, the campaign env vars apply). The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
+`harbor/` is one task in the Harbor format every sibling example uses, and `PYTHONPATH=../.. python3 run.py solve` is the standard one-episode smoke over it (`pip install -e .` first; docker required, the campaign env vars apply). The repository root on `PYTHONPATH` exposes the cookbook's canonical `recipes.skillclaw.recipe` entry point. The task is the benchmark's own `03_Social_Interaction/task_1_meeting_negotiation`, vendored in full at the campaign pin: the prompt is `instruction.md`, its Warmup block is the container startup (mock Gmail and Calendar services on localhost, ground-truth fixtures deleted before the agent starts), and its Automated Checks block is `tests/grade.py`, writing `overall_score` to the verifier reward. This task was chosen because it grades fully programmatically (fixture-driven audit endpoints, no LLM judge, no external hosts), so unlike the campaign day it needs neither the multi gigabyte dataset download nor the benchmark's release image: the environment builds standalone and `lab.run` works anywhere docker does. WildClawBench is MIT licensed; the vendored content carries its notice (`harbor/LICENSE`, `task.toml`'s `license_note`).
 
 The solve agent (`harness/harbor_agent.py`) is deliberately minimal, one recorded model call through the same embedded service the campaign runs - the smoke proves the task contract end to end, not agent quality. Expect a low reward: a one-shot completion cannot work the mock APIs.
 

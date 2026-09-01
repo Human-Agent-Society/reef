@@ -62,7 +62,7 @@ behavior.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── CordisRecipe             harness tree + episodes  reef.train.cordis_backend
-       └── SkillClawRecipe                               recipes.skillclaw.harness
+       └── SkillClawRecipe                                recipes.skillclaw.recipe
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the

@@ -53,15 +53,15 @@ Two choices distinguish it from the tutorial method. ``selection: always``
 publishes every night that produces a proposal, because the next day is the
 gate. And the skill catalog must reach the model on every live request, so the
 recipe overrides ``build_surface``, the hook controlling how a published
-artifact reaches the request path (`skillclaw_recipe.py
-<../../../recipes/skillclaw/harness/skillclaw_recipe.py>`__). That override is
+artifact reaches the request path (`recipe.py
+<../../../recipes/skillclaw/recipe.py>`__). That override is
 the one extension point beyond the method's own callables.
 
 Configuration
 -------------
 
 ``recipes/skillclaw/skillclaw.yaml`` is the recipe config the driver boots. It
-names ``harness.skillclaw_recipe:SkillClawRecipe`` as its ``implementation``
+names ``recipes.skillclaw.recipe:SkillClawRecipe`` as its ``implementation``
 and sets ``batch_size: 60`` with ``max_score: .inf``, so every report of the
 day batches and the day's last one triggers the night. The engine's keys are
 in `Recipe configuration

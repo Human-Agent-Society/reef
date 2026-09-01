@@ -108,8 +108,10 @@ def example(monkeypatch: pytest.MonkeyPatch) -> dict[str, ModuleType]:
     # example's cached import so this file's syspath entry wins.
     for name in [name for name in sys.modules if name == "harness" or name.startswith("harness.")]:
         del sys.modules[name]
-    names = ("skillclaw", "evolver", "prompts", "night", "skillclaw_recipe")
-    return {name: importlib.import_module(f"harness.{name}") for name in names}
+    names = ("skillclaw", "evolver", "prompts", "night")
+    modules = {name: importlib.import_module(f"harness.{name}") for name in names}
+    modules["skillclaw_recipe"] = importlib.import_module("recipes.skillclaw.recipe")
+    return modules
 
 
 @pytest.fixture
@@ -334,7 +336,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     monkeypatch.setenv("REEF_SC_SKILLS", str(skills))
     config = load_config(EXAMPLE_DIR / "skillclaw.yaml")
     sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
-    assert sections["implementation"] == "harness.skillclaw_recipe:SkillClawRecipe"
+    assert sections["implementation"] == "recipes.skillclaw.recipe:SkillClawRecipe"
 
     built = build_recipe(str(sections["implementation"]), {}, config=sections, runtime=runtime())
     assert type(built).__name__ == "SkillClawRecipe"
