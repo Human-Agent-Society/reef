@@ -269,9 +269,8 @@ If Reef looks useful to you, please give it a ⭐ — it helps the community to 
 
 ## Acknowledgements
 
-We are grateful to the contributors and communities behind these projects,
-which power important parts of Reef:
+We are particularly grateful to these projects which power important parts of Reef:
 
 - [SGLang](https://github.com/sgl-project/sglang) — high-performance inference
-- [slime](https://github.com/THUDM/slime) — RL training
-- [cordis](https://github.com/cordiverse/cordis) — the composition foundation behind harness evolution
+- [slime](https://github.com/THUDM/slime) — model weight training
+- [cordis](https://github.com/cordiverse/cordis) — harness evolution
