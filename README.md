@@ -8,14 +8,8 @@
 <h3>Continual learning infra for self-improving agents</h3>
 
 [![CI](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml)
-[![Docker](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docker.yml)
-[![Docs Build](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/docs-build.yml)
-
-[![Docs](https://img.shields.io/badge/docs-reefinfra.ai-0E7490?logo=readthedocs&logoColor=white)](https://reefinfra.ai)
-[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/8k4WeVuTb)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 <div align="left">
 
@@ -29,6 +23,9 @@ and improves the served harness and model weights in the backend. You keep getti
 better and better results without having to do anything.
 
 </div>
+
+**[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) ·
+[Join Discord](https://discord.gg/8k4WeVuTb)**
 
 </div>
 
@@ -233,8 +230,13 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Architecture](https://reefinfra.ai/docs/getting-started/architecture/): Overall architecture of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
-## Contribute
+## Community & Contributing
 
-- Start with the [contribution guide](CONTRIBUTING.md)
-- Write RFCs directly in [GitHub issues](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) for design discussions.
+Working on continual self-improving agent?
+
+- [Join Discord](https://discord.gg/8k4WeVuTb) to share your recipes, ask implementation questions, and discuss new features.
+- Start contributing with the [contribution guide](CONTRIBUTING.md).
+- Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
+
+If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
