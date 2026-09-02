@@ -90,6 +90,11 @@ class Archive:
     #: the minibatch acceptance test rejected.
     steps: int = 0
     rejections: int = 0
+    #: One row per reflection: what the model was shown and what it wrote,
+    #: with the minibatch scores on both sides and the verdict. GEPA keeps the
+    #: same record in its run directory; without it a search outcome can only
+    #: be inferred from the candidate texts after the fact.
+    proposals: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -112,6 +117,7 @@ class Archive:
         self.metric_calls = int(data.get("metric_calls", 0))
         self.steps = int(data.get("steps", 0))
         self.rejections = int(data.get("rejections", 0))
+        self.proposals = [dict(row) for row in data.get("proposals", ())]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -121,6 +127,7 @@ class Archive:
             "metric_calls": self.metric_calls,
             "steps": self.steps,
             "rejections": self.rejections,
+            "proposals": [dict(row) for row in self.proposals],
         }
 
     def _write(self) -> None:
@@ -170,6 +177,12 @@ class Archive:
         """Record a GEPA iteration whose child lost the minibatch comparison."""
         self.steps += 1
         self.rejections += 1
+        self._write()
+
+    def log_proposal(self, row: Mapping[str, Any]) -> None:
+        """Keep one reflection's full record: parent, component, minibatch,
+        prompt, reply, child scores, and whether the child was accepted."""
+        self.proposals.append({"step": self.steps, **row})
         self._write()
 
     def record_validation(self, index: int, scores: Sequence[float]) -> None:

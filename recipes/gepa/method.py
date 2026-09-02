@@ -154,14 +154,32 @@ class GEPAProposer:
         if not keys:
             return None
         key = archive.next_component(parent, keys)
-        new_text = self._reflect(parent_texts[key], minibatch, models)
+        records = self._records(minibatch)
+        prompt = reflection.render_prompt(parent_texts[key], records)
+        reply = self._binding(models).chat([{"role": "user", "content": prompt}])
+        new_text = reflection.extract_new_text(reply)
+        row: dict[str, Any] = {
+            "parent": parent,
+            "served": archive.served,
+            "component": key,
+            "minibatch": records,
+            "parent_scores": [example.score for example in minibatch],
+            "prompt": prompt,
+            "reply": reply,
+            "child_scores": None,
+            "accepted": False,
+            "candidate": None,
+        }
         if not new_text.strip():
+            archive.log_proposal(row)
             return None
 
         child_texts = {**parent_texts, key: new_text}
         child_scores = [self._score(nodes, child_texts, example.task, models)[0] for example in minibatch]
+        row["child_scores"] = child_scores
         if sum(child_scores) <= sum(example.score for example in minibatch):
             archive.reject()
+            archive.log_proposal(row)
             return None
 
         # The proposal is stated against the served tree, so a child that
@@ -169,8 +187,11 @@ class GEPAProposer:
         # nothing to apply; it is dropped rather than left pending.
         proposal = components.mutations(served_texts, child_texts)
         if not proposal:
+            archive.log_proposal(row)
             return None
-        archive.add(child_texts, parent, child_scores)
+        row["accepted"] = True
+        row["candidate"] = archive.add(child_texts, parent, child_scores)
+        archive.log_proposal(row)
         return proposal
 
     def _sync(self, served_texts: Mapping[str, str]) -> int:
@@ -224,8 +245,9 @@ class GEPAProposer:
             return 0.0, "", str(error)
         return float(self._score_episode(task, result)), _episode_output(result), ""
 
-    def _reflect(self, current_text: str, minibatch: Sequence[_Example], models: ModelBindings) -> str:
-        records = [
+    def _records(self, minibatch: Sequence[_Example]) -> list[dict[str, Any]]:
+        """The reflective dataset: one record per minibatch example."""
+        return [
             {
                 INPUTS_KEY: example.task,
                 OUTPUTS_KEY: example.output,
@@ -233,9 +255,6 @@ class GEPAProposer:
             }
             for example in minibatch
         ]
-        prompt = reflection.render_prompt(current_text, records)
-        reply = self._binding(models).chat([{"role": "user", "content": prompt}])
-        return reflection.extract_new_text(reply)
 
     def _binding(self, models: ModelBindings) -> ModelBinding:
         """The reflection model, falling back to the model under test.

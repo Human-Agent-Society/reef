@@ -661,3 +661,21 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
     assert archive["pending"] is None
     assert archive["candidates"][1]["texts"] == {"rules": REFLECTED}
     assert archive["candidates"][1]["val_scores"] == [1.0, 1.0]
+
+
+def test_every_reflection_is_logged_with_its_prompt_reply_and_verdict(tmp_path: Path) -> None:
+    """The archive keeps what the reflection model saw and wrote, accepted or
+    not, so a search outcome can be traced to the exact text rather than
+    inferred from the candidates it left behind."""
+    archive = Archive(tmp_path / "archive.json")
+    models, reflector = bindings()
+
+    proposer(archive, FakeEpisodes())(NODES, (SAMPLE,), models)
+
+    (row,) = archive.proposals
+    assert (row["parent"], row["component"], row["accepted"], row["candidate"]) == (0, "rules", True, 1)
+    assert row["prompt"] == reflector.prompts[0]
+    assert row["reply"] == FENCED_REPLY
+    assert row["minibatch"][0]["Inputs"] == TASK
+    assert (row["parent_scores"], row["child_scores"]) == ([0.0], [1.0])
+    assert Archive(tmp_path / "archive.json").proposals == archive.proposals  # persisted
