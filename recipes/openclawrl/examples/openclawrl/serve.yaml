@@ -217,3 +217,10 @@ services:
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
     depends_on: [ray-head]
+
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    env:
+      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
+    depends_on: [slime-driver, prm-sglang]

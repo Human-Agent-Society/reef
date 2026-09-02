@@ -10,8 +10,6 @@ reef:
   host: 127.0.0.1
   model_path: work/model
   port: 8900
-  process:
-    ready_timeout: 120
   recipe: recipes.tttd.recipe:TTTDRecipe
   token: reef-local
   groups_per_step: 8
@@ -144,3 +142,11 @@ services:
       NCCL_NVLS_ENABLE: "0"
     depends_on: [ray-head]
     cuda: ${training.cuda_visible_devices}
+
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready_timeout: 120
+    env:
+      RAY_ADDRESS: 127.0.0.1:6379
+    depends_on: [slime-driver]

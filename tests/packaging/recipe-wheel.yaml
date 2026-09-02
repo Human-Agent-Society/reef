@@ -7,11 +7,16 @@ reef:
   port: 18900
   recipe: recipe
   token: package-smoke
-  upstream_url: https://example.invalid
-  upstream_model: package-smoke
-  process:
-    ready_timeout: 30
   artifact_repository: .reef/artifacts.git
   artifact_work_dir: .reef/artifact-work
   artifact_cache_dir: .reef/artifact-cache
   agent_record_dir: .reef/agent-record
+
+services:
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:18900/healthz
+    ready_timeout: 30
+    env:
+      REEF_UPSTREAM_URL: https://example.invalid
+      REEF_MODEL_PATH: package-smoke

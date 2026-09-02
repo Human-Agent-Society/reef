@@ -1,10 +1,9 @@
 """Process orchestrator behind ``reef serve``.
 
-Starts configured auxiliary services in dependency order, then starts the
-built-in Reef HTTP service, probes readiness, mirrors child output, watches
-for unexpected exits, and tears the stack down in reverse order on signal.
-Assembly of the HTTP application itself lives in
-:mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
+Starts every service a config declares in dependency order, probes readiness,
+mirrors child output, watches for unexpected exits, and tears the stack down
+in reverse order on signal. Assembly of the Reef HTTP application itself
+lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
 """
 
 from __future__ import annotations
@@ -27,47 +26,27 @@ import yaml
 
 from reef.service.deploy.config import (
     PROJECT_ROOT,
-    DeployConfigError,
     config_value,
     interpolate_config,
     load_config,
     resolve_model_paths,
     validate_services,
 )
-from reef.service.deploy.settings import ServiceSettings, build_parser, service_settings_from_config
+from reef.service.deploy.settings import build_parser
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
 
 
-def _builtin_reef_service(
-    config: Mapping[str, Any], auxiliary_services: Sequence[Mapping[str, Any]]
-) -> dict[str, Any]:
-    """Build the internal HTTP service managed implicitly by ``reef serve``."""
-    try:
-        settings: ServiceSettings = service_settings_from_config(config)
-    except ValueError as exc:
-        raise DeployConfigError(str(exc)) from exc
-
-    reef = config.get("reef")
-    assert isinstance(reef, Mapping)  # validated by service_settings_from_config
-    process = reef.get("process") or {}
-    if not isinstance(process, Mapping):
-        raise DeployConfigError("reef.process must be an object")
-
-    service: dict[str, Any] = {
-        "name": "reef",
-        "command": shlex.join([sys.executable, "-m", "reef.service"]),
-        "ready": f"curl -sf http://127.0.0.1:{settings.port}/healthz",
-        "depends_on": [str(item["name"]) for item in auxiliary_services],
-    }
-    if "ready_timeout" in process:
-        service["ready_timeout"] = process["ready_timeout"]
-    return service
-
-
 def _log(msg):
     print(f"[reef] {msg}", file=sys.stderr)
+
+
+def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:
+    """Materialize a service command without changing its executable semantics."""
+    if isinstance(command, str):
+        return shlex.split(interpolate_config(config, command))
+    return [interpolate_config(config, argument) for argument in command]
 
 
 class InvalidOverrideError(ValueError):
@@ -277,9 +256,9 @@ class _Stack:
             _log(f"{name}: already running (pid {self._procs[name].pid})")
             return
         self._check_deps(svc)
-        command = interpolate_config(self.config, svc["command"])
+        command = _command_argv(self.config, svc["command"])
         env = self._service_env(svc)
-        _log(f"starting {name}: {command}")
+        _log(f"starting {name}: {shlex.join(command)}")
         # The handle outlives this scope (closed in stop()); a context manager
         # would close it under the running service.
         log_fp = open(self._log_file(name), "a")  # noqa: SIM115
@@ -289,7 +268,7 @@ class _Stack:
         tee = _TeeStream(log_fp, sys.stdout)
         self._tees[name] = tee
         proc = subprocess.Popen(
-            shlex.split(command),
+            command,
             env=env,
             cwd=svc.get("cwd"),
             stdout=tee.write_fd,
@@ -386,8 +365,7 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     if overrides:
         config = _apply_overrides(config, overrides)
     # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
-    auxiliary_services = validate_services(config, resolved_config_path)
-    services = [*auxiliary_services, _builtin_reef_service(config, auxiliary_services)]
+    services = validate_services(config, resolved_config_path)
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     if overrides or paths_changed:

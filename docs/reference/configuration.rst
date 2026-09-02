@@ -1,9 +1,9 @@
 Configuration
 =============
 
-A deployment config is one YAML file. ``reef serve -c <file>`` reads it,
-starts any auxiliary processes in its ``services`` list in dependency order,
-then starts the built-in Reef HTTP service from the ``reef`` section.
+A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
+every process in its ``services`` list in dependency order, and hands the
+``reef`` section to the HTTP service.
 
 .. code:: yaml
 
@@ -15,17 +15,21 @@ then starts the built-in Reef HTTP service from the ``reef`` section.
      upstream_url: ${REEF_UPSTREAM_URL}
      upstream_api_key: ${REEF_UPSTREAM_API_KEY}
 
+   services:
+     - name: reef
+       command: ["${REEF_PYTHON}", "-m", "reef.service"]
+       ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+
 Values interpolate from the environment with ``${VAR}`` and from the config
 itself with ``${dotted.path}``. Any value can be overridden on the command line:
 a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
 
-The Reef HTTP service always uses the interpreter that launched ``reef serve``.
-``REEF_PYTHON`` exposes that interpreter to auxiliary Python services; set it
-before launch to use a different interpreter for those commands. A literal
-``python`` in ``services[].command`` keeps its normal meaning and is resolved
-from that service's ``PATH``.
+``REEF_PYTHON`` defaults to the interpreter that launched ``reef serve`` and
+can be overridden in the environment. Use it when a service must share Reef's
+Python environment. A literal ``python`` keeps its normal meaning and is
+resolved from that service's ``PATH``; Reef never rewrites command names.
 
 Start from a cookbook stack
 ---------------------------
@@ -185,25 +189,22 @@ The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
 against.
 
-The optional ``services`` list
-------------------------------
+The ``services`` list
+---------------------
 
-Each entry is one auxiliary process. Reef itself is configured by the
-``reef`` section and starts automatically after every auxiliary service is
-ready; ``reef`` is therefore a reserved service name.
+Each entry is one process. ``command`` can be a command-line string or an argv
+list. Prefer the list form when exact argument boundaries matter; existing
+string commands retain their current ``shlex`` parsing.
 
 .. config::
 
    services[].name | the service's id, used by ``depends_on``; unique within one stack
-   services[].command | the command line to run
+   services[].command | the command line string or argv list to run
    services[].ready | a shell command that succeeds once the service is up
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
    services[].cuda | the value of ``CUDA_VISIBLE_DEVICES`` for this process
    services[].env | extra environment variables
-
-``reef.process.ready_timeout`` overrides the top-level readiness timeout for
-the built-in Reef process.
 
 The ``training`` section
 ------------------------

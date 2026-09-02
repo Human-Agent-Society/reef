@@ -163,6 +163,11 @@ the one to copy:
      upstream_api_key: ${REEF_UPSTREAM_API_KEY}
      upstream_model: ${REEF_MODEL}
 
+   services:
+     - name: reef
+       command: ["${REEF_PYTHON}", "-m", "reef.service"]
+       ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
 ``tutorials/harness_evolve/run.sh`` does exactly this.
 

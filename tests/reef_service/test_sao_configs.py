@@ -356,7 +356,13 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
     started: set[str] = set()
     for service in services:
-        assert isinstance(service.get("command"), str) and service["command"].strip()
+        command = service.get("command")
+        assert (isinstance(command, str) and command.strip()) or (
+            isinstance(command, list)
+            and command
+            and all(isinstance(argument, str) for argument in command)
+            and command[0].strip()
+        )
         dependencies = service.get("depends_on") or []
         assert set(dependencies) <= started, f"{service['name']} must follow its dependencies in service order"
         started.add(service["name"])

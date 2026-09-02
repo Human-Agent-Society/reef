@@ -32,3 +32,8 @@ services:
       --host 0.0.0.0 --port=${sglang.port}
     ready: curl -sf http://127.0.0.1:${sglang.port}/health
     cuda: ${sglang.cuda_visible_devices}
+
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    depends_on: [sglang]

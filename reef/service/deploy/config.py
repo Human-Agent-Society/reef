@@ -98,12 +98,10 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
 
 
 def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
-    """Optional auxiliary services with unique names, checked before any process starts."""
+    """Services with valid commands and unique names, checked before any process starts."""
     services = config.get("services")
-    if services is None:
-        return []
-    if not isinstance(services, list):
-        raise DeployConfigError(f"config {config_path}: 'services' must be a list, not {type(services).__name__}")
+    if not isinstance(services, list) or not services:
+        raise DeployConfigError(f"config {config_path} must declare a non-empty 'services' list")
     names: list[str] = []
     for index, service in enumerate(services):
         if not isinstance(service, dict):
@@ -113,9 +111,17 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
         name = service.get("name")
         if not isinstance(name, str) or not name.strip():
             raise DeployConfigError(f"config {config_path}: services[{index}] must have a non-empty 'name'")
-        if name == "reef":
+        command = service.get("command")
+        valid_string = isinstance(command, str) and bool(command.strip())
+        valid_list = (
+            isinstance(command, list)
+            and bool(command)
+            and all(isinstance(argument, str) for argument in command)
+            and bool(command[0].strip())
+        )
+        if not valid_string and not valid_list:
             raise DeployConfigError(
-                f"config {config_path}: service name 'reef' is reserved; the reef section starts it automatically"
+                f"config {config_path}: services[{index}] must have a non-empty 'command' string or list of strings"
             )
         names.append(name)
     duplicates = sorted({name for name in names if names.count(name) > 1})
