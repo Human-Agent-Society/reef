@@ -333,17 +333,9 @@ def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict
     return aime.evaluate(task, result), {"response": response, "exit_code": result.exit_code}
 
 
-def read_archive() -> dict[str, Any]:
-    path = WORK / "gepa" / f"{SCENARIO}.json"
-    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-
-
-def mean_val(archive: Mapping[str, Any], index: int | None) -> float | None:
-    candidates = archive.get("candidates") or []
-    if index is None or index >= len(candidates):
-        return None
-    scores = candidates[index].get("val_scores")
-    return sum(scores) / len(scores) if scores else None
+def archive() -> Archive:
+    """The method's own archive: the driver reads it and plans through it."""
+    return Archive(WORK / "gepa" / f"{SCENARIO}.json")
 
 
 def seed_tree(recipe: Any) -> dict[str, str]:
@@ -375,16 +367,16 @@ def search(
     that plan out, so the same seed walks the same problems as ``gepa.optimize``
     and a resumed run replays the iteration it was in rather than drawing a new
     one."""
-    archive = Archive(WORK / "gepa" / f"{SCENARIO}.json")
-    archive.rng_seed = seed
+    search_archive = archive()
+    search_archive.rng_seed = seed
     for _ in range(budget):
-        archive.refresh()
-        step = archive.iteration
-        calls = archive.metric_calls
-        print(f"round {step}: {calls}/{budget} metric calls, {len(archive.candidates)} candidates")
+        search_archive.refresh()
+        step = search_archive.iteration
+        calls = search_archive.metric_calls
+        print(f"round {step}: {calls}/{budget} metric calls, {len(search_archive.candidates)} candidates")
         if calls >= budget:
             return
-        plan = archive.plan(len(trainset), valset_size, 3)
+        plan = search_archive.plan(len(trainset), valset_size, 3)
         manifest = pull_tree(client, service, WORK / "served")
         files = episode_files(manifest["files"], service.binding(), get_adapter("pi"))
         # Records at or below this sequence are earlier rounds' leftovers; a
@@ -490,16 +482,16 @@ def main() -> None:
         client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
         search(service, client, binary, trainset, len(valset), args.budget, args.seed)
         scores = test_passes(service, recipe, client, binary, testset)
-        archive = read_archive()
+        final = archive()
         summary = {
             "scenario": SCENARIO,
             "seed": args.seed,
             "components": COMPONENTS,
-            "candidates": len(archive.get("candidates") or []),
-            "metric_calls": archive.get("metric_calls", 0),
-            "steps": archive.get("steps", 0),
-            "validation_seed_score": mean_val(archive, 0),
-            "validation_selected_score": mean_val(archive, archive.get("served")),
+            "candidates": len(final.candidates),
+            "metric_calls": final.metric_calls,
+            "steps": final.steps,
+            "validation_seed_score": final.mean_val(0),
+            "validation_selected_score": None if final.served is None else final.mean_val(final.served),
             "frozen_test_score": scores["frozen"],
             "selected_test_score": scores["selected"],
             "test_delta": scores["selected"] - scores["frozen"],

@@ -173,28 +173,35 @@ class GEPAProposer:
             "candidate": None,
         }
         if not new_text.strip():
-            archive.log_proposal(row)
-            return None
+            return self._abandon(row)
 
         child_texts = {**parent_texts, key: new_text}
         child_scores = [self._score(nodes, child_texts, example.task, models)[0] for example in minibatch]
         row["child_scores"] = child_scores
         if sum(child_scores) <= sum(example.score for example in minibatch):
-            archive.reject()
-            archive.log_proposal(row)
-            return None
+            return self._abandon(row, rejected=True)
 
         # The proposal is stated against the served tree, so a child that
         # differs from its parent but not from what is being served has
         # nothing to apply; it is dropped rather than left pending.
         proposal = components.mutations(served_texts, child_texts)
         if not proposal:
-            archive.log_proposal(row)
-            return None
+            return self._abandon(row)
         row["accepted"] = True
         row["candidate"] = archive.add(child_texts, parent, child_scores)
         archive.log_proposal(row)
         return proposal
+
+    def _abandon(self, row: dict[str, Any], *, rejected: bool = False) -> None:
+        """Log an iteration that produced no proposal, and propose nothing.
+
+        ``rejected`` marks the one case GEPA counts as a spent iteration: a
+        child that lost the minibatch comparison. An empty reflection or a
+        child that matches what is already served did not get that far.
+        """
+        if rejected:
+            self._archive.reject()
+        self._archive.log_proposal(row)
 
     def _sync(self, served_texts: Mapping[str, str]) -> int:
         """Reconcile the archive with the tree the mechanism is actually serving.
