@@ -66,20 +66,33 @@ The loop
    Verdict :: publish the candidate or restore the snapshot
 
 No evolution runs while traffic flows. A report enters the *window* when it
-references exactly one receipt and its score is at or below ``max_score``;
-the default for harness evolution keeps only failures. A report that
-references several receipts never batches, whatever its score. ``reef-pi
-report`` sends every receipt from the last run in one report, so only a run
-with a single model call can trigger a step; report each result against its
-own receipt, as ``run.py`` does. When ``batch_size`` such reports have
-accumulated, one step runs the loop once. ``batch_size`` and ``max_score``
-live under ``data:`` in the recipe config.
+references at least one receipt and its score is at or below ``max_score``;
+the default for harness evolution keeps only failures. A report over one
+receipt batches as that exchange; a report over several batches as one
+trajectory sample carrying every referenced exchange in order, which is what
+``reef-pi report`` sends for a whole run (``--per-receipt`` fans the score
+across the receipts as separate reports instead). When ``batch_size``
+window entries have accumulated, one step runs the loop once. ``batch_size``
+and ``max_score`` live under ``data:`` in the recipe config, and
+``data.batch_policy: records`` drops the report requirement entirely:
+recorded traffic alone batches, unscored, for methods that judge for
+themselves.
 
-Most of a step's cost is the evaluation. Every task runs twice, once against
-the candidate tree and once against the current one, which makes
-``2 x len(tasks)`` headless episodes. Each episode renders one side into a
-throwaway root, runs the agent binary with the task as its prompt under a
-600 s timeout, reads the trajectory back, and deletes the root.
+Most of a step's cost is the evaluation. Every task runs on both trees,
+``episode_repeats`` times each (once by default), which makes
+``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both
+sides of a pairing see the same upstream conditions. Each episode renders one
+side into a throwaway root, runs the agent binary with the task as its prompt
+under the ``episode_timeout_s`` limit (600 s by default), reads the
+trajectory back, and deletes the root.
+
+Each episode runs through an executor. The default ``local`` executor runs the
+binary as a plain subprocess, which is right for development and the tests. A
+hosted service that evaluates model-proposed trees sets ``evolution.executor:
+sandbox`` so each episode runs in a bubblewrap jail (a fresh non-root
+namespace, a read-only base filesystem, no host credentials, resource limits,
+and no network unless a model endpoint is allowlisted); a deployment that
+requires it refuses to start without the sandbox runtime.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -93,13 +106,6 @@ cannot win on a crash, and when both sides fail the step is a tie. When the
 verdict is a rejection, Reef restores the snapshot it took before the
 mutation. Every verdict is recorded in the scenario's commit log together
 with its mutation and both score vectors.
-
-.. note::
-
-   Paired episodes currently run batched by side: all episodes of one tree
-   first, then all of the other. Anything that drifts during the run, such as
-   upstream load or a rate limit, therefore affects one side of the pair more
-   than the other and skews the comparison.
 
 When it fits
 ------------

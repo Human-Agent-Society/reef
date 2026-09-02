@@ -24,7 +24,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeError, EpisodeResult
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
-from reef.recipe.registry import RecipeRegistry, build_recipe
+from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend.strategies import Mutation, resolve_episode_scorer
@@ -637,12 +637,12 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     dispatcher = Dispatcher(
-        RecipeRegistry({built.name: built}),
+        built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
     )
     try:
-        scenario = dispatcher.get_or_create_scenario("gepa-demo", built.name)
+        scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None
         _report_once(scenario, "gepa-demo", "1")
         result = scenario.prepare_training_step()

@@ -151,9 +151,9 @@ Cookbook processors
 |                                             |          | scenario's grid; the step is the group, ready only when every    |                        |
 |                                             |          | ``groups_per_step`` x ``rollouts_per_group`` slot is filled      |                        |
 +---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
-| ``reef/train/cordis_backend/processor.py``  | reported | a trainable, finitely scored report with exactly one reference   | ``TraceBatch``         |
-|                                             |          | and a score inside ``[min_score, max_score]``; the recorded      |                        |
-|                                             |          | request is the sample, unmodified                                |                        |
+| ``reef/train/cordis_backend/processor.py``  | reported | a trainable, finitely scored report referencing at least one     | ``TraceBatch``         |
+|                                             |          | request, scored inside ``[min_score, max_score]``; one reference |                        |
+|                                             |          | is the sample unmodified, several are one trajectory sample      |                        |
 +---------------------------------------------+----------+------------------------------------------------------------------+------------------------+
 | ``recipes/openclawrl/processor.py``         | computed | a main turn whose next state the PRM scores +/-1, or for which   | ``PolicyBatch``        |
 |                                             |          | the teacher scored an accepted hindsight hint                    |                        |

@@ -201,7 +201,7 @@ class _Client:
         assert (scenario, path, recipe, extra_headers) == (
             "discovery",
             "/v1/chat/completions",
-            "tttd",
+            None,
             {"x-reef-release-id": "checkpoint-v1"},
         )
         self.index += 1

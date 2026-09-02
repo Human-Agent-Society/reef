@@ -25,7 +25,6 @@ import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.dispatcher import _DERIVATION_POLL_SECONDS, _STORAGE_RETRY_SECONDS, _UNDRAINED_WARNING_SECONDS, Dispatcher
 from reef.recipe import Recipe
-from reef.recipe.registry import RecipeRegistry
 
 pytestmark = pytest.mark.unit
 
@@ -35,7 +34,7 @@ def _dispatcher() -> Dispatcher:
     initial = root / "initial"
     initial.mkdir()
     return Dispatcher(
-        RecipeRegistry({"recipe": Recipe()}),
+        Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
     )
 
@@ -47,6 +46,7 @@ def _bind(
     batch_ready: bool = False,
     processor_status: dict | None = None,
     runtime=None,
+    last_committed_step: dict | None = None,
 ) -> None:
     processor = SimpleNamespace(derivation_pending=lambda: pending)
     trainer = SimpleNamespace(
@@ -54,9 +54,15 @@ def _bind(
         batch_ready=lambda: batch_ready,
         processor_status=lambda: dict(processor_status or {}),
     )
-    scenario = SimpleNamespace(trainer=trainer, scenario_step=0, runtime=runtime)
+    scenario = SimpleNamespace(
+        trainer=trainer,
+        scenario_step=0,
+        runtime=runtime,
+        commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+    )
     dispatcher._registry = SimpleNamespace(
         training_scenario_name="s",
+        training_status_scenario_names=("s",),
         get_optional=lambda name: scenario if name == "s" else None,
         preload_errors=(),
     )
@@ -97,6 +103,18 @@ def test_status_exposes_the_last_drain_time_and_ready_state() -> None:
     status = dispatcher.training_status
     assert status["last_drain_at"] == drained_at
     assert status["scenarios"]["s"]["batch_ready"] is True
+
+
+def test_status_exposes_the_last_committed_step_outcome() -> None:
+    dispatcher = _dispatcher()
+    committed = {
+        "step": 3,
+        "recorded_at": 1_756_400_000.0,
+        "metrics": {"skipped": "no proposal", "selection": {"reason": "candidate lost"}},
+    }
+    _bind(dispatcher, pending=False, last_committed_step=committed)
+
+    assert dispatcher.training_status["scenarios"]["s"]["last_committed_step"] == committed
 
 
 def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch) -> None:

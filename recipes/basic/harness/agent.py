@@ -27,9 +27,8 @@ from .report import post_report
 #: The Reef ``run.sh`` starts from ``external-provider.yaml``.
 SERVICE_URL = "http://127.0.0.1:8900"
 TOKEN = "reef-local"
-#: This workload's isolated lane, and the recipe that serves it.
+#: This workload's isolated lane.
 SCENARIO = "basic-arithmetic"
-RECIPE = "recipe"  # the record-only core recipe
 #: Where the basic task's instruction says to put the answer
 #: (see ``harbor/instruction.md``).
 ANSWER_PATH = "/workspace/answer.txt"
@@ -86,7 +85,6 @@ class HarborAgent(BaseAgent):
             SCENARIO,
             "/v1/chat/completions",
             {"model": self.model_name, "messages": [{"role": "user", "content": instruction}]},
-            recipe=RECIPE,
         )
 
     def _report_trial_result(self) -> None:
@@ -95,5 +93,5 @@ class HarborAgent(BaseAgent):
         while not (result_path.exists() and result_path.stat().st_mtime >= self._started):
             time.sleep(1)
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        post_report(result, client=self._client, scenario=SCENARIO, recipe=RECIPE)
+        post_report(result, client=self._client, scenario=SCENARIO)
         self.logger.info("reported verifier reward %s to reef", result["verifier_result"]["rewards"]["reward"])

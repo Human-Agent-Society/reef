@@ -4,7 +4,7 @@ import pytest
 
 from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.recipe import Recipe, RecipeRegistry
+from reef.recipe import Recipe
 from reef.service.app import RequestService
 from reef.surface import Surface, create_harness_surface
 
@@ -23,12 +23,12 @@ def _service(tmp_path, *, recipe, skill_text: str | None) -> RequestService:
         (bootstrap / "skills").mkdir()
         (bootstrap / "skills" / "SKILL.md").write_text(skill_text, encoding="utf-8")
     dispatcher = Dispatcher(
-        RecipeRegistry({"p": recipe}),
+        recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
     )
-    dispatcher.get_or_create_scenario("delivery", "p")
+    dispatcher.get_or_create_scenario("delivery")
     return RequestService(dispatcher)
 
 

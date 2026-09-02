@@ -202,6 +202,14 @@ export function MermaidDiagram({ chart }: { chart: string }) {
     }
 
     draw();
+    // A cold direct load lays the diagram out with fallback-font metrics; when
+    // the site webfont arrives its wider glyphs would otherwise clip the boxes.
+    // Redraw once fonts settle. document.fonts is guarded for older engines.
+    if (typeof document !== "undefined" && "fonts" in document) {
+      void document.fonts.ready.then(() => {
+        if (active) draw();
+      });
+    }
     const observer = new MutationObserver((records) => {
       if (records.some((record) => record.attributeName === "data-theme")) draw();
     });

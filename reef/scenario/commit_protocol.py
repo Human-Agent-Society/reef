@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -54,6 +55,7 @@ class ScenarioCommitProtocol:
         trainer: Trainer,
         scenario_step: int = 0,
         commit_log: CommitLog | None = None,
+        recovered_head_record: CommitRecord | None = None,
     ) -> None:
         if not isinstance(scenario_step, int) or scenario_step < 0:
             raise ValueError("scenario_step must be non-negative")
@@ -66,6 +68,16 @@ class ScenarioCommitProtocol:
         self._commit_log = commit_log
         self._creation_artifact = self._resolve_creation_artifact()
         self._lock = RLock()
+        records = (
+            (() if recovered_head_record is None else (recovered_head_record,))
+            if commit_log is None
+            else commit_log.records()
+        )
+        self._latest_training_record = next(
+            (record for record in reversed(records) if record.operation == "training"),
+            None,
+        )
+        self._commit_status_snapshot = (scenario_step, self._latest_training_record)
 
     @property
     def lock(self) -> RLock:
@@ -87,10 +99,28 @@ class ScenarioCommitProtocol:
     def step(self) -> int:
         return self._step
 
+    @property
+    def commit_status(self) -> Mapping[str, Any]:
+        """Current step and latest training outcome from one non-blocking snapshot."""
+        step, record = self._commit_status_snapshot
+        return {
+            "scenario_step": step,
+            "last_committed_step": (
+                None
+                if record is None
+                else {
+                    "step": record.step,
+                    "recorded_at": record.recorded_at,
+                    "metrics": None if record.metrics is None else deepcopy(record.metrics),
+                }
+            ),
+        }
+
     def advance_to(self, step: int) -> None:
         if step != self._step + 1:
             raise ValueError(f"scenario step must advance from {self._step} to {self._step + 1}")
         self._step = step
+        self._commit_status_snapshot = (step, self._latest_training_record)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
@@ -164,7 +194,6 @@ class ScenarioCommitProtocol:
             try:
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
-                    recipe=self._binding.name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
@@ -276,7 +305,6 @@ class ScenarioCommitProtocol:
             if self._should_checkpoint(result):
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
-                    recipe=self._binding.name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
@@ -327,9 +355,7 @@ class ScenarioCommitProtocol:
         prepared: PreparedCommit,
         operation: str = "training",
         rollback_target_release_id: str | None = None,
-    ) -> CommitRecord | None:
-        if self._commit_log is None:
-            return None
+    ) -> CommitRecord:
         record = CommitRecord(
             scenario=self._name,
             step=step,
@@ -345,7 +371,10 @@ class ScenarioCommitProtocol:
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
         )
-        self._commit_log.append(record)
+        if self._commit_log is not None:
+            self._commit_log.append(record)
+        if record.operation == "training":
+            self._latest_training_record = record
         return record
 
     def _find_release_id(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
@@ -468,6 +497,7 @@ class ScenarioCommitProtocol:
         snapshot_record_progress: RecordProgress | None,
         checkpoint_head: ArtifactRef,
         snapshot_training_job_id: str | None = None,
+        snapshot_metrics: Mapping[str, Any] | None = None,
         snapshot_operation: str | None = None,
         snapshot_rollback_target_release_id: str | None = None,
     ) -> CommitRecord | None:
@@ -520,6 +550,7 @@ class ScenarioCommitProtocol:
                 operation=snapshot_operation or "training",
                 operation_verified=snapshot_operation is not None,
                 rollback_target_release_id=snapshot_rollback_target_release_id,
+                metrics=snapshot_metrics,
                 training_job_id=snapshot_training_job_id,
             )
             if commit_log is not None:

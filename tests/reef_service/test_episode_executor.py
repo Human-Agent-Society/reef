@@ -1,0 +1,121 @@
+"""The episode executor abstraction: local behavior, sandbox construction,
+and the fail-fast contract when a required sandbox cannot isolate."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+from reef.core.errors import ReefError
+from reef.harness.executor import (
+    EpisodeLaunchError,
+    EpisodeTimeout,
+    LocalExecutor,
+    SandboxExecutor,
+    SandboxLimits,
+    SandboxUnavailable,
+    build_executor,
+)
+
+
+def _script(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "prog"
+    path.write_text(f"#!/usr/bin/env python3\n{body}\n")
+    path.chmod(0o755)
+    return path
+
+
+def test_local_executor_runs_in_the_workspace_and_returns_the_outcome(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    prog = _script(tmp_path, "import os; print(os.getcwd()); print('err', file=__import__('sys').stderr)")
+    outcome = LocalExecutor().launch([sys.executable, str(prog)], root=root, workspace=workspace, env={}, timeout=10.0)
+    assert outcome.exit_code == 0
+    assert outcome.stdout.strip() == str(workspace)
+    assert "err" in outcome.stderr
+
+
+def test_local_executor_maps_a_missing_binary(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "workspace").mkdir(parents=True)
+    with pytest.raises(EpisodeLaunchError):
+        LocalExecutor().launch(
+            [str(tmp_path / "does-not-exist")], root=root, workspace=root / "workspace", env={}, timeout=10.0
+        )
+
+
+def test_local_executor_kills_the_tree_on_timeout(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    (root / "workspace").mkdir(parents=True)
+    prog = _script(tmp_path, "import time; time.sleep(30)")
+    with pytest.raises(EpisodeTimeout):
+        LocalExecutor().launch(
+            [sys.executable, str(prog)], root=root, workspace=root / "workspace", env={}, timeout=0.5
+        )
+
+
+def test_build_executor_defaults_to_local() -> None:
+    assert isinstance(build_executor(None), LocalExecutor)
+    assert isinstance(build_executor({"executor": "local"}), LocalExecutor)
+
+
+def test_build_executor_rejects_an_unknown_kind() -> None:
+    with pytest.raises(ReefError, match="unknown episode executor"):
+        build_executor({"executor": "vm"})
+
+
+def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
+    with pytest.raises(SandboxUnavailable, match="bubblewrap"):
+        SandboxExecutor().preflight()
+    with pytest.raises(ReefError, match="bubblewrap"):
+        build_executor({"executor": "sandbox"})
+
+
+def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.harness.executor.os.environ", {"PATH": "/usr/bin"})
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    sandbox = SandboxExecutor()
+    argv = sandbox._bwrap_argv([sys.executable, "-c", "pass"], root=root, workspace=workspace, env={"A": "b"})
+
+    assert argv[0] == "bwrap"
+    assert "--unshare-net" in argv  # no egress hosts: network is denied
+    assert "--die-with-parent" in argv
+    assert "--clearenv" in argv
+    # The root is read-only, its workspace writable.
+    ro = [argv[i + 2] for i, tok in enumerate(argv) if tok == "--ro-bind" and argv[i + 1] == str(root)]
+    rw = [argv[i + 2] for i, tok in enumerate(argv) if tok == "--bind" and argv[i + 1] == str(workspace)]
+    assert ro == [str(root)]
+    assert rw == [str(workspace)]
+    # The overlay env is passed; host secrets are not (only PATH from inherited).
+    assert "--setenv" in argv
+    joined = " ".join(argv)
+    assert "A b" in joined
+
+
+def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sandbox = SandboxExecutor(egress_hosts=("127.0.0.1:8000",))
+    argv = sandbox._bwrap_argv(["true"], root=tmp_path, workspace=workspace, env={})
+    assert "--unshare-net" not in argv
+
+
+def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    executor = build_executor(
+        {
+            "executor": "sandbox",
+            "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30, "memory_bytes": 1 << 30}},
+        }
+    )
+    assert isinstance(executor, SandboxExecutor)
+    assert executor.egress_hosts == ("127.0.0.1:8000",)
+    assert executor.limits == SandboxLimits(cpu_seconds=30, memory_bytes=1 << 30)

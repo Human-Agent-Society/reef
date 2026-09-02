@@ -16,7 +16,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | Need                                        | Component                                        | Required for                 |
 +=============================================+==================================================+==============================+
-| bind a scenario's behavior                  | `Recipe <#recipe>`__                             | every recipe                 |
+| configure deployment behavior               | `Recipe <#recipe>`__                             | every deployment             |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | validate feedback at ingress                | `Report <#report>`__                             | methods whose signal arrives |
 |                                             |                                                  | in reports                   |
@@ -51,8 +51,8 @@ Recipe
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
    from reef.train.cordis_backend import CordisRecipe
 
-A recipe is one frozen dataclass binding a scenario to its serving and evolution
-behavior.
+A recipe is one frozen dataclass configuring the serving and evolution behavior
+for every scenario in a deployment.
 
 .. code:: text
 

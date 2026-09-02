@@ -12,7 +12,7 @@ import uuid
 from reef_client import ReefClient
 
 
-def post_report(result: dict, *, client: ReefClient, scenario: str, recipe: str) -> dict:
+def post_report(result: dict, *, client: ReefClient, scenario: str) -> dict:
     trial_id = result["id"]
     task_name = result["task_name"]
     score = result["verifier_result"]["rewards"]["reward"]
@@ -25,4 +25,4 @@ def post_report(result: dict, *, client: ReefClient, scenario: str, recipe: str)
         "references": result["agent_result"]["metadata"]["reef"]["agent_record_ids"],
         "metadata": {"harbor": {"trial_id": trial_id, "task_name": task_name}},
     }
-    return client.report(scenario, payload, recipe=recipe)
+    return client.report(scenario, payload)

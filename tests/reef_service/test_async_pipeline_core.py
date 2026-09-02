@@ -10,7 +10,6 @@ import pytest
 from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
-from reef.recipe import RecipeRegistry
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
@@ -179,7 +178,7 @@ def start_dispatcher(tmp_path: Path):
         runtime = DurableRuntime(tmp_path / "checkpoints", **runtime_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
-            RecipeRegistry({"test_policy": TestPolicyRecipe(runtime, batch_size=1)}),
+            TestPolicyRecipe(runtime, batch_size=1),
             factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "agent-record",
@@ -195,7 +194,7 @@ def start_dispatcher(tmp_path: Path):
 
 
 def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str = "v0") -> None:
-    dispatcher.get_or_create_scenario("math", "test_policy")
+    dispatcher.get_or_create_scenario("math")
     inference_id = f"inference-{suffix}"
     records = (
         AgentRecord.create(
@@ -213,7 +212,7 @@ def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str
         ),
     )
     for record in records:
-        dispatcher.accept_record(record, recipe="test_policy")
+        dispatcher.accept_record(record)
 
 
 def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
@@ -247,7 +246,7 @@ def test_empty_checkpoint_result_fails_closed() -> None:
 @pytest.mark.unit
 def test_report_returns_and_inference_resolves_while_remote_job_is_blocked(start_dispatcher) -> None:
     runtime, dispatcher = start_dispatcher(fail_once=True, block=True)
-    scenario = dispatcher.get_or_create_scenario("math", "test_policy")
+    scenario = dispatcher.get_or_create_scenario("math")
     expected = scenario.current_artifact_ref()
     _submit_pair(dispatcher)
     assert runtime.started.wait(1)
@@ -299,7 +298,7 @@ def test_inference_resolves_while_lost_ack_publication_blocks(start_dispatcher) 
 @pytest.mark.unit
 def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, monkeypatch) -> None:
     _, dispatcher = start_dispatcher()
-    scenario = dispatcher.get_or_create_scenario("math", "test_policy")
+    scenario = dispatcher.get_or_create_scenario("math")
     monkeypatch.setattr(
         scenario.repository,
         "resolve",
@@ -332,13 +331,16 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     assert [call["source"] for call in runtime.calls] == ["inference-1", "inference-2"]
     assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):
-        dispatcher.get_or_create_scenario("other", "test_policy")
+        dispatcher.get_or_create_scenario("other")
 
 
 @pytest.mark.unit
 def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> None:
     metrics = {"staleness/samples_fresh": 1, "staleness/samples_admitted_stale": 0}
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
+    dispatcher.get_or_create_scenario("math")
+
+    assert dispatcher.training_status["scenarios"]["math"]["last_committed_step"] is None
 
     _submit_pair(dispatcher)
     _wait_for_step(dispatcher, 1)
@@ -348,6 +350,13 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["outcome"] == "select"
+    status = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    assert status["step"] == 1
+    assert isinstance(status["recorded_at"], float)
+    assert status["metrics"] == committed
+    status["metrics"]["selection"]["outcome"] = "mutated by caller"
+    refreshed = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    assert refreshed["metrics"]["selection"]["outcome"] == "select"
 
 
 @pytest.mark.unit

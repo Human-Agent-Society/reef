@@ -152,6 +152,7 @@ Harness evolution keys
 
    data.batch_size | 1 | traces per mutation attempt
    data.max_score | 0.0 | upper bound of the score window that batches
+   data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
 
 The window has no lower bound, so the default keeps only traces at or below
 zero.
@@ -164,6 +165,14 @@ zero.
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.adapter | pi | ``opencode``, or an entry-point adapter
    evolution.binary | overrides the adapter's binary name
+   evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
+   evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
+   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
+   evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
+   evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
+   evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
+   evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it
+   evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind

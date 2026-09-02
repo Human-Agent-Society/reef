@@ -26,6 +26,7 @@ better and better results without having to do anything.
 </div>
 
 **[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
+[Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
 [Join Discord](https://discord.gg/5y8e5f937k)**
 
@@ -87,7 +88,7 @@ modules implement each step.
 ## Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
-The recipe bound to a scenario determines which surface it updates.
+The deployment's recipe determines which surface its scenarios update.
 
 ### 1 · Serve
 
@@ -116,9 +117,9 @@ SAO recipe uses each eligible scored rollout to run a training step.
 #### Send an inference request and report feedback
 
 Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`
-and `/v1/messages` take the provider's own request body. The first request for a
-new scenario must include both Reef headers. Reef stores the recipe binding and
-rejects later attempts to change it.
+and `/v1/messages` take the provider's own request body. A request includes the
+`x-reef-scenario` header; a new name creates a scenario using the deployment's
+configured recipe. Requests do not select recipes.
 
 The response body uses the provider's OpenAI-compatible format. Reef adds the
 `x-reef-agent-record-id` response header. Its value is the **receipt** that a
@@ -269,6 +270,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 Working on continual self-improving agent?
 
 - [Join Discord](https://discord.gg/5y8e5f937k) to share your recipes, ask implementation questions, and discuss new features.
+- Join the [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) to ask questions, share ideas, and connect with the community.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).

@@ -480,7 +480,6 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
     recipe = _dry_recipe(example, tmp_path, batch_size=2)
     service = driver.RunService(
         scenario="dry",
-        recipe_name="skillclaw",
         recipe=recipe,
         bootstrap_pool=driver._bootstrap_pool(run_dir, "dry", recipe),
         run_dir=run_dir,
@@ -578,7 +577,6 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
     recipe = _dry_recipe(example, tmp_path, batch_size=1)
     service = driver.RunService(
         scenario="dry2",
-        recipe_name="skillclaw",
         recipe=recipe,
         bootstrap_pool=driver._bootstrap_pool(run_dir, "dry2", recipe),
         run_dir=run_dir,
@@ -588,7 +586,7 @@ def test_poke_night_recovers_a_pending_batch(driver, skillclaw, example, tmp_pat
         inference_backend=_stub_backend(),
     )
     try:
-        scenario = service.dispatcher.get_or_create_scenario("dry2", "skillclaw")
+        scenario = service.dispatcher.get_or_create_scenario("dry2")
         assert scenario is not None
         # Append straight to the store to simulate a crash before the trigger.
         scenario.records.append_result(

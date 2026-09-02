@@ -27,7 +27,7 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                         | every known scenario, recipe, and current release |
+| ``GET /reef/scenarios``                         | every known scenario and current release          |
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
 +-------------------------------------------------+---------------------------------------------------+
@@ -75,7 +75,8 @@ Scenarios
 ---------
 
 The first inference request or report carrying a new ``x-reef-scenario`` creates
-the scenario and binds it to the deployment's recipe.
+the scenario using the deployment's configured recipe. Requests never select a
+recipe.
 
 .. code:: bash
 
@@ -91,15 +92,15 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "recipe", "release_id"?}``       |
-|                                             | → ``{scenario, recipe, release_id,          |
+| ``POST /reef/scenarios``                    | ``{"name", "release_id"?}``                 |
+|                                             | → ``{scenario, release_id,                  |
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario with its recipe and    |
-|                                             | current release once loaded                 |
+| ``GET /reef/scenarios``                     | every known scenario and its current        |
+|                                             | release once loaded                         |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, recipe, processor,             |
+| ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
 
@@ -142,8 +143,9 @@ data inside ``metadata`` or ``feedback``.
 | ``feedback``   | string or object | no       | opaque to Reef's core: a rubric, judge    |
 |                |                  |          | output, plain text                        |
 +----------------+------------------+----------+-------------------------------------------+
-| ``references`` | list of strings  | no       | the receipts this report grades; a report |
-|                |                  |          | without them is accepted but never trains |
+| ``references`` | list of strings  | no       | the receipts this report grades; several  |
+|                |                  |          | batch as one trajectory sample, none is   |
+|                |                  |          | accepted but never trains                 |
 +----------------+------------------+----------+-------------------------------------------+
 | ``metadata``   | object           | no       | opaque, except                            |
 |                |                  |          | ``training.eligible`` (default ``true``)  |
@@ -232,6 +234,11 @@ an update is being trained or published.
      "scenarios": {
        "hello-reef": {
          "scenario_step": 3,
+         "last_committed_step": {
+           "step": 3,
+           "recorded_at": 1756400000.0,
+           "metrics": {"published": false, "selection": {"reason": "candidate lost"}}
+         },
          "current_runtime_load_id": "7f2a:12",
          "checkpoint_storage": {"...": "..."},
          "batch_ready": false,
@@ -244,6 +251,14 @@ an update is being trained or published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
+``last_committed_step`` reports the latest durable training step number,
+commit time, and its recipe-owned metrics; it is ``null`` before the first
+training commit. This distinguishes a step still in flight from a completed
+step that skipped or rejected its candidate. A rollback advances
+``scenario_step`` without replacing the latest training outcome. A deployment
+without an agent-record directory has no historical commit log, so after a
+restart from a rollback checkpoint this field is ``null`` until the next
+training commit.
 ``serving`` is runtime-wide but recipe-shaped: a LoRA deployment reports the
 engine's shared adapter residency there, keyed by recipe. Each scenario's
 ``adapter_runtime_load_id`` appears in its own ``scenarios`` block.
@@ -268,7 +283,7 @@ Status codes
 |        | release, unknown adapter, no configured harness             |
 |        | recipe, or a scenario that serves no files                  |
 +--------+-------------------------------------------------------------+
-| 409    | a recipe or base artifact conflicting with the binding, a   |
+| 409    | a base artifact conflicting with the scenario registration, |
 |        | record id resent with different content, a rollback naming  |
 |        | a release that is not restorable, or an engine that reports |
 |        | no serving runtime load ID                                  |

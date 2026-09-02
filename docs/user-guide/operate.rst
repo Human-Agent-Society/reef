@@ -18,7 +18,7 @@ Check health and status
    curl -f "$REEF_URL/healthz"
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" "$REEF_URL/reef/status"
 
-``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, the runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. It is the first place to look when requests keep being served by an old version.
+``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, latest committed step outcome, runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. The committed outcome includes the recipe-owned metrics, so a skipped or rejected update is distinguishable from one that is still running. It is the first place to look when requests keep being served by an old version.
 
 The service and every process ``reef serve`` started write logs under ``run_dir`` (``/tmp/reef-stack/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
 

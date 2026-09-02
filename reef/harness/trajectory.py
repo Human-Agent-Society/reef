@@ -155,6 +155,38 @@ class PiSessionReader(TrajectoryReader):
 
 
 @register_trajectory_reader
+class ClaudeSessionReader(TrajectoryReader):
+    """Read Claude Code session JSONL trees: every ``*.jsonl`` under ``path``.
+
+    Claude Code writes one transcript per session under
+    ``CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl``, one event
+    object per line. Sorting by relative path orders sessions by their
+    project slug and id; the reader tolerates one torn final line per file,
+    the residue a crash mid-write leaves behind.
+    """
+
+    format = "claude-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events: list[dict[str, Any]] = []
+        for file in sorted(Path(path).rglob("*.jsonl")):
+            lines = file.read_text(encoding="utf-8").splitlines()
+            for index, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    if index == len(lines) - 1:
+                        break  # torn tail from a crash mid-write; the event never landed
+                    raise TrajectoryError(f"claude session {file} has a corrupt event at line {index + 1}") from exc
+                if not isinstance(event, dict):
+                    raise TrajectoryError(f"claude session {file} line {index + 1} is not an event object")
+                events.append(event)
+        return tuple(events)
+
+
+@register_trajectory_reader
 class OpencodeStorageReader(TrajectoryReader):
     """Read opencode storage JSON trees: every ``*.json`` under ``path``.
 
@@ -180,4 +212,5 @@ class OpencodeStorageReader(TrajectoryReader):
 
 # Module-level instances for backward-compatible call syntax.
 read_pi_session = PiSessionReader()
+read_claude_session = ClaudeSessionReader()
 read_opencode_storage = OpencodeStorageReader()

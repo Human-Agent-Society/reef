@@ -66,7 +66,15 @@ def register_inference_routes(
                         if terminal is not None:
                             break
                     if terminal is None:
-                        remainder = decoder.finish()
+                        final_frames, remainder = decoder.finalize()
+                        for frame in final_frames:
+                            if is_terminal_sse_event(request.path, frame):
+                                terminal = frame
+                                break
+                            if not chat_identity:
+                                chat_identity = chat_completion_chunk_identity(frame)
+                            await response.write(frame)
+                    if terminal is None:
                         if remainder:
                             await response.write(remainder)
                         error = "upstream SSE ended without a terminal event"

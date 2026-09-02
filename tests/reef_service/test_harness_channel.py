@@ -28,7 +28,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError, load_descriptor
 from reef.harness.episode import EpisodeResult
 from reef.harness.render import render_composition
-from reef.recipe import Recipe, RecipeRegistry
+from reef.recipe import Recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
@@ -136,7 +136,8 @@ def _dispatcher(
     mutations: tuple[Mutation, ...],
     *,
     bootstrap_files: dict[str, str] | None = None,
-    recipe_names: tuple[str, ...] = ("evolve",),
+    batch_policy: str = "reports",
+    batch_size: int = 1,
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -148,6 +149,8 @@ def _dispatcher(
         ("task one",),
         binary=str(binary),
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
+        batch_policy=batch_policy,
+        batch_size=batch_size,
     )
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
@@ -156,13 +159,13 @@ def _dispatcher(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
     dispatcher = Dispatcher(
-        RecipeRegistry(dict.fromkeys(recipe_names, recipe)),
+        recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
     )
-    dispatcher.get_or_create_scenario("delivery", recipe_names[0])
+    dispatcher.get_or_create_scenario("delivery")
     return dispatcher
 
 
@@ -207,6 +210,100 @@ async def _gate_step(client: TestClient) -> dict:
         if asyncio.get_running_loop().time() >= deadline:
             pytest.fail("harness update did not commit")
         await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+
+
+@pytest.mark.unit
+def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/status")
+            assert response.status == 200
+            assert (await response.json())["scenarios"]["delivery"]["last_committed_step"] is None
+
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "delivery"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status == 200
+            receipt = response.headers["x-reef-agent-record-id"]
+            response = await client.post(
+                "/reef/report",
+                headers={"x-reef-scenario": "delivery"},
+                json={"score": 0.0, "references": [receipt]},
+            )
+            assert response.status == 200
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/status")
+                assert response.status == 200
+                scenario = (await response.json())["scenarios"]["delivery"]
+                committed = scenario["last_committed_step"]
+                if committed is not None:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("no-proposal step did not commit")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+
+            assert scenario["scenario_step"] == committed["step"] == 1
+            assert isinstance(committed["recorded_at"], float)
+            assert committed["metrics"]["skipped"] == "no proposal"
+            response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
+    async def run() -> None:
+        mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
+        client = TestClient(
+            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_backend=_EchoBackend()))
+        )
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "delivery"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status == 200
+            receipt = response.headers["x-reef-agent-record-id"]
+            response = await client.post(
+                "/reef/report",
+                headers={"x-reef-scenario": "delivery"},
+                json={"score": 0.0, "references": [receipt]},
+            )
+            assert response.status == 200
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/status")
+                assert response.status == 200
+                scenario = (await response.json())["scenarios"]["delivery"]
+                committed = scenario["last_committed_step"]
+                if committed is not None:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("rejected gate step did not commit")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+
+            assert scenario["scenario_step"] == committed["step"] == 1
+            assert committed["metrics"]["published"] is False
+            assert committed["metrics"]["selected"] is False
+            assert committed["metrics"]["selection"]["outcome"] == "reject"
+            response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit
@@ -879,34 +976,7 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
             assert response.status == 200
             assert 'export REEF_HARNESS_SCENARIO="harness-0123456789ab"' in await response.text()
             created = dispatcher.get_or_create_scenario("harness-0123456789ab")
-            assert created is not None and created.recipe == "evolve"
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_install_route_without_scenario_rejects_multiple_harness_recipes(tmp_path, monkeypatch) -> None:
-    dispatcher = _dispatcher(
-        tmp_path,
-        (),
-        bootstrap_files={"pi-agent/AGENTS.md": "starter rules\n"},
-        recipe_names=("code-harness", "support-harness"),
-    )
-    monkeypatch.setattr(
-        "reef.service.request_service._random_harness_scenario_name",
-        lambda: "harness-0123456789ab",
-    )
-
-    async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
-        await client.start_server()
-        try:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
-            assert response.status == 400
-            assert "multiple harness recipes are available" in await response.text()
-            assert not dispatcher.has_loaded("harness-0123456789ab")
+            assert created is not None
         finally:
             await client.close()
 
@@ -918,12 +988,12 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     dispatcher = Dispatcher(
-        RecipeRegistry({"weights": Recipe()}),
+        Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
     )
-    dispatcher.get_or_create_scenario("weights-only", "weights")
+    dispatcher.get_or_create_scenario("weights-only")
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
@@ -1001,6 +1071,46 @@ def test_install_route_refuses_an_unknown_version_with_a_404_naming_it(tmp_path)
             )
             assert response.status == 404
             assert "no-such-version" in await response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
+    """The report-free policy end to end through the real service: recorded
+    inference traffic alone fills the batch, one evolve step runs on the
+    unscored samples, and the harness read channel serves the winner. No
+    report is ever posted."""
+
+    async def run() -> None:
+        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            for prompt in ("first", "second"):
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "delivery"},
+                    json={"messages": [{"role": "user", "content": prompt}]},
+                )
+                assert response.status == 200
+                await response.read()
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+                if response.status == 200:
+                    manifest = await response.json()
+                    assert manifest["gate"]["published"] is True
+                    assert "marker rules" in manifest["files"]["pi-agent/AGENTS.md"]
+                    break
+                assert response.status == 404
+                await response.read()
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("record-driven step did not publish")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
         finally:
             await client.close()
 

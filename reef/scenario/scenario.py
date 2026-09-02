@@ -14,7 +14,7 @@ from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.checkpoint_strategy import CheckpointStrategy
-from reef.scenario.commit_log import CommitLog
+from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
 from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_metadata_for
 from reef.surface.base import Surface
@@ -24,7 +24,7 @@ from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class Scenario:
-    """Scenario aggregate owning one immutable recipe binding and release chain."""
+    """Scenario aggregate owning one runtime binding and release chain."""
 
     def __init__(
         self,
@@ -38,6 +38,7 @@ class Scenario:
         scenario_step: int = 0,
         process_id: str | None = None,
         commit_log: CommitLog | None = None,
+        recovered_head_record: CommitRecord | None = None,
     ) -> None:
         self._name = name
         self._binding = binding
@@ -53,15 +54,12 @@ class Scenario:
             trainer=trainer,
             scenario_step=scenario_step,
             commit_log=commit_log,
+            recovered_head_record=recovered_head_record,
         )
 
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def recipe(self) -> str:
-        return self._binding.name
 
     @property
     def runtime(self) -> InferenceRuntime | None:
@@ -147,6 +145,11 @@ class Scenario:
         return self._commit_protocol.commit_log
 
     @property
+    def commit_status(self) -> Mapping[str, Any]:
+        """The non-blocking step and durable training-outcome snapshot."""
+        return self._commit_protocol.commit_status
+
+    @property
     def committed_training_job_id(self) -> str | None:
         """Training-job identity proven by the current durable commit."""
         with self._commit_protocol.lock:
@@ -216,7 +219,6 @@ class Scenario:
     def to_snapshot_metadata(self) -> dict[str, object]:
         return snapshot_metadata_for(
             name=self.name,
-            recipe=self.recipe,
             base_artifact=self.repository.base_artifact,
             scenario_step=self.scenario_step,
         )

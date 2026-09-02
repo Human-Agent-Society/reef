@@ -38,8 +38,10 @@ How a recipe is selected
 ------------------------
 
 A deployment serves exactly one recipe, named by ``reef.recipe`` in its config.
-Every scenario it creates binds to that recipe, permanently. Requests never name
-a recipe. The scenario header is the only routing a caller provides.
+Every scenario it creates uses that recipe. Requests never name a recipe, and
+scenario snapshots do not store one. The scenario header is the only routing a
+caller provides. The artifact repository is therefore deployment-owned: do not
+point deployments configured with different recipes at the same repository.
 
 .. code:: yaml
 

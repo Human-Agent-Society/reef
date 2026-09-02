@@ -2,7 +2,7 @@
 
 A scenario registration lives in the artifact backend's metadata under
 ``SCENARIO_SNAPSHOT_METADATA_KEY``. The snapshot pins the durable binding
-(scenario name, recipe, base artifact) plus enough recovery state
+(scenario name and base artifact) plus enough recovery state
 (scenario step, algorithm state, record-consumption progress) for a
 checkpoint to resume training after a crash. This module is the format
 counterpart of ``commit_log.py``: the log journals every commit, the
@@ -12,6 +12,7 @@ snapshot summarizes the last checkpointed one.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -68,7 +69,6 @@ class ScenarioSnapshot:
     """Parsed, validated scenario registration metadata."""
 
     scenario: str
-    recipe: str
     base_artifact: ArtifactRef
     scenario_step: int
     algorithm_state: Mapping[str, Any] | None
@@ -76,12 +76,12 @@ class ScenarioSnapshot:
     training_job_id: str | None = None
     operation: str | None = None
     rollback_target_release_id: str | None = None
+    metrics: Mapping[str, Any] | None = None
 
 
 def snapshot_metadata_for(
     *,
     name: str,
-    recipe: str,
     base_artifact: ArtifactRef,
     scenario_step: int = 0,
     algorithm_state: Mapping[str, Any] | None = None,
@@ -94,7 +94,6 @@ def snapshot_metadata_for(
     metadata: dict[str, object] = {
         "format": SCENARIO_SNAPSHOT_KIND,
         "scenario": name,
-        "recipe": recipe,
         "scenario_step": scenario_step,
         "base_artifact": encode_artifact_ref(base_artifact),
         "operation": operation,
@@ -118,6 +117,8 @@ def snapshot_metadata_for(
         }
         if prepared.training_job_id is not None:
             metadata["training_job_id"] = prepared.training_job_id
+        if prepared.metrics is not None:
+            metadata["metrics"] = deepcopy(dict(prepared.metrics))
     return metadata
 
 
@@ -125,11 +126,8 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
     if value.get("format") != SCENARIO_SNAPSHOT_KIND:
         raise ValueError(f"unsupported scenario snapshot format: {value.get('format')!r}")
     scenario = value.get("scenario")
-    recipe = value.get("recipe")
     if not isinstance(scenario, str) or not scenario:
         raise ValueError("scenario snapshot requires scenario")
-    if not isinstance(recipe, str) or not recipe:
-        raise ValueError("scenario snapshot requires recipe")
     raw_base = value.get("base_artifact")
     if not isinstance(raw_base, Mapping):
         raise ValueError("scenario snapshot requires base_artifact")
@@ -154,6 +152,11 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
     training_job_id = value.get("training_job_id")
     if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
         raise ValueError("scenario snapshot training_job_id must be a non-empty string or null")
+    metrics = value.get("metrics")
+    if metrics is not None:
+        if not isinstance(metrics, Mapping):
+            raise ValueError("scenario snapshot metrics must be an object or null")
+        metrics = MappingProxyType(deepcopy(dict(metrics)))
     operation = value.get("operation")
     rollback_target_release_id = value.get("rollback_target_release_id")
     if operation is not None and operation not in ("training", "rollback"):
@@ -167,12 +170,12 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
         raise ValueError("non-rollback scenario snapshot cannot carry rollback_target_release_id")
     return ScenarioSnapshot(
         scenario=scenario,
-        recipe=recipe,
         base_artifact=base_artifact,
         scenario_step=scenario_step,
         algorithm_state=algorithm_state,
         record_progress=record_progress,
         training_job_id=training_job_id,
+        metrics=metrics,
         operation=operation,
         rollback_target_release_id=rollback_target_release_id,
     )

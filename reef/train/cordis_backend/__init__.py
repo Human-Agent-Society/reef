@@ -33,6 +33,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, run_episode
+from reef.harness.executor import EpisodeExecutor, LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
@@ -61,6 +62,59 @@ class HarnessCandidate(UpdateCandidate):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+
+
+class _BudgetedBinding(ModelBinding):
+    """A ModelBinding that delegates ``chat`` to a wrapped binding under a
+    shared per-step call budget.
+
+    A subclass so the proposer still receives ModelBinding values, but it
+    holds the real binding and forwards to its ``chat`` (never the base
+    implementation), so a method's own binding behavior is preserved. The
+    shared counter is a mutable one-element list so every binding in the set
+    decrements the same budget.
+    """
+
+    _inner: ModelBinding
+    _spent: list[int]
+    _cap: int
+
+    def __init__(self, inner: ModelBinding, spent: list[int], cap: int) -> None:
+        super().__init__(
+            base_url=inner.base_url,
+            model=inner.model,
+            api_key=inner.api_key,
+            api=inner.api,
+            timeout_s=inner.timeout_s,
+        )
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_spent", spent)
+        object.__setattr__(self, "_cap", cap)
+
+    def chat(self, *args: Any, **kwargs: Any) -> str:
+        if self._spent[0] >= self._cap:
+            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
+        self._spent[0] += 1
+        return self._inner.chat(*args, **kwargs)
+
+
+def _budgeted_bindings(models: ModelBindings, cap: int) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares one per-step budget.
+
+    With ``cap`` 0 the bindings pass through unchanged. The counter is per
+    prepare_step call, so a cap bounds one step's model bill, never the
+    campaign's.
+    """
+    if not cap:
+        return models
+    spent: list[int] = [0]
+
+    def wrap(binding: ModelBinding) -> ModelBinding:
+        return _BudgetedBinding(binding, spent, cap)
+
+    return ModelBindings(
+        served=wrap(models.served), named={name: wrap(models[name]) for name in models if name != "served"}
+    )
 
 
 class ScoreComparisonSelector(CandidateSelector):
@@ -134,6 +188,13 @@ class CordisBackend(TrainingBackend):
         tasks: tuple[str, ...],
         models: ModelBindings | ModelBinding,
         binary: str | None = None,
+        episode_timeout_s: float = 600.0,
+        episode_repeats: int = 1,
+        forbid_residue: bool = False,
+        max_steps: int = 0,
+        max_failure_streak: int = 0,
+        max_model_calls_per_step: int = 0,
+        executor: EpisodeExecutor | None = None,
         seed: tuple[Mapping[str, Any], ...] = (),
         episode_workers: int = 1,
     ) -> None:
@@ -159,8 +220,34 @@ class CordisBackend(TrainingBackend):
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
+        if (
+            isinstance(episode_timeout_s, bool)
+            or not isinstance(episode_timeout_s, (int, float))
+            or episode_timeout_s <= 0
+        ):
+            raise ValueError("episode_timeout_s must be a positive number")
+        if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
+            raise ValueError("episode_repeats must be an integer of at least 1")
+        if not isinstance(forbid_residue, bool):
+            raise ValueError("forbid_residue must be a boolean")
+        for label, value in (
+            ("max_steps", max_steps),
+            ("max_failure_streak", max_failure_streak),
+            ("max_model_calls_per_step", max_model_calls_per_step),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         self._binary = binary
         self._episode_workers = episode_workers
+        self._episode_timeout_s = float(episode_timeout_s)
+        self._episode_repeats = episode_repeats
+        self._forbid_residue = forbid_residue
+        self._max_steps = max_steps
+        self._max_failure_streak = max_failure_streak
+        self._max_model_calls_per_step = max_model_calls_per_step
+        # Preflighted at build (recipe.build), so a hosted deployment that
+        # requires the sandbox fails to start, not at the first episode.
+        self._executor = executor or LocalExecutor()
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -223,11 +310,29 @@ class CordisBackend(TrainingBackend):
         carried = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
+        # The budgets are circuit breakers, not schedulers: a skipped step
+        # commits its reason and consumes the batch, so a runaway loop stops
+        # burning episodes and model calls instead of queueing forever.
+        if self._max_steps and steps > self._max_steps:
+            return PreparedStep.skipped(
+                state={"steps": steps, "entries": self._entries(), **carried},
+                metrics={**metrics, "skipped": f"step budget of {self._max_steps} exhausted"},
+            )
+        streak = int(state.get("failure_streak", 0))
+        if self._max_failure_streak and streak >= self._max_failure_streak:
+            return PreparedStep.skipped(
+                state={"steps": steps, "entries": self._entries(), **carried},
+                metrics={
+                    **metrics,
+                    "skipped": f"failure streak breaker open after {streak} consecutive rejections",
+                },
+            )
+        models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
         if self._propose_accepts_manifest:
             manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
-            proposal = self._propose(self._nodes(), batch.samples, self._models, manifest=manifest)
+            proposal = self._propose(self._nodes(), batch.samples, models, manifest=manifest)
         else:
-            proposal = self._propose(self._nodes(), batch.samples, self._models)
+            proposal = self._propose(self._nodes(), batch.samples, models)
         mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         if not mutations:
             return PreparedStep.skipped(
@@ -282,20 +387,30 @@ class CordisBackend(TrainingBackend):
         # so the published artifact carries no endpoint or credential.
         candidate_files = self._render_for_episode(candidate.candidate_entries)
         current_files = self._render_for_episode(candidate.current_entries)
-        # Every episode of both sides is independent work in its own root, so
-        # with more than one worker they all run in one pool, interleaved:
-        # a task set of forty-five costs one wave, not ninety turns, and a
-        # drifting upstream skews both sides alike instead of one after the
-        # other. Results keep task order either way.
-        runs = [(candidate_files, task) for task in self._tasks] + [(current_files, task) for task in self._tasks]
-        if self._episode_workers > 1:
-            with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(runs))) as pool:
-                scored = list(pool.map(lambda run: self._run_and_score(*run), runs))
+        # Episodes interleave candidate and current inside each pairing, so
+        # anything that drifts during the run (upstream load, rate limits)
+        # lands on both sides of a pair instead of one whole side. A repeat
+        # is one more pairing of the same task; the selector compares the
+        # vectors positionally, so every pairing tallies on its own. Each
+        # episode is independent work in its own root, so with more than one
+        # worker the pairings run in one pool - a large task set costs one
+        # wave instead of a long turn-taking pass - and the results are read
+        # back in submission order either way.
+        pairings = [
+            (files, task)
+            for task in self._tasks
+            for _ in range(self._episode_repeats)
+            for files in (candidate_files, current_files)
+        ]
+        if self._episode_workers > 1 and len(pairings) > 1:
+            with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(pairings))) as pool:
+                scored = list(pool.map(lambda pairing: self._run_and_score(*pairing), pairings))
         else:
-            scored = [self._run_and_score(files, task) for files, task in runs]
-        candidate_runs, current_runs = tuple(scored[: len(self._tasks)]), tuple(scored[len(self._tasks) :])
-        candidate_scores = tuple(score for score, _ in candidate_runs)
-        current_scores = tuple(score for score, _ in current_runs)
+            scored = [self._run_and_score(files, task) for files, task in pairings]
+        candidate_runs = scored[0::2]
+        current_runs = scored[1::2]
+        candidate_scores = tuple(score for score, _, _ in candidate_runs)
+        current_scores = tuple(score for score, _, _ in current_runs)
         return EvaluationResult(
             evaluator="harness_episode_pairs",
             evaluator_version="1",
@@ -304,9 +419,12 @@ class CordisBackend(TrainingBackend):
                 "current_scores": current_scores,
                 # Failure observations ride the evaluation so settlement can
                 # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(f.to_dict() for _, f in candidate_runs if f is not None),
-                "current_failures": tuple(f.to_dict() for _, f in current_runs if f is not None),
+                "candidate_failures": tuple(f.to_dict() for _, f, _ in candidate_runs if f is not None),
+                "current_failures": tuple(f.to_dict() for _, f, _ in current_runs if f is not None),
                 "episode_failures": sum(score is None for score in candidate_scores + current_scores),
+                "episode_repeats": self._episode_repeats,
+                "candidate_residue": sum(residue for _, _, residue in candidate_runs),
+                "current_residue": sum(residue for _, _, residue in current_runs),
                 "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
                 "current_score": float(sum(score for score in current_scores if score is not None)),
             },
@@ -345,7 +463,13 @@ class CordisBackend(TrainingBackend):
             "persisting": len(manifest.persisting),
             "fixed": len(manifest.fixed),
         }
-        state = {**prepared.state, "failure_manifest": manifest.to_state()}
+        streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
+        metrics["gated_against"] = {
+            "model": self._models.served.model,
+            "adapter": self._descriptor.name,
+            "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
+        }
+        state = {**prepared.state, "failure_manifest": manifest.to_state(), "failure_streak": streak}
 
         metrics.update(
             {
@@ -391,25 +515,41 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
-    def _run_and_score(self, files: Mapping[str, str], task: str) -> tuple[float | None, FailureObservation | None]:
+    def _run_and_score(
+        self, files: Mapping[str, str], task: str
+    ) -> tuple[float | None, FailureObservation | None, int]:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A nonzero
-        exit still scores, as before, and is observed alongside the score."""
+        exit still scores, as before, and is observed alongside the score.
+        The third element counts files the episode left outside the cleanup
+        whitelist; with ``forbid_residue`` a littering episode scores as one
+        that could not run."""
         try:
-            result = run_episode(self._descriptor, files, task, binary=self._binary)
+            result = run_episode(
+                self._descriptor,
+                files,
+                task,
+                binary=self._binary,
+                timeout=self._episode_timeout_s,
+                executor=self._executor,
+            )
         except EpisodeError as error:
-            return None, FailureObservation(task=task, stage="launch", cause=str(error))
+            return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0
         except TrajectoryError as error:
-            return None, FailureObservation(task=task, stage="trajectory", cause=str(error))
+            return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0
+        residue = len(result.residue)
+        if residue and self._forbid_residue:
+            cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
+            return None, FailureObservation(task=task, stage="residue", cause=cause), residue
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return score, FailureObservation(task=task, stage="exit", cause=cause)
-        return score, None
+            return score, FailureObservation(task=task, stage="exit", cause=cause), residue
+        return score, None, residue
 
     def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
         return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)

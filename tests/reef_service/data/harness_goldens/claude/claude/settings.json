@@ -1,0 +1,5 @@
+{
+  "defaultModel": "qwen/qwen3-8b",
+  "defaultProvider": "qwen",
+  "includeCoAuthoredBy": false
+}

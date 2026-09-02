@@ -16,9 +16,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
+from reef.harness.executor import EpisodeExecutor, build_executor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.version_check import version_check_entry
 from reef.observability import ExperimentLogger
@@ -29,7 +31,7 @@ from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
-from reef.train.cordis_backend.processor import CordisProcessor
+from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
@@ -130,6 +132,13 @@ class CordisRecipe(Recipe):
     tasks: tuple[str, ...]
     adapter: str = "pi"
     binary: str | None = None
+    episode_timeout_s: float = 600.0
+    episode_repeats: int = 1
+    forbid_residue: bool = False
+    max_steps: int = 0
+    max_failure_streak: int = 0
+    max_model_calls_per_step: int = 0
+    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -137,6 +146,7 @@ class CordisRecipe(Recipe):
     episode_workers: int = 1
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
+    batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
 
     @property
@@ -154,6 +164,19 @@ class CordisRecipe(Recipe):
             raise ValueError("batch_size must be positive")
         if self.episode_workers < 1:
             raise ValueError("episode_workers must be positive")
+        if self.batch_policy not in ("reports", "records"):
+            raise ValueError("batch_policy must be 'reports' or 'records'")
+        if self.episode_timeout_s <= 0:
+            raise ValueError("episode_timeout_s must be positive")
+        if self.episode_repeats < 1:
+            raise ValueError("episode_repeats must be at least 1")
+        for label, value in (
+            ("max_steps", self.max_steps),
+            ("max_failure_streak", self.max_failure_streak),
+            ("max_model_calls_per_step", self.max_model_calls_per_step),
+        ):
+            if value < 0:
+                raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
 
@@ -168,6 +191,25 @@ class CordisRecipe(Recipe):
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
+        timeout = evolution.get("episode_timeout_s", 600.0)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
+        repeats = evolution.get("episode_repeats", 1)
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
+            raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+        forbid_residue = evolution.get("forbid_residue", False)
+        if not isinstance(forbid_residue, bool):
+            raise RecipeConfigError("evolution.forbid_residue must be a boolean")
+        try:
+            executor = build_executor(evolution)
+        except ReefError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        budgets: dict[str, int] = {}
+        for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step"):
+            value = evolution.get(label, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RecipeConfigError(f"evolution.{label} must be an integer of at least 0 (0 disables the limit)")
+            budgets[label] = value
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -218,6 +260,11 @@ class CordisRecipe(Recipe):
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
             "binary": binary,
+            "episode_timeout_s": float(timeout),
+            "episode_repeats": repeats,
+            "forbid_residue": forbid_residue,
+            **budgets,
+            "executor": executor,
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -259,14 +306,22 @@ class CordisRecipe(Recipe):
             tasks=self.tasks,
             models=self.model_bindings(),
             binary=self.binary,
+            episode_timeout_s=self.episode_timeout_s,
+            episode_repeats=self.episode_repeats,
+            forbid_residue=self.forbid_residue,
+            max_steps=self.max_steps,
+            max_failure_streak=self.max_failure_streak,
+            max_model_calls_per_step=self.max_model_calls_per_step,
             seed=self.seed,
             episode_workers=self.episode_workers,
         )
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
+            processor_factory=lambda context: (
+                RecordDrivenTraceProcessor(context.with_config({"batch_size": self.batch_size}))
+                if self.batch_policy == "records"
+                else CordisProcessor(context.with_config({"batch_size": self.batch_size, "max_score": self.max_score}))
             ),
             training_backend=training_backend,
             candidate_evaluator=DefaultCandidateEvaluationPlugin(training_backend, self.candidate_selector),

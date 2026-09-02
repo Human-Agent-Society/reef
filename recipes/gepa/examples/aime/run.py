@@ -47,7 +47,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
-from reef.recipe.registry import RecipeRegistry, build_recipe
+from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
@@ -160,7 +160,7 @@ class RunService:
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.dispatcher = Dispatcher(
-            RecipeRegistry({recipe_name: recipe}),
+            recipe,
             InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             agent_record_dir=run_dir / "reef-data",
@@ -182,7 +182,7 @@ class RunService:
     def start(self) -> None:
         # Scenario creation (or durable recovery from the commit log) happens
         # before any request lands.
-        self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="reef-embedded", daemon=True)
         self._thread.start()
@@ -212,12 +212,12 @@ class RunService:
         return ModelBinding(self.base_url, os.environ["REEF_MODEL"], api_key=EMBEDDED_KEY, timeout_s=EPISODE_TIMEOUT_S)
 
     def records(self) -> RecordStore:
-        scenario = self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
         return scenario.records
 
     def training_step(self) -> int:
-        current = self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        current = self.dispatcher.get_or_create_scenario(self.scenario)
         assert current is not None
         return current.scenario_step
 
@@ -288,7 +288,7 @@ def report(service: RunService, client: Any, payload: dict[str, Any]) -> None:
     from reef_client import ReefClientError
 
     try:
-        client.report(service.scenario, dict(payload), recipe=service.recipe_name)
+        client.report(service.scenario, dict(payload))
     except ReefClientError as exc:
         if exc.status != 409:
             raise

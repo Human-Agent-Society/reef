@@ -19,7 +19,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
-from reef.recipe.registry import RecipeRegistry, recipe_class_for
+from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation, MutationError, ScoreComparisonSelector
@@ -86,6 +86,23 @@ def batch() -> TraceBatch:
 # The deployment's model binding: where episodes and proposals reach a model.
 # It is rendered into episodes at run time and never enters a seed or a tree.
 MODEL = ModelBinding(base_url="http://localhost:8000", model="qwen3-8b", api_key="dummy")
+
+
+class _ChatBinding:
+    """A served binding whose chat returns a canned reply; base_url/model/api
+    mirror MODEL so compose_nodes renders."""
+
+    base_url = MODEL.base_url
+    model = MODEL.model
+    api_key = MODEL.api_key
+    api = MODEL.api
+    timeout_s = MODEL.timeout_s
+
+    def chat(self, *args, **kwargs) -> str:
+        return "ok"
+
+    def compose_nodes(self, descriptor):
+        return MODEL.compose_nodes(descriptor)
 
 
 def runtime() -> InferenceProxyRuntime:
@@ -585,9 +602,9 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("leak-476", built.name)
+        scenario = dispatcher.get_or_create_scenario("leak-476")
         assert scenario is not None
         _report_once(scenario, "leak-476", "1")
         result = scenario.prepare_training_step()
@@ -602,9 +619,9 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
-    restarted = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        recovered = restarted.get_or_create_scenario("leak-476", built.name)
+        recovered = restarted.get_or_create_scenario("leak-476")
         assert recovered is not None
         assert recovered.trainer.state["entries"] == [SEED_MODELS, SEED_SETTINGS]
         _report_once(recovered, "leak-476", "2")
@@ -656,9 +673,9 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("leak-476-disabled", built.name)
+        scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
         assert scenario is not None
         _report_once(scenario, "leak-476-disabled", "1")
         result = scenario.prepare_training_step()
@@ -686,9 +703,9 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("pregate-476", built.name)
+        scenario = dispatcher.get_or_create_scenario("pregate-476")
         assert scenario is not None
         _report_once(scenario, "pregate-476", "1")
         result = scenario.prepare_training_step()
@@ -705,9 +722,9 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
-    restarted = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        recovered = restarted.get_or_create_scenario("pregate-476", built.name)
+        recovered = restarted.get_or_create_scenario("pregate-476")
         assert recovered is not None
         _report_once(recovered, "pregate-476", "2")
         with pytest.raises(ValueError, match=r"apiKey.*inline credential.*rotate"):
@@ -873,6 +890,293 @@ def test_adapter_without_model_binding_refuses_boot(tmp_path: Path) -> None:
             models=MODEL,
             binary=str(make_binary(tmp_path)),
         )
+
+
+def test_gate_knobs_reach_the_episodes_and_interleave_the_sides(tmp_path: Path, monkeypatch) -> None:
+    """episode_timeout_s reaches every run_episode call, a repeat is one more
+    pairing of the same task, and episodes alternate candidate and current
+    inside each pairing instead of running batched by side."""
+    sides: list[str] = []
+    timeouts: list[float] = []
+    original = reef_cordis_backend.run_episode
+
+    def spy(descriptor, files, prompt, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
+        return original(descriptor, files, prompt, **kwargs)
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        episode_timeout_s=5.0,
+        episode_repeats=2,
+    )
+    result = run_backend_step(b, batch(), b.initial_state())
+
+    assert timeouts == [5.0, 5.0, 5.0, 5.0]
+    assert sides == ["candidate", "current", "candidate", "current"]
+    assert result.metrics["episode_repeats"] == 2
+    assert len(result.metrics["selection"]["evaluation"]["metrics"]["candidate_scores"]) == 2
+
+
+def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: Path) -> None:
+    """Files an episode leaves outside the cleanup whitelist are counted into
+    the evaluation; with forbid_residue a littering episode scores as one
+    that could not run, so it cannot win."""
+    litterer = tmp_path / "fake-pi-littering"
+    litterer.write_text(
+        PI_FAKE.replace(
+            '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")',
+            '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")\n'
+            '(agent_dir.parent / "junk.txt").write_text("litter")',
+        )
+    )
+    litterer.chmod(0o755)
+
+    def build(forbid: bool) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(
+                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+            ),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(litterer),
+            forbid_residue=forbid,
+        )
+
+    counted = run_backend_step(build(False), batch(), build(False).initial_state())
+    assert counted.metrics["candidate_residue"] == 1
+    assert counted.metrics["current_residue"] == 1
+    assert counted.metrics["episode_failures"] == 0
+
+    forbidden = run_backend_step(build(True), batch(), build(True).initial_state())
+    assert forbidden.metrics["episode_failures"] == 2
+    assert forbidden.metrics["selected"] is False
+    evaluation = forbidden.metrics["selection"]["evaluation"]["metrics"]
+    assert {f["stage"] for f in evaluation["candidate_failures"]} == {"residue"}
+    assert {f["stage"] for f in evaluation["current_failures"]} == {"residue"}
+
+
+def test_recipe_parses_and_validates_the_episode_gate_knobs(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_gate_knobs.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_gate_knobs:propose",
+                "evaluate": "demo_gate_knobs:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    built = CordisRecipe.from_environment(
+        {}, config=config(episode_timeout_s=5, episode_repeats=2, forbid_residue=True)
+    )
+    assert built.episode_timeout_s == 5.0
+    assert built.episode_repeats == 2
+    assert built.forbid_residue is True
+
+    defaults = CordisRecipe.from_environment({}, config=config())
+    assert defaults.episode_timeout_s == 600.0
+    assert defaults.episode_repeats == 1
+    assert defaults.forbid_residue is False
+
+    with pytest.raises(RecipeConfigError, match=r"episode_timeout_s must be a positive number"):
+        CordisRecipe.from_environment({}, config=config(episode_timeout_s=0))
+    with pytest.raises(RecipeConfigError, match=r"episode_repeats must be an integer"):
+        CordisRecipe.from_environment({}, config=config(episode_repeats=0))
+    with pytest.raises(RecipeConfigError, match=r"forbid_residue must be a boolean"):
+        CordisRecipe.from_environment({}, config=config(forbid_residue="yes"))
+
+
+def test_backend_rejects_invalid_gate_knobs(tmp_path: Path) -> None:
+    def build(**kwargs) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(lambda n, s, m: None),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match="episode_timeout_s must be a positive number"):
+        build(episode_timeout_s=0)
+    with pytest.raises(ValueError, match="episode_repeats must be an integer"):
+        build(episode_repeats=0)
+    with pytest.raises(ValueError, match="forbid_residue must be a boolean"):
+        build(forbid_residue="no")
+
+
+def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch) -> None:
+    """data.batch_policy records swaps the processor; the default stays the
+    reported window."""
+    module = tmp_path / "demo_batch_policy.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(policy: str | None):
+        data = {} if policy is None else {"batch_policy": policy}
+        return {
+            "data": data,
+            "evolution": {
+                "propose": "demo_batch_policy:propose",
+                "evaluate": "demo_batch_policy:evaluate",
+                "tasks": ["task one"],
+                "binary": str(make_binary(tmp_path)),
+            },
+        }
+
+    records = CordisRecipe.from_environment(
+        {}, config=config("records"), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
+    )
+    assert records.batch_policy == "records"
+    trainer = records.build("demo", RecordStore())
+    assert type(trainer.processor).__name__ == "RecordDrivenTraceProcessor"
+
+    reported = CordisRecipe.from_environment(
+        {}, config=config(None), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
+    )
+    assert reported.batch_policy == "reports"
+    trainer = reported.build("demo", RecordStore())
+    assert type(trainer.processor).__name__ == "CordisProcessor"
+
+    with pytest.raises(RecipeConfigError, match="batch_policy must be 'reports' or 'records'"):
+        CordisRecipe.from_environment({}, config=config("sometimes"))
+
+
+def test_step_budget_skips_further_steps(tmp_path: Path) -> None:
+    """max_steps opens after its count: the step commits a skip reason and
+    proposes nothing more, so the loop stops burning episodes."""
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "x"}})),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        max_steps=1,
+    )
+    state = b.initial_state()
+    first = run_backend_step(b, batch(), state)
+    second = run_backend_step(b, batch(), first.state)
+    assert "step budget of 1 exhausted" in second.metrics["skipped"]
+
+
+def test_failure_streak_breaker_opens_after_consecutive_rejections(tmp_path: Path) -> None:
+    """A rejected step increments the streak in its committed state; once the
+    state carries the cap, the next prepare skips before proposing."""
+    # A candidate that scores no better than the empty current tree loses.
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "nothing of note"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        max_failure_streak=1,
+    )
+    first = run_backend_step(b, batch(), b.initial_state())
+    assert first.metrics["selected"] is False
+    assert first.state["failure_streak"] == 1
+    second = run_backend_step(b, batch(), first.state)
+    assert "failure streak breaker open" in second.metrics["skipped"]
+
+
+def test_model_call_budget_caps_the_proposer(tmp_path: Path) -> None:
+    """max_model_calls_per_step bounds one step's chat calls; the cap raises
+    inside propose, which the backend surfaces as the step error."""
+    calls = {"n": 0}
+
+    def greedy(nodes, samples, models):
+        while True:
+            models.served.chat([{"role": "user", "content": "hi"}])
+            calls["n"] += 1
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(greedy),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=ModelBindings(served=_ChatBinding()),
+        binary=str(make_binary(tmp_path)),
+        max_model_calls_per_step=3,
+    )
+    with pytest.raises(RuntimeError, match="model call budget of 3"):
+        run_backend_step(b, batch(), b.initial_state())
+    assert calls["n"] == 3
+
+
+def test_settle_records_what_the_gate_ran_against(tmp_path: Path) -> None:
+    b = backend(tmp_path, lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}))
+    result = run_backend_step(b, batch(), b.initial_state())
+    stamp = result.metrics["gated_against"]
+    assert stamp["model"] == MODEL.model
+    assert stamp["adapter"] == "pi"
+    assert stamp["adapter_version"] == get_adapter("pi").install.version
+
+
+def test_backend_rejects_negative_budgets(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_steps must be an integer of at least 0"):
+        CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(lambda n, s, m: None),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            max_steps=-1,
+        )
+
+
+def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> None:
+    """evolution.executor selects the executor; local is the default, and a
+    sandbox that cannot isolate refuses at recipe build."""
+    module = tmp_path / "demo_executor.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_executor:propose",
+                "evaluate": "demo_executor:evaluate",
+                "tasks": ["task one"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    default = CordisRecipe.from_environment({}, config=config())
+    assert type(default.executor).__name__ == "LocalExecutor"
+
+    local = CordisRecipe.from_environment({}, config=config(executor="local"))
+    assert type(local.executor).__name__ == "LocalExecutor"
+
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
+    with pytest.raises(RecipeConfigError, match="bubblewrap"):
+        CordisRecipe.from_environment({}, config=config(executor="sandbox"))
 
 
 def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path, monkeypatch) -> None:

@@ -22,7 +22,7 @@ export function DocsPage({ doc, navigation, previous, next }: { doc: Doc; naviga
   return (
     <div className="docs-layout">
       <Sidebar navigation={navigation} />
-      <main className="docs-main">
+      <main id="main-content" className="docs-main" tabIndex={-1}>
         <div className="doc-context" aria-label="Breadcrumb">
           <Link href="/docs">Docs</Link>
           <ChevronRight size={13} aria-hidden="true" />

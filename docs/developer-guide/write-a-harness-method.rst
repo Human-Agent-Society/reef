@@ -85,6 +85,19 @@ This method adds a rules node the first time a batch contains a failure:
                return message["content"]
        return None
 
+Two batching modes
+~~~~~~~~~~~~~~~~~~
+
+Evolution batches in one of two modes, selected by ``data.batch_policy``.
+The default, ``reports``, batches explicitly scored reports through the
+score window; use it whenever the deployment has an outcome signal (a
+grader, a test result, a user action), because a measured result beats
+model self judgment. ``records`` batches recorded inference traffic alone,
+every ``batch_size`` requests, so a deployment that only serves still
+evolves. Samples batched this way carry ``score=None``, and ``propose``
+must handle unscored samples; the SkillClaw night backfills its own
+judgment over them and is the worked instance.
+
 Configure it
 ~~~~~~~~~~~~
 

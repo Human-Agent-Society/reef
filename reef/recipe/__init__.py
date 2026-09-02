@@ -7,9 +7,8 @@ weights or the harness*. This package holds everything a method binds to:
   ``build``, ``build_artifact_validator``, ``build_surface``, the
   ``CheckpointStrategy``) and ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (step preparer, loss family, data processor).
-- ``registry`` — dotted class resolution (``recipe_class_for``),
-  ``build_named_recipe`` for a deployment preset, and
-  ``RecipeRegistry``, the closed instance table scenarios bind to.
+- ``registry`` — dotted class resolution (``recipe_class_for``) and
+  ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
   for one setting (YAML key, env fallback, typed parser).
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
@@ -38,16 +37,12 @@ and never ``reef.train.slime_backend`` at module scope.
 from reef.recipe.base import Recipe, WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
-from reef.recipe.errors import RecipeConfigError, ScenarioRecipeConflict, ScenarioRecipeError, UnknownScenarioRecipe
-from reef.recipe.registry import RecipeRegistry, build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 
 __all__ = [
     "Recipe",
     "RecipeConfigError",
-    "RecipeRegistry",
-    "ScenarioRecipeConflict",
-    "ScenarioRecipeError",
-    "UnknownScenarioRecipe",
     "WeightTrainingRecipe",
     "WeightTrainingSpec",
     "build_named_recipe",

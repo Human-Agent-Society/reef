@@ -427,7 +427,7 @@ class RequestService:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
         selected_backend = backend if backend is not None else scenario.inference_backend
         if selected_backend is None:
-            raise RecipeConfigError(f"recipe {scenario.recipe!r} has no inference backend")
+            raise RecipeConfigError("the served recipe has no inference backend")
         ref = scenario.current_artifact_ref()
         return PreparedInference(
             parsed=parsed,
@@ -535,18 +535,13 @@ class RequestService:
         """Resolve a file-serving scenario, optionally creating a randomly named one."""
         normalized = {key.lower(): value.strip() for key, value in headers.items()}
         if create_if_missing and not normalized.get(SCENARIO_HEADER):
-            candidates = self._dispatcher.file_recipe_names()
-            if not candidates:
+            if not self._dispatcher.recipe_has_files():
                 raise ArtifactNotFound("no harness recipes are available")
-            if len(candidates) > 1:
-                raise ReefError(f"multiple harness recipes are available ({', '.join(candidates)})")
-            recipe = candidates[0]
 
             scenario_name = _random_harness_scenario_name()
             scenario = self._dispatcher.get_or_create_scenario(
                 scenario_name,
-                recipe,
-                release_id,
+                release_id=release_id,
                 allow_implicit_creation=True,
             )
             if scenario is None:
@@ -556,7 +551,7 @@ class RequestService:
         parsed = self._require_inference(headers)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
-        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, None, parsed.release_id)
+        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
         if scenario.surface.files is None:

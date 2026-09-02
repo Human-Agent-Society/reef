@@ -4,10 +4,11 @@
   "buildCommand": "npm run build",
   "git": {
     "deploymentEnabled": {
-      "*": false,
+      "**": false,
       "main": true
     }
   },
+  "ignoreCommand": "[ \"$VERCEL_GIT_COMMIT_REF\" != \"main\" ]",
   "redirects": [
     {
       "source": "/docs/concepts",

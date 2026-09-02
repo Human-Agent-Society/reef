@@ -30,6 +30,18 @@ from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
+#: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
+#: prefixes and key blocks that are never legitimate tree content, chosen so
+#: prose about keys (or the tutorial's sk-local placeholder) cannot trip it.
+_SECRET_TEXT = re.compile(
+    r"(?:sk-[A-Za-z0-9_-]{16,}"
+    r"|ghp_[A-Za-z0-9]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|gho_[A-Za-z0-9]{20,}"
+    r"|xox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
+)
 
 
 def _holds_literal(value: Any) -> bool:
@@ -106,30 +118,46 @@ def config_node(ctx: Any, config: Any) -> None:
     _reject_inline_secret(data, "data")
 
 
+def _reject_secret_shaped_text(text: str, where: str) -> None:
+    """Refuse a node body carrying a credential-shaped literal.
+
+    The same boundary as :func:`_reject_inline_secret`, for the free-text
+    kinds: tree state persists verbatim, so a pasted key in a rule, skill,
+    command, or extension would outlive rotation in every commit record and
+    published artifact. The message names the field, never the value.
+    """
+    if _SECRET_TEXT.search(text):
+        raise ValueError(
+            f"{where} carries an inline credential; the composition tree never holds secrets: "
+            "set reef.upstream_api_key for the served model or "
+            "evolution.models.<name>.api_key_env for method models"
+        )
+
+
 def rules_node(ctx: Any, config: Any) -> None:
     """Context text for the adapter's rules file (AGENTS.md on both harnesses)."""
-    _require_text(_require_mapping(config), "text")
+    _reject_secret_shaped_text(_require_text(_require_mapping(config), "text"), "rules node 'text'")
 
 
 def agent_command_node(ctx: Any, config: Any) -> None:
     """A named prompt template, rendered as one markdown command file."""
     options = _require_mapping(config)
     _require_name(options)
-    _require_text(options, "text")
+    _reject_secret_shaped_text(_require_text(options, "text"), "agent_command node 'text'")
 
 
 def skill_node(ctx: Any, config: Any) -> None:
     """A named Agent Skill, rendered as ``skills/<name>/SKILL.md``."""
     options = _require_mapping(config)
     _require_name(options)
-    _require_text(options, "text")
+    _reject_secret_shaped_text(_require_text(options, "text"), "skill node 'text'")
 
 
 def code_extension_node(ctx: Any, config: Any) -> None:
     """A named code file the harness loads in-process (extension or plugin)."""
     options = _require_mapping(config)
     _require_name(options)
-    _require_text(options, "code")
+    _reject_secret_shaped_text(_require_text(options, "code"), "code_extension node 'code'")
 
 
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {

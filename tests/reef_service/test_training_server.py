@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import signal
 from pathlib import Path
 
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 
-from reef.recipe import UnknownScenarioRecipe
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
@@ -14,6 +14,27 @@ from reef.service.deploy.settings import ServiceSettings
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+
+
+class _Process:
+    """Small Popen stand-in for orchestrator lifecycle tests."""
+
+    pid = 123
+
+    def __init__(self, returncode=None, stop_on_poll=None):
+        self.returncode = returncode
+        self._stop_on_poll = stop_on_poll
+
+    def poll(self):
+        if self._stop_on_poll is not None:
+            self._stop_on_poll.set()
+        return self.returncode
+
+    def terminate(self):
+        self.returncode = -signal.SIGTERM
+
+    def wait(self, timeout=None):
+        return self.returncode
 
 
 def _example_owned(relative_path: str):
@@ -229,7 +250,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         connector=connector,
     )
 
-    assert dispatcher._registry.recipes.names == ("openclawrl",)
+    assert dispatcher._recipe.name == "openclawrl"
     assert connected == {
         "inference_url": "http://ray-head:30000",
         "actor_name": "reef-train-bridge",
@@ -257,17 +278,11 @@ def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_pa
         )
     )
 
-    registry = dispatcher._registry.recipes
-    assert registry.names == ("recipe",)
-    assert registry.served_recipe == "recipe"
-    # The deployment serves one recipe: a request-time name never materializes
-    # another method, even though a dotted resolver could have built it.
-    with pytest.raises(UnknownScenarioRecipe):
-        registry.resolve("harness_evolve")
+    assert dispatcher._recipe.name == "recipe"
 
 
 @pytest.mark.unit
-def test_build_dispatcher_uses_the_dotted_recipe_name_as_its_registry_key(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
         "factory",
@@ -283,8 +298,7 @@ def test_build_dispatcher_uses_the_dotted_recipe_name_as_its_registry_key(monkey
         environ={},
     )
 
-    assert dispatcher._registry.recipes.names == ("recipe",)
-    assert dispatcher._registry.recipes.served_recipe == "recipe"
+    assert dispatcher._recipe.name == "recipe"
 
 
 @pytest.mark.unit
@@ -304,7 +318,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
         environ={},
         connector=lambda **kwargs: StubRuntime(),
     )
-    recipe = dispatcher._registry.recipes.resolve("openclawrl")
+    recipe = dispatcher._recipe
     captured["batch_size"] = recipe.batch_size
     captured["checkpoint_strategy"] = recipe.checkpoint_strategy
 
@@ -333,7 +347,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         connector=lambda **kwargs: StubRuntime(),
     )
 
-    recipe = dispatcher._registry.recipes.resolve("openclawrl")
+    recipe = dispatcher._recipe
     assert recipe.candidate_evaluation is not None
     assert recipe.candidate_evaluation.module == evaluation["module"]
 
@@ -439,11 +453,11 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
         connector=connector,
     )
 
-    assert dispatcher._registry.recipes.names == ("sao",)
+    assert dispatcher._recipe.name == "sao"
     # The runtime connector was invoked (inference branch never connects).
     assert connected["actor_name"] == "reef-train-bridge"
     assert connected["max_staleness"] == 2
-    assert dispatcher._registry.recipes.resolve("sao").max_staleness == 2
+    assert dispatcher._recipe.max_staleness == 2
 
 
 @pytest.mark.unit
@@ -471,7 +485,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
     )
 
     assert connected.get("max_staleness", 0) == max_staleness
-    assert dispatcher._registry.recipes.resolve("openclawrl").max_staleness == max_staleness
+    assert dispatcher._recipe.max_staleness == max_staleness
 
 
 @pytest.mark.unit
@@ -538,3 +552,67 @@ def test_stack_places_the_bridge_ready_marker_under_run_dir(tmp_path: Path, monk
     assert env["REEF_BRIDGE_READY_FILE"] == str(tmp_path / "stack" / "bridge.ready")
     assert env["RAY_ADDRESS"] == "127.0.0.1:8900"
     assert env["REEF_CONFIG"] == str(tmp_path / "serve.yaml")
+
+
+@pytest.mark.unit
+def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: Path) -> None:
+    from reef.service.deploy.orchestrator import _Stack
+
+    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    process = _Process()
+    stack._procs["service"] = process
+
+    stack.shutdown(grace=0)
+
+    assert process.returncode == -signal.SIGTERM
+    assert stack.exit_code == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, returncode: int) -> None:
+    from reef.service.deploy.orchestrator import _Stack
+
+    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack._procs["service"] = _Process(returncode)
+
+    stack._watchdog()
+
+    assert stack.exit_code == 1
+
+
+@pytest.mark.unit
+def test_watchdog_does_not_reclassify_a_signal_driven_child_exit(tmp_path: Path) -> None:
+    from reef.service.deploy.orchestrator import _Stack
+
+    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    # Simulate a signal arriving after the watchdog began its polling pass but
+    # before shutdown made the child exit.
+    stack._procs["service"] = _Process(-signal.SIGTERM, stop_on_poll=stack._stopping)
+
+    stack._watchdog()
+
+    assert stack.exit_code == 0
+
+
+@pytest.mark.unit
+def test_stack_installs_signal_handlers_before_starting_watchdog(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy import orchestrator
+
+    stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
+    handlers = {}
+    started = []
+
+    monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    class Watcher:
+        def start(self):
+            assert signal.SIGINT in handlers and signal.SIGTERM in handlers
+            started.append(True)
+            stack._stopping.set()
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", lambda **kwargs: Watcher())
+
+    stack.block()
+
+    assert started == [True]
