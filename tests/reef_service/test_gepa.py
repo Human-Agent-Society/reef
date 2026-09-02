@@ -351,7 +351,9 @@ def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_episodes(tmp_p
 
     assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
     assert episodes.prompts == [TASK]  # the child only
-    assert archive.metric_calls == 1
+    # GEPA's count: the seed's validation (2 tasks), the served parent's
+    # minibatch (1, from traffic), and the child's minibatch (1).
+    assert archive.metric_calls == 4
     assert archive.pending == 1
     assert archive.candidates[1].parent == 0
     assert archive.candidates[1].minibatch_scores == [1.0]
@@ -482,7 +484,8 @@ def test_the_first_decision_records_both_sides_and_charges_both(tmp_path: Path) 
     assert (decision.policy, decision.policy_version) == ("gepa", "1")
     assert archive.candidates[1].val_scores == [1.0, 0.0]  # a failed episode is a zero, not a gap
     assert archive.candidates[0].val_scores == [0.0, 0.0]  # the seed's own first validation
-    assert (archive.served, archive.pending, archive.metric_calls) == (1, None, 4)
+    # The candidate's validation (2); the seed's was charged when it was seeded.
+    assert (archive.served, archive.pending, archive.metric_calls) == (1, None, 2)
     assert decision.metrics == {
         "candidate_val_mean": 0.5,
         "served_val_mean": 0.0,
@@ -510,7 +513,7 @@ def test_the_seed_is_validated_once(tmp_path: Path) -> None:
     archive.add({"rules": "third"}, 0, [1.0])
     selector.decide(UpdateCandidate("c2"), evaluation((0.0, 0.0), (1.0, 1.0)))
 
-    assert archive.metric_calls == 6  # 2 + 2 for the seed, then 2 for the second candidate
+    assert archive.metric_calls == 4  # 2 per validated candidate; the seed's own pass was charged at seeding
     assert archive.candidates[0].val_scores == [1.0, 1.0]
 
 
@@ -653,8 +656,10 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
     gate = result.metrics
     assert (gate["candidate_val_mean"], gate["served_val_mean"], gate["parent"]) == (1.0, 0.0, 0)
     assert (gate["archive_size"], gate["front_size"]) == (2, 1)
-    # One child minibatch episode, then the mechanism's two validation passes.
-    assert gate["metric_calls"] == 5
+    # The seed's validation (2), the served minibatch (1), the child's (1),
+    # then the candidate's validation (2): the mechanism's re-run of the
+    # served side is not a metric call.
+    assert gate["metric_calls"] == 6
     assert gate["selection"]["policy"] == "gepa"
 
     archive = json.loads((tmp_path / "gepa" / "gepa-demo.json").read_text())

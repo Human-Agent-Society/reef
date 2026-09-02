@@ -11,15 +11,15 @@ called, so the per-task scores in its evaluation are exactly GEPA's valset
 evaluation, and recording them is what updates the fronts and moves the
 served composition.
 
-Two things are cheaper here than upstream and one is dearer. The parent's
-minibatch is free when the parent is the served composition: the mechanism
-already batched that composition's real recorded traffic, scores included,
-so the proposer runs no episodes at all for it. Any other parent has to be
-re-run, because no traffic was ever served from it. Dearer: the mechanism
-re-runs the served composition over the whole validation set every evaluated
-step, so an accepted proposal costs ``2 x |tasks|`` episodes where GEPA pays
-``|valset|``. The archive counts what the method actually spends, which is
-what a budget comparison against upstream reads.
+The parent's minibatch costs no episodes when the parent is the served
+composition: the mechanism already batched that composition's real recorded
+traffic, scores included. Any other parent has to be re-run, because no
+traffic was ever served from it. The archive's metric-call count follows
+GEPA's accounting regardless - the seed's validation, every parent and child
+minibatch, every accepted candidate's validation - so a budget means what it
+means upstream. The mechanism's own re-run of the served composition over the
+validation set at every evaluated step is extra wall time and spend that the
+count leaves out.
 """
 
 from __future__ import annotations
@@ -207,7 +207,11 @@ class GEPAProposer:
         archive = self._archive
         index = archive.served
         if index is None or archive.candidates[index].texts != dict(served_texts):
-            return archive.seed(served_texts)
+            index = archive.seed(served_texts)
+            # GEPA scores its seed on the validation set before the first
+            # iteration and charges it then; the mechanism runs that pass
+            # during the first evaluated step, but the budget is the same.
+            archive.charge(self._valset_size)
         return index
 
     def _minibatch(
@@ -221,6 +225,10 @@ class GEPAProposer:
         """The parent's minibatch: free from traffic, or re-run on the parent."""
         batch = _traffic(samples)[: self._minibatch_size]
         if parent == self._archive.served:
+            # Free of episodes, but not of budget: upstream evaluates the
+            # parent on the minibatch and counts it, so the traffic that
+            # stands in for that evaluation counts the same.
+            self._archive.charge(len(batch))
             return [_Example(task, output, float(sample.score)) for sample, (task, output) in batch]
         examples = []
         for _, (task, _) in batch:
@@ -299,9 +307,8 @@ class GEPASelector:
         served = archive.served
         if served is not None and archive.candidates[served].val_scores is None:
             # The seed's own validation arrives with the first evaluated
-            # step; the mechanism ran those episodes, so the budget pays.
+            # step; its budget was charged when the archive was seeded.
             archive.record_validation(served, served_scores)
-            archive.charge(len(served_scores))
 
         # GEPA scores every candidate on the validation set once and keeps
         # that number; the mechanism's fresh re-run of the served tree is
