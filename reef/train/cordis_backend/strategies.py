@@ -72,8 +72,11 @@ class Proposer(ABC):
 
     ``manifest`` is the previous step's
     :class:`~reef.train.cordis_backend.FailureManifest`, or ``None`` when
-    no step has settled one yet. The keyword is only forwarded to callables
-    whose signature names it, so pre-manifest proposers run unchanged.
+    no step has settled one yet. ``rejected`` is the recent rejected
+    proposals, oldest first, each a mapping of ``step``, ``mutations``
+    (``{"op", "id"}`` pairs) and the selector's ``reason``. Each keyword is
+    only forwarded to callables whose signature names it, so earlier
+    proposers run unchanged.
     """
 
     @abstractmethod
@@ -84,6 +87,7 @@ class Proposer(ABC):
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
+        rejected: Sequence[Mapping[str, Any]] = (),
     ) -> Mutation | Sequence[Mutation] | None:
         """Propose mutations for the current composition and trace batch."""
 
@@ -101,20 +105,18 @@ class EpisodeScorer(ABC):
         """Score one episode result for a task."""
 
 
-def accepts_manifest(fn: Callable[..., Any]) -> bool:
-    """Whether ``fn``'s signature names ``manifest`` or takes ``**kwargs``.
-
-    Signature inspection is the compatibility gate: the manifest keyword is
-    only ever passed to code that declared it, so every three-argument
-    proposer written before the manifest existed runs unchanged.
-    """
+def accepts_keyword(fn: Callable[..., Any], name: str) -> bool:
+    """Whether ``fn`` names ``name`` or takes ``**kwargs``; a keyword is only passed to code that declared it."""
     try:
         parameters = inspect.signature(fn).parameters.values()
     except (TypeError, ValueError):
         return False
-    return any(
-        parameter.name == "manifest" or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
-    )
+    return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+
+def accepts_manifest(fn: Callable[..., Any]) -> bool:
+    """Whether ``fn`` declares the ``manifest`` keyword."""
+    return accepts_keyword(fn, "manifest")
 
 
 class _CallableProposer(Proposer):
@@ -126,6 +128,7 @@ class _CallableProposer(Proposer):
     ) -> None:
         self._fn = fn
         self._forward_manifest = accepts_manifest(fn)
+        self._forward_rejected = accepts_keyword(fn, "rejected")
 
     def __call__(
         self,
@@ -134,10 +137,14 @@ class _CallableProposer(Proposer):
         models: ModelBindings,
         *,
         manifest: FailureManifest | None = None,
+        rejected: Sequence[Mapping[str, Any]] = (),
     ) -> Mutation | Sequence[Mutation] | None:
+        extra: dict[str, Any] = {}
         if self._forward_manifest:
-            return self._fn(nodes, samples, models, manifest=manifest)
-        return self._fn(nodes, samples, models)
+            extra["manifest"] = manifest
+        if self._forward_rejected:
+            extra["rejected"] = rejected
+        return self._fn(nodes, samples, models, **extra)
 
 
 class _CallableEpisodeScorer(EpisodeScorer):

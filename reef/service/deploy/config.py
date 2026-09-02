@@ -81,9 +81,39 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         path = PROJECT_ROOT / path
     if not path.exists():
         raise DeployConfigError(f"config not found: {path}\n  pass a deployment stack with: reef serve -c <path>")
-    with open(path) as handle:
-        config = yaml.safe_load(handle) or {}
+    try:
+        with open(path) as handle:
+            config = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        raise DeployConfigError(f"config {path} is not valid YAML: {exc}") from exc
+    if config is None:
+        config = {}
+    if not isinstance(config, dict):
+        raise DeployConfigError(f"config {path} must be a YAML object at the root, not {type(config).__name__}")
     return _deep_interp_env(config, os.environ)
+
+
+def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
+    """Services as a non-empty list of objects with unique names, checked before any download, run dir, or process."""
+    services = config.get("services")
+    if not isinstance(services, list) or not services:
+        raise DeployConfigError(f"config {config_path} must declare a non-empty 'services' list")
+    names: list[str] = []
+    for index, service in enumerate(services):
+        if not isinstance(service, dict):
+            raise DeployConfigError(
+                f"config {config_path}: services[{index}] must be an object, not {type(service).__name__}"
+            )
+        name = service.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise DeployConfigError(f"config {config_path}: services[{index}] must have a non-empty 'name'")
+        names.append(name)
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise DeployConfigError(
+            f"config {config_path}: service names must be unique; duplicated: {', '.join(duplicates)}"
+        )
+    return services
 
 
 def is_local_path(value: str) -> bool:
@@ -158,4 +188,5 @@ __all__ = [
     "load_config",
     "resolve_hf_snapshot",
     "resolve_model_paths",
+    "validate_services",
 ]
