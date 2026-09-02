@@ -14,7 +14,13 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeError, run_episode
 from reef.harness.render import render_composition
-from reef.harness.trajectory import TrajectoryError, read_opencode_storage, read_pi_session, reader_for
+from reef.harness.trajectory import (
+    TrajectoryError,
+    read_claude_session,
+    read_opencode_storage,
+    read_pi_session,
+    reader_for,
+)
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -131,6 +137,29 @@ def test_pi_reader_parses_a_captured_real_session() -> None:
     final = events[-1]["message"]
     assert final["role"] == "assistant"
     assert final["content"] == [{"type": "text", "text": "READY"}]
+
+
+def test_claude_reader_reads_nested_sessions_in_path_order(tmp_path: Path) -> None:
+    # Claude Code lays sessions out as projects/<cwd-slug>/<session-id>.jsonl.
+    first = tmp_path / "projects" / "proj-a" / "01.jsonl"
+    second = tmp_path / "projects" / "proj-a" / "02.jsonl"
+    first.parent.mkdir(parents=True)
+    first.write_text('{"type": "user"}\n')
+    second.write_text('{"type": "assistant"}\n')
+    assert [event["type"] for event in read_claude_session(tmp_path)] == ["user", "assistant"]
+
+
+def test_claude_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
+    session = tmp_path / "session.jsonl"
+    session.write_text('{"type": "user"}\n{"type": "assistant"\n')  # crash mid-write
+    assert [event["type"] for event in read_claude_session(tmp_path)] == ["user"]
+    session.write_text('{"type": "user"\n{"type": "assistant"}\n')  # torn in the middle: corruption
+    with pytest.raises(TrajectoryError, match="corrupt event at line 1"):
+        read_claude_session(tmp_path)
+
+
+def test_claude_format_resolves_through_reader_for() -> None:
+    assert reader_for("claude-session-jsonl").format == "claude-session-jsonl"
 
 
 def test_missing_trajectory_reads_as_empty(tmp_path: Path) -> None:

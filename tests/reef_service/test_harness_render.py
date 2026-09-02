@@ -52,6 +52,11 @@ def test_opencode_render_matches_the_golden_tree() -> None:
     assert render_composition(nodes, get_adapter("opencode")) == golden_tree("opencode")
 
 
+def test_claude_render_matches_the_golden_tree() -> None:
+    nodes = [node for node in NODES if node[1].get("target") != "models"]
+    assert render_composition(nodes, get_adapter("claude")) == golden_tree("claude")
+
+
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [
@@ -81,5 +86,12 @@ def test_opencode_quirk_rejects_reopened_autoupdate() -> None:
         render_composition([("config", {"data": {"autoupdate": True}})], get_adapter("opencode"))
 
 
+def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
+    with pytest.raises(RenderError, match="includeCoAuthoredBy"):
+        render_composition([("config", {"data": {"includeCoAuthoredBy": True}})], get_adapter("claude"))
+    with pytest.raises(RenderError, match="DISABLE_AUTOUPDATER"):
+        render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
+
+
 def test_bundled_adapters_are_discoverable() -> None:
-    assert set(available_adapters()) >= {"opencode", "pi"}
+    assert set(available_adapters()) >= {"claude", "opencode", "pi"}
