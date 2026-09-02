@@ -4,6 +4,8 @@ import asyncio
 
 from aiohttp import web
 
+from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.descriptor import DescriptorError
 from reef.service.request_service import RequestService
 
 
@@ -37,9 +39,34 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         value = await asyncio.to_thread(lambda: request_service.dispatcher.training_status)
         return web.json_response(value)
 
+    async def adapters(request: web.Request) -> web.Response:
+        names = await asyncio.to_thread(available_adapters)
+        entries = []
+        for name in names:
+            try:
+                descriptor = await asyncio.to_thread(get_adapter, name)
+            except DescriptorError:
+                continue
+            install = descriptor.install
+            entries.append(
+                {
+                    "name": name,
+                    "binary": descriptor.binary,
+                    "trajectory_format": descriptor.trajectory_format,
+                    "model_bindings": sorted(descriptor.model_binding),
+                    "install": (
+                        None
+                        if install is None
+                        else {"kind": install.kind, "package": install.package, "version": install.version}
+                    ),
+                }
+            )
+        return web.json_response({"adapters": entries})
+
     app.router.add_get("/reef/harness", harness)
     app.router.add_get("/reef/harness/install", harness_install)
     app.router.add_get("/reef/harness/releases", harness_releases)
+    app.router.add_get("/reef/adapters", adapters)
     app.router.add_get("/reef/status", status)
 
 

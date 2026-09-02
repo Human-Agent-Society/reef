@@ -260,6 +260,29 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
 
 
 @pytest.mark.unit
+def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) -> None:
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/adapters")
+            assert response.status == 200
+            payload = await response.json()
+            by_name = {entry["name"]: entry for entry in payload["adapters"]}
+            # Bundled adapters must all appear with the fields the endpoint promises.
+            assert {"claude", "opencode", "pi"}.issubset(by_name.keys())
+            pi = by_name["pi"]
+            assert pi["binary"] == "pi"
+            assert pi["trajectory_format"] == "pi-session-jsonl"
+            assert pi["install"]["package"].startswith("@")
+            assert isinstance(pi["model_bindings"], list) and pi["model_bindings"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
     async def run() -> None:
         mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
@@ -581,8 +604,7 @@ def test_install_script_golden_structure() -> None:
     sidecar = (
         json.dumps({"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}, indent=2) + "\n"
     )
-    golden = (
-        r"""#!/bin/sh
+    golden = (r"""#!/bin/sh
 # Reef harness install: adapter pi, release v1.
 # Self contained: the composition files ride inline below and the harness
 # binary comes from the vendor's own channel; running this script calls no
@@ -699,8 +721,7 @@ fi
 echo "run:     $DEST/reef-pi"
 echo "binary:  $BINARY"
 echo "harness: $DEST"
-"""
-    ).replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
+""").replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
     golden = golden.replace("@SIDECAR_CHECKSUM@", hashlib.sha256(sidecar.encode()).hexdigest())
     golden = golden.replace("@RULES_EOF@", "REEF_EOF_" + hashlib.sha256(b"hello\n").hexdigest()[:12])
     golden = golden.replace("@SIDECAR_EOF@", "REEF_EOF_" + hashlib.sha256(sidecar.encode()).hexdigest()[:12])
