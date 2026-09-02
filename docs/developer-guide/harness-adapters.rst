@@ -4,7 +4,10 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles five, one per third-party coding-agent CLI.
+adapter does. Reef bundles five, one per third-party coding-agent CLI, and
+one for its own agent, ``native``, whose loop lives in this tree and whose
+tools are ``native_tool`` nodes, so a mutation can add, rewrite, or remove a
+tool.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -21,6 +24,9 @@ adapter does. Reef bundles five, one per third-party coding-agent CLI.
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
 |              |                                                           | at ``v2026.8.31`` (0.21.0)                |
++--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
+|              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
@@ -70,6 +76,29 @@ binding is a custom provider with a literal key in ``config.yaml``; only the
 ``openai`` dialect is bound. hermes's own default approval policy runs tools
 inside the working directory with no prompt and refuses a command it flags as
 dangerous with a tool error, so no bypass flag is used.
+
+The native adapter also renders the optional ``native_tool`` kind to
+``native/tools/{name}.py``: a module whose ``NAME``, ``DESCRIPTION``, and
+``PARAMETERS`` come from the node config and whose ``code`` defines
+``run(args, workdir) -> str``. ``reef.harness.native.seed.SEED_TOOLS`` holds
+the starting ``read_file``, ``write_file``, and ``run_bash`` tools as entries
+a recipe can seed and the loop can then evolve. An adapter that declares no
+``files.native_tool`` path refuses to render that kind, so the mutation fails
+under it instead of silently dropping the tool.
+
+The native loop writes its trajectory as ``native-jsonl``: one
+``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
+``session`` header line names the task, model, and tools; then ``turn/start``,
+per step ``step/start``, ``request/header`` (the rendered system prompt and
+the tool declarations, logged on the first step so the log holds everything
+the model saw), ``assistant/message`` (``content``, ``tool_calls``,
+``finish``), ``tool/call`` (the raw argument string), ``tool/result``
+(``content``, ``is_error``, and on error a closed ``code``: ``UNKNOWN_TOOL``,
+``INVALID_ARGS``, ``TOOL_FAILED``), ``step/end``, and finally ``turn/end``
+with a ``reason`` of ``completed``, ``max-steps``, or ``error``. Arguments are
+validated against the tool's declared schema before ``run`` sees them, and a
+``user/message`` from the ``loop-guard`` plugin lands when the same call
+repeats three, five, or eight times in a row.
 
 The descriptor
 --------------
