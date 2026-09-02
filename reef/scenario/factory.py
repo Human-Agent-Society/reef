@@ -302,7 +302,7 @@ class ScenarioFactory:
                 (
                     record.step
                     for record in (() if commit_log is None else commit_log.records())
-                    if record.operation == "rollback"
+                    if record.operation in ("rollback", "promote")
                 ),
                 default=0,
             ),

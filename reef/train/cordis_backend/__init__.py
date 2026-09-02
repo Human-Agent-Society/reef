@@ -259,6 +259,8 @@ class CordisBackend(TrainingBackend):
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
+        publish: str = "auto",
+        review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -319,6 +321,10 @@ class CordisBackend(TrainingBackend):
         self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
+        if publish not in ("auto", "review"):
+            raise ValueError("publish must be 'auto' or 'review'")
+        self._publish = publish
+        self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -635,6 +641,9 @@ class CordisBackend(TrainingBackend):
             entries = [dict(entry) for entry in candidate.candidate_entries]
             self._loader.root.update(entries)
             artifact = Artifact.local(_write_rendered_files(candidate.candidate_files))
+            # Under review, or when a reviewed kind is touched, the release waits for a promote.
+            if self._publish == "review" or self._review_kinds & self._mutation_kinds(candidate):
+                metrics["pending"] = True
             return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact)
 
         entries = [dict(entry) for entry in candidate.current_entries]
@@ -693,6 +702,17 @@ class CordisBackend(TrainingBackend):
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return score, FailureObservation(task=task, stage="exit", cause=cause), residue
         return score, None, residue
+
+    @staticmethod
+    def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:
+        """Node kinds the mutations touch; update and remove read the kind off the pre-mutation tree."""
+        by_id = {str(entry.get("id")): str(entry.get("name")) for entry in candidate.current_entries}
+        kinds: set[str] = set()
+        for mutation in candidate.mutations:
+            name = (mutation.options or {}).get("name") if mutation.op == "create" else by_id.get(mutation.id)
+            if name:
+                kinds.add(str(name))
+        return frozenset(kinds)
 
     def _gated_against(self) -> dict[str, Any]:
         """The served model and adapter version this step's gate runs against."""

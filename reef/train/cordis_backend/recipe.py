@@ -142,6 +142,8 @@ class CordisRecipe(Recipe):
     recheck_every: int = 0
     max_rejected_history: int = 25
     min_win_margin: int = 0
+    publish: str = "auto"
+    review_kinds: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -180,6 +182,8 @@ class CordisRecipe(Recipe):
         ):
             if value < 0:
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
+        if self.publish not in ("auto", "review"):
+            raise ValueError("publish must be 'auto' or 'review'")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
 
@@ -243,6 +247,14 @@ class CordisRecipe(Recipe):
             if selection != "score_comparison":
                 raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
             candidate_selector = ScoreComparisonSelector(min_win_margin=budgets["min_win_margin"])
+        publish = evolution.get("publish", "auto")
+        if publish not in ("auto", "review"):
+            raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
+        review_kinds = evolution.get("review_kinds", ())
+        if isinstance(review_kinds, str) or not isinstance(review_kinds, Sequence):
+            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        if not all(isinstance(kind, str) and kind for kind in review_kinds):
+            raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
         adapter = str(evolution.get("adapter", "pi"))
         version_check = evolution.get("version_check", False)
         if not isinstance(version_check, bool):
@@ -283,6 +295,8 @@ class CordisRecipe(Recipe):
             "executor": executor,
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
+            "publish": publish,
+            "review_kinds": tuple(review_kinds),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -334,6 +348,8 @@ class CordisRecipe(Recipe):
             promote=self.promote,
             recheck_every=self.recheck_every,
             max_rejected_history=self.max_rejected_history,
+            publish=self.publish,
+            review_kinds=self.review_kinds,
             seed=self.seed,
         )
         return Trainer.build(
