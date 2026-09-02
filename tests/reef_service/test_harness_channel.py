@@ -210,6 +210,100 @@ async def _gate_step(client: TestClient) -> dict:
 
 
 @pytest.mark.unit
+def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/status")
+            assert response.status == 200
+            assert (await response.json())["scenarios"]["delivery"]["last_committed_step"] is None
+
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "delivery"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status == 200
+            receipt = response.headers["x-reef-agent-record-id"]
+            response = await client.post(
+                "/reef/report",
+                headers={"x-reef-scenario": "delivery"},
+                json={"score": 0.0, "references": [receipt]},
+            )
+            assert response.status == 200
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/status")
+                assert response.status == 200
+                scenario = (await response.json())["scenarios"]["delivery"]
+                committed = scenario["last_committed_step"]
+                if committed is not None:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("no-proposal step did not commit")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+
+            assert scenario["scenario_step"] == committed["step"] == 1
+            assert isinstance(committed["recorded_at"], float)
+            assert committed["metrics"]["skipped"] == "no proposal"
+            response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
+    async def run() -> None:
+        mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
+        client = TestClient(
+            TestServer(create_app(_dispatcher(tmp_path, (mutation,)), inference_backend=_EchoBackend()))
+        )
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "delivery"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status == 200
+            receipt = response.headers["x-reef-agent-record-id"]
+            response = await client.post(
+                "/reef/report",
+                headers={"x-reef-scenario": "delivery"},
+                json={"score": 0.0, "references": [receipt]},
+            )
+            assert response.status == 200
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/status")
+                assert response.status == 200
+                scenario = (await response.json())["scenarios"]["delivery"]
+                committed = scenario["last_committed_step"]
+                if committed is not None:
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("rejected gate step did not commit")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+
+            assert scenario["scenario_step"] == committed["step"] == 1
+            assert committed["metrics"]["published"] is False
+            assert committed["metrics"]["selected"] is False
+            assert committed["metrics"]["selection"]["outcome"] == "reject"
+            response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(

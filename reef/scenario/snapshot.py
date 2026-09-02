@@ -12,6 +12,7 @@ snapshot summarizes the last checkpointed one.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -76,6 +77,7 @@ class ScenarioSnapshot:
     training_job_id: str | None = None
     operation: str | None = None
     rollback_target_release_id: str | None = None
+    metrics: Mapping[str, Any] | None = None
 
 
 def snapshot_metadata_for(
@@ -118,6 +120,8 @@ def snapshot_metadata_for(
         }
         if prepared.training_job_id is not None:
             metadata["training_job_id"] = prepared.training_job_id
+        if prepared.metrics is not None:
+            metadata["metrics"] = deepcopy(dict(prepared.metrics))
     return metadata
 
 
@@ -154,6 +158,11 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
     training_job_id = value.get("training_job_id")
     if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
         raise ValueError("scenario snapshot training_job_id must be a non-empty string or null")
+    metrics = value.get("metrics")
+    if metrics is not None:
+        if not isinstance(metrics, Mapping):
+            raise ValueError("scenario snapshot metrics must be an object or null")
+        metrics = MappingProxyType(deepcopy(dict(metrics)))
     operation = value.get("operation")
     rollback_target_release_id = value.get("rollback_target_release_id")
     if operation is not None and operation not in ("training", "rollback"):
@@ -173,6 +182,7 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
         algorithm_state=algorithm_state,
         record_progress=record_progress,
         training_job_id=training_job_id,
+        metrics=metrics,
         operation=operation,
         rollback_target_release_id=rollback_target_release_id,
     )
