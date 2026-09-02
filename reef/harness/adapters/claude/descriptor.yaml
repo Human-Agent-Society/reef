@@ -7,9 +7,9 @@
 # variables stop the startup network work (auto-update, telemetry, and the
 # non-essential background traffic) that would otherwise make episodes
 # non-deterministic. `-p --output-format json` is Claude Code's headless
-# mode; `--permission-mode bypassPermissions` is the non-interactive
-# equivalent of trusting the isolated episode root, matching opencode's
-# `--auto` and pi's json mode.
+# mode; `--permission-mode auto` matches opencode's `--auto` and pi's json
+# mode — auto-approve without dropping every safety check, which is the
+# right level for a hermetic episode root.
 name: claude
 binary: claude
 # The vendor's install channel at the pinned version; consumed by the
@@ -19,7 +19,7 @@ install:
   package: "@anthropic-ai/claude-code"
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
-argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "bypassPermissions"]
+argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"
