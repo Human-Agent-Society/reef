@@ -41,7 +41,7 @@
   --font-mono: "DM Mono", ui-monospace, monospace;
 }
 
-html { color-scheme: light; scroll-behavior: smooth; scroll-padding-top: 92px; }
+html { color-scheme: light; scroll-padding-top: 92px; } /* auto scroll: smooth raced the late-mounting diagrams and landed deep links hundreds of px off */
 html[data-theme="dark"] {
   color-scheme: dark;
   --background: #100e0c;
@@ -82,6 +82,9 @@ html[data-theme="dark"] {
 
 /* Base */
 * { box-sizing: border-box; }
+.skip-link { position: fixed; z-index: 200; top: -60px; left: 12px; padding: 10px 16px; color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; background: var(--background); transition: top .15s; }
+.skip-link:focus { top: 12px; }
+main.docs-main:focus { outline: none; }
 body { margin: 0; color: var(--text); background: var(--background); font-family: var(--font-sans); font-size: 15px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
 a { color: inherit; text-decoration: none; }
 button, input { color: inherit; font: inherit; }
@@ -126,10 +129,11 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .search-input-row { height: 60px; padding: 0 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
 .search-input-row input { min-width: 0; height: 100%; flex: 1; color: var(--foreground); border: 0; outline: 0; background: transparent; font-size: 16px; }
 .search-input-row button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 7px; background: transparent; }
-.search-results { min-height: 250px; max-height: 55vh; padding: 10px; overflow: auto; overscroll-behavior: contain; }
+.search-results { min-height: min(250px, 40vh); max-height: 55vh; padding: 10px; overflow: auto; overscroll-behavior: contain; }
 .search-label { margin: 4px 8px 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .search-results > a { padding: 10px; display: flex; align-items: center; gap: 11px; border-radius: 8px; }
 .search-results > a:hover { background: var(--accent); }
+.search-results > a.is-selected { background: var(--accent); }
 .search-results > a > svg { color: var(--muted); }
 .search-results > a > svg:last-child { margin-left: auto; }
 .search-results a span { min-width: 0; display: grid; gap: 3px; }
@@ -259,6 +263,7 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
 .code-copy:hover { color: var(--brand-strong); border-color: color-mix(in srgb, var(--brand) 48%, var(--border)); }
 .table-scroll { overflow-x: auto; }
+.markdown-body img { max-width: 100%; height: auto; }
 .markdown-body .table-scroll { --scroller-bg: var(--background); margin: 24px 0 32px; border-radius: 10px; box-shadow: var(--shadow-sm); }
 .markdown-body .table-scroll table { margin: 0; }
 .markdown-body table { width: 100%; margin: 24px 0 32px; border-collapse: separate; border-spacing: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; line-height: 1.5; }
@@ -447,6 +452,11 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 }
 
 @media (max-width: 600px) {
+  /* Code on a phone: tighter padding buys back the horizontal room the
+     desktop 24px gutter costs, and 12px fits more of each line before a
+     line has to be scrolled sideways. Pad and desktop keep 13px/24px. */
+  .markdown-body pre { padding: 16px 14px; font-size: 12px; }
+  .markdown-body pre code { font-size: 12px; }
   .header-inner { gap: 8px; }
   .header-search { width: 44px; }
   .search-trigger { width: 44px; padding: 0; justify-content: center; border: 0; background: transparent; box-shadow: none; }
@@ -484,6 +494,7 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 @media (pointer: coarse) {
   .icon-button { width: 44px; height: 44px; }
   .code-copy { width: 44px; height: 44px; opacity: 1; top: 8px; right: 8px; }
+  .search-input-row button { width: 44px; height: 44px; }
   .search-trigger { min-width: 44px; min-height: 44px; }
   .logo { min-height: 44px; }
   .markdown-body a.heading-anchor { padding: 10px 15px; margin-left: 0; }
