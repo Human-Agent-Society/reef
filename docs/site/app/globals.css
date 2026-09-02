@@ -466,6 +466,12 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
   .markdown-body h1 { font-size: 31px; }
   .markdown-body td { overflow-wrap: anywhere; }
   .markdown-body th { overflow-wrap: normal; }
+  /* Two-column fact tables (label | value): keep the label column on one line
+     so a phone's auto layout cannot squeeze "Loss family" into a sliver and
+     stack it vertically. Three-column tables (the two-axis recipe grid) are
+     excluded so their wider first column still wraps. */
+  .markdown-body table:not(:has(td:nth-child(3))) td:first-child,
+  .markdown-body table:not(:has(td:nth-child(3))) th:first-child { white-space: nowrap; }
   .markdown-body .page-brief { margin-top: -8px; grid-template-columns: 1fr; gap: 2px 0; }
   .markdown-body .page-brief dd { margin-bottom: 8px; }
   .markdown-body .page-brief dd:last-child { margin-bottom: 0; }
