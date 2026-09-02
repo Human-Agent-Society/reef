@@ -393,11 +393,15 @@ class Dispatcher:
             while self._process_local_backend_step(scenario):
                 pass
         except Exception as exc:
-            # Keep the in-memory pending batch intact. A later record wakes
-            # this worker to retry it; replacing the scenario here could lose
-            # records in deployments that intentionally use an in-memory store.
             logger.exception("local backend failed to commit for scenario %r", scenario)
             self._record_training_error(scenario, self._error_text(exc))
+
+    def _reload_durable_local_scenario(self, scenario: str, current: Scenario) -> None:
+        if current.commit_log is None:
+            return
+        with self._registry.lock_for(scenario):
+            if self._registry.get_optional(scenario) is current:
+                self._registry.reload(scenario)
 
     def _process_local_backend_step(self, scenario: str) -> bool:
         current = self._registry.get_optional(scenario)
@@ -406,10 +410,30 @@ class Dispatcher:
         if current.trainer.training_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
-        result = current.prepare_training_step()
+        try:
+            result = current.prepare_training_step()
+        except Exception:
+            # Durable records let recovery reconstruct the reserved batch. A
+            # logless deployment must retain its in-memory pending batch for a
+            # later wake instead.
+            self._reload_durable_local_scenario(scenario, current)
+            raise
         if result is None:
             return False
-        self._commit_result(scenario, result)
+        # Keep only the short commit and recovery window under the scenario
+        # registry lock. Candidate generation above can take minutes and must
+        # not block record acceptance for this scenario.
+        with self._registry.lock_for(scenario):
+            if self._registry.get_optional(scenario) is not current:
+                raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
+            try:
+                self._commit_result(scenario, result)
+            except Exception:
+                # A record may already have crossed the fsync commit point.
+                # Reload before rollback or acceptance can observe the stale
+                # in-memory step and append the same step number again.
+                self._reload_durable_local_scenario(scenario, current)
+                raise
         return True
 
     def _run_training(self) -> None:
@@ -589,7 +613,7 @@ class Dispatcher:
     @property
     def training_status(self) -> Mapping[str, Any]:
         name = self._registry.training_scenario_name
-        names = self._training_scenario_names()
+        names = self._registry.training_status_scenario_names
         preload_errors = self._registry.preload_errors
         with self._training.lock:
             storage_status = self._training.storage_status
@@ -606,7 +630,7 @@ class Dispatcher:
                     if batch_ready:
                         self._warn_if_undrained(scenario_name, last_drain)
                     block: dict[str, Any] = {
-                        "scenario_step": current.scenario_step,
+                        **current.commit_status,
                         # A version is current only after Reef commits its head
                         # and reopens admission. The backend may report it
                         # earlier while the update is still being published.
