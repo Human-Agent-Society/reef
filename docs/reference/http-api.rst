@@ -142,8 +142,9 @@ data inside ``metadata`` or ``feedback``.
 | ``feedback``   | string or object | no       | opaque to Reef's core: a rubric, judge    |
 |                |                  |          | output, plain text                        |
 +----------------+------------------+----------+-------------------------------------------+
-| ``references`` | list of strings  | no       | the receipts this report grades; a report |
-|                |                  |          | without them is accepted but never trains |
+| ``references`` | list of strings  | no       | the receipts this report grades; several  |
+|                |                  |          | batch as one trajectory sample, none is   |
+|                |                  |          | accepted but never trains                 |
 +----------------+------------------+----------+-------------------------------------------+
 | ``metadata``   | object           | no       | opaque, except                            |
 |                |                  |          | ``training.eligible`` (default ``true``)  |

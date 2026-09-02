@@ -14,7 +14,8 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
   1. Claims the oldest pending run's persisted receipts.
-  2. POSTs a report to Reef with all captured receipts as ``references``.
+  2. POSTs a report to Reef with all captured receipts as ``references``
+     (one trajectory sample), or one report per receipt with ``--per-receipt``.
   3. Clears the persisted receipts.
 
 Env vars (baked into the wrapper at install time):
@@ -266,7 +267,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     sys.exit(result.returncode)
 
 
-def report(scenario: str, adapter: str, score: float, feedback: str) -> None:
+def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt: bool = False) -> None:
     while True:
         claim = _claim_captures(scenario)
         if claim is None:
@@ -284,7 +285,6 @@ def report(scenario: str, adapter: str, score: float, feedback: str) -> None:
             break
         captures_file.unlink()
 
-    payload = json.dumps({"score": score, "feedback": feedback, "references": receipts}).encode()
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "x-reef-scenario": scenario,
@@ -293,25 +293,31 @@ def report(scenario: str, adapter: str, score: float, feedback: str) -> None:
     if token:
         headers["authorization"] = f"Bearer {token}"
 
-    req = urllib.request.Request(
-        f"{reef_url}/reef/report",
-        data=payload,
-        headers=headers,
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as response:
-            response.read()
-    except urllib.error.HTTPError as exc:
-        os.replace(captures_file, pending_file)
-        body = exc.read().decode(errors="replace")
-        sys.exit(f"reef-{adapter}: report failed ({exc.code}): {body}")
-    except BaseException:
-        os.replace(captures_file, pending_file)
-        raise
+    # One report referencing the whole run batches as one trajectory sample;
+    # --per-receipt sends the same score against each receipt on its own.
+    reference_lists = [[receipt] for receipt in receipts] if per_receipt else [receipts]
+    for references in reference_lists:
+        payload = json.dumps({"score": score, "feedback": feedback, "references": references}).encode()
+        req = urllib.request.Request(
+            f"{reef_url}/reef/report",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                response.read()
+        except urllib.error.HTTPError as exc:
+            os.replace(captures_file, pending_file)
+            body = exc.read().decode(errors="replace")
+            sys.exit(f"reef-{adapter}: report failed ({exc.code}): {body}")
+        except BaseException:
+            os.replace(captures_file, pending_file)
+            raise
 
     captures_file.unlink()
-    print(f"reef-{adapter}: reported {len(receipts)} receipt(s) to {scenario}")
+    mode = "report per receipt" if per_receipt else "one report"
+    print(f"reef-{adapter}: reported {len(receipts)} receipt(s) to {scenario} ({mode})")
 
 
 def main() -> None:
@@ -331,8 +337,13 @@ def main() -> None:
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} report")
         parser.add_argument("--score", type=float, required=True)
         parser.add_argument("--feedback", default="")
+        parser.add_argument(
+            "--per-receipt",
+            action="store_true",
+            help="send one report per captured receipt instead of one for the run",
+        )
         ns = parser.parse_args(args[1:])
-        report(scenario, adapter, ns.score, ns.feedback)
+        report(scenario, adapter, ns.score, ns.feedback, per_receipt=ns.per_receipt)
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 

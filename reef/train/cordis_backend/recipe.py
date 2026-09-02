@@ -127,6 +127,9 @@ class CordisRecipe(Recipe):
     tasks: tuple[str, ...]
     adapter: str = "pi"
     binary: str | None = None
+    episode_timeout_s: float = 600.0
+    episode_repeats: int = 1
+    forbid_residue: bool = False
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -148,6 +151,10 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires tasks")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.episode_timeout_s <= 0:
+            raise ValueError("episode_timeout_s must be positive")
+        if self.episode_repeats < 1:
+            raise ValueError("episode_repeats must be at least 1")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
 
@@ -162,6 +169,15 @@ class CordisRecipe(Recipe):
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
             raise RecipeConfigError("evolution.binary must be a non-empty string when set")
+        timeout = evolution.get("episode_timeout_s", 600.0)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+            raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
+        repeats = evolution.get("episode_repeats", 1)
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
+            raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+        forbid_residue = evolution.get("forbid_residue", False)
+        if not isinstance(forbid_residue, bool):
+            raise RecipeConfigError("evolution.forbid_residue must be a boolean")
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -205,6 +221,9 @@ class CordisRecipe(Recipe):
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
             "binary": binary,
+            "episode_timeout_s": float(timeout),
+            "episode_repeats": repeats,
+            "forbid_residue": forbid_residue,
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -245,6 +264,9 @@ class CordisRecipe(Recipe):
             tasks=self.tasks,
             models=self.model_bindings(),
             binary=self.binary,
+            episode_timeout_s=self.episode_timeout_s,
+            episode_repeats=self.episode_repeats,
+            forbid_residue=self.forbid_residue,
             seed=self.seed,
         )
         return Trainer.build(

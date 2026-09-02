@@ -873,3 +873,114 @@ def test_adapter_without_model_binding_refuses_boot(tmp_path: Path) -> None:
             models=MODEL,
             binary=str(make_binary(tmp_path)),
         )
+
+
+def test_gate_knobs_reach_the_episodes_and_interleave_the_sides(tmp_path: Path, monkeypatch) -> None:
+    """episode_timeout_s reaches every run_episode call, a repeat is one more
+    pairing of the same task, and episodes alternate candidate and current
+    inside each pairing instead of running batched by side."""
+    sides: list[str] = []
+    timeouts: list[float] = []
+    original = reef_cordis_backend.run_episode
+
+    def spy(descriptor, files, prompt, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
+        return original(descriptor, files, prompt, **kwargs)
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        episode_timeout_s=5.0,
+        episode_repeats=2,
+    )
+    result = run_backend_step(b, batch(), b.initial_state())
+
+    assert timeouts == [5.0, 5.0, 5.0, 5.0]
+    assert sides == ["candidate", "current", "candidate", "current"]
+    assert result.metrics["episode_repeats"] == 2
+    assert len(result.metrics["selection"]["evaluation"]["metrics"]["candidate_scores"]) == 2
+
+
+def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: Path) -> None:
+    """Files an episode leaves outside the cleanup whitelist are counted into
+    the evaluation; with forbid_residue a littering episode scores as one
+    that could not run, so it cannot win."""
+    litterer = tmp_path / "fake-pi-littering"
+    litterer.write_text(
+        PI_FAKE.replace(
+            '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")',
+            '(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")\n'
+            '(agent_dir.parent / "junk.txt").write_text("litter")',
+        )
+    )
+    litterer.chmod(0o755)
+
+    def build(forbid: bool) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(
+                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+            ),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(litterer),
+            forbid_residue=forbid,
+        )
+
+    counted = run_backend_step(build(False), batch(), build(False).initial_state())
+    assert counted.metrics["candidate_residue"] == 1
+    assert counted.metrics["current_residue"] == 1
+    assert counted.metrics["episode_failures"] == 0
+
+    forbidden = run_backend_step(build(True), batch(), build(True).initial_state())
+    assert forbidden.metrics["episode_failures"] == 2
+    assert forbidden.metrics["selected"] is False
+    evaluation = forbidden.metrics["selection"]["evaluation"]["metrics"]
+    assert {f["stage"] for f in evaluation["candidate_failures"]} == {"residue"}
+    assert {f["stage"] for f in evaluation["current_failures"]} == {"residue"}
+
+
+def test_recipe_parses_and_validates_the_episode_gate_knobs(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_gate_knobs.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_gate_knobs:propose",
+                "evaluate": "demo_gate_knobs:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    built = CordisRecipe.from_environment(
+        {}, config=config(episode_timeout_s=5, episode_repeats=2, forbid_residue=True)
+    )
+    assert built.episode_timeout_s == 5.0
+    assert built.episode_repeats == 2
+    assert built.forbid_residue is True
+
+    defaults = CordisRecipe.from_environment({}, config=config())
+    assert defaults.episode_timeout_s == 600.0
+    assert defaults.episode_repeats == 1
+    assert defaults.forbid_residue is False
+
+    with pytest.raises(RecipeConfigError, match=r"episode_timeout_s must be a positive number"):
+        CordisRecipe.from_environment({}, config=config(episode_timeout_s=0))
+    with pytest.raises(RecipeConfigError, match=r"episode_repeats must be an integer"):
+        CordisRecipe.from_environment({}, config=config(episode_repeats=0))
+    with pytest.raises(RecipeConfigError, match=r"forbid_residue must be a boolean"):
+        CordisRecipe.from_environment({}, config=config(forbid_residue="yes"))

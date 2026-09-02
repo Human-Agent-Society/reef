@@ -101,11 +101,21 @@ def policy_samples(batch: TrainingBatch) -> tuple[PolicySample, ...]:
 
 @dataclass(frozen=True)
 class TraceSample:
-    """One recorded request, exactly as served, with its reported score."""
+    """One recorded exchange, exactly as served, with its reported score.
+
+    A report referencing one request batches as a sample whose ``payload``
+    is that request. A report referencing several batches as one sample
+    whose ``trajectory`` holds every referenced payload in reference order
+    and whose ``payload`` is the last of them, so single-payload consumers
+    keep seeing the exchange that carries the full conversation.
+    ``feedback`` is the report's feedback field, verbatim.
+    """
 
     source_agent_record_id: str
     payload: Mapping[str, Any]
     score: float
+    feedback: str | Mapping[str, Any] | None = None
+    trajectory: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)

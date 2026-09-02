@@ -316,6 +316,38 @@ def test_failed_report_restores_claim_for_retry(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_per_receipt_report_posts_one_report_for_each_capture(tmp_path) -> None:
+    """--per-receipt fans the run's score across its receipts as separate
+    reports, one reference each, so every exchange batches on its own."""
+    scenario_key = hashlib.sha256(b"scenario").hexdigest()
+    captures = tmp_path / f"{scenario_key}-{1:020d}-run.pending.json"
+    captures.write_text(
+        json.dumps(
+            {
+                "reef_url": "http://reef",
+                "scenario": "scenario",
+                "turns": [{"receipt": "receipt-1"}, {"receipt": "receipt-2"}],
+            }
+        )
+    )
+    posted: list[dict] = []
+
+    def record_report(req, timeout=None):
+        posted.append(json.loads(req.data))
+        return _Response()
+
+    with (
+        patch.dict(os.environ, {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}),
+        patch("reef.harness.harness_wrapper.urllib.request.urlopen", record_report),
+    ):
+        report("scenario", "pi", 0.0, "per turn", per_receipt=True)
+
+    assert [item["references"] for item in posted] == [["receipt-1"], ["receipt-2"]]
+    assert {item["score"] for item in posted} == {0.0}
+    assert not any(tmp_path.glob("*.json"))
+
+
+@pytest.mark.unit
 def test_report_recovers_reused_process_id_before_newer_run(tmp_path) -> None:
     claimed_file = _write_spool_entry(
         tmp_path,
