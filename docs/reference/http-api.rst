@@ -43,7 +43,7 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                   | a shell script that installs the tree             |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/adapters``                          | every harness adapter this process resolves       |
+| ``GET /reef/harness/adapters``                  | every harness adapter this process resolves       |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/status``                            | training, serving, and storage state              |
 +-------------------------------------------------+---------------------------------------------------+
@@ -197,7 +197,7 @@ Harness artifacts
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary and writes the tree                                    |
 +--------------------------------+---------------------------------------------------------------+
-| ``GET /reef/adapters``         | ``{adapters}`` — every harness adapter this process resolves, |
+| ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
 |                                | ``model_bindings``, and the pinned ``install`` spec           |
 +--------------------------------+---------------------------------------------------------------+

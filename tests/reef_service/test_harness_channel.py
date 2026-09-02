@@ -265,7 +265,7 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
         client = TestClient(TestServer(create_app(_dispatcher(tmp_path, ()), inference_backend=_EchoBackend())))
         await client.start_server()
         try:
-            response = await client.get("/reef/adapters")
+            response = await client.get("/reef/harness/adapters")
             assert response.status == 200
             payload = await response.json()
             by_name = {entry["name"]: entry for entry in payload["adapters"]}

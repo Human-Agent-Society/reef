@@ -66,7 +66,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_get("/reef/harness", harness)
     app.router.add_get("/reef/harness/install", harness_install)
     app.router.add_get("/reef/harness/releases", harness_releases)
-    app.router.add_get("/reef/adapters", adapters)
+    app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)
 
 
