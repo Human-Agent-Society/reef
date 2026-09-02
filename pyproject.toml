@@ -106,7 +106,7 @@ py_version = 310  # python 3.10 as a target version
 sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 default_section = "THIRDPARTY"
 known_first_party = ["reef", "recipes"]
-known_third_party = ["megatron", "wandb", "ray", "transformers"]
+known_third_party = ["megatron", "wandb", "ray", "transformers", "gepa"]
 src_paths = ["reef", "recipes"]
 # Files no formatter touches (vendored benchmark content, saved result programs)
 # are listed once, in .pre-commit-config.yaml's top-level `exclude`.

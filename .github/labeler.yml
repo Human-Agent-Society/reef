@@ -35,6 +35,7 @@
           - "third_party/cordis/**"
           - "tutorials/harness_evolve/**"
           - "recipes/skillclaw/**"
+          - "recipes/gepa/**"
           - "tests/reef_service/test_compose*.py"
           - "tests/reef_service/test_harness*.py"
           - "tests/reef_service/test_*recipe*.py"

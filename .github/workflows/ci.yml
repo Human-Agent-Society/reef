@@ -74,6 +74,11 @@ jobs:
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
       - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub numpy ray httpx
+      # The GEPA example's deterministic suite drives the pinned upstream
+      # optimizer itself, so install that exact release (the example's own
+      # pyproject pin, asserted by its tests) without adding it to Reef's
+      # package metadata.
+      - run: python -m pip install "gepa==0.1.2" "datasets==5.0.1" "litellm==1.91.5"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
