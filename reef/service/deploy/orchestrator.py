@@ -24,7 +24,14 @@ from typing import Any
 
 import yaml
 
-from reef.service.deploy.config import PROJECT_ROOT, config_value, interpolate_config, load_config, resolve_model_paths
+from reef.service.deploy.config import (
+    PROJECT_ROOT,
+    config_value,
+    interpolate_config,
+    load_config,
+    resolve_model_paths,
+    validate_services,
+)
 from reef.service.deploy.settings import build_parser
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -350,17 +357,13 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     config = load_config(resolved_config_path)
     if overrides:
         config = _apply_overrides(config, overrides)
+    # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
+    services = validate_services(config, resolved_config_path)
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     if overrides or paths_changed:
         temp_config_path = _write_override_config(config)
         resolved_config_path = temp_config_path
-    services = config.get("services") or []
-    if not isinstance(services, list) or not services:
-        sys.exit("[reef] ERROR: config must declare a non-empty 'services' list")
-    names = [svc.get("name") for svc in services]
-    if any(not n for n in names):
-        sys.exit("[reef] ERROR: every service must have a 'name'")
     run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
     run_dir.mkdir(parents=True, exist_ok=True)
     ready_timeout_default = int(config_value(config, "ready_timeout", default="3600") or "3600")

@@ -7,6 +7,7 @@ from aiohttp import web
 
 from reef.runtime.inference import InferenceBackend
 from reef.service.request_service import RequestService
+from reef.service.routes.payload import read_object
 from reef.service.streaming import (
     SSEFrameDecoder,
     chat_completion_chunk_identity,
@@ -25,7 +26,7 @@ def register_inference_routes(
     inference_backend: InferenceBackend | None,
 ) -> None:
     async def inference(request: web.Request) -> web.StreamResponse:
-        payload = await request.json()
+        payload = await read_object(request)
         if payload.get("stream") is True:
             upstream, pending = await request_service.start_stream(
                 request.headers,

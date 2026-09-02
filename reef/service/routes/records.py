@@ -6,12 +6,13 @@ from aiohttp import web
 
 from reef.core.records_types import RequestType
 from reef.service.request_service import RequestService
+from reef.service.routes.payload import read_object
 
 
 def register_record_routes(app: web.Application, *, request_service: RequestService) -> None:
     def accept_typed(request_type: RequestType):
         async def accept(request: web.Request) -> web.Response:
-            payload = await request.json()
+            payload = await read_object(request)
             agent_record_id = None
             if isinstance(payload, dict) and "agent_record_id" in payload:
                 # Client-supplied id (see reef-protocols.md): lets a
