@@ -1149,6 +1149,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
         ("claude", "CLAUDE_CONFIG_DIR", "claude"),
         # dsh's config file sits inside a profile; the relocated directory is the home two levels up.
         ("dsh", "DSH_HOME", "dsh"),
+        ("hermes", "HERMES_HOME", "hermes"),
     ],
 )
 def test_install_script_relocates_every_bundled_adapters_compose_directory(
@@ -1161,3 +1162,82 @@ def test_install_script_relocates_every_bundled_adapters_compose_directory(
     )
     assert f'export REEF_HARNESS_ENV_VAR="{env_var}"' in script
     assert f'COMPOSE_ABS="$(mkdir -p "$DEST/{compose_dir}" && cd "$DEST/{compose_dir}" && pwd)"' in script
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("repository", "git@github.com:acme/agent.git"), ("ref", "v1$(touch pwned)")],
+)
+def test_git_install_fields_constrain_their_charset(tmp_path, field: str, value: str) -> None:
+    source = Path(reef.harness.adapters.__file__).parent / "hermes" / "descriptor.yaml"
+    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    data["install"][field] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=f"install '{field}'"):
+        load_descriptor(target)
+
+
+def _git_install_fixture(tmp_path: Path, *, binary_version: str | None) -> tuple[Path, Path, Path, dict, Path]:
+    """A rendered hermes script with git and python3 shims that log their calls and fake the venv."""
+    script = tmp_path / "install.sh"
+    script.write_text(
+        render_install_script(
+            descriptor=get_adapter("hermes"),
+            files={"hermes/SOUL.md": "hello\n"},
+            release_id="v-test",
+            content_id="content-test",
+        )
+    )
+    prefix = tmp_path / "prefix"
+    if binary_version is not None:
+        _write_executable(
+            prefix / "venv/bin/hermes", f"#!/bin/sh\necho 'Hermes Agent v{binary_version} (2026.8.31)'\n"
+        )
+    shim = tmp_path / "shim"
+    log = tmp_path / "vendor.log"
+    # POSIX sh (dash on CI): the clone target is the last argument, found by iterating.
+    _write_executable(
+        shim / "git",
+        f'#!/bin/sh\nprintf \'git %s\\n\' "$*" >> "{log}"\nfor arg in "$@"; do last="$arg"; done\nmkdir -p "$last/.git"\n',
+    )
+    # python3 -m venv DIR makes DIR/bin/python, whose -m pip install then drops the binary the pin expects.
+    _write_executable(
+        shim / "python3",
+        "#!/bin/sh\n"
+        f'printf \'python3 %s\\n\' "$*" >> "{log}"\n'
+        'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
+        '    mkdir -p "$3/bin"\n'
+        f'    printf \'#!/bin/sh\\nprintf "python %%s\\\\n" "$*" >> "{log}"\\nmkdir -p "$(dirname "$0")"\\n'
+        'printf "#!/bin/sh\\\\necho Hermes Agent v0.21.0\\\\n" > "$(dirname "$0")/hermes"\\nchmod +x "$(dirname "$0")/hermes"\\n\' > "$3/bin/python"\n'
+        '    chmod +x "$3/bin/python"\n'
+        "fi\n",
+    )
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    return script, tmp_path / "dest", prefix, env, log
+
+
+@pytest.mark.unit
+def test_git_install_kind_clones_the_pinned_ref_into_a_venv_when_the_binary_is_absent(tmp_path) -> None:
+    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version=None)
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    calls = log.read_text().splitlines()
+    assert calls[0] == (
+        f"git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent {prefix}/src"
+    )
+    assert calls[1] == f"python3 -m venv {prefix}/venv"
+    assert calls[2] == f"python -m pip install --quiet -e {prefix}/src"
+    assert not (prefix / "src" / ".git").exists()  # the checkout's .git goes: nothing for a startup update check
+    assert (dest / "hermes/SOUL.md").read_text() == "hello\n"
+
+
+@pytest.mark.unit
+def test_git_install_kind_skips_the_clone_when_the_version_label_matches(tmp_path) -> None:
+    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version="0.21.0")
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    # The version answered, so the vendor step never ran (the reef-client step still calls python3).
+    assert "git clone" not in (log.read_text() if log.exists() else "")
+    assert "hermes 0.21.0 already installed" in result.stdout
