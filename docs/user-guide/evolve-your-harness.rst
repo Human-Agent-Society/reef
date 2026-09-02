@@ -103,6 +103,15 @@ the most recent publish is kept as a rollback target, and a rollback consumes
 it, so the recheck reverts one bad publish rather than walking the whole
 history back.
 
+Two more settings shape the search itself. ``evolution.min_win_margin: M``
+(0 by default) is a noise floor on the verdict: the candidate must win more
+than ``M`` task pairings beyond its losses, so on a stochastic episode a
+single lucky flip does not publish. ``evolution.max_rejected_history: N``
+(25 by default, 0 off) keeps the last ``N`` rejected proposals in the
+scenario state, each with its step, its mutations, and the verdict's reason;
+a ``propose`` whose signature names ``rejected`` receives them and can stop
+re-proposing what the gate already refused.
+
 Most of a step's cost is the evaluation. Every task runs on both trees,
 ``episode_repeats`` times each (once by default), which makes
 ``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both

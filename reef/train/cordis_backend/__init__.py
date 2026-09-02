@@ -47,6 +47,7 @@ from reef.train.cordis_backend.strategies import (
     MutationError,
     Promoter,
     Proposer,
+    accepts_keyword,
     accepts_manifest,
 )
 from reef.train.evaluation.contracts import CandidateSelector, EvaluationResult, SelectionDecision, UpdateCandidate
@@ -168,13 +169,21 @@ def _budgeted_bindings(models: ModelBindings, cap: int) -> ModelBindings:
 
 
 class ScoreComparisonSelector(CandidateSelector):
-    """Select a candidate when it wins more task comparisons than it loses."""
+    """Select a candidate when its wins exceed its losses by more than ``min_win_margin`` (0: plain majority)."""
+
+    def __init__(self, min_win_margin: int = 0) -> None:
+        if isinstance(min_win_margin, bool) or not isinstance(min_win_margin, int) or min_win_margin < 0:
+            raise ValueError("min_win_margin must be an integer of at least 0")
+        self._min_win_margin = min_win_margin
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         candidate_scores, current_scores = _score_vectors(evaluation)
         wins, losses = _score_comparison_tally(candidate_scores, current_scores)
         ties = len(candidate_scores) - wins - losses
-        selected = wins > losses
+        selected = wins - losses > self._min_win_margin
+        metrics: dict[str, Any] = {"wins": wins, "losses": losses, "ties": ties}
+        if self._min_win_margin:
+            metrics["min_win_margin"] = self._min_win_margin
         return SelectionDecision(
             outcome="select" if selected else "reject",
             policy="score_comparison",
@@ -185,7 +194,7 @@ class ScoreComparisonSelector(CandidateSelector):
                 else f"candidate did not exceed its {losses} losses with {wins} wins"
             ),
             evaluation=evaluation,
-            metrics={"wins": wins, "losses": losses, "ties": ties},
+            metrics=metrics,
         )
 
 
@@ -249,6 +258,7 @@ class CordisBackend(TrainingBackend):
         max_promoted_tasks: int = 50,
         promote: Promoter | None = None,
         recheck_every: int = 0,
+        max_rejected_history: int = 25,
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -271,6 +281,7 @@ class CordisBackend(TrainingBackend):
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
+        self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -286,6 +297,7 @@ class CordisBackend(TrainingBackend):
             ("max_failure_streak", max_failure_streak),
             ("max_model_calls_per_step", max_model_calls_per_step),
             ("recheck_every", recheck_every),
+            ("max_rejected_history", max_rejected_history),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
@@ -306,6 +318,7 @@ class CordisBackend(TrainingBackend):
         self._promote_task = promote
         self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
         self._recheck_every = recheck_every
+        self._max_rejected_history = max_rejected_history
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -376,6 +389,9 @@ class CordisBackend(TrainingBackend):
         if rollback_entries is not None:
             carried["rollback_entries"] = rollback_entries
             carried["rollback_gated_against"] = rollback_gated_against
+        rejected = list(state.get("rejected_proposals", ()))
+        if rejected:
+            carried["rejected_proposals"] = rejected
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
         # The budgets are circuit breakers, not schedulers: a skipped step
@@ -434,10 +450,12 @@ class CordisBackend(TrainingBackend):
                 metrics=metrics,
             )
         models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
+        extra: dict[str, Any] = {}
         if self._propose_accepts_manifest:
-            proposal = self._propose(self._nodes(), batch.samples, models, manifest=manifest)
-        else:
-            proposal = self._propose(self._nodes(), batch.samples, models)
+            extra["manifest"] = manifest
+        if self._propose_accepts_rejected:
+            extra["rejected"] = tuple(rejected)
+        proposal = self._propose(self._nodes(), batch.samples, models, **extra)
         mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         if not mutations:
             return PreparedStep.skipped(
@@ -584,6 +602,17 @@ class CordisBackend(TrainingBackend):
         if rollback_entries is not None:
             state["rollback_entries"] = rollback_entries
             state["rollback_gated_against"] = rollback_gated_against
+        # A real rejection joins a bounded ledger the proposer can read back.
+        if not candidate.recheck and not decision.selected and self._max_rejected_history:
+            rejected = list(prepared.state.get("rejected_proposals", ()))
+            rejected.append(
+                {
+                    "step": int(prepared.state["steps"]),
+                    "mutations": [{"op": mutation.op, "id": mutation.id} for mutation in candidate.mutations],
+                    "reason": decision.reason,
+                }
+            )
+            state["rejected_proposals"] = rejected[-self._max_rejected_history :]
 
         metrics.update(
             {

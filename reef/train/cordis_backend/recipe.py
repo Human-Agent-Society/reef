@@ -140,6 +140,8 @@ class CordisRecipe(Recipe):
     max_promoted_tasks: int = 50
     promote: Promoter | None = None
     recheck_every: int = 0
+    max_rejected_history: int = 25
+    min_win_margin: int = 0
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -173,6 +175,8 @@ class CordisRecipe(Recipe):
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
             ("recheck_every", self.recheck_every),
+            ("max_rejected_history", self.max_rejected_history),
+            ("min_win_margin", self.min_win_margin),
         ):
             if value < 0:
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
@@ -203,9 +207,17 @@ class CordisRecipe(Recipe):
             executor = build_executor(evolution)
         except ReefError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        budget_defaults = {
+            "max_steps": 0,
+            "max_failure_streak": 0,
+            "max_model_calls_per_step": 0,
+            "recheck_every": 0,
+            "max_rejected_history": 25,
+            "min_win_margin": 0,
+        }
         budgets: dict[str, int] = {}
-        for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step", "recheck_every"):
-            value = evolution.get(label, 0)
+        for label, default in budget_defaults.items():
+            value = evolution.get(label, default)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RecipeConfigError(f"evolution.{label} must be an integer of at least 0 (0 disables the limit)")
             budgets[label] = value
@@ -225,7 +237,12 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError("evolution.seed entries must be entry option mappings")
         if "acceptance" in evolution:
             raise RecipeConfigError("evolution.acceptance was removed; configure evolution.selection")
-        candidate_selector = _resolve_candidate_selector(evolution.get("selection", "score_comparison"))
+        selection = evolution.get("selection", "score_comparison")
+        candidate_selector = _resolve_candidate_selector(selection)
+        if budgets["min_win_margin"]:
+            if selection != "score_comparison":
+                raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
+            candidate_selector = ScoreComparisonSelector(min_win_margin=budgets["min_win_margin"])
         adapter = str(evolution.get("adapter", "pi"))
         version_check = evolution.get("version_check", False)
         if not isinstance(version_check, bool):
@@ -316,6 +333,7 @@ class CordisRecipe(Recipe):
             max_promoted_tasks=self.max_promoted_tasks,
             promote=self.promote,
             recheck_every=self.recheck_every,
+            max_rejected_history=self.max_rejected_history,
             seed=self.seed,
         )
         return Trainer.build(

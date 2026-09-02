@@ -1547,3 +1547,80 @@ def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
     assert drift.metrics["recheck"] is True
     assert drift.metrics["recheck_reason"] == "drift"
     assert drift.metrics["rolled_back"] is False
+
+
+def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
+    """One win and no losses clears the plain majority rule but not a margin of 1."""
+    b = backend(tmp_path, lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}))
+    prepared = b.prepare_step(batch(), b.initial_state(), 0)
+    candidate = prepared.candidate
+    assert candidate is not None
+    evaluator = DefaultCandidateEvaluationPlugin(b, ScoreComparisonSelector(min_win_margin=1))
+    decision = evaluator.decide(candidate, evaluator.evaluate(candidate))
+    result = b.settle_step(prepared, decision)
+    assert result.metrics["wins"] == 1 and result.metrics["losses"] == 0
+    assert result.metrics["selected"] is False
+    assert result.metrics["min_win_margin"] == 1
+    with pytest.raises(ValueError, match="min_win_margin must be an integer of at least 0"):
+        ScoreComparisonSelector(min_win_margin=-1)
+
+
+def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path: Path) -> None:
+    """A rejection lands in a bounded ledger; the next step hands it to a
+    proposer whose signature names ``rejected``, and a three-argument
+    proposer keeps running without it."""
+    seen: list[tuple] = []
+
+    def propose(n, s, m, rejected=()):
+        seen.append(tuple(rejected))
+        return Mutation("create", f"r{len(seen)}", {"name": "rules", "config": {"text": "no signal here"}})
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(propose),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        max_rejected_history=1,
+    )
+    first = run_backend_step(b, batch(), b.initial_state())
+    # A tie is a rejection, and it is recorded with its step, mutation, and reason.
+    assert first.metrics["selected"] is False
+    assert first.state["rejected_proposals"] == [
+        {"step": 1, "mutations": [{"op": "create", "id": "r1"}], "reason": first.metrics["selection"]["reason"]}
+    ]
+    second = run_backend_step(b, batch(), first.state)
+    assert seen[0] == () and seen[1][0]["mutations"] == [{"op": "create", "id": "r1"}]
+    # The cap keeps only the latest rejection.
+    assert [entry["step"] for entry in second.state["rejected_proposals"]] == [2]
+    third = run_backend_step(backend(tmp_path, lambda n, s, m: None), batch(), second.state)
+    assert third.state["rejected_proposals"] == second.state["rejected_proposals"]
+
+
+def test_recipe_parses_search_quality_config(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_search.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_search:propose",
+                "evaluate": "demo_search:evaluate",
+                "tasks": ["t"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    on = CordisRecipe.from_environment({}, config=config(min_win_margin=1, max_rejected_history=5))
+    assert on.min_win_margin == 1 and on.max_rejected_history == 5
+    off = CordisRecipe.from_environment({}, config=config())
+    assert off.min_win_margin == 0 and off.max_rejected_history == 25
+    with pytest.raises(RecipeConfigError, match="min_win_margin applies only to the score_comparison selection"):
+        CordisRecipe.from_environment({}, config=config(min_win_margin=1, selection="always"))
+    with pytest.raises(RecipeConfigError, match="max_rejected_history must be an integer"):
+        CordisRecipe.from_environment({}, config=config(max_rejected_history=-1))
