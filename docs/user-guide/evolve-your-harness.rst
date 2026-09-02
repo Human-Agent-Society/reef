@@ -86,6 +86,14 @@ side into a throwaway root, runs the agent binary with the task as its prompt
 under the ``episode_timeout_s`` limit (600 s by default), reads the
 trajectory back, and deletes the root.
 
+Each episode runs through an executor. The default ``local`` executor runs the
+binary as a plain subprocess, which is right for development and the tests. A
+hosted service that evaluates model-proposed trees sets ``evolution.executor:
+sandbox`` so each episode runs in a bubblewrap jail (a fresh non-root
+namespace, a read-only base filesystem, no host credentials, resource limits,
+and no network unless a model endpoint is allowlisted); a deployment that
+requires it refuses to start without the sandbox runtime.
+
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
 machine. A task must therefore state the whole problem in its prompt. A task

@@ -48,9 +48,14 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
 
     def _authorized(headers) -> bool:
         authorization = headers.get("Authorization")
-        if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        if not isinstance(authorization, str):
             return False
-        presented = _digest(authorization.removeprefix("Bearer "))
+        # The auth-scheme is case-insensitive per RFC 9110 §11.1; only the
+        # credential itself stays case-sensitive.
+        scheme, separator, credential = authorization.partition(" ")
+        if not separator or scheme.lower() != "bearer" or not credential:
+            return False
+        presented = _digest(credential)
         matched = False
         for digest in accepted:
             matched |= secrets.compare_digest(presented, digest)

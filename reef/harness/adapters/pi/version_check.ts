@@ -18,10 +18,13 @@ export default function versionCheck(pi) {
     const serviceUrl = process.env.REEF_SERVICE_URL;
     const scenario = process.env.REEF_SCENARIO;
     if (!agentDir || !serviceUrl || !scenario) return;
+    // The wrapper relocates the agent into a temp copy and exports the true
+    // install root; a directly-run tree falls back to the sidecar beside it.
+    const destDir = process.env.REEF_HARNESS_DEST || join(agentDir, "..");
     let pinned;
     try {
       // harness_pull and the install script write the sidecar at the tree root.
-      pinned = JSON.parse(readFileSync(join(agentDir, "..", ".reef-harness-release"), "utf8")).release_id;
+      pinned = JSON.parse(readFileSync(join(destDir, ".reef-harness-release"), "utf8")).release_id;
     } catch {
       return; // no sidecar: this tree did not come through the channel
     }
@@ -45,7 +48,9 @@ export default function versionCheck(pi) {
     const instruction =
       `curl -fsS -H 'x-reef-scenario: ${scenario}' ` +
       (token ? '-H "Authorization: Bearer $REEF_TOKEN" ' : "") +
-      `'${serviceUrl}/reef/harness/install?adapter=pi' | bash`;
+      // The installer takes the destination as its first argument; without
+      // it a reinstall lands at ./reef-harness relative to the agent's cwd.
+      `'${serviceUrl}/reef/harness/install?adapter=pi' | bash -s -- '${destDir}'`;
     const updateOption = `Update with ${instruction}`;
     const title =
       "Reef harness update available\n\n" +
@@ -69,11 +74,12 @@ export default function versionCheck(pi) {
         "-c",
         'set -o pipefail\nargs=(-fsS -H "x-reef-scenario: $1")\n' +
           'if [[ -n "$3" ]]; then args+=(-H "Authorization: Bearer $3"); fi\n' +
-          'curl "${args[@]}" "$2/reef/harness/install?adapter=pi" | bash',
+          'curl "${args[@]}" "$2/reef/harness/install?adapter=pi" | bash -s -- "$4"',
         "reef-harness-update",
         scenario,
         serviceUrl,
         token || "",
+        destDir,
       ]);
     } catch (error) {
       ctx.ui.notify(`Reef harness update failed: ${error instanceof Error ? error.message : String(error)}`, "error");

@@ -20,11 +20,7 @@ finding.
 
 from __future__ import annotations
 
-import contextlib
-import os
 import shutil
-import signal
-import subprocess
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -33,6 +29,7 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.descriptor import AdapterDescriptor
+from reef.harness.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor
 from reef.harness.trajectory import reader_for
 
 
@@ -72,14 +69,19 @@ def run_episode(
     *,
     binary: str | None = None,
     timeout: float = 600.0,
+    executor: EpisodeExecutor | None = None,
 ) -> EpisodeResult:
     """Run one headless episode of ``descriptor``'s harness over ``files``.
 
     ``binary`` overrides the descriptor's binary name (the seam hermetic
     tests drive a fake harness through); ``prompt`` substitutes into the
-    descriptor's argv template. The episode root is removed before this
-    returns, success or failure.
+    descriptor's argv template. ``executor`` decides how the process runs
+    (the default local subprocess, or a sandbox); the root preparation,
+    environment, trajectory read, and residue collection are the same for
+    every executor. The episode root is removed before this returns, success
+    or failure.
     """
+    executor = executor or LocalExecutor()
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
     root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-"))
     try:
@@ -104,28 +106,11 @@ def run_episode(
         env.setdefault("HOME", str(root))
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
-            # Own session so a timeout can kill the binary's whole process
-            # group: coding agents spawn tool children as a matter of course,
-            # and killing only the direct child would orphan them.
-            process = subprocess.Popen(
-                argv,
-                cwd=workspace,
-                env={**_inherited_env(), **env},
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-        except FileNotFoundError as exc:
-            raise EpisodeError(f"harness binary {argv[0]!r} not found") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise EpisodeError(f"episode timed out after {timeout}s: {argv}") from exc
-        completed = subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+            outcome = executor.launch(argv, root=root, workspace=workspace, env=env, timeout=timeout)
+        except EpisodeLaunchError as exc:
+            raise EpisodeError(str(exc)) from exc
+        except EpisodeTimeout as exc:
+            raise EpisodeError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         residue = tuple(
             sorted(
@@ -137,18 +122,11 @@ def run_episode(
             )
         )
         return EpisodeResult(
-            exit_code=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            exit_code=outcome.exit_code,
+            stdout=outcome.stdout,
+            stderr=outcome.stderr,
             trajectory=trajectory,
             residue=residue,
         )
     finally:
         shutil.rmtree(root, ignore_errors=True)
-
-
-def _inherited_env() -> dict[str, str]:
-    """The minimal parent environment an episode keeps: how to find binaries."""
-    import os
-
-    return {key: value for key, value in os.environ.items() if key in ("PATH", "SYSTEMROOT", "TMPDIR")}

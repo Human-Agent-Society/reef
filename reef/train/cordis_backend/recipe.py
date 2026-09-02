@@ -16,9 +16,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
+from reef.harness.executor import EpisodeExecutor, build_executor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.version_check import version_check_entry
 from reef.observability import ExperimentLogger
@@ -130,6 +132,10 @@ class CordisRecipe(Recipe):
     episode_timeout_s: float = 600.0
     episode_repeats: int = 1
     forbid_residue: bool = False
+    max_steps: int = 0
+    max_failure_streak: int = 0
+    max_model_calls_per_step: int = 0
+    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -158,6 +164,13 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
+        for label, value in (
+            ("max_steps", self.max_steps),
+            ("max_failure_streak", self.max_failure_streak),
+            ("max_model_calls_per_step", self.max_model_calls_per_step),
+        ):
+            if value < 0:
+                raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
 
@@ -181,6 +194,16 @@ class CordisRecipe(Recipe):
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
+        try:
+            executor = build_executor(evolution)
+        except ReefError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        budgets: dict[str, int] = {}
+        for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step"):
+            value = evolution.get(label, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise RecipeConfigError(f"evolution.{label} must be an integer of at least 0 (0 disables the limit)")
+            budgets[label] = value
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -227,6 +250,8 @@ class CordisRecipe(Recipe):
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
             "forbid_residue": forbid_residue,
+            **budgets,
+            "executor": executor,
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -270,6 +295,9 @@ class CordisRecipe(Recipe):
             episode_timeout_s=self.episode_timeout_s,
             episode_repeats=self.episode_repeats,
             forbid_residue=self.forbid_residue,
+            max_steps=self.max_steps,
+            max_failure_streak=self.max_failure_streak,
+            max_model_calls_per_step=self.max_model_calls_per_step,
             seed=self.seed,
         )
         return Trainer.build(
