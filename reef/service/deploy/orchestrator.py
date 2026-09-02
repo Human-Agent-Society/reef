@@ -37,6 +37,15 @@ from reef.service.deploy.settings import build_parser
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
 
+_PYTHON_ALIASES = frozenset({"python", "python3"})
+
+
+def _resolve_python(argv: list[str]) -> list[str]:
+    """Rewrite a leading bare ``python`` / ``python3`` to ``sys.executable``."""
+    if not argv or "/" in argv[0] or argv[0] not in _PYTHON_ALIASES:
+        return argv
+    return [sys.executable, *argv[1:]]
+
 
 def _log(msg):
     print(f"[reef] {msg}", file=sys.stderr)
@@ -260,8 +269,9 @@ class _Stack:
         # operator sees live output without `tail -f`.
         tee = _TeeStream(log_fp, sys.stdout)
         self._tees[name] = tee
+        argv = _resolve_python(shlex.split(command))
         proc = subprocess.Popen(
-            shlex.split(command),
+            argv,
             env=env,
             cwd=svc.get("cwd"),
             stdout=tee.write_fd,
