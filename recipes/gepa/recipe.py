@@ -3,9 +3,11 @@
 ``GEPARecipe`` is a ``CordisRecipe`` that supplies its own ``propose`` and
 ``selection`` objects instead of asking the config for them. Both halves of
 GEPA share one :class:`~recipes.gepa.archive.Archive`, and an archive is
-per scenario, so the binding cannot happen at config time: ``build`` opens
-``<archive>/<scenario>.json``, constructs the proposer and the selector
-against it, and boots the stock backend with those two in place.
+per scenario, so the binding cannot happen at config time: ``build`` opens a
+hashed scenario file directly under ``archive``, constructs the proposer and
+the selector against it, and boots the stock backend with those two in place.
+The search state itself travels in Reef's algorithm state; that JSON file is
+only its post-commit mirror.
 
 The config adds one ``gepa:`` block under ``evolution``::
 
@@ -34,6 +36,7 @@ while the other stays under the operator's control.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import importlib
 from collections.abc import Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass
@@ -51,6 +54,7 @@ from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
 from .archive import Archive
+from .backend import ARCHIVE_STATE_KEY, GEPABackend
 from .components import EVOLVABLE_KINDS
 from .method import Feedback, GEPAProposer, GEPASelector, default_feedback
 
@@ -156,7 +160,15 @@ class GEPARecipe(CordisRecipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        archive = Archive(self.archive_dir / f"{scenario}.json")
+        archive = Archive(scenario_archive_path(self.archive_dir, scenario), autosave=False)
+        archive_state = None if algorithm_state is None else algorithm_state.get(ARCHIVE_STATE_KEY)
+        if archive_state is not None:
+            if not isinstance(archive_state, Mapping):
+                raise RecipeConfigError(f"{ARCHIVE_STATE_KEY} algorithm state must be a mapping")
+            archive.restore(archive_state)
+            # Recovery may follow a crash after the commit record was durable
+            # but before the derived JSON mirror was refreshed.
+            archive.persist()
         propose = self.propose
         if isinstance(propose, _UnboundProposer):
             propose = resolve_proposer(
@@ -164,6 +176,9 @@ class GEPARecipe(CordisRecipe):
                     archive=archive,
                     descriptor=get_adapter(self.adapter),
                     binary=self.binary,
+                    executor=self.executor,
+                    episode_timeout_s=self.episode_timeout_s,
+                    forbid_residue=self.forbid_residue,
                     score_episode=self.score_episode,
                     feedback=self.feedback or default_feedback,
                     minibatch_size=self.minibatch_size,
@@ -179,15 +194,20 @@ class GEPARecipe(CordisRecipe):
         if isinstance(selector, _UnboundSelector):
             selector = GEPASelector(archive)
         bound = dataclasses.replace(self, propose=propose, candidate_selector=selector)
-        # ``bound`` is a GEPARecipe, so the stock build is named explicitly:
-        # calling it through ``bound`` would come straight back here.
-        return CordisRecipe.build(
-            bound,
+        training_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
+        return bound._build_trainer(
             scenario,
             records,
+            training_backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
+
+
+def scenario_archive_path(directory: Path, scenario: str) -> Path:
+    """Map an arbitrary scenario name to one file directly under ``directory``."""
+    key = hashlib.sha256(scenario.encode("utf-8")).hexdigest()
+    return Path(directory) / f"{key}.json"
 
 
 def _check_seed_ids(seed: Sequence[Mapping[str, Any]]) -> None:

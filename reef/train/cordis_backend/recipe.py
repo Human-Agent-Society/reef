@@ -330,28 +330,49 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = CordisBackend(
-            descriptor=get_adapter(self.adapter),
-            propose=self.propose,
-            score_episode=self.score_episode,
-            tasks=self.tasks,
-            models=self.model_bindings(),
-            binary=self.binary,
-            episode_timeout_s=self.episode_timeout_s,
-            episode_repeats=self.episode_repeats,
-            forbid_residue=self.forbid_residue,
-            executor=self.executor,
-            max_steps=self.max_steps,
-            max_failure_streak=self.max_failure_streak,
-            max_model_calls_per_step=self.max_model_calls_per_step,
-            promote_failures=self.promote_failures,
-            max_promoted_tasks=self.max_promoted_tasks,
-            promote=self.promote,
-            recheck_every=self.recheck_every,
-            max_rejected_history=self.max_rejected_history,
-            seed=self.seed,
-            episode_workers=self.episode_workers,
+        training_backend = CordisBackend(**self._backend_kwargs())
+        return self._build_trainer(
+            scenario,
+            records,
+            training_backend,
+            algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
         )
+
+    def _backend_kwargs(self) -> dict[str, Any]:
+        """Arguments shared by the stock backend and recipe specializations."""
+        return {
+            "descriptor": get_adapter(self.adapter),
+            "propose": self.propose,
+            "score_episode": self.score_episode,
+            "tasks": self.tasks,
+            "models": self.model_bindings(),
+            "binary": self.binary,
+            "episode_timeout_s": self.episode_timeout_s,
+            "episode_repeats": self.episode_repeats,
+            "forbid_residue": self.forbid_residue,
+            "executor": self.executor,
+            "max_steps": self.max_steps,
+            "max_failure_streak": self.max_failure_streak,
+            "max_model_calls_per_step": self.max_model_calls_per_step,
+            "promote_failures": self.promote_failures,
+            "max_promoted_tasks": self.max_promoted_tasks,
+            "promote": self.promote,
+            "recheck_every": self.recheck_every,
+            "max_rejected_history": self.max_rejected_history,
+            "seed": self.seed,
+            "episode_workers": self.episode_workers,
+        }
+
+    def _build_trainer(
+        self,
+        scenario: str,
+        records: RecordStore,
+        training_backend: CordisBackend,
+        *,
+        algorithm_state: Mapping[str, Any] | None,
+        experiment_logger: ExperimentLogger | None,
+    ) -> Trainer:
         return Trainer.build(
             scenario,
             records,

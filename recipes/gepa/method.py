@@ -24,6 +24,7 @@ count leaves out.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
@@ -31,6 +32,7 @@ from typing import Any, Protocol
 
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
+from reef.harness.executor import EpisodeExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.render import render_composition
 from reef.harness.trajectory import TrajectoryError
@@ -69,6 +71,7 @@ class EpisodeRunner(Protocol):
         *,
         binary: str | None = None,
         timeout: float = EPISODE_TIMEOUT_S,
+        executor: EpisodeExecutor | None = None,
     ) -> EpisodeResult: ...
 
 
@@ -103,6 +106,9 @@ class GEPAProposer:
         archive: Archive,
         descriptor: AdapterDescriptor,
         binary: str | None,
+        executor: EpisodeExecutor | None = None,
+        episode_timeout_s: float = EPISODE_TIMEOUT_S,
+        forbid_residue: bool = False,
         score_episode: EpisodeScorer,
         feedback: Feedback,
         minibatch_size: int,
@@ -118,6 +124,17 @@ class GEPAProposer:
         self._archive = archive
         self._descriptor = descriptor
         self._binary = binary
+        self._executor = executor
+        if (
+            isinstance(episode_timeout_s, bool)
+            or not isinstance(episode_timeout_s, (int, float))
+            or episode_timeout_s <= 0
+        ):
+            raise ValueError("episode_timeout_s must be a positive number")
+        if not isinstance(forbid_residue, bool):
+            raise ValueError("forbid_residue must be a boolean")
+        self._episode_timeout_s = float(episode_timeout_s)
+        self._forbid_residue = forbid_residue
         self._score_episode = score_episode
         self._feedback = feedback
         self._minibatch_size = minibatch_size
@@ -257,10 +274,23 @@ class GEPAProposer:
         )
         self._archive.charge(1)
         try:
-            result = self._run_episode(self._descriptor, files, task, binary=self._binary, timeout=EPISODE_TIMEOUT_S)
+            result = self._run_episode(
+                self._descriptor,
+                files,
+                task,
+                binary=self._binary,
+                timeout=self._episode_timeout_s,
+                executor=self._executor,
+            )
         except (EpisodeError, TrajectoryError) as error:
             return 0.0, "", str(error)
-        return float(self._score_episode(task, result)), _episode_output(result), ""
+        if result.residue and self._forbid_residue:
+            cause = f"{len(result.residue)} file(s) outside the cleanup whitelist: {result.residue[0]}"
+            return 0.0, "", cause
+        score = float(self._score_episode(task, result))
+        if not math.isfinite(score):
+            raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
+        return score, _episode_output(result), ""
 
     def _records(self, minibatch: Sequence[_Example]) -> list[dict[str, Any]]:
         """The reflective dataset: one record per minibatch example."""

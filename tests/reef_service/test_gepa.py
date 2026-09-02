@@ -15,13 +15,15 @@ import pytest
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
+from recipes.gepa.backend import ARCHIVE_STATE_KEY
 from recipes.gepa.method import GEPAProposer, GEPASelector, default_feedback
-from recipes.gepa.recipe import GEPARecipe
+from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeError, EpisodeResult
+from reef.harness.executor import LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
@@ -98,13 +100,18 @@ def score_rules(task: str, result: EpisodeResult) -> float:
 class FakeEpisodes:
     """An episode runner that answers with the rules text it was rendered."""
 
-    def __init__(self, failure: Exception | None = None) -> None:
+    def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
         self.prompts: list[str] = []
         self.rules: list[str] = []
+        self.executors = []
+        self.timeouts: list[float] = []
         self.failure = failure
+        self.residue = residue
 
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0):
+    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         self.prompts.append(prompt)
+        self.executors.append(executor)
+        self.timeouts.append(timeout)
         text = next((value for path, value in files.items() if path.endswith("AGENTS.md")), "")
         self.rules.append(text)
         if self.failure is not None:
@@ -114,7 +121,7 @@ class FakeEpisodes:
             stdout="",
             stderr="",
             trajectory=({"role": "assistant", "content": text},),
-            residue=(),
+            residue=self.residue,
         )
 
 
@@ -337,6 +344,26 @@ def test_the_archive_resumes_from_disk(tmp_path: Path) -> None:
     )
 
 
+def test_a_reef_bound_archive_imports_only_a_matching_external_plan(tmp_path: Path) -> None:
+    path = tmp_path / "archive.json"
+    committed = Archive(path)
+    committed.seed({"rules": SEED_TEXT})
+    committed.record_validation(0, [0.0, 0.0])
+
+    bound = Archive(path, autosave=False)
+    driver = Archive(path)
+    plan = driver.plan(trainset_size=4, valset_size=2, minibatch_size=2)
+    bound.refresh()
+    assert bound.plans["0"] == plan
+    assert bound.candidates == committed.candidates
+
+    driver.add({"rules": REFLECTED}, 0, [1.0])
+    mismatched = Archive(path, autosave=False)
+    mismatched.restore(committed.to_dict())
+    with pytest.raises(ValueError, match="does not match Reef's committed state"):
+        mismatched.refresh()
+
+
 # -- proposer: minibatch, reflection, acceptance ----------------------------
 
 
@@ -410,6 +437,54 @@ def test_an_episode_that_cannot_run_scores_zero_and_reports_its_error(tmp_path: 
     assert proposer(archive, episodes)(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
     (prompt,) = reflector.prompts
     assert "## Feedback\nharness binary 'pi' not found" in prompt
+
+
+def test_proposer_episodes_use_the_configured_execution_policy(tmp_path: Path) -> None:
+    archive = Archive(tmp_path / "archive.json")
+    episodes = FakeEpisodes()
+    models, _ = bindings()
+    executor = LocalExecutor()
+
+    proposal = proposer(
+        archive,
+        episodes,
+        executor=executor,
+        episode_timeout_s=12.5,
+    )(NODES, (SAMPLE,), models)
+
+    assert proposal is not None
+    assert episodes.executors == [executor]
+    assert episodes.timeouts == [12.5]
+
+
+def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> None:
+    models, _ = bindings()
+    dirty = proposer(
+        Archive(tmp_path / "dirty.json"),
+        FakeEpisodes(residue=("unexpected.txt",)),
+        forbid_residue=True,
+    )
+    score, output, error = dirty._score(NODES, {"rules": REFLECTED}, TASK, models)
+    assert (score, output) == (0.0, "")
+    assert error == "1 file(s) outside the cleanup whitelist: unexpected.txt"
+
+    nonfinite = GEPAProposer(
+        archive=Archive(tmp_path / "nonfinite.json"),
+        descriptor=get_adapter("pi"),
+        binary=None,
+        score_episode=resolve_episode_scorer(lambda task, result: float("nan")),
+        feedback=default_feedback,
+        minibatch_size=1,
+        rng_seed=0,
+        skip_perfect_score=False,
+        perfect_score=1.0,
+        max_metric_calls=None,
+        kinds=("rules",),
+        valset_size=1,
+        episode_runner=FakeEpisodes(),
+    )
+    with pytest.raises(ValueError, match="non-finite score nan"):
+        nonfinite._score(NODES, {"rules": REFLECTED}, TASK, models)
 
 
 def test_the_budget_short_circuits_before_any_model_call(tmp_path: Path) -> None:
@@ -566,6 +641,18 @@ def test_the_config_boots_the_recipe_and_binds_both_seams(tmp_path: Path) -> Non
     assert isinstance(built.build("demo", RecordStore()), Trainer)
 
 
+def test_scenario_archive_path_cannot_escape_its_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "gepa"
+    traversal = scenario_archive_path(directory, "../outside")
+    absolute = scenario_archive_path(directory, "/tmp/outside")
+
+    assert traversal.parent == directory
+    assert absolute.parent == directory
+    assert traversal != absolute
+    assert traversal.name.endswith(".json")
+    assert "/" not in traversal.name and ".." not in traversal.name
+
+
 def test_a_seed_that_breaks_the_id_convention_is_refused(tmp_path: Path) -> None:
     config = sections(tmp_path)
     config["evolution"]["seed"] = [{"id": "wrong", "name": "skill", "config": {"name": "notes", "text": "# n"}}]
@@ -641,12 +728,18 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         factory,
         agent_record_dir=tmp_path / "agent-record",
     )
+    scenario_name = "../gepa-demo"
     try:
-        scenario = dispatcher.get_or_create_scenario("gepa-demo")
+        scenario = dispatcher.get_or_create_scenario(scenario_name)
         assert scenario is not None
-        _report_once(scenario, "gepa-demo", "1")
+        _report_once(scenario, scenario_name, "1")
         result = scenario.prepare_training_step()
         assert result is not None
+        archive_path = scenario_archive_path(tmp_path / "gepa", scenario_name)
+        assert not archive_path.exists()
+        assert not (tmp_path / "gepa-demo.json").exists()
+        assert result.state is not None
+        assert result.state[ARCHIVE_STATE_KEY]["served"] == 1
         scenario.commit(result)
     finally:
         dispatcher.close()
@@ -662,11 +755,64 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
     assert gate["metric_calls"] == 6
     assert gate["selection"]["policy"] == "gepa"
 
-    archive = json.loads((tmp_path / "gepa" / "gepa-demo.json").read_text())
+    archive = json.loads(archive_path.read_text())
+    assert not (tmp_path / "gepa-demo.json").exists()
     assert archive["served"] == 1
     assert archive["pending"] is None
     assert archive["candidates"][1]["texts"] == {"rules": REFLECTED}
     assert archive["candidates"][1]["val_scores"] == [1.0, 1.0]
+
+
+def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_path: Path, monkeypatch) -> None:
+    make_binary(tmp_path)
+    config = sections(tmp_path)
+    booted = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
+    built = dataclasses.replace(booted, models={"reflection": FakeChat(FENCED_REPLY)})
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    data_dir = tmp_path / "agent-record"
+    dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    try:
+        scenario = dispatcher.get_or_create_scenario("gepa-demo")
+        assert scenario is not None
+        _report_once(scenario, "gepa-demo", "1")
+        first = scenario.prepare_training_step()
+        assert first is not None
+        scenario.commit(first)
+
+        archive_path = scenario_archive_path(tmp_path / "gepa", "gepa-demo")
+        committed = json.loads(archive_path.read_text())
+        assert scenario.trainer.state[ARCHIVE_STATE_KEY] == committed
+
+        _report_once(scenario, "gepa-demo", "2")
+        second = scenario.prepare_training_step()
+        assert second is not None and second.artifact is None and second.state is not None
+        assert second.state[ARCHIVE_STATE_KEY] != committed
+        assert json.loads(archive_path.read_text()) == committed
+
+        commit_log = scenario.commit_log
+        assert commit_log is not None
+
+        def fail_append(record):
+            raise RuntimeError("commit log unavailable")
+
+        monkeypatch.setattr(commit_log, "append", fail_append)
+        with pytest.raises(RuntimeError, match="commit log unavailable"):
+            scenario.commit(second)
+        assert json.loads(archive_path.read_text()) == committed
+    finally:
+        dispatcher.close()
+
+    recovered_dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    try:
+        recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")
+        assert recovered is not None
+        assert recovered.scenario_step == 1
+        assert recovered.trainer.state[ARCHIVE_STATE_KEY] == committed
+        assert json.loads(archive_path.read_text()) == committed
+    finally:
+        recovered_dispatcher.close()
 
 
 def test_every_reflection_is_logged_with_its_prompt_reply_and_verdict(tmp_path: Path) -> None:

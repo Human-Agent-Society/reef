@@ -129,6 +129,15 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Acknowledge that Reef durably committed a backend training job."""
         return
 
+    def commit_applied(self, state: Mapping[str, Any]) -> None:
+        """Observe algorithm state only after its scenario commit is durable.
+
+        Backends normally need no side effect here. A backend that maintains
+        a derived local mirror may update it from ``state`` without letting
+        speculative prepare/evaluate work escape Reef's commit boundary.
+        """
+        return
+
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""
         return {}

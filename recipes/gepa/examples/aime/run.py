@@ -41,6 +41,7 @@ from aiohttp import web
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
 from recipes.gepa.archive import Archive
+from recipes.gepa.recipe import scenario_archive_path
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
@@ -335,7 +336,7 @@ def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict
 
 def archive() -> Archive:
     """The method's own archive: the driver reads it and plans through it."""
-    return Archive(WORK / "gepa" / f"{SCENARIO}.json")
+    return Archive(scenario_archive_path(WORK / "gepa", SCENARIO))
 
 
 def seed_tree(recipe: Any) -> dict[str, str]:

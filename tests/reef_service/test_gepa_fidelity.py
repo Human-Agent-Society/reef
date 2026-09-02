@@ -105,7 +105,7 @@ def run_upstream(run_dir: Path, budget: int):
 
 
 class ReefEpisodes:
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0):
+    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         text = files["pi-agent/AGENTS.md"].rstrip("\n")
         return EpisodeResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
 

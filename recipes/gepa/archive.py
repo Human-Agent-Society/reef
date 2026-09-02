@@ -1,13 +1,12 @@
-"""The GEPA candidate pool on disk: fronts, parent sampling, budget.
+"""The GEPA candidate pool: fronts, parent sampling, budget, persistence.
 
-GEPA keeps its whole search in one in-process state object: every program
+GEPA keeps its whole search in one state object: every program
 it ever proposed, that program's per-instance validation scores, the Pareto
 front each instance induces, a round-robin cursor per candidate, and the
-metric-call budget spent so far. Reef's algorithm state holds only the
-served composition, and the method owns everything else, so that state
-lives here - one JSON file per scenario beside the run, rewritten
-atomically after every change so an interrupted step resumes instead of
-restarting the search.
+metric-call budget spent so far. Standalone drivers persist every mutation
+to JSON. A Reef recipe instead keeps this object transactionally in Reef's
+algorithm state and updates the JSON mirror only after the scenario commit
+is durable, so a failed activation or commit cannot advance the search.
 
 Two rules are GEPA's and are reproduced exactly:
 
@@ -79,6 +78,9 @@ class Archive:
     """Every candidate the search has produced, and the budget it has spent."""
 
     path: Path
+    #: Standalone archives write after every mutation. Reef-bound archives
+    #: disable this and persist only from the post-commit hook.
+    autosave: bool = True
     candidates: list[Candidate] = field(default_factory=list)
     #: The candidate the mechanism is serving, and the one a proposal is
     #: stated against; ``pending`` is the candidate awaiting the selector's
@@ -104,21 +106,34 @@ class Archive:
     order: list[int] = field(default_factory=list)
     epoch: int = -1
     plans: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _plan_refreshed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
+        if not isinstance(self.autosave, bool):
+            raise TypeError("archive autosave must be a boolean")
         if self.path.exists():
             self._load()
 
     # -- persistence ---------------------------------------------------------
 
-    def _load(self) -> None:
+    def _read(self) -> Mapping[str, Any]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as error:
             raise ValueError(f"cannot read the GEPA archive at {self.path}: {error}") from error
         if not isinstance(data, Mapping):
             raise ValueError(f"the GEPA archive at {self.path} must hold a JSON object")
+        return data
+
+    def _load(self) -> None:
+        self.restore(self._read())
+
+    def restore(self, data: Mapping[str, Any]) -> None:
+        """Replace the in-memory archive from a committed state snapshot."""
+        if not isinstance(data, Mapping):
+            raise ValueError("GEPA archive state must be a mapping")
+        self._plan_refreshed = False
         self.candidates = [Candidate.from_dict(entry) for entry in data.get("candidates", ())]
         served, pending = data.get("served"), data.get("pending")
         self.served = None if served is None else int(served)
@@ -153,16 +168,42 @@ class Archive:
 
     def refresh(self) -> None:
         """Re-read the file: the driver that plans an iteration and the method
-        that runs it hold separate objects on one archive, never at once."""
-        if self.path.exists():
-            self._load()
+        that runs it hold separate objects on one archive, never at once.
 
-    def _write(self) -> None:
-        """Rewrite the archive atomically: a crash resumes, never truncates."""
+        A Reef-bound archive accepts only the driver's scheduling fields from
+        disk. Candidate, budget, and serving state must still match the
+        committed in-memory snapshot, so a stale or speculative mirror cannot
+        replace Reef's canonical state.
+        """
+        if self.autosave:
+            if self.path.exists():
+                self._load()
+            return
+        if self._plan_refreshed:
+            return
+        self._plan_refreshed = True
+        if not self.path.exists():
+            return
+        data = self._read()
+        current = self.to_dict()
+        planned_fields = {"rng_state", "order", "epoch", "plans"}
+        if any(data.get(key) != value for key, value in current.items() if key not in planned_fields):
+            raise ValueError(f"the GEPA archive plan at {self.path} does not match Reef's committed state")
+        self.rng_state = data.get("rng_state")
+        self.order = [int(index) for index in data.get("order", ())]
+        self.epoch = int(data.get("epoch", -1))
+        self.plans = {str(key): dict(value) for key, value in (data.get("plans") or {}).items()}
+
+    def persist(self) -> None:
+        """Rewrite the JSON mirror atomically from the current state."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         scratch = self.path.with_name(f"{self.path.name}.tmp")
         scratch.write_text(json.dumps(self.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
         os.replace(scratch, self.path)
+
+    def _write(self) -> None:
+        if self.autosave:
+            self.persist()
 
     # -- growth --------------------------------------------------------------
 
