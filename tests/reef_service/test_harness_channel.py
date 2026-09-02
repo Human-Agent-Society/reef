@@ -28,7 +28,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError, load_descriptor
 from reef.harness.episode import EpisodeResult
 from reef.harness.render import render_composition
-from reef.recipe import Recipe, RecipeRegistry
+from reef.recipe import Recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
@@ -136,7 +136,6 @@ def _dispatcher(
     mutations: tuple[Mutation, ...],
     *,
     bootstrap_files: dict[str, str] | None = None,
-    recipe_names: tuple[str, ...] = ("evolve",),
     batch_policy: str = "reports",
     batch_size: int = 1,
 ) -> Dispatcher:
@@ -160,13 +159,13 @@ def _dispatcher(
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
     dispatcher = Dispatcher(
-        RecipeRegistry(dict.fromkeys(recipe_names, recipe)),
+        recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
     )
-    dispatcher.get_or_create_scenario("delivery", recipe_names[0])
+    dispatcher.get_or_create_scenario("delivery")
     return dispatcher
 
 
@@ -977,34 +976,7 @@ def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_
             assert response.status == 200
             assert 'export REEF_HARNESS_SCENARIO="harness-0123456789ab"' in await response.text()
             created = dispatcher.get_or_create_scenario("harness-0123456789ab")
-            assert created is not None and created.recipe == "evolve"
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_install_route_without_scenario_rejects_multiple_harness_recipes(tmp_path, monkeypatch) -> None:
-    dispatcher = _dispatcher(
-        tmp_path,
-        (),
-        bootstrap_files={"pi-agent/AGENTS.md": "starter rules\n"},
-        recipe_names=("code-harness", "support-harness"),
-    )
-    monkeypatch.setattr(
-        "reef.service.request_service._random_harness_scenario_name",
-        lambda: "harness-0123456789ab",
-    )
-
-    async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
-        await client.start_server()
-        try:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
-            assert response.status == 400
-            assert "multiple harness recipes are available" in await response.text()
-            assert not dispatcher.has_loaded("harness-0123456789ab")
+            assert created is not None
         finally:
             await client.close()
 
@@ -1016,12 +988,12 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     dispatcher = Dispatcher(
-        RecipeRegistry({"weights": Recipe()}),
+        Recipe(),
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
     )
-    dispatcher.get_or_create_scenario("weights-only", "weights")
+    dispatcher.get_or_create_scenario("weights-only")
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))

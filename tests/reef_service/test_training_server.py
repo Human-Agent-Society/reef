@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 
-from reef.recipe import UnknownScenarioRecipe
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
@@ -251,7 +250,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
         connector=connector,
     )
 
-    assert dispatcher._registry.recipes.names == ("openclawrl",)
+    assert dispatcher._recipe.name == "openclawrl"
     assert connected == {
         "inference_url": "http://ray-head:30000",
         "actor_name": "reef-train-bridge",
@@ -279,17 +278,11 @@ def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_pa
         )
     )
 
-    registry = dispatcher._registry.recipes
-    assert registry.names == ("recipe",)
-    assert registry.served_recipe == "recipe"
-    # The deployment serves one recipe: a request-time name never materializes
-    # another method, even though a dotted resolver could have built it.
-    with pytest.raises(UnknownScenarioRecipe):
-        registry.resolve("harness_evolve")
+    assert dispatcher._recipe.name == "recipe"
 
 
 @pytest.mark.unit
-def test_build_dispatcher_uses_the_dotted_recipe_name_as_its_registry_key(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
         "factory",
@@ -305,8 +298,7 @@ def test_build_dispatcher_uses_the_dotted_recipe_name_as_its_registry_key(monkey
         environ={},
     )
 
-    assert dispatcher._registry.recipes.names == ("recipe",)
-    assert dispatcher._registry.recipes.served_recipe == "recipe"
+    assert dispatcher._recipe.name == "recipe"
 
 
 @pytest.mark.unit
@@ -326,7 +318,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
         environ={},
         connector=lambda **kwargs: StubRuntime(),
     )
-    recipe = dispatcher._registry.recipes.resolve("openclawrl")
+    recipe = dispatcher._recipe
     captured["batch_size"] = recipe.batch_size
     captured["checkpoint_strategy"] = recipe.checkpoint_strategy
 
@@ -355,7 +347,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         connector=lambda **kwargs: StubRuntime(),
     )
 
-    recipe = dispatcher._registry.recipes.resolve("openclawrl")
+    recipe = dispatcher._recipe
     assert recipe.candidate_evaluation is not None
     assert recipe.candidate_evaluation.module == evaluation["module"]
 
@@ -461,11 +453,11 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
         connector=connector,
     )
 
-    assert dispatcher._registry.recipes.names == ("sao",)
+    assert dispatcher._recipe.name == "sao"
     # The runtime connector was invoked (inference branch never connects).
     assert connected["actor_name"] == "reef-train-bridge"
     assert connected["max_staleness"] == 2
-    assert dispatcher._registry.recipes.resolve("sao").max_staleness == 2
+    assert dispatcher._recipe.max_staleness == 2
 
 
 @pytest.mark.unit
@@ -493,7 +485,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
     )
 
     assert connected.get("max_staleness", 0) == max_staleness
-    assert dispatcher._registry.recipes.resolve("openclawrl").max_staleness == max_staleness
+    assert dispatcher._recipe.max_staleness == max_staleness
 
 
 @pytest.mark.unit

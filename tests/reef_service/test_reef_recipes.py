@@ -13,15 +13,7 @@ from recipes.sao import SAOProcessor, SAORecipe
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor, TTTDRecipe
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.recipe import (
-    Recipe,
-    RecipeConfigError,
-    RecipeRegistry,
-    UnknownScenarioRecipe,
-    WeightTrainingRecipe,
-    WeightTrainingSpec,
-    load_recipe_config,
-)
+from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime import InferenceProxyRuntime
@@ -81,21 +73,6 @@ def test_dotted_reference_resolves_an_external_recipe_class() -> None:
 def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> None:
     with pytest.raises(RecipeConfigError, match=match):
         recipe_class_for(reference)
-
-
-def test_recipe_registry_resolves_registered_recipe() -> None:
-    custom_recipe = Recipe()
-    tttd_recipe = Recipe(name="tttd")
-
-    registry = RecipeRegistry(
-        recipes={"custom": custom_recipe, "tttd": tttd_recipe},
-    )
-
-    assert registry.names == ("custom", "tttd")
-    assert registry.resolve("custom") is custom_recipe
-    assert registry.resolve("tttd") is tttd_recipe
-    with pytest.raises(UnknownScenarioRecipe, match="available recipes: custom, tttd"):
-        registry.resolve("missing")
 
 
 @pytest.mark.parametrize(
@@ -348,7 +325,7 @@ model:
 
 def test_named_recipe_without_config_directory_resolves_core_recipe_only() -> None:
     assert isinstance(build_named_recipe("recipe", {}), Recipe)
-    with pytest.raises(UnknownScenarioRecipe, match="unknown scenario recipe 'thorough'"):
+    with pytest.raises(RecipeConfigError, match="unknown deployment recipe 'thorough'"):
         build_named_recipe("thorough", {})
 
 
@@ -358,13 +335,6 @@ def test_named_recipe_reads_the_config_directory_from_the_environment(tmp_path) 
     recipe = build_named_recipe("thorough", {"REEF_RECIPE_CONFIG_DIR": str(tmp_path)})
 
     assert isinstance(recipe, Recipe)
-
-
-def test_instance_registry_is_a_closed_set() -> None:
-    registry = RecipeRegistry({"custom": Recipe()})
-
-    with pytest.raises(UnknownScenarioRecipe):
-        registry.resolve("recipe")
 
 
 def test_named_recipes_never_import_implementation_references() -> None:

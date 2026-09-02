@@ -17,7 +17,7 @@ from reef.artifact import (
 )
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.recipe import Recipe, RecipeRegistry, ScenarioRecipeConflict, UnknownScenarioRecipe
+from reef.recipe import Recipe
 from reef.runtime.inference import HttpInferenceBackend, InferenceBackend, default_artifact_request_headers
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
@@ -37,7 +37,7 @@ class ContractInferenceBackend(InferenceBackend):
 def dispatcher_with_checkpoint_strategy(strategy, *, backend_factory, local_artifact_dir):
     recipe = Recipe(checkpoint_strategy=strategy)
     return Dispatcher(
-        RecipeRegistry({"recipe": recipe}),
+        recipe,
         backend_factory,
         local_artifact_dir=local_artifact_dir,
     )
@@ -54,7 +54,7 @@ class WeightRecipe(Recipe):
 
 def weight_dispatcher(tmp_path, initial):
     return Dispatcher(
-        RecipeRegistry({"recipe": WeightRecipe(checkpoint_strategy=EveryNVersions(3))}),
+        WeightRecipe(checkpoint_strategy=EveryNVersions(3)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
     )
@@ -132,30 +132,6 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
 
 
 @pytest.mark.unit
-def test_scenario_recipe_is_bound_on_first_request_and_cannot_change() -> None:
-    dispatcher = build_default_dispatcher()
-    service = RequestService(dispatcher)
-
-    service.accept({"x-reef-scenario": "math"}, {"score": 1.0}, request_type=RequestType.REPORT)
-
-    assert dispatcher.get_or_create_scenario("math").recipe == "recipe"
-    # The binding is durable: an in-process caller asserting another recipe is refused.
-    with pytest.raises(ScenarioRecipeConflict, match="already bound"):
-        dispatcher.get_or_create_scenario("math", "other")
-
-
-@pytest.mark.unit
-def test_unknown_recipe_does_not_create_scenario_runtime() -> None:
-    dispatcher = build_default_dispatcher()
-
-    # The closed registry never materializes a name it was not given.
-    with pytest.raises(UnknownScenarioRecipe, match="available recipes: recipe"):
-        dispatcher.get_or_create_scenario("math", "tttd")
-
-    assert not dispatcher.has_loaded("math")
-
-
-@pytest.mark.unit
 def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -177,7 +153,7 @@ def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_dispatcher_selects_backend_registered_recipe_factory(tmp_path) -> None:
+def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     selected: list[str] = []
@@ -194,33 +170,13 @@ def test_dispatcher_selects_backend_registered_recipe_factory(tmp_path) -> None:
             )
 
     dispatcher = Dispatcher(
-        RecipeRegistry(
-            recipes={
-                "default": RecordingRecipe(name="default"),
-                "tttd": RecordingRecipe(name="tttd"),
-            },
-        ),
+        RecordingRecipe(name="tttd"),
         InMemoryRepositoryBackend.factory(initial),
     )
 
-    runtime = dispatcher.get_or_create_scenario("discovery", "tttd")
+    dispatcher.get_or_create_scenario("discovery")
 
-    assert runtime.recipe == "tttd"
     assert selected == ["tttd"]
-
-
-@pytest.mark.unit
-def test_dispatcher_binds_new_scenarios_to_the_served_recipe(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
-    dispatcher = Dispatcher(
-        RecipeRegistry({"recipe": Recipe()}),
-        InMemoryRepositoryBackend.factory(initial),
-    )
-
-    assert dispatcher.get_or_create_scenario("math").recipe == "recipe"
-    assert dispatcher.get_or_create_scenario("math", "recipe").recipe == "recipe"
 
 
 @pytest.mark.unit
@@ -246,12 +202,11 @@ def test_new_dispatcher_recovers_scenario_snapshot_from_repository(tmp_path) -> 
     backend = InMemoryRepositoryBackend.factory(initial)
 
     first = build_default_dispatcher(backend_factory=backend)
-    created = first.get_or_create_scenario("math", recipe="recipe")
+    created = first.get_or_create_scenario("math")
     second = build_default_dispatcher(backend_factory=backend)
 
     recovered = second.get_or_create_scenario("math")
 
-    assert recovered.recipe == "recipe"
     assert recovered.repository.base_artifact == created.repository.base_artifact
     assert recovered.repository.current_artifact == created.repository.checkpoint_artifact
     assert recovered.scenario_step == 0
@@ -276,7 +231,7 @@ def test_failed_artifact_fork_does_not_leave_runtime(tmp_path) -> None:
     )
 
     with pytest.raises(ArtifactError, match="cannot fork math"):
-        dispatcher.get_or_create_scenario("math", "recipe")
+        dispatcher.get_or_create_scenario("math")
 
     assert not dispatcher.has_loaded("math")
 
@@ -316,7 +271,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
-    runtime = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    runtime = build_default_dispatcher().get_or_create_scenario("math")
 
     assert runtime.trainer.processor.output_schema is PolicyBatch
     assert runtime.trainer.training_backend is None
@@ -635,7 +590,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
         (initial / "model.txt").write_text("base")
         repository_backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
         dispatcher = build_default_dispatcher(backend_factory=repository_backend)
-        old_ref = dispatcher.get_or_create_scenario("chat", "recipe").repository.current_artifact
+        old_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
         candidate_path = tmp_path / "candidate"
         candidate_path.mkdir()
@@ -686,7 +641,7 @@ def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_
         checkpoint_strategy=EveryNVersions(3),
         local_artifact_dir=tmp_path / "local",
     )
-    original_checkpoint = dispatcher.get_or_create_scenario("chat", "recipe").repository.current_artifact
+    original_checkpoint = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
     for version in (1, 2, 3):
         candidate = tmp_path / f"candidate-{version}"
@@ -729,7 +684,7 @@ def test_non_checkpointed_version_is_used_by_next_inference(tmp_path) -> None:
         initial.mkdir()
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat", "recipe")
+        dispatcher.get_or_create_scenario("chat")
         checkpoint = dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
         dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
         runtime = dispatcher.get_or_create_scenario("chat")
@@ -777,7 +732,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
         initial.mkdir()
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat", "recipe")
+        dispatcher.get_or_create_scenario("chat")
         dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
         head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
         assert isinstance(head, LiveWeightArtifactRef)
@@ -824,7 +779,7 @@ def test_completed_inference_with_mismatched_runtime_load_id_fails_loudly(tmp_pa
         initial.mkdir()
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat", "recipe")
+        dispatcher.get_or_create_scenario("chat")
         dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
 
         client = TestClient(
@@ -908,7 +863,7 @@ def test_inference_fails_loudly_when_the_engine_reports_no_version(tmp_path) -> 
         initial.mkdir()
         (initial / "model.txt").write_text("base")
         dispatcher = weight_dispatcher(tmp_path, initial)
-        dispatcher.get_or_create_scenario("chat", "recipe")
+        dispatcher.get_or_create_scenario("chat")
         dispatcher._commit_result("chat", TrainStepResult(state=None, runtime_load_id="sglang-v1"))
 
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
@@ -942,7 +897,7 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
         checkpoint_strategy=EveryNVersions(3),
         local_artifact_dir=tmp_path / "first-local",
     )
-    checkpoint = first_dispatcher.get_or_create_scenario("chat", "recipe").repository.checkpoint_artifact
+    checkpoint = first_dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     (candidate / "model.txt").write_text("v1")
@@ -997,8 +952,8 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
         local_artifact_dir=tmp_path / "local",
     )
 
-    dispatcher.get_or_create_scenario("math", "recipe")
-    dispatcher.get_or_create_scenario("code", "recipe")
+    dispatcher.get_or_create_scenario("math")
+    dispatcher.get_or_create_scenario("code")
     math_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
     dispatcher._commit_result("math", TrainStepResult(state="no artifact"))
     # A no-artifact commit advances the step (the trainer consumed records and
@@ -1048,7 +1003,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path, failure
         backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
     )
-    runtime = dispatcher.get_or_create_scenario("chat", "recipe")
+    runtime = dispatcher.get_or_create_scenario("chat")
     previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.scenario_step)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
@@ -1120,9 +1075,12 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
             created = await client.post(
                 "/reef/scenarios",
                 headers=current,
-                json={"name": "shared", "recipe": "recipe"},
+                json={"name": "shared"},
             )
             assert created.status == 201
+            created_body = await created.json()
+            assert created_body["scenario"] == "shared"
+            assert "recipe" not in created_body
 
             after_rotation = await client.post(
                 "/reef/report",
@@ -1132,7 +1090,9 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
             assert after_rotation.status == 200
 
             listed = await client.get("/reef/scenarios", headers=rotated)
-            assert [row["scenario"] for row in (await listed.json())["scenarios"]] == ["shared"]
+            listed_rows = (await listed.json())["scenarios"]
+            assert [row["scenario"] for row in listed_rows] == ["shared"]
+            assert all("recipe" not in row for row in listed_rows)
 
             outsider = await client.post(
                 "/reef/report",

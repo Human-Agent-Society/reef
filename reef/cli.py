@@ -8,8 +8,8 @@ process in dependency order, including the internal Reef HTTP service.
 Run `reef serve --help` for config options.
 
 Deployment stacks use the `services` layout documented in the configuration
-reference. Named per-scenario recipe YAML is deployment data, not library
-data: point ``REEF_RECIPE_CONFIG_DIR`` at your own directory.
+reference. Named recipe YAML is deployment data, not library data: point
+``REEF_RECIPE_CONFIG_DIR`` at your own directory.
 """
 
 from __future__ import annotations

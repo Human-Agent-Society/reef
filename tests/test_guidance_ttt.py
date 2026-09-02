@@ -77,7 +77,7 @@ class _ReefClient:
         assert (scenario, path, recipe, release_id) == (
             "guidance-smoke",
             "/v1/chat/completions",
-            "tttd",
+            None,
             None,
         )
         with self._lock:
@@ -87,7 +87,7 @@ class _ReefClient:
         return {"choices": [{"message": {"content": content}}]}, f"receipt-{index}"
 
     def report(self, scenario, payload, *, recipe=None, release_id=None):
-        assert (scenario, recipe, release_id) == ("guidance-smoke", "tttd", None)
+        assert (scenario, recipe, release_id) == ("guidance-smoke", None, None)
         with self._lock:
             self.reports.append(payload)
         return {}

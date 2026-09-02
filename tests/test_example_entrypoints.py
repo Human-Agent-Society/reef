@@ -329,10 +329,8 @@ def test_harbor_result_posts_verifier_reward_to_its_exact_receipts(monkeypatch, 
     }
     client = Client()
 
-    assert report_module.post_report(result, client=client, scenario="example-host-test", recipe=example) == {
-        "accepted": True
-    }
+    assert report_module.post_report(result, client=client, scenario="example-host-test") == {"accepted": True}
     scenario, payload, recipe = client.call
-    assert (scenario, recipe) == ("example-host-test", example)
+    assert (scenario, recipe) == ("example-host-test", None)
     assert payload["score"] == 0.75
     assert payload["references"] == ["receipt-7"]

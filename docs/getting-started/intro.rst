@@ -82,8 +82,8 @@ the current and proposed versions on your tasks, and keeps the winner. See `Evol
 What a call looks like
 ----------------------
 
-A deployment names one recipe in its config. Every scenario it creates binds
-to that recipe:
+A deployment names one recipe in its config. Every scenario it creates uses
+that recipe; recipe identity is not part of scenario state:
 
 .. code:: yaml
 

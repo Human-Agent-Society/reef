@@ -73,7 +73,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.render import render_composition
-from reef.recipe.registry import RecipeRegistry, build_recipe
+from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
@@ -93,7 +93,7 @@ class Ledger:
             handle.write(json.dumps(record) + "\n")
 
 
-def load_recipe() -> tuple[str, Any]:
+def load_recipe() -> Any:
     """The recipe skillclaw.yaml declares, built through its explicit implementation.
 
     This driver is the deployment: it owns the upstream binding and hands it
@@ -108,8 +108,7 @@ def load_recipe() -> tuple[str, Any]:
         api_key=read_key(),
         inference_timeout_s=600.0,
     )
-    recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
-    return recipe.name, recipe
+    return build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
 
 
 def _default_headers_middleware(scenario: str) -> Any:
@@ -137,7 +136,6 @@ class RunService:
         self,
         *,
         scenario: str,
-        recipe_name: str,
         recipe: Any,
         bootstrap_pool: Path,
         run_dir: Path,
@@ -147,11 +145,10 @@ class RunService:
         inference_backend: Any | None = None,
     ) -> None:
         self.scenario = scenario
-        self.recipe_name = recipe_name
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.dispatcher = Dispatcher(
-            RecipeRegistry({recipe_name: recipe}),
+            recipe,
             InMemoryRepositoryBackend.factory(bootstrap_pool, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             agent_record_dir=run_dir / "reef-data",
@@ -173,7 +170,7 @@ class RunService:
     def start(self) -> None:
         # Scenario creation (or durable recovery from the commit log) happens
         # before any request lands.
-        self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        self.dispatcher.get_or_create_scenario(self.scenario)
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, name="reef-embedded", daemon=True)
         self._thread.start()
@@ -210,7 +207,7 @@ class RunService:
         return artifact.local_path
 
     def records(self) -> RecordStore:
-        scenario = self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
         return scenario.records
 
@@ -227,7 +224,7 @@ class RunService:
         return len(trained - baseline)
 
     def training_step(self) -> int:
-        current = self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        current = self.dispatcher.get_or_create_scenario(self.scenario)
         assert current is not None
         return current.scenario_step
 
@@ -247,7 +244,7 @@ class RunService:
         If the process died after the trigger report but before its commit, no
         further record will re-trigger it, so a resumed run drives one step.
         """
-        current = self.dispatcher.get_or_create_scenario(self.scenario, self.recipe_name)
+        current = self.dispatcher.get_or_create_scenario(self.scenario)
         assert current is not None
         result = current.prepare_training_step()
         if result is None:
@@ -282,7 +279,7 @@ def ensure_task_record(
         payload={"messages": [{"role": "user", "content": composed_prompt}], "response": {}},
         agent_record_id=agent_record_id,
     )
-    service.dispatcher.accept_record(item, recipe=service.recipe_name)
+    service.dispatcher.accept_record(item)
     return item.agent_record_id
 
 
@@ -453,7 +450,7 @@ def report(service: RunService, client: ReefClient, payload: dict[str, Any]) -> 
     checked to determine whether the report landed.
     """
     try:
-        client.report(service.scenario, dict(payload), recipe=service.recipe_name)
+        client.report(service.scenario, dict(payload))
     except ReefClientError as exc:
         if exc.status == 409:
             return  # an already reported task from a replayed day
@@ -557,10 +554,9 @@ def main() -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = Ledger(run_dir / "ledger.jsonl")
     day.ensure_benchmark()
-    recipe_name, recipe = load_recipe()
+    recipe = load_recipe()
     service = RunService(
         scenario=RUN,
-        recipe_name=recipe_name,
         recipe=recipe,
         # The last durable commit wins over pool-current: a crash between the
         # night's commit and the pool copy must not silently revert the pool.
@@ -639,10 +635,9 @@ def solve() -> None:
 
     run_dir = WORKDIR / "solve"
     run_dir.mkdir(parents=True, exist_ok=True)
-    recipe_name, recipe = load_recipe()
+    recipe = load_recipe()
     service = RunService(
         scenario="solve",
-        recipe_name=recipe_name,
         recipe=recipe,
         bootstrap_pool=_bootstrap_pool(run_dir, "solve", recipe),
         run_dir=run_dir,
@@ -654,7 +649,7 @@ def solve() -> None:
     agent = {
         "name": "harness.harbor_agent:HarborAgent",
         "model_name": AGENT_MODEL,
-        "kwargs": {"service_url": service.base_url, "scenario": "solve", "recipe": recipe_name},
+        "kwargs": {"service_url": service.base_url, "scenario": "solve"},
     }
     try:
         lab = Lab(run_dir / "lab")

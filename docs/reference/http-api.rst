@@ -27,7 +27,7 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                         | every known scenario, recipe, and current release |
+| ``GET /reef/scenarios``                         | every known scenario and current release          |
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
 +-------------------------------------------------+---------------------------------------------------+
@@ -75,7 +75,8 @@ Scenarios
 ---------
 
 The first inference request or report carrying a new ``x-reef-scenario`` creates
-the scenario and binds it to the deployment's recipe.
+the scenario using the deployment's configured recipe. Requests never select a
+recipe.
 
 .. code:: bash
 
@@ -91,15 +92,15 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "recipe", "release_id"?}``       |
-|                                             | → ``{scenario, recipe, release_id,          |
+| ``POST /reef/scenarios``                    | ``{"name", "release_id"?}``                 |
+|                                             | → ``{scenario, release_id,                  |
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario with its recipe and    |
-|                                             | current release once loaded                 |
+| ``GET /reef/scenarios``                     | every known scenario and its current        |
+|                                             | release once loaded                         |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, recipe, processor,             |
+| ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
 
@@ -282,7 +283,7 @@ Status codes
 |        | release, unknown adapter, no configured harness             |
 |        | recipe, or a scenario that serves no files                  |
 +--------+-------------------------------------------------------------+
-| 409    | a recipe or base artifact conflicting with the binding, a   |
+| 409    | a base artifact conflicting with the scenario registration, |
 |        | record id resent with different content, a rollback naming  |
 |        | a release that is not restorable, or an engine that reports |
 |        | no serving runtime load ID                                  |

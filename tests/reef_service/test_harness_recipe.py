@@ -19,7 +19,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
-from reef.recipe.registry import RecipeRegistry, recipe_class_for
+from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation, MutationError, ScoreComparisonSelector
@@ -585,9 +585,9 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("leak-476", built.name)
+        scenario = dispatcher.get_or_create_scenario("leak-476")
         assert scenario is not None
         _report_once(scenario, "leak-476", "1")
         result = scenario.prepare_training_step()
@@ -602,9 +602,9 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
-    restarted = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        recovered = restarted.get_or_create_scenario("leak-476", built.name)
+        recovered = restarted.get_or_create_scenario("leak-476")
         assert recovered is not None
         assert recovered.trainer.state["entries"] == [SEED_MODELS, SEED_SETTINGS]
         _report_once(recovered, "leak-476", "2")
@@ -656,9 +656,9 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("leak-476-disabled", built.name)
+        scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
         assert scenario is not None
         _report_once(scenario, "leak-476-disabled", "1")
         result = scenario.prepare_training_step()
@@ -686,9 +686,9 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        scenario = dispatcher.get_or_create_scenario("pregate-476", built.name)
+        scenario = dispatcher.get_or_create_scenario("pregate-476")
         assert scenario is not None
         _report_once(scenario, "pregate-476", "1")
         result = scenario.prepare_training_step()
@@ -705,9 +705,9 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
-    restarted = Dispatcher(RecipeRegistry({built.name: built}), factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
     try:
-        recovered = restarted.get_or_create_scenario("pregate-476", built.name)
+        recovered = restarted.get_or_create_scenario("pregate-476")
         assert recovered is not None
         _report_once(recovered, "pregate-476", "2")
         with pytest.raises(ValueError, match=r"apiKey.*inline credential.*rotate"):

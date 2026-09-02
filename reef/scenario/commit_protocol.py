@@ -194,7 +194,6 @@ class ScenarioCommitProtocol:
             try:
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
-                    recipe=self._binding.name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
@@ -306,7 +305,6 @@ class ScenarioCommitProtocol:
             if self._should_checkpoint(result):
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
-                    recipe=self._binding.name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,

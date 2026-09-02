@@ -30,7 +30,6 @@ from reef.observability import (
     TrainingExperimentEvent,
 )
 from reef.recipe.base import Recipe
-from reef.recipe.registry import RecipeRegistry
 from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
@@ -105,14 +104,15 @@ class Dispatcher:
     """Coordinate scenario creation, inference state, training, and model commits.
 
     Invariant: at most one weight-training scenario per process. Its serial
-    thread is bound to the first recipe carrying a ``TrainingRuntime``;
-    resolving a second raises (enforced in :class:`ScenarioRegistry`).
+    thread is bound to the first scenario using the deployment's
+    ``TrainingRuntime``; resolving a second raises (enforced in
+    :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
     """
 
     def __init__(
         self,
-        recipes: RecipeRegistry,
+        recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
         local_artifact_dir: Path | None = None,
@@ -120,9 +120,10 @@ class Dispatcher:
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
     ) -> None:
+        self._recipe = recipe
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self._registry = ScenarioRegistry(
-            recipes,
+            recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
@@ -157,14 +158,12 @@ class Dispatcher:
     def get_or_create_scenario(
         self,
         scenario: str,
-        recipe: str | None = None,
-        release_id: str | None = None,
         *,
+        release_id: str | None = None,
         allow_implicit_creation: bool | None = None,
     ) -> Scenario | None:
         return self._registry.get_or_create(
             scenario,
-            recipe,
             release_id,
             allow_implicit_creation=allow_implicit_creation,
         )
@@ -172,11 +171,8 @@ class Dispatcher:
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
 
-    def recipe_has_files(self, recipe: str) -> bool:
-        return self._registry.recipe_has_files(recipe)
-
-    def file_recipe_names(self) -> tuple[str, ...]:
-        return self._registry.file_recipe_names()
+    def recipe_has_files(self) -> bool:
+        return self._registry.recipe_has_files()
 
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
@@ -188,7 +184,6 @@ class Dispatcher:
             processor = current.trainer.processor
             return {
                 "scenario": scenario,
-                "recipe": current.recipe,
                 "processor": type(processor).__name__,
                 "required_request_types": sorted(rt.value for rt in processor.required_request_types),
             }
@@ -203,7 +198,7 @@ class Dispatcher:
                 return published
             event = RollbackExperimentEvent(
                 scenario=scenario,
-                recipe=current.recipe,
+                recipe=self._recipe.name,
                 step=current.scenario_step,
                 run_segment=context.run_segment,
                 source_artifact_ref=source,
@@ -219,10 +214,10 @@ class Dispatcher:
     def current_artifact(
         self,
         scenario: str,
-        recipe: str | None = None,
+        *,
         release_id: str | None = None,
     ) -> Artifact:
-        current = self.get_or_create_scenario(scenario, recipe, release_id)
+        current = self.get_or_create_scenario(scenario, release_id=release_id)
         if current is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         return Artifact(current.repository.require_current_artifact(), current.repository)
@@ -233,11 +228,10 @@ class Dispatcher:
         self,
         item: AgentRecord,
         *,
-        recipe: str | None = None,
         release_id: str | None = None,
     ) -> AgentRecord:
         with self._registry.lock_for(item.scenario):
-            current = self.get_or_create_scenario(item.scenario, recipe, release_id)
+            current = self.get_or_create_scenario(item.scenario, release_id=release_id)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             return self._accept_record(current, item)
@@ -300,8 +294,7 @@ class Dispatcher:
         except Exception:
             logger.exception("experiment tracker failed to record committed training step")
 
-    @staticmethod
-    def _experiment_context(current: Scenario) -> TrainingExperimentContext:
+    def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
         backend = current.trainer.training_backend
         try:
             backend_config = None if backend is None else dict(backend.experiment_config())
@@ -313,7 +306,7 @@ class Dispatcher:
         run_step = sum(record.operation == "training" and record.step > run_segment for record in records)
         return TrainingExperimentContext(
             scenario=current.name,
-            recipe=current.recipe,
+            recipe=self._recipe.name,
             step=current.scenario_step + 1,
             source_artifact_ref=current.current_artifact_ref(),
             run_segment=run_segment,
@@ -682,19 +675,12 @@ class Dispatcher:
         }
 
     def _serving_status(self) -> dict[str, Any]:
-        """Runtime-wide serving state per recipe (shared adapter residency)."""
-        serving: dict[str, Any] = {}
-        recipes = getattr(self._registry, "recipes", None)
-        if recipes is None:
-            return serving
-        for recipe_name in recipes.names:
-            try:
-                status = recipes.resolve(recipe_name).serving_status()
-            except Exception as exc:
-                status = {"error": self._error_text(exc)}
-            if status is not None:
-                serving[recipe_name] = status
-        return serving
+        """Runtime-wide serving state for the deployment's recipe."""
+        try:
+            status = self._recipe.serving_status()
+        except Exception as exc:
+            status = {"error": self._error_text(exc)}
+        return {} if status is None else {self._recipe.name: status}
 
     # -- Lifecycle -------------------------------------------------------
 
@@ -734,8 +720,8 @@ def build_default_dispatcher(
     """Build a Dispatcher serving the core record-only ``recipe``.
 
     Convenience for tests and service entrypoints that want a working
-    dispatcher without configuring a recipe registry by hand. The recipe is
-    the same base ``Recipe`` a deployment gets from ``reef.recipe: recipe``.
+    dispatcher. The recipe is the same base ``Recipe`` a deployment gets
+    from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
     provided.
     """
@@ -748,7 +734,7 @@ def build_default_dispatcher(
         checkpoint_strategy=checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1),
     )
     return Dispatcher(
-        RecipeRegistry({recipe.name: recipe}),
+        recipe,
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         agent_record_dir=agent_record_dir,

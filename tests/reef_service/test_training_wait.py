@@ -25,7 +25,6 @@ import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.dispatcher import _DERIVATION_POLL_SECONDS, _STORAGE_RETRY_SECONDS, _UNDRAINED_WARNING_SECONDS, Dispatcher
 from reef.recipe import Recipe
-from reef.recipe.registry import RecipeRegistry
 
 pytestmark = pytest.mark.unit
 
@@ -35,7 +34,7 @@ def _dispatcher() -> Dispatcher:
     initial = root / "initial"
     initial.mkdir()
     return Dispatcher(
-        RecipeRegistry({"recipe": Recipe()}),
+        Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
     )
 

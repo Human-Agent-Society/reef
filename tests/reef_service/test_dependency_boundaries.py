@@ -160,7 +160,7 @@ def test_importing_reef_does_not_load_cookbook_or_slime_packages() -> None:
 
 
 def test_scenario_factory_imports_without_a_cycle() -> None:
-    # The factory bridges the scenario domain and the recipe registry; a fresh
+    # The factory bridges the scenario aggregate and the deployment recipe; a fresh
     # interpreter import in either direction must not deadlock on a cycle.
     _assert_isolated_import("from reef.scenario.factory import ScenarioFactory; assert ScenarioFactory")
     _assert_isolated_import("import reef; from reef.scenario.factory import ScenarioFactory")

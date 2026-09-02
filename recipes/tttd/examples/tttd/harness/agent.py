@@ -30,7 +30,6 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         *,
         scenario: str,
         model: str,
-        recipe: str = "tttd",
         release_id: str | None = None,
         inference_path: str = "/v1/chat/completions",
         groups_per_step: int = 8,
@@ -53,7 +52,6 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         )
         self.client = client
         self.scenario = scenario
-        self.recipe = recipe
         self.release_id = release_id
         self.inference_path = inference_path
 
@@ -70,7 +68,6 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
             self.scenario,
             self.inference_path,
             self._request_payload(parent),
-            recipe=self.recipe,
             extra_headers=release_headers,
         )
 
@@ -97,7 +94,6 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
                     "search_value": result.search_value,
                 },
             },
-            recipe=self.recipe,
             extra_headers=release_headers,
         )
         return result

@@ -22,7 +22,6 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.recipe import RecipeRegistry
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.train.evaluation import SelectionDecision
@@ -150,9 +149,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        RecipeRegistry(
-            recipes={"test_policy": TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000))}
-        ),
+        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
@@ -162,8 +159,8 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     def worker(seed: int) -> None:
         for offset in range(pairs_per_thread):
             index = seed * pairs_per_thread + offset
-            dispatcher.accept_record(sft_inference(f"i{index}"), recipe="test_policy")
-            dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"), recipe="test_policy")
+            dispatcher.accept_record(sft_inference(f"i{index}"))
+            dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
 
     errors = run_workers(thread_count, worker)
 
@@ -192,13 +189,11 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        RecipeRegistry(
-            recipes={"test_policy": TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000))}
-        ),
+        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
-    scenario = dispatcher.get_or_create_scenario("math", "test_policy")
+    scenario = dispatcher.get_or_create_scenario("math")
     original_commit = scenario.trainer.commit
 
     def slow_commit():
@@ -208,8 +203,8 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(scenario.trainer, "commit", slow_commit)
 
     def worker(seed: int) -> None:
-        dispatcher.accept_record(sft_inference(f"i{seed}"), recipe="test_policy")
-        dispatcher.accept_record(sft_report(f"r{seed}", f"i{seed}"), recipe="test_policy")
+        dispatcher.accept_record(sft_inference(f"i{seed}"))
+        dispatcher.accept_record(sft_report(f"r{seed}", f"i{seed}"))
 
     errors = run_workers(4, worker)
 
@@ -228,7 +223,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
         checkpoint_strategy=EveryNVersions(1),
         local_artifact_dir=tmp_path / "staged",
     )
-    dispatcher.get_or_create_scenario("chat", "recipe")
+    dispatcher.get_or_create_scenario("chat")
     commits_per_thread = 3
     thread_count = 4
 
@@ -271,7 +266,7 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
         checkpoint_strategy=EveryNVersions(1000),
         local_artifact_dir=tmp_path / "staged",
     )
-    scenario = dispatcher.get_or_create_scenario("chat", "recipe")
+    scenario = dispatcher.get_or_create_scenario("chat")
     repository = scenario.repository
     original_stage = repository.stage
 

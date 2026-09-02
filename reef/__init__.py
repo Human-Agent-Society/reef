@@ -42,11 +42,7 @@ from reef.scenario import (
 )
 from reef.recipe import (
     RecipeConfigError,
-    RecipeRegistry,
-    ScenarioRecipeConflict,
-    ScenarioRecipeError,
     Recipe,
-    UnknownScenarioRecipe,
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import DataProcessor, Trainer
@@ -73,7 +69,6 @@ __all__ = [
     "ModelCandidate",
     "Recipe",
     "RecipeConfigError",
-    "RecipeRegistry",
     "RecordStore",
     "ReefError",
     "ReportBase",
@@ -82,12 +77,9 @@ __all__ = [
     "RequestHeaders",
     "RequestType",
     "Scenario",
-    "ScenarioRecipeConflict",
-    "ScenarioRecipeError",
     "SelectionDecision",
     "Trainer",
     "TrainingRuntime",
-    "UnknownScenarioRecipe",
     "UpdateCandidate",
     "build_candidate_evaluation",
     "build_default_dispatcher",

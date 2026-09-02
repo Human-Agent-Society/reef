@@ -16,7 +16,6 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
-from reef.recipe.registry import RecipeRegistry
 from reef.train import ProcessorContext
 
 
@@ -184,7 +183,7 @@ def _dispatcher(recipe: Recipe, name: str) -> Dispatcher:
     initial = root / "initial"
     initial.mkdir()
     return Dispatcher(
-        RecipeRegistry({name: recipe}),
+        recipe,
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
     )
 
@@ -206,18 +205,18 @@ def test_declared_schema_is_enforced_at_ingress() -> None:
 
     dispatcher = _dispatcher(_ScoredRecipe(name="scored"), "scored")
     with pytest.raises(ReportValidationError, match="score must be a number"):
-        dispatcher.accept_record(_report_record("bad", {"score": "high"}), recipe="scored")
+        dispatcher.accept_record(_report_record("bad", {"score": "high"}))
     # A compliant report on the same scenario still lands.
-    stored = dispatcher.accept_record(_report_record("good", {"score": 1.0}), recipe="scored")
+    stored = dispatcher.accept_record(_report_record("good", {"score": 1.0}))
     assert stored.agent_record_id == "good"
-    scenario = dispatcher.get_or_create_scenario("workload", "scored")
+    scenario = dispatcher.get_or_create_scenario("workload")
     assert scenario is not None
     assert scenario.trainer.processor.context.report_type is ScoredRolloutReport
 
 
 def test_undeclared_recipe_keeps_open_ingress_via_anyreport() -> None:
     dispatcher = _dispatcher(Recipe(), "recipe")
-    stored = dispatcher.accept_record(_report_record("open", {"feedback": "no score at all"}), recipe="recipe")
+    stored = dispatcher.accept_record(_report_record("open", {"feedback": "no score at all"}))
     assert stored.agent_record_id == "open"
 
 

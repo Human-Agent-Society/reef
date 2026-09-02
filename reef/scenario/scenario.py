@@ -24,7 +24,7 @@ from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class Scenario:
-    """Scenario aggregate owning one immutable recipe binding and release chain."""
+    """Scenario aggregate owning one runtime binding and release chain."""
 
     def __init__(
         self,
@@ -60,10 +60,6 @@ class Scenario:
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def recipe(self) -> str:
-        return self._binding.name
 
     @property
     def runtime(self) -> InferenceRuntime | None:
@@ -223,7 +219,6 @@ class Scenario:
     def to_snapshot_metadata(self) -> dict[str, object]:
         return snapshot_metadata_for(
             name=self.name,
-            recipe=self.recipe,
             base_artifact=self.repository.base_artifact,
             scenario_step=self.scenario_step,
         )
