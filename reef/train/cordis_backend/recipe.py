@@ -326,6 +326,7 @@ class CordisRecipe(Recipe):
             episode_timeout_s=self.episode_timeout_s,
             episode_repeats=self.episode_repeats,
             forbid_residue=self.forbid_residue,
+            executor=self.executor,
             max_steps=self.max_steps,
             max_failure_streak=self.max_failure_streak,
             max_model_calls_per_step=self.max_model_calls_per_step,

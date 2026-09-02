@@ -17,6 +17,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
+from reef.harness.executor import LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
@@ -1185,6 +1186,39 @@ def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
     with pytest.raises(RecipeConfigError, match="bubblewrap"):
         CordisRecipe.from_environment({}, config=config(executor="sandbox"))
+
+
+def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, monkeypatch) -> None:
+    class SentinelExecutor(LocalExecutor):
+        pass
+
+    executor = SentinelExecutor()
+    seen = []
+    original = reef_cordis_backend.run_episode
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["executor"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    built = CordisRecipe(
+        resolve_proposer(
+            lambda nodes, samples, models: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        executor=executor,
+        runtime=runtime(),
+    )
+    trainer = built.build("demo", RecordStore())
+    backend = trainer.training_backend
+    assert isinstance(backend, CordisBackend)
+
+    run_backend_step(backend, batch(), backend.initial_state())
+
+    assert seen
+    assert all(received is executor for received in seen)
 
 
 def _traced_batch(*prompts: str) -> TraceBatch:
