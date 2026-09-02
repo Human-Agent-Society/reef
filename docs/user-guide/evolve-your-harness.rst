@@ -72,7 +72,19 @@ receipt batches as that exchange; a report over several batches as one
 trajectory sample carrying every referenced exchange in order, which is what
 ``reef-pi report`` sends for a whole run (``--per-receipt`` fans the score
 across the receipts as separate reports instead). When ``batch_size``
-window entries have accumulated, one step runs the loop once. ``batch_size``
+window entries have accumulated, one step runs the loop once. With
+``evolution.promote_failures: true`` a failing trace's prompt is added to the
+gate as a permanent task, so the seed tasks are the floor of a suite that
+grows from real failures and no later candidate can win while bringing one
+back (the method's ``evaluate`` must score an arbitrary prompt). A prompt is
+real traffic, so it meets the tree's own credential tripwire first: a prompt
+carrying a key-shaped literal is never promoted, never persisted, and never
+re-run as a task, and the step goes on without it. Which prompts are
+promoted is the method's call: an optional ``evolution.promote`` callable
+receives the step's trace samples (and the failure manifest when its
+signature names ``manifest``) and returns the prompts to promote; without it
+every failing trace's user prompt is promoted. Reef still dedupes, screens,
+and caps whatever it returns. ``batch_size``
 and ``max_score`` live under ``data:`` in the recipe config, and
 ``data.batch_policy: records`` drops the report requirement entirely:
 recorded traffic alone batches, unscored, for methods that judge for

@@ -22,8 +22,16 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation, MutationError, ScoreComparisonSelector
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend import (
+    CordisBackend,
+    CordisRecipe,
+    FailureManifest,
+    Mutation,
+    MutationError,
+    Promoter,
+    ScoreComparisonSelector,
+)
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
@@ -1177,3 +1185,213 @@ def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
     with pytest.raises(RecipeConfigError, match="bubblewrap"):
         CordisRecipe.from_environment({}, config=config(executor="sandbox"))
+
+
+def _traced_batch(*prompts: str) -> TraceBatch:
+    samples = tuple(
+        TraceSample(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0) for i, p in enumerate(prompts)
+    )
+    return TraceBatch("demo:trace:promote", samples)
+
+
+def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
+    """With promotion on, a failing trace's prompt becomes a permanent gate
+    task: the seed set is the floor, and evaluate runs the union."""
+    seen: list[str] = []
+
+    def score(task, result):
+        seen.append(task)
+        return evaluate(task, result)
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(score),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        promote_failures=True,
+    )
+    result = run_backend_step(b, _traced_batch("real request A"), b.initial_state())
+    # The gate ran the seed task and the promoted prompt, on both sides.
+    assert "task one" in seen and "real request A" in seen
+    assert result.metrics["gate_tasks"] == 2
+    assert result.metrics["promoted_tasks"] == 1
+    # The ledger persists in the committed state.
+    assert result.state["promoted_tasks"] == ["real request A"]
+
+
+def test_promoted_tasks_are_deduped_capped_and_persist(tmp_path: Path) -> None:
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        promote_failures=True,
+        max_promoted_tasks=2,
+    )
+    first = run_backend_step(b, _traced_batch("A", "B", "C"), b.initial_state())
+    # Cap of 2 admits only the first two distinct prompts.
+    assert first.state["promoted_tasks"] == ["A", "B"]
+    # A later batch dedupes against the ledger and the seed; nothing new fits.
+    second = run_backend_step(b, _traced_batch("A", "task one", "B"), first.state)
+    assert second.state["promoted_tasks"] == ["A", "B"]
+
+
+def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
+    """A traffic prompt meets the tree's credential tripwire before it can
+    become a persisted, re-run gate task; the clean prompt beside it still
+    promotes and the step does not fail."""
+    key = "sk-476-PROMOTED-KEY-0123456789abcdef"
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        promote_failures=True,
+    )
+    result = run_backend_step(b, _traced_batch(f"use {key} to call the api", "clean request"), b.initial_state())
+    assert result.state["promoted_tasks"] == ["clean request"]
+    assert key not in json.dumps(result.state)
+
+
+def test_promotion_off_by_default_leaves_the_gate_frozen(tmp_path: Path) -> None:
+    seen: list[str] = []
+
+    def score(task, result):
+        seen.append(task)
+        return evaluate(task, result)
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(score),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+    )
+    result = run_backend_step(b, _traced_batch("real request A"), b.initial_state())
+    assert set(seen) == {"task one"}
+    assert "promoted_tasks" not in result.state
+    assert "gate_tasks" not in result.metrics
+
+
+def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_promote.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_promote:propose",
+                "evaluate": "demo_promote:evaluate",
+                "tasks": ["t"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, max_promoted_tasks=10))
+    assert on.promote_failures is True and on.max_promoted_tasks == 10
+    off = CordisRecipe.from_environment({}, config=config())
+    assert off.promote_failures is False and off.max_promoted_tasks == 50
+    with pytest.raises(RecipeConfigError, match="promote_failures must be a boolean"):
+        CordisRecipe.from_environment({}, config=config(promote_failures="yes"))
+    with pytest.raises(RecipeConfigError, match="max_promoted_tasks must be an integer"):
+        CordisRecipe.from_environment({}, config=config(max_promoted_tasks=-1))
+
+
+def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: Path) -> None:
+    """The method decides which prompts to promote; Reef still dedupes, drops
+    a secret-shaped one, and applies the cap to what it returns."""
+    key = "sk-476-POLICY-KEY-0123456789abcdef"
+
+    def keep_marked(samples):
+        return [
+            prompt
+            for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
+            if prompt and "keep" in prompt
+        ]
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        promote_failures=True,
+        promote=resolve_promoter(keep_marked),
+        max_promoted_tasks=2,
+    )
+    first = run_backend_step(
+        b, _traced_batch("keep A", "drop B", f"keep {key}", "keep C", "keep D"), b.initial_state()
+    )
+    assert first.state["promoted_tasks"] == ["keep A", "keep C"]
+    assert key not in json.dumps(first.state)
+
+
+def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path) -> None:
+    seen: list[object] = []
+
+    def with_manifest(samples, *, manifest=None):
+        seen.append(manifest)
+        return []
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        promote_failures=True,
+        promote=resolve_promoter(with_manifest),
+    )
+    first = run_backend_step(b, _traced_batch("A"), b.initial_state())
+    run_backend_step(b, _traced_batch("B"), first.state)
+    assert seen[0] is None and isinstance(seen[1], FailureManifest)
+    assert "promoted_tasks" not in first.state
+
+
+def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_promote_policy.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n\n"
+        "def promote(samples):\n    return []\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_promote_policy:propose",
+                "evaluate": "demo_promote_policy:evaluate",
+                "tasks": ["t"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
+    assert isinstance(on.promote, Promoter) and on.promote(()) == []
+    assert CordisRecipe.from_environment({}, config=config()).promote is None
