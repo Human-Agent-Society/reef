@@ -88,6 +88,23 @@ def batch() -> TraceBatch:
 MODEL = ModelBinding(base_url="http://localhost:8000", model="qwen3-8b", api_key="dummy")
 
 
+class _ChatBinding:
+    """A served binding whose chat returns a canned reply; base_url/model/api
+    mirror MODEL so compose_nodes renders."""
+
+    base_url = MODEL.base_url
+    model = MODEL.model
+    api_key = MODEL.api_key
+    api = MODEL.api
+    timeout_s = MODEL.timeout_s
+
+    def chat(self, *args, **kwargs) -> str:
+        return "ok"
+
+    def compose_nodes(self, descriptor):
+        return MODEL.compose_nodes(descriptor)
+
+
 def runtime() -> InferenceProxyRuntime:
     return InferenceProxyRuntime(model_path=MODEL.model, base_url=MODEL.base_url, api_key=MODEL.api_key)
 
@@ -1043,3 +1060,89 @@ def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch)
 
     with pytest.raises(RecipeConfigError, match="batch_policy must be 'reports' or 'records'"):
         CordisRecipe.from_environment({}, config=config("sometimes"))
+
+
+def test_step_budget_skips_further_steps(tmp_path: Path) -> None:
+    """max_steps opens after its count: the step commits a skip reason and
+    proposes nothing more, so the loop stops burning episodes."""
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "x"}})),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        max_steps=1,
+    )
+    state = b.initial_state()
+    first = run_backend_step(b, batch(), state)
+    second = run_backend_step(b, batch(), first.state)
+    assert "step budget of 1 exhausted" in second.metrics["skipped"]
+
+
+def test_failure_streak_breaker_opens_after_consecutive_rejections(tmp_path: Path) -> None:
+    """A rejected step increments the streak in its committed state; once the
+    state carries the cap, the next prepare skips before proposing."""
+    # A candidate that scores no better than the empty current tree loses.
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "nothing of note"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        max_failure_streak=1,
+    )
+    first = run_backend_step(b, batch(), b.initial_state())
+    assert first.metrics["selected"] is False
+    assert first.state["failure_streak"] == 1
+    second = run_backend_step(b, batch(), first.state)
+    assert "failure streak breaker open" in second.metrics["skipped"]
+
+
+def test_model_call_budget_caps_the_proposer(tmp_path: Path) -> None:
+    """max_model_calls_per_step bounds one step's chat calls; the cap raises
+    inside propose, which the backend surfaces as the step error."""
+    calls = {"n": 0}
+
+    def greedy(nodes, samples, models):
+        while True:
+            models.served.chat([{"role": "user", "content": "hi"}])
+            calls["n"] += 1
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(greedy),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=ModelBindings(served=_ChatBinding()),
+        binary=str(make_binary(tmp_path)),
+        max_model_calls_per_step=3,
+    )
+    with pytest.raises(RuntimeError, match="model call budget of 3"):
+        run_backend_step(b, batch(), b.initial_state())
+    assert calls["n"] == 3
+
+
+def test_settle_records_what_the_gate_ran_against(tmp_path: Path) -> None:
+    b = backend(tmp_path, lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}))
+    result = run_backend_step(b, batch(), b.initial_state())
+    stamp = result.metrics["gated_against"]
+    assert stamp["model"] == MODEL.model
+    assert stamp["adapter"] == "pi"
+    assert stamp["adapter_version"] == get_adapter("pi").install.version
+
+
+def test_backend_rejects_negative_budgets(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="max_steps must be an integer of at least 0"):
+        CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(lambda n, s, m: None),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            max_steps=-1,
+        )

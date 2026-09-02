@@ -48,6 +48,7 @@ import urllib.request
 import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from reef_client.serve import CaptureStore, ServeConfig, build_handler
 
@@ -228,6 +229,21 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
+#: The release sidecar the install script and harness_pull write at the tree
+#: root; version_check.ts reads the same name.
+HARNESS_RELEASE_SIDECAR = ".reef-harness-release"
+
+
+def _installed_release(compose_dir: str) -> str | None:
+    """The release id of the installed tree, from the sidecar beside it."""
+    sidecar = Path(compose_dir).parent / HARNESS_RELEASE_SIDECAR
+    try:
+        release = json.loads(sidecar.read_text(encoding="utf-8")).get("release_id")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return release if isinstance(release, str) and release else None
+
+
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     reef_url = _extract_reef_url(adapter, Path(compose_dir))
     if reef_url is None:
@@ -236,6 +252,11 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
 
     store = CaptureStore()
     override: dict[str, str] = {"x-reef-scenario": scenario}
+    release = _installed_release(compose_dir)
+    if release:
+        # The opaque tag channel: the record keeps which release answered on
+        # the client, under metadata.tags.release.
+        override["x-reef-tag-release"] = release
     token = os.environ.get("REEF_TOKEN")
     if token:
         override["authorization"] = f"Bearer {token}"
@@ -256,6 +277,11 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy_port)
     env = os.environ.copy()
     env[env_var] = temp_dir
+    # The update notice extension needs the service address, the scenario,
+    # and the true install root; the relocated temp copy carries none of them.
+    env["REEF_SERVICE_URL"] = upstream
+    env["REEF_SCENARIO"] = scenario
+    env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
 
     try:
         result = subprocess.run([binary, *args], env=env)
@@ -296,6 +322,8 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
     # One report referencing the whole run batches as one trajectory sample;
     # --per-receipt sends the same score against each receipt on its own.
     reference_lists = [[receipt] for receipt in receipts] if per_receipt else [receipts]
+    release = _installed_release(os.environ.get("REEF_HARNESS_COMPOSE", ""))
+    metadata = {"client_release": release} if release else {}
 
     def restore_unsent(sent: int) -> None:
         # A partial per-receipt failure must not resend what already posted:
@@ -306,7 +334,10 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
         os.replace(captures_file, pending_file)
 
     for sent, references in enumerate(reference_lists):
-        payload = json.dumps({"score": score, "feedback": feedback, "references": references}).encode()
+        body: dict[str, Any] = {"score": score, "feedback": feedback, "references": references}
+        if metadata:
+            body["metadata"] = metadata
+        payload = json.dumps(body).encode()
         req = urllib.request.Request(
             f"{reef_url}/reef/report",
             data=payload,
@@ -318,8 +349,8 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
                 response.read()
         except urllib.error.HTTPError as exc:
             restore_unsent(sent)
-            body = exc.read().decode(errors="replace")
-            sys.exit(f"reef-{adapter}: report failed ({exc.code}): {body}")
+            detail = exc.read().decode(errors="replace")
+            sys.exit(f"reef-{adapter}: report failed ({exc.code}): {detail}")
         except BaseException:
             restore_unsent(sent)
             raise
