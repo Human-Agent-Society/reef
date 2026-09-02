@@ -48,7 +48,7 @@ def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path
     monkeypatch.setattr(
         service.dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize
     )
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFound, match="the deployment's recipe carries no harness surface"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
@@ -56,6 +56,15 @@ def test_current_files_never_creates_a_scenario(tmp_path) -> None:
     service = _service(tmp_path, recipe=_HarnessRecipe(), skill_text="x")
     with pytest.raises(ArtifactNotFound):
         service.harness_manifest({"x-reef-scenario": "unknown"})
+
+
+def test_manifest_error_distinguishes_a_scenario_without_a_published_composition(tmp_path) -> None:
+    # A scenario exists and its recipe has a harness surface, but no files
+    # have been published yet. The message must tell the operator that the
+    # trainer has not published, not that the surface is missing.
+    service = _service(tmp_path, recipe=_HarnessRecipe(), skill_text=None)
+    with pytest.raises(ArtifactNotFound, match="no harness composition has been published yet"):
+        service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
 def test_harness_surface_reads_the_file_tree(tmp_path) -> None:
