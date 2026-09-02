@@ -116,7 +116,7 @@ reef:
 
 services:
   - name: reef
-    command: ${PYTHON} -m reef.service
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 ```
 

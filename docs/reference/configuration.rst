@@ -17,7 +17,7 @@ every process in its ``services`` list in dependency order, and hands the
 
    services:
      - name: reef
-       command: python -m reef.service
+       command: ["${REEF_PYTHON}", "-m", "reef.service"]
        ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 
 Values interpolate from the environment with ``${VAR}`` and from the config
@@ -25,6 +25,11 @@ itself with ``${dotted.path}``. Any value can be overridden on the command line:
 a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
+
+``REEF_PYTHON`` defaults to the interpreter that launched ``reef serve`` and
+can be overridden in the environment. Use it when a service must share Reef's
+Python environment. A literal ``python`` keeps its normal meaning and is
+resolved from that service's ``PATH``; Reef never rewrites command names.
 
 Start from a cookbook stack
 ---------------------------
@@ -187,12 +192,14 @@ against.
 The ``services`` list
 ---------------------
 
-Each entry is one process.
+Each entry is one process. ``command`` can be a command-line string or an argv
+list. Prefer the list form when exact argument boundaries matter; existing
+string commands retain their current ``shlex`` parsing.
 
 .. config::
 
    services[].name | the service's id, used by ``depends_on``; unique within one stack
-   services[].command | the command line to run
+   services[].command | the command line string or argv list to run
    services[].ready | a shell command that succeeds once the service is up
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first

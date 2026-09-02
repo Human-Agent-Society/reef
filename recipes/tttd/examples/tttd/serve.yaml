@@ -56,7 +56,7 @@ services:
 
   - name: slime-driver
     command: >-
-      python -m reef.train.slime_backend.reef_adapters.driver
+      "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
       --hf-checkpoint=${reef.model_path}
       --load=${training.checkpoint_dir}/megatron
       --ref-load=${reef.model_path}
@@ -144,7 +144,7 @@ services:
     cuda: ${training.cuda_visible_devices}
 
   - name: reef
-    command: python -m reef.service
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
     ready_timeout: 120
     env:
