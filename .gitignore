@@ -215,4 +215,4 @@ tutorials/*/work/
 recipes/basic/work/
 
 # The GEPA AIME example writes its run state here.
-recipes/gepa/examples/aime/work/
+recipes/gepa/examples/aime/work*/

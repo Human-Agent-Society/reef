@@ -82,7 +82,7 @@ STEP_TIMEOUT_S = 7200.0
 RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
 
-def load_recipe(tasks: list[str], *, api_key: str) -> tuple[str, Any]:
+def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, Any]:
     """The recipe gepa.yaml declares, with the validation split filled in.
 
     This driver is the deployment: it owns the provider endpoint and hands it
@@ -93,6 +93,9 @@ def load_recipe(tasks: list[str], *, api_key: str) -> tuple[str, Any]:
     sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     evolution = dict(sections["evolution"])
     evolution["tasks"] = tasks
+    # One --seed drives both random draws: the proposer's parent sampling
+    # (evolution.gepa.seed) and the driver's minibatch order.
+    evolution["gepa"] = {**evolution["gepa"], "seed": seed}
     if MULTI:
         evolution["seed"] = [
             *evolution["seed"],
@@ -360,13 +363,13 @@ def verify_binary(binary: str) -> str:
     return found
 
 
-def search(service: RunService, client: Any, binary: str, trainset: list, budget: int) -> None:
+def search(service: RunService, client: Any, binary: str, trainset: list, budget: int, seed: int) -> None:
     """Rounds until the archive's metric calls reach the budget.
 
     The round counter is the driver's own, on disk beside the archive: the
     sampler's epoch order is a function of it, so a resumed run continues the
     training order instead of redrawing minibatches it already paid for."""
-    sampler = aime.Minibatches(len(trainset), 3, seed=0)
+    sampler = aime.Minibatches(len(trainset), 3, seed=seed)
     rounds = WORK / "rounds.json"
     done = int(json.loads(rounds.read_text(encoding="utf-8"))["step"]) if rounds.is_file() else 0
     for step in range(done):
@@ -425,6 +428,7 @@ def test_passes(service: RunService, recipe: Any, client: Any, binary: str, test
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--budget", type=int, default=aime.SEARCH_BUDGET, help="metric calls before the search stops")
+    parser.add_argument("--seed", type=int, default=0, help="the search seed: minibatch order and parent sampling")
     parser.add_argument("--dry-run", action="store_true", help="boot the recipe and print the plan; no model calls")
     return parser.parse_args()
 
@@ -438,7 +442,7 @@ def main() -> None:
     if args.dry_run:
         # A dry run proves the recipe boots from gepa.yaml with the real
         # validation set; the placeholder credential is never sent anywhere.
-        recipe_name, _ = load_recipe(tasks, api_key="dry-run")
+        recipe_name, _ = load_recipe(tasks, api_key="dry-run", seed=args.seed)
         plan = {
             "recipe": recipe_name,
             "scenario": SCENARIO,
@@ -447,6 +451,7 @@ def main() -> None:
             "task_model": os.environ["REEF_MODEL"],
             "reflection_model": aime.REFLECTION_MODEL,
             "budget": args.budget,
+            "seed": args.seed,
             "splits": {"train": len(trainset), "validation": len(valset), "test": len(testset)},
             "dataset_sha256": aime.AIME_DATASET_SHA256,
             "planned_test_episodes": 2 * len(testset),
@@ -459,7 +464,7 @@ def main() -> None:
     from reef_client import ReefClient
 
     key = provider_key()
-    recipe_name, recipe = load_recipe(tasks, api_key=key)
+    recipe_name, recipe = load_recipe(tasks, api_key=key, seed=args.seed)
     WORK.mkdir(parents=True, exist_ok=True)
     bootstrap = WORK / "bootstrap"
     if not bootstrap.is_dir():
@@ -479,11 +484,12 @@ def main() -> None:
     service.start()
     try:
         client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
-        search(service, client, binary, trainset, args.budget)
+        search(service, client, binary, trainset, args.budget, args.seed)
         scores = test_passes(service, recipe, client, binary, testset)
         archive = read_archive()
         summary = {
             "scenario": SCENARIO,
+            "seed": args.seed,
             "components": COMPONENTS,
             "candidates": len(archive.get("candidates") or []),
             "metric_calls": archive.get("metric_calls", 0),
