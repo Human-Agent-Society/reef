@@ -40,6 +40,7 @@ from aiohttp import web
 
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
+from recipes.gepa.archive import Archive
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
@@ -363,30 +364,34 @@ def verify_binary(binary: str) -> str:
     return found
 
 
-def search(service: RunService, client: Any, binary: str, trainset: list, budget: int, seed: int) -> None:
+def search(
+    service: RunService, client: Any, binary: str, trainset: list, valset_size: int, budget: int, seed: int
+) -> None:
     """Rounds until the archive's metric calls reach the budget.
 
-    The round counter is the driver's own, on disk beside the archive: the
-    sampler's epoch order is a function of it, so a resumed run continues the
-    training order instead of redrawing minibatches it already paid for."""
-    sampler = aime.Minibatches(len(trainset), 3, seed=seed)
-    rounds = WORK / "rounds.json"
-    done = int(json.loads(rounds.read_text(encoding="utf-8"))["step"]) if rounds.is_file() else 0
-    for step in range(done):
-        sampler.ids(step)  # advance the sampler over the rounds a previous run drew
-    for step in range(done, budget):
-        archive = read_archive()
-        calls = int(archive.get("metric_calls", 0))
-        print(f"round {step}: {calls}/{budget} metric calls, {len(archive.get('candidates') or [])} candidates")
+    The method plans each iteration - the parent it will reflect from and the
+    training problems it wants to see - from one seeded generator in GEPA's own
+    order, and writes the plan before anything runs. The driver only carries
+    that plan out, so the same seed walks the same problems as ``gepa.optimize``
+    and a resumed run replays the iteration it was in rather than drawing a new
+    one."""
+    archive = Archive(WORK / "gepa" / f"{SCENARIO}.json")
+    archive.rng_seed = seed
+    for _ in range(budget):
+        archive.refresh()
+        step = archive.iteration
+        calls = archive.metric_calls
+        print(f"round {step}: {calls}/{budget} metric calls, {len(archive.candidates)} candidates")
         if calls >= budget:
             return
+        plan = archive.plan(len(trainset), valset_size, 3)
         manifest = pull_tree(client, service, WORK / "served")
         files = episode_files(manifest["files"], service.binding(), get_adapter("pi"))
         # Records at or below this sequence are earlier rounds' leftovers; a
         # repeated problem must not match its own past session.
         floor = max_sequence(service.records(), service.scenario)
         before = service.training_step()
-        problems = [str(trainset[identifier]["input"]) for identifier in sampler.ids(step)]
+        problems = [str(trainset[identifier]["input"]) for identifier in plan["minibatch"]]
         with ThreadPoolExecutor(max_workers=min(WORKERS, len(problems))) as pool:
             scored = [score for score, _ in pool.map(lambda task, files=files: solve(files, task, binary), problems)]
         # Reports go out only once every episode of the round has recorded,
@@ -401,7 +406,6 @@ def search(service: RunService, client: Any, binary: str, trainset: list, budget
                 {"agent_record_id": f"gepa-{step}-{index}", "score": score, "references": [record.agent_record_id]},
             )
         service.wait_for_training_step(before)
-        rounds.write_text(json.dumps({"step": step + 1}) + "\n", encoding="utf-8")
     print(f"stopped after {budget} rounds without reaching the metric-call budget")
 
 
@@ -484,7 +488,7 @@ def main() -> None:
     service.start()
     try:
         client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
-        search(service, client, binary, trainset, args.budget, args.seed)
+        search(service, client, binary, trainset, len(valset), args.budget, args.seed)
         scores = test_passes(service, recipe, client, binary, testset)
         archive = read_archive()
         summary = {

@@ -24,7 +24,6 @@ what a budget comparison against upstream reads.
 
 from __future__ import annotations
 
-import random
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
@@ -112,6 +111,7 @@ class GEPAProposer:
         perfect_score: float,
         max_metric_calls: int | None,
         kinds: Sequence[str],
+        valset_size: int,
         reflection_model: str = "reflection",
         episode_runner: EpisodeRunner = run_episode,
     ) -> None:
@@ -121,7 +121,8 @@ class GEPAProposer:
         self._score_episode = score_episode
         self._feedback = feedback
         self._minibatch_size = minibatch_size
-        self._rng = random.Random(rng_seed)
+        archive.rng_seed = rng_seed
+        self._valset_size = valset_size
         self._skip_perfect_score = skip_perfect_score
         self._perfect_score = perfect_score
         self._max_metric_calls = max_metric_calls
@@ -136,13 +137,14 @@ class GEPAProposer:
         models: ModelBindings,
     ) -> tuple[Mutation, ...] | None:
         archive = self._archive
+        archive.refresh()
         served_texts = components.texts_of(nodes, self._kinds)
         self._sync(served_texts)
 
         if self._max_metric_calls is not None and archive.metric_calls >= self._max_metric_calls:
             return None
 
-        parent = archive.select_parent(self._rng)
+        parent = archive.take_parent(self._valset_size)
         parent_texts = archive.candidates[parent].texts
         minibatch = self._minibatch(nodes, parent, parent_texts, samples, models)
         if not minibatch:
@@ -284,6 +286,7 @@ class GEPASelector:
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         archive = self._archive
+        archive.refresh()
         candidate_scores = _scores(evaluation.metrics.get("candidate_scores", ()))
         served_scores = _scores(evaluation.metrics.get("current_scores", ()))
 

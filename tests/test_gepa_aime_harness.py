@@ -1,8 +1,7 @@
 """Deterministic coverage for the GEPA AIME example.
 
 Nothing here calls a model or launches Pi: the scorer and the feedback hook run
-on synthetic episode results, the minibatch order is checked against a sequence
-computed from upstream GEPA's own sampler, and the driver's record lookup and
+on synthetic episode results, and the driver's record lookup and
 report run against a real embedded Reef service with a stubbed inference
 backend, exactly as the campaign driver's suite does.
 """
@@ -23,12 +22,6 @@ from reef.harness.model_binding import ModelBinding
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
-
-# GEPA's EpochShuffledBatchSampler at v0.1.2 (commit 92dadfff) with
-# random.Random(0) and minibatch_size 3, over five and over forty-five ids.
-# Five ids pad to six, so the second epoch starts at step 2.
-UPSTREAM_ORDER_5 = [(2, 1, 0), (4, 3, 3), (0, 2, 1), (3, 4, 4), (1, 0, 4), (2, 3, 3)]
-UPSTREAM_ORDER_45 = [(1, 34, 12), (0, 39, 21), (11, 7, 43), (41, 29, 20), (14, 6, 5), (23, 15, 10)]
 
 
 def _purge_example_modules() -> None:
@@ -133,24 +126,6 @@ def test_the_pins_a_report_names_stay_exact(aime):
     assert aime.PI_TASK_MAX_TOKENS == 16_384
     assert aime.AIME_SPLIT_SIZES == {"train": 45, "validation": 45, "test": 150}
     assert aime.AIME_DATASET_SHA256 == "74e81306a9a1debadd64c49a4ab3588615f7bb698b695a59c17c65dd3b895185"
-
-
-# The minibatch order ------------------------------------------------------
-
-
-@pytest.mark.parametrize(("size", "expected"), [(5, UPSTREAM_ORDER_5), (45, UPSTREAM_ORDER_45)])
-def test_minibatches_follow_gepas_epoch_shuffled_order(aime, size, expected):
-    sampler = aime.Minibatches(size, 3, seed=0)
-
-    assert [sampler.ids(step) for step in range(len(expected))] == expected
-
-
-def test_minibatches_pad_the_epoch_with_the_least_frequent_id(aime):
-    drawn = [identifier for step in range(2) for identifier in aime.Minibatches(5, 3, seed=0).ids(step)]
-
-    # One epoch is six draws over five problems: every id once, one repeated.
-    assert sorted(drawn[:3]) == [0, 1, 2]
-    assert aime.Minibatches(5, 3, seed=0).ids(1) == (4, 3, 3)
 
 
 # The example's own wiring -------------------------------------------------

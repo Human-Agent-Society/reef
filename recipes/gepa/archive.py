@@ -95,6 +95,15 @@ class Archive:
     #: same record in its run directory; without it a search outcome can only
     #: be inferred from the candidate texts after the fact.
     proposals: list[dict[str, Any]] = field(default_factory=list)
+    #: GEPA's one random stream, in its order: a parent draw, then a reshuffle
+    #: of the training order at an epoch boundary. Persisted so the same seed
+    #: walks the same problems as ``gepa.optimize`` would, across restarts.
+    rng_seed: int = 0
+    rng_state: list[Any] | None = None
+    iteration: int = 0
+    order: list[int] = field(default_factory=list)
+    epoch: int = -1
+    plans: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.path = Path(self.path)
@@ -118,6 +127,12 @@ class Archive:
         self.steps = int(data.get("steps", 0))
         self.rejections = int(data.get("rejections", 0))
         self.proposals = [dict(row) for row in data.get("proposals", ())]
+        self.rng_seed = int(data.get("rng_seed", self.rng_seed))
+        self.rng_state = data.get("rng_state")
+        self.iteration = int(data.get("iteration", 0))
+        self.order = [int(index) for index in data.get("order", ())]
+        self.epoch = int(data.get("epoch", -1))
+        self.plans = {str(key): dict(value) for key, value in (data.get("plans") or {}).items()}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,7 +143,19 @@ class Archive:
             "steps": self.steps,
             "rejections": self.rejections,
             "proposals": [dict(row) for row in self.proposals],
+            "rng_seed": self.rng_seed,
+            "rng_state": self.rng_state,
+            "iteration": self.iteration,
+            "order": list(self.order),
+            "epoch": self.epoch,
+            "plans": {key: dict(value) for key, value in self.plans.items()},
         }
+
+    def refresh(self) -> None:
+        """Re-read the file: the driver that plans an iteration and the method
+        that runs it hold separate objects on one archive, never at once."""
+        if self.path.exists():
+            self._load()
 
     def _write(self) -> None:
         """Rewrite the archive atomically: a crash resumes, never truncates."""
@@ -231,25 +258,81 @@ class Archive:
         means = [self.mean_val(index) for index in range(len(self.candidates))]
         return means.index(max(means))
 
-    def select_parent(self, rng: random.Random) -> int:
+    # -- the iteration plan ---------------------------------------------------
+
+    def plan(self, trainset_size: int, valset_size: int, minibatch_size: int) -> dict[str, Any]:
+        """The current iteration's parent and minibatch, drawn the way GEPA draws them.
+
+        ``gepa.optimize`` feeds one generator to both its Pareto selector and
+        its epoch-shuffled batch sampler, and consumes it in that order: the
+        parent is chosen, then the training order is reshuffled when an epoch
+        starts. Reproducing the order is what makes a seed mean the same thing
+        here as there. The plan is written before anything runs, so a restart
+        replays the same iteration instead of drawing a new one.
+        """
+        self.refresh()
+        key = str(self.iteration)
+        if key in self.plans:
+            return dict(self.plans[key])
+        rng = self._rng()
+        parent = self.select_parent(rng, valset_size)
+        base = self.iteration * minibatch_size
+        epoch = 0 if self.epoch == -1 else base // max(len(self.order), 1)
+        if not self.order or epoch > self.epoch:
+            self.epoch = epoch
+            self.order = _shuffled_epoch(trainset_size, minibatch_size, rng)
+        start = base % len(self.order)
+        plan = {"iteration": self.iteration, "parent": parent, "minibatch": self.order[start : start + minibatch_size]}
+        self.plans[key] = plan
+        self.rng_state = _state_to_json(rng.getstate())
+        self._write()
+        return dict(plan)
+
+    def take_parent(self, valset_size: int) -> int:
+        """The parent for this iteration and the step to the next one.
+
+        A driver that planned the iteration fixed the parent already; a
+        deployment feeding real traffic did not, so the parent is drawn here
+        from the same generator, keeping GEPA's order of draws either way.
+        """
+        self.refresh()
+        plan = self.plans.get(str(self.iteration))
+        if plan is not None:
+            parent = int(plan["parent"])
+        else:
+            rng = self._rng()
+            parent = self.select_parent(rng, valset_size)
+            self.rng_state = _state_to_json(rng.getstate())
+        self.iteration += 1
+        self._write()
+        return parent
+
+    def _rng(self) -> random.Random:
+        rng = random.Random(self.rng_seed)
+        if self.rng_state is not None:
+            rng.setstate(_state_from_json(self.rng_state))
+        return rng
+
+    def select_parent(self, rng: random.Random, valset_size: int | None = None) -> int:
         """Sample a parent from the Pareto front, GEPA's selection rule.
 
-        Falls back to the served candidate before any candidate has been
-        validated: the seed's own scores only arrive with the mechanism's
-        first evaluation pass, and the search has to start somewhere.
+        The sampling list is built in GEPA's order - fronts in task order,
+        each front ascending, candidates in order of first appearance - so
+        one draw lands on the same candidate here as there. Before any
+        candidate has been validated GEPA has already scored its seed, which
+        then sits on every front: the same draw over ``valset_size`` copies of
+        the served candidate keeps the generator in step.
         """
         survivors = _remove_dominated(self.fronts(), [self.mean_val(index) for index in range(len(self.candidates))])
         frequency: dict[int, int] = {}
-        for front in survivors.values():
-            for index in front:
+        for task in sorted(survivors):
+            for index in sorted(survivors[task]):
                 frequency[index] = frequency.get(index, 0) + 1
-        # Sorted so a seeded rng reproduces the same walk across processes;
-        # the multiset is what GEPA samples, the order is ours.
-        sampling = [index for index, count in sorted(frequency.items()) for _ in range(count)]
+        sampling = [index for index, count in frequency.items() for _ in range(count)]
         if not sampling:
-            if self.served is None:
-                raise ValueError("the GEPA archive has no candidate to parent a proposal")
-            return self.served
+            # An empty archive is about to be seeded at index 0 by the first
+            # proposal; the plan for that iteration is drawn before it exists.
+            return rng.choice([self.served if self.served is not None else 0] * (valset_size or 1))
         return rng.choice(sampling)
 
     def next_component(self, index: int, keys: Sequence[str]) -> str:
@@ -261,6 +344,31 @@ class Archive:
         candidate.cursor = (position + 1) % len(keys)
         self._write()
         return keys[position]
+
+
+def _shuffled_epoch(size: int, minibatch_size: int, rng: random.Random) -> list[int]:
+    """GEPA's ``EpochShuffledBatchSampler`` epoch: a shuffle, padded up to a
+    whole number of minibatches by repeating the least frequent id, ties to
+    the one that appeared last."""
+    order = list(range(size))
+    rng.shuffle(order)
+    frequency = dict.fromkeys(order, 1)
+    remainder = size % minibatch_size
+    for _ in range(minibatch_size - remainder if remainder else 0):
+        least = min(reversed(list(frequency)), key=lambda index: frequency[index])
+        order.append(least)
+        frequency[least] += 1
+    return order
+
+
+def _state_to_json(state: Any) -> list[Any]:
+    version, internal, gauss = state
+    return [version, list(internal), gauss]
+
+
+def _state_from_json(state: Sequence[Any]) -> Any:
+    version, internal, gauss = state
+    return (int(version), tuple(int(value) for value in internal), gauss)
 
 
 def _is_dominated(candidate: int, others: set[int], fronts: Mapping[int, set[int]]) -> bool:

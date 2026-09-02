@@ -180,6 +180,7 @@ def proposer(
         "perfect_score": 1.0,
         "max_metric_calls": None,
         "kinds": ("rules",),
+        "valset_size": 2,
     }
     settings.update(overrides)
     return GEPAProposer(

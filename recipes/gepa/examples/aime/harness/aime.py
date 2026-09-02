@@ -1,4 +1,4 @@
-"""The AIME benchmark as the GEPA method's task side: pins, scorer, feedback, sampler.
+"""The AIME benchmark as the GEPA method's task side: pins, scorer, feedback.
 
 Everything the method needs to know about AIME lives here, and nothing here
 knows about GEPA: ``evaluate`` and ``feedback`` are the two hooks
@@ -8,14 +8,14 @@ text because that is all the mechanism carries - ``evolution.tasks`` is a
 list of strings - so the splits are loaded once and indexed by problem
 statement.
 
-The upstream quickstart's scoring rule, its feedback wording, and its epoch
-shuffled minibatch order are reproduced here rather than imported: this
-example exists to show the Reef method matching GEPA's published numbers, so
-a runtime dependency on the package under comparison would defeat it. The
-originals are ``gepa.adapters.default_adapter.ContainsAnswerEvaluator`` and
-``gepa.strategies.batch_sampler.EpochShuffledBatchSampler`` at the v0.1.2 tag
+The upstream quickstart's scoring rule and its feedback wording are
+reproduced here rather than imported: this example exists to show the Reef
+method matching GEPA's published numbers, so a runtime dependency on the
+package under comparison would defeat it. The original is
+``gepa.adapters.default_adapter.ContainsAnswerEvaluator`` at the v0.1.2 tag
 (commit 92dadfff), MIT licensed, copyright Lakshya A Agrawal and the GEPA
-contributors.
+contributors. The minibatch order is the method's (``recipes/gepa/archive.py``),
+drawn from the same generator as its parent choice, as upstream draws it.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict, cast
 
@@ -180,45 +179,3 @@ def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
             if texts:
                 return "\n".join(texts)
     return None
-
-
-class Minibatches:
-    """GEPA's epoch-shuffled training order, by step index.
-
-    The rule, reproduced from ``EpochShuffledBatchSampler``: shuffle the ids
-    once per epoch with a seeded generator whose state carries across epochs,
-    pad the shuffled list up to a whole number of minibatches by repeating the
-    least frequent id (ties broken by the latest first appearance), and slice
-    the step's window out of it. The driver owns the step counter, so an
-    interrupted run resumes on the same order it would have drawn.
-    """
-
-    def __init__(self, size: int, minibatch_size: int, *, seed: int = 0) -> None:
-        if size <= 0 or minibatch_size <= 0:
-            raise ValueError("a minibatch sampler needs a non-empty trainset and a positive minibatch size")
-        self.size = size
-        self.minibatch_size = minibatch_size
-        self._rng = random.Random(seed)
-        self._order: list[int] = []
-        self._epoch = -1
-
-    def ids(self, step: int) -> tuple[int, ...]:
-        base = step * self.minibatch_size
-        epoch = 0 if self._epoch == -1 else base // max(len(self._order), 1)
-        if not self._order or epoch > self._epoch:
-            self._epoch = epoch
-            self._reshuffle()
-        base %= len(self._order)
-        return tuple(self._order[base : base + self.minibatch_size])
-
-    def _reshuffle(self) -> None:
-        self._order = list(range(self.size))
-        self._rng.shuffle(self._order)
-        frequencies = Counter(self._order)
-        remainder = self.size % self.minibatch_size
-        for _ in range(self.minibatch_size - remainder if remainder else 0):
-            # ``most_common()[::-1][0]`` upstream: the least frequent id, and
-            # among equals the one that appeared last in the shuffled list.
-            selected = min(reversed(list(frequencies)), key=lambda identifier: frequencies[identifier])
-            self._order.append(selected)
-            frequencies[selected] += 1

@@ -172,6 +172,7 @@ class GEPARecipe(CordisRecipe):
                     perfect_score=self.perfect_score,
                     max_metric_calls=self.max_metric_calls,
                     kinds=self.kinds,
+                    valset_size=len(self.tasks),
                 )
             )
         selector = self.candidate_selector

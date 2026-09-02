@@ -60,8 +60,8 @@ comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
 tree; the Pi episodes authenticate to the local service with a placeholder.
 
-One round is: pull the served tree, draw the next epoch-shuffled minibatch of
-three training problems, run each as a Pi episode against that tree with a
+One round is: pull the served tree, take the method's plan for the iteration
+(its parent choice and its three training problems), run each as a Pi episode against that tree with a
 model binding pointed back at the embedded service, score it, find its recorded
 request by problem text, and report the score against it. The third report
 closes the batch (`data.batch_size: 3`) and schedules the training step, which
@@ -73,10 +73,11 @@ archive reaches the metric-call budget.
 Everything under `./work`, and a rerun resumes from it:
 
 - `gepa/<scenario>.json` - the archive: candidates and their texts, parents,
-  per-problem validation vectors, fronts, the round-robin cursors, and the
-  metric-call count.
-- `rounds.json` - the driver's round counter, so a resumed run continues the
-  training order instead of redrawing minibatches it already paid for.
+  per-problem validation vectors, fronts, the round-robin cursors, the
+  metric-call count, every reflection's prompt and reply, and the iteration
+  plans - which parent and which training problems each round used, drawn from
+  one seeded generator in upstream's own order, so seed 0 here shows the
+  reflection model the same problems the official seed-0 run showed it.
 - `heldout/{frozen,selected}/example-NNNN.json` - one checkpoint per test
   episode, keyed by the problem and the composition; a checkpoint written for
   a different composition is refused, never folded into the score.
@@ -100,9 +101,12 @@ work.
 
 The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,
-the dataset drift refusal, the minibatch order against a sequence computed from
-upstream, and the driver's record lookup and report against a real embedded
-service with a stubbed inference backend.
+the dataset drift refusal, and the driver's record lookup and report against a
+real embedded service with a stubbed inference backend. Where the upstream
+package is installed, `tests/reef_service/test_gepa_fidelity.py` drives
+`gepa.optimize` and this method side by side on a synthetic task from the
+same seed and requires the same candidates, parents, minibatches, and
+validation means at every iteration.
 
 ## Deviations
 
