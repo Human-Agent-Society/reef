@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Header } from "@/components/header";
+import { RouteFocus } from "@/components/route-focus";
+import { ThemeSync } from "@/components/theme-sync";
 import { getSearchDocuments, navigation } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
@@ -24,10 +26,13 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   const searchDocuments = getSearchDocuments();
 
   return (
-    <html lang="en" data-scroll-behavior="smooth" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body>
         {/* Inline so it runs at parse time, before first paint. */}
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <a className="skip-link" href="#main-content">Skip to content</a>
+        <ThemeSync />
+        <RouteFocus />
         <Header documents={searchDocuments} navigation={navigation} />
         {children}
       </body>

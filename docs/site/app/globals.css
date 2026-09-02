@@ -41,7 +41,7 @@
   --font-mono: "DM Mono", ui-monospace, monospace;
 }
 
-html { color-scheme: light; scroll-behavior: smooth; scroll-padding-top: 92px; }
+html { color-scheme: light; scroll-padding-top: 92px; } /* auto scroll: smooth raced the late-mounting diagrams and landed deep links hundreds of px off */
 html[data-theme="dark"] {
   color-scheme: dark;
   --background: #100e0c;
@@ -82,6 +82,9 @@ html[data-theme="dark"] {
 
 /* Base */
 * { box-sizing: border-box; }
+.skip-link { position: fixed; z-index: 200; top: -60px; left: 12px; padding: 10px 16px; color: var(--foreground); border: 1px solid var(--border); border-radius: 8px; background: var(--background); transition: top .15s; }
+.skip-link:focus { top: 12px; }
+main.docs-main:focus { outline: none; }
 body { margin: 0; color: var(--text); background: var(--background); font-family: var(--font-sans); font-size: 15px; line-height: 1.7; -webkit-font-smoothing: antialiased; }
 a { color: inherit; text-decoration: none; }
 button, input { color: inherit; font: inherit; }
@@ -90,7 +93,7 @@ button { cursor: pointer; }
 
 /* Header and navigation */
 .site-header { position: fixed; z-index: 50; top: 0; right: 0; left: 0; height: 68px; border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent); background: color-mix(in srgb, var(--background) 82%, transparent); backdrop-filter: blur(20px) saturate(140%); }
-.header-inner { width: min(1440px, 100%); height: 68px; margin: 0 auto; padding: 0 28px; display: flex; align-items: center; gap: 32px; }
+.header-inner { width: 100%; height: 68px; padding: 0 28px; display: flex; align-items: center; gap: 32px; }
 .logo { display: inline-flex; align-items: center; gap: 11px; color: var(--foreground); font-weight: 600; }
 .logo-mark { color: var(--brand); stroke-width: 2.4; }
 .logo-name { color: var(--foreground); font-size: 15px; font-weight: 700; letter-spacing: .15em; }
@@ -126,10 +129,11 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .search-input-row { height: 60px; padding: 0 16px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
 .search-input-row input { min-width: 0; height: 100%; flex: 1; color: var(--foreground); border: 0; outline: 0; background: transparent; font-size: 16px; }
 .search-input-row button { width: 32px; height: 32px; padding: 0; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 7px; background: transparent; }
-.search-results { min-height: 250px; max-height: 55vh; padding: 10px; overflow: auto; overscroll-behavior: contain; }
+.search-results { min-height: min(250px, 40vh); max-height: 55vh; padding: 10px; overflow: auto; overscroll-behavior: contain; }
 .search-label { margin: 4px 8px 8px; color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
 .search-results > a { padding: 10px; display: flex; align-items: center; gap: 11px; border-radius: 8px; }
 .search-results > a:hover { background: var(--accent); }
+.search-results > a.is-selected { background: var(--accent); }
 .search-results > a > svg { color: var(--muted); }
 .search-results > a > svg:last-child { margin-left: auto; }
 .search-results a span { min-width: 0; display: grid; gap: 3px; }
@@ -218,7 +222,7 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 
 /* Documentation layout */
 .docs-layout { width: 100%; min-height: 100vh; padding-top: 68px; display: grid; grid-template-columns: 270px minmax(0, 760px) minmax(220px, 1fr); }
-.docs-sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: 270px; padding: 38px 22px 48px; overflow-y: auto; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: color-mix(in srgb, var(--background) 92%, var(--accent)); }
+.docs-sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: 270px; padding: 38px 18px 48px; overflow-y: auto; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: color-mix(in srgb, var(--background) 92%, var(--accent)); }
 .sidebar-group { margin-bottom: 30px; }
 .sidebar-group-items { display: grid; gap: 3px; }
 .sidebar-group a { padding: 7px 10px; color: var(--muted); border-radius: 7px; font-size: 13px; line-height: 20px; }
@@ -254,7 +258,12 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .markdown-body pre { --scroller-bg: var(--code); margin: 24px 0 32px; padding: 22px 24px; overflow-x: auto; color: var(--code-text); border: 1px solid color-mix(in srgb, var(--border) 88%, transparent); border-radius: 10px; box-shadow: inset 0 1px color-mix(in srgb, var(--foreground) 4%, transparent); font: 13px/1.65 var(--font-mono); }
 .markdown-body pre, .markdown-body .table-scroll { background: linear-gradient(90deg, var(--scroller-bg) 45%, transparent) left center / 32px 100% no-repeat local, linear-gradient(270deg, var(--scroller-bg) 45%, transparent) right center / 32px 100% no-repeat local, radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) left center / 14px 100% no-repeat scroll, radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--foreground) 28%, transparent), transparent) right center / 14px 100% no-repeat scroll, var(--scroller-bg); }
 .markdown-body pre code { display: block; width: max-content; min-width: 100%; padding: 0; color: inherit; background: transparent; font-size: 13px; }
+.code-block { position: relative; }
+.code-copy { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; display: grid; place-items: center; color: var(--muted); border: 1px solid color-mix(in srgb, var(--border) 82%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--code) 90%, var(--background)); opacity: 0; transition: opacity .12s, color .12s, border-color .12s; }
+.code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+.code-copy:hover { color: var(--brand-strong); border-color: color-mix(in srgb, var(--brand) 48%, var(--border)); }
 .table-scroll { overflow-x: auto; }
+.markdown-body img { max-width: 100%; height: auto; }
 .markdown-body .table-scroll { --scroller-bg: var(--background); margin: 24px 0 32px; border-radius: 10px; box-shadow: var(--shadow-sm); }
 .markdown-body .table-scroll table { margin: 0; }
 .markdown-body table { width: 100%; margin: 24px 0 32px; border-collapse: separate; border-spacing: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; font-size: 14px; line-height: 1.5; }
@@ -443,6 +452,11 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 }
 
 @media (max-width: 600px) {
+  /* Code on a phone: tighter padding buys back the horizontal room the
+     desktop 24px gutter costs, and 12px fits more of each line before a
+     line has to be scrolled sideways. Pad and desktop keep 13px/24px. */
+  .markdown-body pre { padding: 16px 14px; font-size: 12px; }
+  .markdown-body pre code { font-size: 12px; }
   .header-inner { gap: 8px; }
   .header-search { width: 44px; }
   .search-trigger { width: 44px; padding: 0; justify-content: center; border: 0; background: transparent; box-shadow: none; }
@@ -462,6 +476,12 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
   .markdown-body h1 { font-size: 31px; }
   .markdown-body td { overflow-wrap: anywhere; }
   .markdown-body th { overflow-wrap: normal; }
+  /* Two-column fact tables (label | value): keep the label column on one line
+     so a phone's auto layout cannot squeeze "Loss family" into a sliver and
+     stack it vertically. Three-column tables (the two-axis recipe grid) are
+     excluded so their wider first column still wraps. */
+  .markdown-body table:not(:has(td:nth-child(3))) td:first-child,
+  .markdown-body table:not(:has(td:nth-child(3))) th:first-child { white-space: nowrap; }
   .markdown-body .page-brief { margin-top: -8px; grid-template-columns: 1fr; gap: 2px 0; }
   .markdown-body .page-brief dd { margin-bottom: 8px; }
   .markdown-body .page-brief dd:last-child { margin-bottom: 0; }
@@ -473,6 +493,8 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 
 @media (pointer: coarse) {
   .icon-button { width: 44px; height: 44px; }
+  .code-copy { width: 44px; height: 44px; opacity: 1; top: 8px; right: 8px; }
+  .search-input-row button { width: 44px; height: 44px; }
   .search-trigger { min-width: 44px; min-height: 44px; }
   .logo { min-height: 44px; }
   .markdown-body a.heading-anchor { padding: 10px 15px; margin-left: 0; }
