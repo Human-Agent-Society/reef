@@ -98,8 +98,11 @@ the official GEPA quickstart at seed 0 improved sealed AIME-2025 accuracy from
 is this method at the same seed. It reflected from the same parents on the same
 training problems at every iteration, produced four candidates in 198 metric
 calls, scored the identical 40/150 frozen, and improved to **46.67%** (70/150),
-a gain of 20 points against the official 12. One seed of a stochastic search is
-a conformance check, not an estimate of variance.
+a gain of 20 points against the official 12.
+[`results/method-seed-1-2026-09-02/`](results/method-seed-1-2026-09-02/README.md)
+is seed 1: four candidates in 198 metric calls again, 24.00% to 36.00%, a gain
+of exactly 12 points. Two seeds of a stochastic search bracket the official
+result rather than estimate its variance.
 
 The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,
