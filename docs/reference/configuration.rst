@@ -191,7 +191,7 @@ Each entry is one process.
 
 .. config::
 
-   services[].name | the service's id, used by ``depends_on``
+   services[].name | the service's id, used by ``depends_on``; unique within one stack
    services[].command | the command line to run
    services[].ready | a shell command that succeeds once the service is up
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
