@@ -3,7 +3,7 @@
 Reproduction of [Learning to Discover at Test Time](https://arxiv.org/abs/2601.16175) as a Reef weight-training recipe. TTT-Discover makes repeated attempts at one hard problem at test time: rollouts arrive as a fixed grid of sibling attempts, the step trains on the whole group, and the next grid runs on the weights it produced. The package holds the method; the search loop that drives it lives in [examples/tttd](examples/tttd/README.md).
 
 - Paper: [arXiv:2601.16175](https://arxiv.org/abs/2601.16175)
-- Pins: the repo's `third_party/slime` submodule for training; the completed run used `Qwen/Qwen3-8B` with thinking, rank-32 LoRA, the paper's Adam learning rate, and the Erdos minimum-overlap task
+- Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`); the completed run used `Qwen/Qwen3-8B` with thinking, rank-32 LoRA, Adam lr `4e-5`, and the Erdos minimum-overlap task
 - Claim scope: a result-level reproduction of the paper's Qwen3-8B Erdos experiment at half its rollout budget (eight groups of 32 against the paper's 64 per group). 50 steps in about 22.6 hours on one four-B200 node reached a best certified C5 upper bound of 0.380916 against 0.380932 in the paper's Table 2.
 
 ## Layout
