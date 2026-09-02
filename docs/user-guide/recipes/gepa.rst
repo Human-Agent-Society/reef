@@ -139,36 +139,8 @@ without making a single model call.
 Results
 -------
 
-The example reproduces the upstream AIME quickstart, using the same 45 training
-problems, 45 validation problems, and sealed 150-problem AIME-2025 split, the
-same 150-call budget, and dated snapshots of the same task and reflection
-models.
-
-Four runs were made on the same day under identical settings, two of the
-upstream optimizer and two of this method, across two seeds. Every one of them
-produced four candidates and consumed 198 metric calls. At a given seed both
-arms reflect on the same training problems in the same order, so the runs pair
-up. On the sealed split the upstream arm improved by 11.33 and 14.00 points,
-and this method improved by 20.00 and 12.00, for means across seeds of 12.67
-and 16.00.
-
-The means are taken across seeds because one run of this search has no stable
-number to report. GEPA is a stochastic optimization, so the reflection model
-writes a different prompt every time it is asked and the task model scores a
-given prompt differently from one run to the next. This method comes out 8.67
-points above the upstream arm at seed 0 and 2.00 points below it at seed 1, and
-a difference that changes sign between seeds is sampling rather than a property
-of either implementation. The starting scores make the size of that noise
-concrete: the very same seed prompt, on the very same problems, scored anywhere
-between 36 and 47 out of 150 across the four runs. The records are kept under
-``recipes/gepa/examples/aime/results/``.
-
-Exact agreement is checked in the one place it can be. The test at
-``tests/reef_service/test_gepa_fidelity.py`` drives the real upstream optimizer
-and this method side by side on a synthetic task from a single seed, with the
-scoring and the reflection made deterministic, and requires that they produce
-the same candidates from the same parents on the same minibatches with the same
-validation means, round after round.
+The example's README records four runs against upstream GEPA, two of each,
+and the records are kept beside it.
 
 See also
 --------
