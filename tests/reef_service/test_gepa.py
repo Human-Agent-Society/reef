@@ -476,7 +476,7 @@ def pending_archive(tmp_path: Path) -> Archive:
     return archive
 
 
-def test_the_first_decision_records_both_sides_and_charges_both(tmp_path: Path) -> None:
+def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
     decision = GEPASelector(archive).decide(UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0)))
 
@@ -492,7 +492,7 @@ def test_the_first_decision_records_both_sides_and_charges_both(tmp_path: Path) 
         "parent": 0,
         "archive_size": 2,
         "front_size": 2,  # the seed still holds the task both compositions failed
-        "metric_calls": 4,
+        "metric_calls": 2,
     }
 
 
