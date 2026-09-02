@@ -604,7 +604,8 @@ def test_install_script_golden_structure() -> None:
     sidecar = (
         json.dumps({"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}, indent=2) + "\n"
     )
-    golden = (r"""#!/bin/sh
+    golden = (
+        r"""#!/bin/sh
 # Reef harness install: adapter pi, release v1.
 # Self contained: the composition files ride inline below and the harness
 # binary comes from the vendor's own channel; running this script calls no
@@ -721,7 +722,8 @@ fi
 echo "run:     $DEST/reef-pi"
 echo "binary:  $BINARY"
 echo "harness: $DEST"
-""").replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
+"""
+    ).replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
     golden = golden.replace("@SIDECAR_CHECKSUM@", hashlib.sha256(sidecar.encode()).hexdigest())
     golden = golden.replace("@RULES_EOF@", "REEF_EOF_" + hashlib.sha256(b"hello\n").hexdigest()[:12])
     golden = golden.replace("@SIDECAR_EOF@", "REEF_EOF_" + hashlib.sha256(sidecar.encode()).hexdigest()[:12])
