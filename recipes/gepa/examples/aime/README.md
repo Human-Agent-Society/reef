@@ -50,7 +50,10 @@ OPENAI_API_KEY=... REEF_PI_BINARY=/path/to/pi ./run.sh
 ```
 
 A live run is roughly 150 search episodes plus the mechanism's validation
-passes, then 300 test episodes. `--budget` lowers the search budget for a
+passes, then 300 test episodes. Episodes are independent, so `REEF_GEPA_WORKERS`
+(default 128) run at once everywhere: the mechanism's validation pass through
+`evolution.episode_workers`, the driver's minibatch, and the test passes. It
+changes wall time only. `--budget` lowers the search budget for a
 shorter run. `REEF_GEPA_MULTI=1` adds an `aime-solver` skill node to the seed
 and evolves it alongside the rules node, which is the extension case, not the
 comparison. The credential is read once, handed to the embedded service as its

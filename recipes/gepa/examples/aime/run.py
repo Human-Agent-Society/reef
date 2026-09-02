@@ -32,13 +32,14 @@ import subprocess
 import threading
 import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
+
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
-
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
@@ -60,6 +61,7 @@ HERE = Path(__file__).resolve().parent
 os.environ.setdefault("REEF_WORK", str(HERE / "work"))
 os.environ.setdefault("REEF_MODEL", "gpt-4.1-mini-2025-04-14")
 os.environ.setdefault("REEF_PI_BINARY", "pi")
+os.environ.setdefault("REEF_GEPA_WORKERS", "128")
 
 WORK = Path(os.environ["REEF_WORK"])
 SCENARIO = os.environ.get("REEF_GEPA_SCENARIO", "gepa-aime")
@@ -72,6 +74,10 @@ COMPONENTS = ["rules", "skill"] if MULTI else ["rules"]
 # rendered models.json inside the episode root.
 EMBEDDED_KEY = "reef-embedded"
 EPISODE_TIMEOUT_S = 600.0
+# Episodes are independent: the mechanism's validation pass (gepa.yaml's
+# episode_workers), the driver's minibatch, and the test passes all run this
+# many at once. It only changes wall time, never sampling or scoring.
+WORKERS = int(os.environ["REEF_GEPA_WORKERS"])
 STEP_TIMEOUT_S = 7200.0
 RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
@@ -377,12 +383,15 @@ def search(service: RunService, client: Any, binary: str, trainset: list, budget
         # repeated problem must not match its own past session.
         floor = max_sequence(service.records(), service.scenario)
         before = service.training_step()
-        for index, identifier in enumerate(sampler.ids(step)):
-            task = str(trainset[identifier]["input"])
-            score, _ = solve(files, task, binary)
+        problems = [str(trainset[identifier]["input"]) for identifier in sampler.ids(step)]
+        with ThreadPoolExecutor(max_workers=min(WORKERS, len(problems))) as pool:
+            scored = [score for score, _ in pool.map(lambda task, files=files: solve(files, task, binary), problems)]
+        # Reports go out only once every episode of the round has recorded,
+        # so the batch never closes on a round that is still in flight.
+        for index, (task, score) in enumerate(zip(problems, scored, strict=True)):
             record = find_task_record(service.records(), service.scenario, task, after_sequence=floor)
             if record is None:
-                raise RuntimeError(f"the episode for training problem {identifier} recorded no request")
+                raise RuntimeError(f"the episode for training problem {index} recorded no request")
             report(
                 service,
                 client,
@@ -395,7 +404,7 @@ def search(service: RunService, client: Any, binary: str, trainset: list, budget
 
 def test_passes(service: RunService, recipe: Any, client: Any, binary: str, testset: list) -> dict[str, float]:
     """The sealed split, once on the seed composition and once on the served one."""
-    evaluator = CheckpointedEvaluator(WORK / "heldout")
+    evaluator = CheckpointedEvaluator(WORK / "heldout", workers=WORKERS)
     tasks = [str(example["input"]) for example in testset]
     binding = service.binding()
     descriptor = get_adapter("pi")
@@ -441,6 +450,7 @@ def main() -> None:
             "splits": {"train": len(trainset), "validation": len(valset), "test": len(testset)},
             "dataset_sha256": aime.AIME_DATASET_SHA256,
             "planned_test_episodes": 2 * len(testset),
+            "workers": WORKERS,
             "work_dir": str(WORK),
         }
         print(json.dumps(plan, indent=2, sort_keys=True))

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,18 @@ def fingerprint(value: Any) -> str:
 
 
 class CheckpointedEvaluator:
-    """Score a held-out batch with one durable result file per example."""
+    """Score a held-out batch with one durable result file per example.
 
-    def __init__(self, root: Path) -> None:
+    Episodes are independent, so ``workers`` of them run at once; each writes
+    its own checkpoint the moment it finishes, so an interruption mid-wave
+    loses only the episodes still in flight.
+    """
+
+    def __init__(self, root: Path, *, workers: int = 1) -> None:
+        if workers < 1:
+            raise ValueError("the held-out evaluator needs at least one worker")
         self.root = Path(root)
+        self.workers = workers
 
     def scores(
         self,
@@ -41,8 +50,9 @@ class CheckpointedEvaluator:
         score and whatever record of the episode belongs beside it.
         """
         composition_sha256 = fingerprint(dict(composition))
-        scores: list[float] = []
-        for index, task in enumerate(tasks):
+
+        def one(item: tuple[int, str]) -> float:
+            index, task = item
             path = self.root / label / f"example-{index:04d}.json"
             identity = {
                 "index": index,
@@ -57,8 +67,13 @@ class CheckpointedEvaluator:
                 score, output = run(index, task)
                 payload = {**identity, "score": float(score), "output": output}
                 _write_json(path, payload)
-            scores.append(float(payload["score"]))
-        return scores
+            return float(payload["score"])
+
+        items = list(enumerate(tasks))
+        if self.workers == 1 or len(items) <= 1:
+            return [one(item) for item in items]
+        with ThreadPoolExecutor(max_workers=min(self.workers, len(items))) as pool:
+            return list(pool.map(one, items))
 
 
 def _write_json(path: Path, value: Any) -> None:
