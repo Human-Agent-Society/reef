@@ -30,9 +30,9 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Promoter, Proposer, ScoreComparisonSelector
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -136,6 +136,9 @@ class CordisRecipe(Recipe):
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
+    promote_failures: bool = False
+    max_promoted_tasks: int = 50
+    promote: Promoter | None = None
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -204,6 +207,12 @@ class CordisRecipe(Recipe):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RecipeConfigError(f"evolution.{label} must be an integer of at least 0 (0 disables the limit)")
             budgets[label] = value
+        promote_failures = evolution.get("promote_failures", False)
+        if not isinstance(promote_failures, bool):
+            raise RecipeConfigError("evolution.promote_failures must be a boolean")
+        max_promoted_tasks = evolution.get("max_promoted_tasks", 50)
+        if isinstance(max_promoted_tasks, bool) or not isinstance(max_promoted_tasks, int) or max_promoted_tasks < 0:
+            raise RecipeConfigError("evolution.max_promoted_tasks must be an integer of at least 0")
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -243,6 +252,7 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.models may not name a model 'served'; that is the model under test")
         return {
             "propose": resolve_proposer(evolution.get("propose")),
+            "promote": resolve_promoter(evolution["promote"]) if "promote" in evolution else None,
             "score_episode": resolve_episode_scorer(evolution.get("evaluate")),
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
@@ -252,6 +262,8 @@ class CordisRecipe(Recipe):
             "forbid_residue": forbid_residue,
             **budgets,
             "executor": executor,
+            "promote_failures": promote_failures,
+            "max_promoted_tasks": max_promoted_tasks,
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -298,6 +310,9 @@ class CordisRecipe(Recipe):
             max_steps=self.max_steps,
             max_failure_streak=self.max_failure_streak,
             max_model_calls_per_step=self.max_model_calls_per_step,
+            promote_failures=self.promote_failures,
+            max_promoted_tasks=self.max_promoted_tasks,
+            promote=self.promote,
             seed=self.seed,
         )
         return Trainer.build(
