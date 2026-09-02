@@ -19,7 +19,9 @@ class CordisProcessor(ReportedFeedbackProcessor):
     Requests are recorded post-transform, so a trace shows exactly what the
     backend served. A score window in config selects which traces batch —
     harness evolution's ``max_score`` bound keeps only failures — and reports
-    outside it are terminal and release their records. The backends consume
+    outside it are terminal and release their records. A report may reference
+    one request or a whole run's worth; several references become one
+    trajectory sample. The backends consume
     the resulting trace batches without adding processor logic.
     """
 
@@ -42,23 +44,29 @@ class CordisProcessor(ReportedFeedbackProcessor):
         score = context.score
         if score is None:
             raise RuntimeError("eligible harness report has no score")
-        # 2. A trace outside the window, or one claiming more than a single
-        #    request, is terminal before its reference resolves — so both
-        #    records release immediately.
-        if len(context.references) != 1 or not self._min_score <= score <= self._max_score:
+        # 2. A trace outside the window, or one referencing nothing, is
+        #    terminal before any reference resolves — the records release
+        #    immediately.
+        if not context.references or not self._min_score <= score <= self._max_score:
             return NEVER
-        # 3. Park until the referenced request record arrives.
+        # 3. Park until every referenced request record arrives.
         if gate is not None:
             return gate
         if context.inferences is None:
             raise RuntimeError("resolved harness report has no inference")
-        inference = context.inferences[0]
-        # 4. The recorded request itself is the sample, unmodified.
+        # 4. The recorded requests themselves are the sample, unmodified: one
+        #    reference is a single-exchange sample, several are one trajectory
+        #    sample in reference order.
+        last = context.inferences[-1]
         return ReportDecision.train(
             TraceSample(
-                source_agent_record_id=inference.agent_record_id,
-                payload=inference.payload,
+                source_agent_record_id=last.agent_record_id,
+                payload=last.payload,
                 score=score,
+                feedback=context.report.payload.get("feedback"),
+                trajectory=(
+                    tuple(record.payload for record in context.inferences) if len(context.inferences) > 1 else ()
+                ),
             )
         )
 

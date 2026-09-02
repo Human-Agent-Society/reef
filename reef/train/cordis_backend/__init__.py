@@ -133,6 +133,9 @@ class CordisBackend(TrainingBackend):
         tasks: tuple[str, ...],
         models: ModelBindings | ModelBinding,
         binary: str | None = None,
+        episode_timeout_s: float = 600.0,
+        episode_repeats: int = 1,
+        forbid_residue: bool = False,
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -155,7 +158,20 @@ class CordisBackend(TrainingBackend):
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
+        if (
+            isinstance(episode_timeout_s, bool)
+            or not isinstance(episode_timeout_s, (int, float))
+            or episode_timeout_s <= 0
+        ):
+            raise ValueError("episode_timeout_s must be a positive number")
+        if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
+            raise ValueError("episode_repeats must be an integer of at least 1")
+        if not isinstance(forbid_residue, bool):
+            raise ValueError("forbid_residue must be a boolean")
         self._binary = binary
+        self._episode_timeout_s = float(episode_timeout_s)
+        self._episode_repeats = episode_repeats
+        self._forbid_residue = forbid_residue
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -277,10 +293,19 @@ class CordisBackend(TrainingBackend):
         # so the published artifact carries no endpoint or credential.
         candidate_files = self._render_for_episode(candidate.candidate_entries)
         current_files = self._render_for_episode(candidate.current_entries)
-        candidate_runs = tuple(self._run_and_score(candidate_files, task) for task in self._tasks)
-        current_runs = tuple(self._run_and_score(current_files, task) for task in self._tasks)
-        candidate_scores = tuple(score for score, _ in candidate_runs)
-        current_scores = tuple(score for score, _ in current_runs)
+        # Episodes interleave candidate and current inside each pairing, so
+        # anything that drifts during the run (upstream load, rate limits)
+        # lands on both sides of a pair instead of one whole side. A repeat
+        # is one more pairing of the same task; the selector compares the
+        # vectors positionally, so every pairing tallies on its own.
+        candidate_runs: list[tuple[float | None, FailureObservation | None, int]] = []
+        current_runs: list[tuple[float | None, FailureObservation | None, int]] = []
+        for task in self._tasks:
+            for _ in range(self._episode_repeats):
+                candidate_runs.append(self._run_and_score(candidate_files, task))
+                current_runs.append(self._run_and_score(current_files, task))
+        candidate_scores = tuple(score for score, _, _ in candidate_runs)
+        current_scores = tuple(score for score, _, _ in current_runs)
         return EvaluationResult(
             evaluator="harness_episode_pairs",
             evaluator_version="1",
@@ -289,9 +314,12 @@ class CordisBackend(TrainingBackend):
                 "current_scores": current_scores,
                 # Failure observations ride the evaluation so settlement can
                 # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(f.to_dict() for _, f in candidate_runs if f is not None),
-                "current_failures": tuple(f.to_dict() for _, f in current_runs if f is not None),
+                "candidate_failures": tuple(f.to_dict() for _, f, _ in candidate_runs if f is not None),
+                "current_failures": tuple(f.to_dict() for _, f, _ in current_runs if f is not None),
                 "episode_failures": sum(score is None for score in candidate_scores + current_scores),
+                "episode_repeats": self._episode_repeats,
+                "candidate_residue": sum(residue for _, _, residue in candidate_runs),
+                "current_residue": sum(residue for _, _, residue in current_runs),
                 "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
                 "current_score": float(sum(score for score in current_scores if score is not None)),
             },
@@ -376,25 +404,34 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
-    def _run_and_score(self, files: Mapping[str, str], task: str) -> tuple[float | None, FailureObservation | None]:
+    def _run_and_score(
+        self, files: Mapping[str, str], task: str
+    ) -> tuple[float | None, FailureObservation | None, int]:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A nonzero
-        exit still scores, as before, and is observed alongside the score."""
+        exit still scores, as before, and is observed alongside the score.
+        The third element counts files the episode left outside the cleanup
+        whitelist; with ``forbid_residue`` a littering episode scores as one
+        that could not run."""
         try:
-            result = run_episode(self._descriptor, files, task, binary=self._binary)
+            result = run_episode(self._descriptor, files, task, binary=self._binary, timeout=self._episode_timeout_s)
         except EpisodeError as error:
-            return None, FailureObservation(task=task, stage="launch", cause=str(error))
+            return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0
         except TrajectoryError as error:
-            return None, FailureObservation(task=task, stage="trajectory", cause=str(error))
+            return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0
+        residue = len(result.residue)
+        if residue and self._forbid_residue:
+            cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
+            return None, FailureObservation(task=task, stage="residue", cause=cause), residue
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return score, FailureObservation(task=task, stage="exit", cause=cause)
-        return score, None
+            return score, FailureObservation(task=task, stage="exit", cause=cause), residue
+        return score, None, residue
 
     def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
         return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)

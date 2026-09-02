@@ -24,11 +24,14 @@ def _inference(agent_record_id: str, payload: dict) -> AgentRecord:
     )
 
 
-def _report(agent_record_id: str, score: object, references: list[str]) -> AgentRecord:
+def _report(agent_record_id: str, score: object, references: list[str], feedback: object = None) -> AgentRecord:
+    payload: dict = {"score": score, "references": references}
+    if feedback is not None:
+        payload["feedback"] = feedback
     return AgentRecord.create(
         scenario="s",
         request_type=RequestType.REPORT,
-        payload={"score": score, "references": references},
+        payload=payload,
         agent_record_id=agent_record_id,
     )
 
@@ -64,16 +67,46 @@ def test_trace_processor_ignores_reports_outside_the_score_window() -> None:
     assert "rep-1" in retention.releasable_agent_record_ids
 
 
-def test_trace_processor_rejects_multi_reference_reports_without_selecting_the_first() -> None:
+def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() -> None:
+    """A report over a whole run becomes one sample: the trajectory holds
+    every referenced payload in reference order, the payload is the last
+    exchange, and the feedback rides along verbatim."""
     processor = _processor({"max_score": 0.0})
-    processor.ingest(_inference("inf-1", {"messages": [{"role": "user", "content": "first"}]}))
-    processor.ingest(_inference("inf-2", {"messages": [{"role": "user", "content": "second"}]}))
-    processor.ingest(_report("rep-1", 0.0, ["inf-1", "inf-2"]))
+    first = {"messages": [{"role": "user", "content": "first"}]}
+    second = {"messages": [{"role": "user", "content": "second"}]}
+    processor.ingest(_inference("inf-1", first))
+    processor.ingest(_inference("inf-2", second))
+    processor.ingest(_report("rep-1", 0.0, ["inf-1", "inf-2"], feedback="wrong file"))
 
+    assert processor.ready()
+    batch = processor.build_batch()
+    (sample,) = batch.samples
+    assert sample.source_agent_record_id == "inf-2"
+    assert sample.payload == second
+    assert sample.trajectory == (first, second)
+    assert sample.feedback == "wrong file"
+    assert sample.score == 0.0
+
+
+def test_trace_processor_keeps_single_reference_samples_flat_and_carries_feedback() -> None:
+    processor = _processor({"max_score": 0.0})
+    payload = {"messages": [{"role": "user", "content": "q"}]}
+    processor.ingest(_inference("inf-1", payload))
+    processor.ingest(_report("rep-1", 0.0, ["inf-1"], feedback={"reason": "timeout"}))
+
+    batch = processor.build_batch()
+    (sample,) = batch.samples
+    assert sample.payload == payload
+    assert sample.trajectory == ()
+    assert sample.feedback == {"reason": "timeout"}
+
+
+def test_trace_processor_never_trains_a_report_without_references() -> None:
+    processor = _processor({"max_score": 0.0})
+    processor.ingest(_report("rep-1", 0.0, []))
     assert not processor.ready()
     retention = processor.retention_decision()
-    assert retention.protected_agent_record_ids == frozenset()
-    assert retention.releasable_agent_record_ids == frozenset({"inf-1", "inf-2", "rep-1"})
+    assert "rep-1" in retention.releasable_agent_record_ids
 
 
 def test_trace_processor_rejects_an_inverted_window() -> None:

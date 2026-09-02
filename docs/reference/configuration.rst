@@ -164,6 +164,9 @@ zero.
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.adapter | pi | ``opencode``, or an entry-point adapter
    evolution.binary | overrides the adapter's binary name
+   evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
+   evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
+   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
