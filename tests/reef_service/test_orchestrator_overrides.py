@@ -16,9 +16,7 @@ def test_key_equals_value() -> None:
 
 
 def test_dotted_key() -> None:
-    assert _parse_overrides(["--training.checkpoint_dir", "/tmp/ckpt"]) == {
-        "training.checkpoint_dir": "/tmp/ckpt"
-    }
+    assert _parse_overrides(["--training.checkpoint_dir", "/tmp/ckpt"]) == {"training.checkpoint_dir": "/tmp/ckpt"}
 
 
 def test_bare_boolean_override() -> None:
