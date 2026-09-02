@@ -86,7 +86,10 @@ class CordisRecipe(Recipe):
     loaded into the composition tree on first boot; a recovered algorithm
     state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``always``;
-    or a dotted reference to an object implementing ``decide``), and optional ``version_check``
+    or a dotted reference to an object implementing ``decide``), optional
+    ``episode_workers`` (how many evaluation episodes run at once, default
+    one; a large task set is one wave instead of a long turn-taking pass),
+    and optional ``version_check``
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
     the channel head; adapters without a shipped extension refuse boot).
@@ -131,6 +134,7 @@ class CordisRecipe(Recipe):
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
+    episode_workers: int = 1
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     name: str = field(default="harness_evolve", kw_only=True)
@@ -148,6 +152,8 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires tasks")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.episode_workers < 1:
+            raise ValueError("episode_workers must be positive")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
 
@@ -199,6 +205,13 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(str(exc)) from exc
         if "served" in models:
             raise RecipeConfigError("evolution.models may not name a model 'served'; that is the model under test")
+        # A ``${VAR}`` interpolation arrives as text, so a digit string counts.
+        raw_workers = evolution.get("episode_workers", 1)
+        if isinstance(raw_workers, str) and raw_workers.strip().isdigit():
+            raw_workers = int(raw_workers)
+        if isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1:
+            raise RecipeConfigError("evolution.episode_workers must be a positive integer")
+        episode_workers = raw_workers
         return {
             "propose": resolve_proposer(evolution.get("propose")),
             "score_episode": resolve_episode_scorer(evolution.get("evaluate")),
@@ -209,6 +222,7 @@ class CordisRecipe(Recipe):
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
             "candidate_selector": candidate_selector,
+            "episode_workers": episode_workers,
         }
 
     def model_binding(self) -> ModelBinding:
@@ -246,6 +260,7 @@ class CordisRecipe(Recipe):
             models=self.model_bindings(),
             binary=self.binary,
             seed=self.seed,
+            episode_workers=self.episode_workers,
         )
         return Trainer.build(
             scenario,

@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import tempfile
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -134,9 +135,12 @@ class CordisBackend(TrainingBackend):
         models: ModelBindings | ModelBinding,
         binary: str | None = None,
         seed: tuple[Mapping[str, Any], ...] = (),
+        episode_workers: int = 1,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        if episode_workers < 1:
+            raise ValueError("harness evolution requires at least one episode worker")
         if isinstance(models, ModelBinding):
             models = ModelBindings(served=models)
         if not isinstance(models, ModelBindings):
@@ -156,6 +160,7 @@ class CordisBackend(TrainingBackend):
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
         self._binary = binary
+        self._episode_workers = episode_workers
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -277,8 +282,18 @@ class CordisBackend(TrainingBackend):
         # so the published artifact carries no endpoint or credential.
         candidate_files = self._render_for_episode(candidate.candidate_entries)
         current_files = self._render_for_episode(candidate.current_entries)
-        candidate_runs = tuple(self._run_and_score(candidate_files, task) for task in self._tasks)
-        current_runs = tuple(self._run_and_score(current_files, task) for task in self._tasks)
+        # Every episode of both sides is independent work in its own root, so
+        # with more than one worker they all run in one pool, interleaved:
+        # a task set of forty-five costs one wave, not ninety turns, and a
+        # drifting upstream skews both sides alike instead of one after the
+        # other. Results keep task order either way.
+        runs = [(candidate_files, task) for task in self._tasks] + [(current_files, task) for task in self._tasks]
+        if self._episode_workers > 1:
+            with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(runs))) as pool:
+                scored = list(pool.map(lambda run: self._run_and_score(*run), runs))
+        else:
+            scored = [self._run_and_score(files, task) for files, task in runs]
+        candidate_runs, current_runs = tuple(scored[: len(self._tasks)]), tuple(scored[len(self._tasks) :])
         candidate_scores = tuple(score for score, _ in candidate_runs)
         current_scores = tuple(score for score, _ in current_runs)
         return EvaluationResult(
