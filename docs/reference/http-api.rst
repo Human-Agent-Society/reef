@@ -232,6 +232,11 @@ an update is being trained or published.
      "scenarios": {
        "hello-reef": {
          "scenario_step": 3,
+         "last_committed_step": {
+           "step": 3,
+           "recorded_at": 1756400000.0,
+           "metrics": {"published": false, "selection": {"reason": "candidate lost"}}
+         },
          "current_runtime_load_id": "7f2a:12",
          "checkpoint_storage": {"...": "..."},
          "batch_ready": false,
@@ -244,6 +249,14 @@ an update is being trained or published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
+``last_committed_step`` reports the latest durable training step number,
+commit time, and its recipe-owned metrics; it is ``null`` before the first
+training commit. This distinguishes a step still in flight from a completed
+step that skipped or rejected its candidate. A rollback advances
+``scenario_step`` without replacing the latest training outcome. A deployment
+without an agent-record directory has no historical commit log, so after a
+restart from a rollback checkpoint this field is ``null`` until the next
+training commit.
 ``serving`` is runtime-wide but recipe-shaped: a LoRA deployment reports the
 engine's shared adapter residency there, keyed by recipe. Each scenario's
 ``adapter_runtime_load_id`` appears in its own ``scenarios`` block.

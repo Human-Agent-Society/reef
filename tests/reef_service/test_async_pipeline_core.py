@@ -339,6 +339,9 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
 def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> None:
     metrics = {"staleness/samples_fresh": 1, "staleness/samples_admitted_stale": 0}
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
+    dispatcher.get_or_create_scenario("math", "test_policy")
+
+    assert dispatcher.training_status["scenarios"]["math"]["last_committed_step"] is None
 
     _submit_pair(dispatcher)
     _wait_for_step(dispatcher, 1)
@@ -348,6 +351,13 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["outcome"] == "select"
+    status = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    assert status["step"] == 1
+    assert isinstance(status["recorded_at"], float)
+    assert status["metrics"] == committed
+    status["metrics"]["selection"]["outcome"] = "mutated by caller"
+    refreshed = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    assert refreshed["metrics"]["selection"]["outcome"] == "select"
 
 
 @pytest.mark.unit

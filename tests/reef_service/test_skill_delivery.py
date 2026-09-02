@@ -99,6 +99,42 @@ def test_sse_frame_decoder_finds_split_openai_terminator_and_builds_receipt_chun
     assert terminal == b"data: [DONE]\n\n"
 
 
+def test_sse_frame_decoder_accepts_mixed_line_endings_across_single_byte_chunks() -> None:
+    separators = (
+        b"\r\n\r\n",
+        b"\r\n\r",
+        b"\r\n\n",
+        b"\r\r\n",
+        b"\r\r",
+        b"\n\r\n",
+        b"\n\r",
+        b"\n\n",
+    )
+
+    for separator in separators:
+        decoder = SSEFrameDecoder()
+        frames: list[bytes] = []
+        expected = b"data: value" + separator
+        for value in expected:
+            frames.extend(decoder.feed(bytes((value,))))
+        final_frames, remainder = decoder.finalize()
+        frames.extend(final_frames)
+
+        assert frames == [expected]
+        assert remainder == b""
+
+
+def test_sse_frame_decoder_preserves_multiple_frames_and_unfinished_bytes() -> None:
+    decoder = SSEFrameDecoder()
+
+    assert decoder.feed(b"data: one\r\n\ndata: two\n\r\ndata: unfinished") == (
+        b"data: one\r\n\n",
+        b"data: two\n\r\n",
+    )
+    assert decoder.finish() == b"data: unfinished"
+    assert decoder.finish() == b""
+
+
 def test_anthropic_receipt_is_attached_to_message_stop() -> None:
     terminal = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
     assert is_terminal_sse_event("/v1/messages", terminal)

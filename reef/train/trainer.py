@@ -206,19 +206,25 @@ class Trainer:
                 return None
             if self._pending is not None:
                 result = self._pending.result
-                if result is None:
-                    raise RuntimeError("inline trainer has a pending batch without a result")
-                return result
-            self._consume_data()
-            if not self._processor.ready():
-                return None
-            batch = self._build_validated_batch()
-            execution = self._execute_backend_step(batch, scenario_step)
-            if execution.outcome != "commit" or execution.result is None:
-                raise RuntimeError(f"inline training backend returned {execution.outcome!r}")
-            result = execution.result
-            self._pending = _PendingStep(batch=batch, result=result)
-            return result
+                if result is not None:
+                    return result
+                batch = self._pending.batch
+            else:
+                self._consume_data()
+                if not self._processor.ready():
+                    return None
+                batch = self._build_validated_batch()
+                self._pending = _PendingStep(batch=batch, result=None)
+        # Local candidate generation and evaluation can take minutes. Keep the
+        # batch reserved, but release the trainer lock so status remains live.
+        execution = self._execute_backend_step(batch, scenario_step)
+        if execution.outcome != "commit" or execution.result is None:
+            raise RuntimeError(f"inline training backend returned {execution.outcome!r}")
+        with self._lock:
+            if self._pending is None or self._pending.batch_id != batch.batch_id:
+                raise RuntimeError("inline trainer reservation changed while its backend was executing")
+            self._pending.result = execution.result
+            return execution.result
 
     def _execute_backend_step(self, batch: TrainingBatch, scenario_step: int) -> StepExecution:
         backend = self._training_backend

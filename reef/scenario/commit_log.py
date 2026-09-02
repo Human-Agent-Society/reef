@@ -31,6 +31,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -103,7 +104,7 @@ class CommitRecord:
         self.rollback_target_release_id = rollback_target_release_id
         if metrics is not None and not isinstance(metrics, Mapping):
             raise CommitLogError("commit record metrics must be an object or null")
-        self.metrics = None if metrics is None else dict(metrics)
+        self.metrics = None if metrics is None else deepcopy(dict(metrics))
         if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
             raise CommitLogError("commit record training_job_id must be a non-empty string or null")
         if operation != "training" and training_job_id is not None:
@@ -133,7 +134,7 @@ class CommitRecord:
         if not self.operation_verified:
             value["operation_verified"] = False
         if self.metrics is not None:
-            value["metrics"] = self.metrics
+            value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
             value["training_job_id"] = self.training_job_id
         return value
