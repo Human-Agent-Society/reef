@@ -16,9 +16,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
+from reef.harness.executor import EpisodeExecutor, build_executor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.version_check import version_check_entry
 from reef.observability import ExperimentLogger
@@ -133,6 +135,7 @@ class CordisRecipe(Recipe):
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
+    executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -191,6 +194,10 @@ class CordisRecipe(Recipe):
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
+        try:
+            executor = build_executor(evolution)
+        except ReefError as exc:
+            raise RecipeConfigError(str(exc)) from exc
         budgets: dict[str, int] = {}
         for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step"):
             value = evolution.get(label, 0)
@@ -244,6 +251,7 @@ class CordisRecipe(Recipe):
             "episode_repeats": repeats,
             "forbid_residue": forbid_residue,
             **budgets,
+            "executor": executor,
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,

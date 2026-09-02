@@ -1146,3 +1146,34 @@ def test_backend_rejects_negative_budgets(tmp_path: Path) -> None:
             binary=str(make_binary(tmp_path)),
             max_steps=-1,
         )
+
+
+def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> None:
+    """evolution.executor selects the executor; local is the default, and a
+    sandbox that cannot isolate refuses at recipe build."""
+    module = tmp_path / "demo_executor.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_executor:propose",
+                "evaluate": "demo_executor:evaluate",
+                "tasks": ["task one"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    default = CordisRecipe.from_environment({}, config=config())
+    assert type(default.executor).__name__ == "LocalExecutor"
+
+    local = CordisRecipe.from_environment({}, config=config(executor="local"))
+    assert type(local.executor).__name__ == "LocalExecutor"
+
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
+    with pytest.raises(RecipeConfigError, match="bubblewrap"):
+        CordisRecipe.from_environment({}, config=config(executor="sandbox"))

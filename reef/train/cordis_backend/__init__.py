@@ -32,6 +32,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, run_episode
+from reef.harness.executor import EpisodeExecutor, LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
@@ -192,6 +193,7 @@ class CordisBackend(TrainingBackend):
         max_steps: int = 0,
         max_failure_streak: int = 0,
         max_model_calls_per_step: int = 0,
+        executor: EpisodeExecutor | None = None,
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -238,6 +240,9 @@ class CordisBackend(TrainingBackend):
         self._max_steps = max_steps
         self._max_failure_streak = max_failure_streak
         self._max_model_calls_per_step = max_model_calls_per_step
+        # Preflighted at build (recipe.build), so a hosted deployment that
+        # requires the sandbox fails to start, not at the first episode.
+        self._executor = executor or LocalExecutor()
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -505,7 +510,14 @@ class CordisBackend(TrainingBackend):
         whitelist; with ``forbid_residue`` a littering episode scores as one
         that could not run."""
         try:
-            result = run_episode(self._descriptor, files, task, binary=self._binary, timeout=self._episode_timeout_s)
+            result = run_episode(
+                self._descriptor,
+                files,
+                task,
+                binary=self._binary,
+                timeout=self._episode_timeout_s,
+                executor=self._executor,
+            )
         except EpisodeError as error:
             return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0
         except TrajectoryError as error:
