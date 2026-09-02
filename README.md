@@ -270,6 +270,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 Working on continual self-improving agent?
 
 - [Join Discord](https://discord.gg/5y8e5f937k) to share your recipes, ask implementation questions, and discuss new features.
+- Join the [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) to ask questions, share ideas, and connect with the community.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).
 - Report suspected vulnerabilities privately by following the [security policy](SECURITY.md).
