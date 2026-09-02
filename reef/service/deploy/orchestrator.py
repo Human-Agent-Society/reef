@@ -162,6 +162,7 @@ class _Stack:
         self._tees: dict[str, _TeeStream] = {}
         self._names = [svc["name"] for svc in services]
         self._stopping = threading.Event()
+        self._unexpected_exit = threading.Event()
 
     def _pid_file(self, name):
         return self.run_dir / f"{name}.pid"
@@ -264,8 +265,14 @@ class _Stack:
         while not self._stopping.is_set():
             for name, proc in list(self._procs.items()):
                 if proc.poll() is not None:
+                    # A signal may arrive while this polling pass is already
+                    # in progress. Child exits after that stop request belong
+                    # to deliberate teardown, not to the watchdog.
+                    if self._stopping.is_set():
+                        return
                     code = proc.returncode
                     _log(f"{name}: exited (code {code}); bringing down the stack")
+                    self._unexpected_exit.set()
                     self._stopping.set()
                     return
             self._stopping.wait(_WATCHDOG_INTERVAL)
@@ -273,8 +280,6 @@ class _Stack:
     def block(self):
         """Run the watchdog thread and block until a signal arrives or a
         service exits."""
-        watcher = threading.Thread(target=self._watchdog, daemon=True)
-        watcher.start()
 
         def _request_stop(signum, frame):
             _log("received signal, shutting down")
@@ -282,6 +287,8 @@ class _Stack:
 
         signal.signal(signal.SIGTERM, _request_stop)
         signal.signal(signal.SIGINT, _request_stop)
+        watcher = threading.Thread(target=self._watchdog, daemon=True)
+        watcher.start()
         self._stopping.wait()
 
     def shutdown(self, grace=_DEFAULT_GRACE_TIMEOUT):
@@ -314,14 +321,11 @@ class _Stack:
 
     @property
     def exit_code(self) -> int:
-        """1 when any service exited with a failure code, else 0.
+        """1 when a service exited unexpectedly, else 0.
 
         If we got here via a signal, exit 0; if a service died, exit 1.
         """
-        for proc in self._procs.values():
-            if proc.poll() is not None and proc.returncode != 0:
-                return 1
-        return 0
+        return int(self._unexpected_exit.is_set())
 
 
 def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None) -> int:
@@ -360,7 +364,7 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
         # SIGINT during startup (before block() registers its handler) still
         # triggers the default KeyboardInterrupt; shutdown ran via finally.
         # Swallow it so the operator sees a clean exit, not a traceback.
-        pass
+        stack._stopping.set()
     finally:
         stack.shutdown()
         if temp_config_path is not None:
