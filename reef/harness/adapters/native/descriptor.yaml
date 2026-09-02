@@ -1,6 +1,7 @@
 # Reef's own coding agent: a Python loop inside this tree, driven headless per
-# episode, whose tools are native_tool nodes. REEF_NATIVE_DIR relocates the
-# whole composition root so nothing is read from the working directory.
+# episode, whose tools are native_tool nodes and whose loop seams listen to
+# native_hook nodes. REEF_NATIVE_DIR relocates the whole composition root so
+# nothing is read from the working directory.
 name: native
 binary: reef-native
 argv: ["-p", "{prompt}"]
@@ -20,12 +21,14 @@ files:
   skill: "native/skills/{name}/SKILL.md"
   code_extension: "native/extensions/{name}.py"
   native_tool: "native/tools/{name}.py"
+  native_hook: "native/hooks/{name}.py"
 trajectory:
   format: native-jsonl
   path: "native/sessions"
 cleanup_whitelist:
   - "native/sessions/**"
   - "native/tools/__pycache__/**"
+  - "native/hooks/__pycache__/**"
 # The served model reaches the loop through this file only; the served tree
 # never carries a provider.
 model_binding:
