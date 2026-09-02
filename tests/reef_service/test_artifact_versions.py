@@ -172,6 +172,7 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     assert all(version["restorable"] for version in before)
     assert before[-1]["release_id"] == created
     target_version = before[-2]["release_id"]
+    last_training_step = value.training_status["scenarios"]["math"]["last_committed_step"]
 
     published = value.rollback("math", target_version)
 
@@ -185,6 +186,9 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
     assert record.operation == "rollback"
     assert record.rollback_target_release_id == target_version
     assert record.artifact_ref == published
+    status = value.training_status["scenarios"]["math"]
+    assert status["scenario_step"] == 4
+    assert status["last_committed_step"] == last_training_step
 
 
 @pytest.mark.unit

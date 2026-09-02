@@ -26,6 +26,7 @@ better and better results without having to do anything.
 </div>
 
 **[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
+[Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
 [Join Discord](https://discord.gg/5y8e5f937k)**
 

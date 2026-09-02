@@ -11,29 +11,70 @@ from reef.runtime.inference import InferenceStream
 class SSEFrameDecoder:
     """Split arbitrarily chunked SSE bytes without changing event bytes."""
 
-    _SEPARATORS = (b"\r\n\r\n", b"\n\n", b"\r\r")
+    _CR = ord("\r")
+    _LF = ord("\n")
 
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._after_line_end = False
+        self._pending_cr = False
+        self._pending_frame = False
 
     def feed(self, chunk: bytes) -> tuple[bytes, ...]:
-        self._buffer.extend(chunk)
         frames: list[bytes] = []
-        while True:
-            boundaries = tuple(
-                (index, separator) for separator in self._SEPARATORS if (index := self._buffer.find(separator)) >= 0
-            )
-            if not boundaries:
-                return tuple(frames)
-            index, separator = min(boundaries, key=lambda boundary: boundary[0])
-            end = index + len(separator)
-            frames.append(bytes(self._buffer[:end]))
-            self._buffer[:end] = b""
+        for value in chunk:
+            # A CR that ends an empty line may still be the first byte of CRLF.
+            # Delay that frame until the following byte makes the choice clear.
+            if self._pending_frame:
+                if value == self._LF:
+                    self._buffer.append(value)
+                    frames.append(self._take_frame())
+                    continue
+                frames.append(self._take_frame())
+
+            self._buffer.append(value)
+            if self._pending_cr:
+                self._pending_cr = False
+                if value == self._LF:
+                    continue
+
+            if value == self._CR:
+                self._pending_frame = self._after_line_end
+                self._after_line_end = True
+                self._pending_cr = True
+            elif value == self._LF:
+                if self._after_line_end:
+                    frames.append(self._take_frame())
+                else:
+                    self._after_line_end = True
+            else:
+                self._after_line_end = False
+        return tuple(frames)
+
+    def finalize(self) -> tuple[tuple[bytes, ...], bytes]:
+        """Resolve a trailing CR at EOF and return complete frames plus remainder."""
+
+        frames = (bytes(self._buffer),) if self._pending_frame else ()
+        remainder = b"" if frames else bytes(self._buffer)
+        self._reset()
+        return frames, remainder
 
     def finish(self) -> bytes:
-        remainder = bytes(self._buffer)
-        self._buffer.clear()
-        return remainder
+        """Return every byte not already emitted, including a final complete frame."""
+
+        frames, remainder = self.finalize()
+        return b"".join(frames) + remainder
+
+    def _take_frame(self) -> bytes:
+        frame = bytes(self._buffer)
+        self._reset()
+        return frame
+
+    def _reset(self) -> None:
+        self._buffer = bytearray()
+        self._after_line_end = False
+        self._pending_cr = False
+        self._pending_frame = False
 
 
 def _sse_data(frame: bytes) -> str:

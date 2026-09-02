@@ -87,6 +87,19 @@ class ScenarioRegistry:
             return tuple(self._training_scenarios)
 
     @property
+    def training_status_scenario_names(self) -> tuple[str, ...]:
+        """Every loaded scenario with a local or dispatched training backend."""
+        with self._lock:
+            scenarios = tuple(self._scenarios.values())
+            dispatched = tuple(self._training_scenarios)
+        local = tuple(
+            scenario.name
+            for scenario in scenarios
+            if scenario.name not in dispatched and scenario.trainer.training_backend is not None
+        )
+        return (*dispatched, *local)
+
+    @property
     def preload_errors(self) -> dict[str, str]:
         with self._lock:
             return dict(self._preload_errors)
