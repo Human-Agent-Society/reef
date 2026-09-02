@@ -12,21 +12,16 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await request.json()
         name = payload.get("name")
-        recipe = payload.get("recipe")
         release_id = payload.get("release_id")
         if not isinstance(name, str) or not name.strip():
             raise web.HTTPBadRequest(text="name must be a non-empty string")
-        if not isinstance(recipe, str) or not recipe.strip():
-            raise web.HTTPBadRequest(text="recipe must be a non-empty string")
         if release_id is not None and not isinstance(release_id, str):
             raise web.HTTPBadRequest(text="release_id must be a string")
         name = name.strip()
-        recipe = recipe.strip()
         created = not request_service.dispatcher.has_scenario(name)
         scenario = request_service.dispatcher.get_or_create_scenario(
             name,
-            recipe,
-            release_id,
+            release_id=release_id,
             allow_implicit_creation=True,
         )
         if scenario is None:
@@ -35,7 +30,6 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         return web.json_response(
             {
                 "scenario": scenario.name,
-                "recipe": scenario.recipe,
                 "release_id": current.release_id,
                 "content_id": current.content_id,
             },

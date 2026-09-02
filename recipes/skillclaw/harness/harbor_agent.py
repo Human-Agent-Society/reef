@@ -10,7 +10,7 @@ report: the smoke proves the task contract - environment up, instruction
 in, exchange recorded, verifier reward out of ``lab.run``.
 
 The connection is passed as agent kwargs by ``run.py solve`` (Harbor's
-``AgentConfig.kwargs``): ``service_url``, ``scenario``, and ``recipe``.
+``AgentConfig.kwargs``): ``service_url`` and ``scenario``.
 """
 
 from __future__ import annotations
@@ -39,12 +39,10 @@ class HarborAgent(BaseAgent):
         *args: Any,
         service_url: str,
         scenario: str,
-        recipe: str | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._scenario = scenario
-        self._recipe = recipe
         self._client = ReefClient(
             service_url,
             timeout_s=float(os.environ.get("REEF_TIMEOUT_S", "300")),
@@ -95,5 +93,4 @@ class HarborAgent(BaseAgent):
                 "model": self.model_name or "reef",
                 "messages": [{"role": "user", "content": instruction}],
             },
-            recipe=self._recipe,
         )

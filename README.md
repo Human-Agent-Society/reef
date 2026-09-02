@@ -88,7 +88,7 @@ modules implement each step.
 ## Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
-The recipe bound to a scenario determines which surface it updates.
+The deployment's recipe determines which surface its scenarios update.
 
 ### 1 · Serve
 
@@ -117,9 +117,9 @@ SAO recipe uses each eligible scored rollout to run a training step.
 #### Send an inference request and report feedback
 
 Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`
-and `/v1/messages` take the provider's own request body. The first request for a
-new scenario must include both Reef headers. Reef stores the recipe binding and
-rejects later attempts to change it.
+and `/v1/messages` take the provider's own request body. A request includes the
+`x-reef-scenario` header; a new name creates a scenario using the deployment's
+configured recipe. Requests do not select recipes.
 
 The response body uses the provider's OpenAI-compatible format. Reef adds the
 `x-reef-agent-record-id` response header. Its value is the **receipt** that a

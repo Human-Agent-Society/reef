@@ -79,7 +79,6 @@ Connection settings come from environment variables set by `run.sh`:
 
 - `REEF_SERVICE_URL` (required)
 - `REEF_SCENARIO` (required)
-- `REEF_RECIPE`
 - `REEF_TOKEN`
 - `REEF_TIMEOUT_S`
 
@@ -127,7 +126,8 @@ training stack under the same `reef:` section.
 
 ## `run.sh`
 
-1. Set environment variables (port, token, scenario, recipe, work dir).
+1. Set environment variables (port, token, scenario, work dir); select the
+   deployment recipe in YAML.
 2. Start `reef serve -c <yaml>` in the background; wait for `/healthz`.
 3. Run reef-eval with `--with-editable "$PWD"` (installs `harness/`) and
    `--with reef-client` (installs the SDK from PyPI).

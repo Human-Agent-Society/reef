@@ -30,7 +30,6 @@ class AcceptAnyArtifact:
 class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
-    name: str
     surface: Surface
     runtime: InferenceRuntime | None
     inference_backend: InferenceBackend | None

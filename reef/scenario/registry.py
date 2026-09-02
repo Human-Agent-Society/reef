@@ -17,7 +17,7 @@ from typing import Any
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.recipe.registry import RecipeRegistry
+from reef.recipe.base import Recipe
 from reef.runtime.base import TrainingRuntime
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
@@ -35,7 +35,7 @@ class ScenarioRegistry:
 
     def __init__(
         self,
-        recipes: RecipeRegistry,
+        recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
         local_artifact_dir: Path | None = None,
@@ -44,14 +44,14 @@ class ScenarioRegistry:
         experiment_tracker: ExperimentTracker | None = None,
     ) -> None:
         self._scenario_factory = ScenarioFactory(
-            recipes,
+            recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
         )
         self._backend_factory = backend_factory
-        self._recipes = recipes
+        self._recipe = recipe
         self._scenarios: dict[str, Scenario] = {}
         self._scenario_locks: dict[str, RLock] = {}
         self._lock = Lock()
@@ -61,18 +61,10 @@ class ScenarioRegistry:
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
 
-    @property
-    def recipes(self) -> RecipeRegistry:
-        return self._recipes
-
-    def recipe_has_files(self, recipe: str) -> bool:
-        """Whether a configured recipe creates a file-serving surface."""
+    def recipe_has_files(self) -> bool:
+        """Whether the served recipe creates a file-serving surface."""
         # Capability probe only: file serving does not depend on the scenario.
-        return self._recipes.resolve(recipe).build_surface("").files is not None
-
-    def file_recipe_names(self) -> tuple[str, ...]:
-        """Materialized recipe names that can back a harness scenario."""
-        return tuple(name for name in self._recipes.names if self.recipe_has_files(name))
+        return self._recipe.build_surface("").files is not None
 
     @property
     def training_scenario_name(self) -> str | None:
@@ -137,7 +129,6 @@ class ScenarioRegistry:
     def get_or_create(
         self,
         scenario: str,
-        recipe: str | None = None,
         release_id: str | None = None,
         *,
         allow_implicit_creation: bool | None = None,
@@ -153,13 +144,13 @@ class ScenarioRegistry:
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, recipe, release_id)
+            return self._resolve(scenario, release_id)
 
     def require(self, scenario: str) -> Scenario:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
         if not self.has(scenario):
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        return self._resolve(scenario, None, None)
+        return self._resolve(scenario, None)
 
     def list(self) -> tuple[dict[str, Any], ...]:
         """Known scenarios: loaded ones with their binding, durable ones by name."""
@@ -173,7 +164,6 @@ class ScenarioRegistry:
             current = loaded.get(name)
             row: dict[str, Any] = {"scenario": name, "loaded": current is not None}
             if current is not None:
-                row["recipe"] = current.recipe
                 ref = current.repository.require_current_artifact()
                 row["release_id"] = ref.release_id
                 row["content_id"] = ref.content_id
@@ -191,7 +181,7 @@ class ScenarioRegistry:
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(scenario, None, None)
+            recovered = self._scenario_factory.load_or_create(scenario, None)
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered
@@ -209,15 +199,14 @@ class ScenarioRegistry:
     def _resolve(
         self,
         scenario: str,
-        recipe: str | None,
         release_id: str | None,
     ) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, recipe, release_id)
+            self._scenario_factory.validate_existing(current, release_id)
             return current
-        current = self._scenario_factory.load_or_create(scenario, recipe, release_id)
+        current = self._scenario_factory.load_or_create(scenario, release_id)
         training = isinstance(current.runtime, TrainingRuntime)
         with self._lock:
             shared_runtime = training and getattr(current.runtime, "concurrent_training_scenarios", False)

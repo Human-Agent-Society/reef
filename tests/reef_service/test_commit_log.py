@@ -22,7 +22,6 @@ from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
-from reef.recipe import RecipeRegistry
 from reef.recipe.base import Recipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
@@ -310,16 +309,10 @@ def build_training_dispatcher(
     agent_record_dir=None,
 ):
     return Dispatcher(
-        RecipeRegistry(
-            recipes={
-                "test_policy": TestPolicyRecipe(
-                    runtime,
-                    batch_size=1,
-                    checkpoint_strategy=(
-                        checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1000)
-                    ),
-                )
-            }
+        TestPolicyRecipe(
+            runtime,
+            batch_size=1,
+            checkpoint_strategy=(checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1000)),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
@@ -352,10 +345,10 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=agent_record_dir,
     )
-    dispatcher.accept_record(sft_inference("i1"), recipe="test_policy")
-    dispatcher.accept_record(sft_report("r1", "i1"), recipe="test_policy")
-    dispatcher.accept_record(sft_inference("i2"), recipe="test_policy")
-    dispatcher.accept_record(sft_report("r2", "i2"), recipe="test_policy")
+    dispatcher.accept_record(sft_inference("i1"))
+    dispatcher.accept_record(sft_report("r1", "i1"))
+    dispatcher.accept_record(sft_inference("i2"))
+    dispatcher.accept_record(sft_report("r2", "i2"))
     wait_for_step(dispatcher, 2)
 
     records = CommitLog(commit_log_path(agent_record_dir)).records()
@@ -389,8 +382,8 @@ def test_training_commit_proves_its_training_job_identity(tmp_path) -> None:
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=agent_record_dir,
     )
-    dispatcher.accept_record(sft_inference("i1"), recipe="test_policy")
-    dispatcher.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    dispatcher.accept_record(sft_inference("i1"))
+    dispatcher.accept_record(sft_report("r1", "i1"))
     wait_for_step(dispatcher, 1)
 
     scenario = dispatcher.get_or_create_scenario("math")
@@ -407,10 +400,10 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
-    first.accept_record(sft_inference("i2"), recipe="test_policy")
-    first.accept_record(sft_report("r2", "i2"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
+    first.accept_record(sft_inference("i2"))
+    first.accept_record(sft_report("r2", "i2"))
     wait_for_step(first, 2)
     committed_head = first.get_or_create_scenario("math").repository.require_current_artifact()
     assert isinstance(committed_head, LiveWeightArtifactRef)
@@ -421,7 +414,7 @@ def test_recovery_restores_the_live_head_step_and_state_from_the_log(tmp_path) -
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 2
     # The live head survives the restart: it is the log's head record, even
     # though the release chain only knows the bootstrap checkpoint.
@@ -471,19 +464,17 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    registry = lambda runtime: RecipeRegistry(  # noqa: E731
-        recipes={
-            "test_policy": ProtectAllPolicyRecipe(
-                runtime,
-                batch_size=1,
-                checkpoint_strategy=EveryNVersions(1000),
-            )
-        }
+    recipe = lambda runtime: (  # noqa: E731
+        ProtectAllPolicyRecipe(
+            runtime,
+            batch_size=1,
+            checkpoint_strategy=EveryNVersions(1000),
+        )
     )
 
     def build(runtime):
         return Dispatcher(
-            registry(runtime),
+            recipe(runtime),
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_record_dir,
@@ -491,8 +482,8 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     first_runtime = RecordingRuntime()
     first = build(first_runtime)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
     # Nothing was compacted: the consumed pair is still physically present.
@@ -500,11 +491,11 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     second_runtime = RecordingRuntime()
     second = build(second_runtime)
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     assert recovered.trainer.data_offset == 2  # resumed at the committed watermark
 
-    second.accept_record(sft_inference("i2"), recipe="test_policy")
-    second.accept_record(sft_report("r2", "i2"), recipe="test_policy")
+    second.accept_record(sft_inference("i2"))
+    second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
     assert second_runtime.trained_batches == [["i2"]]
@@ -528,9 +519,9 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first_runtime = RecordingRuntime()
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_inference("i2"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_inference("i2"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
     # The step-2 inference sits below the committed watermark yet survives
@@ -540,10 +531,10 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
 
     second_runtime = RecordingRuntime()
     second = build_training_dispatcher(second_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     assert recovered.trainer.data_offset == 3  # resumed at the committed watermark
 
-    second.accept_record(sft_report("r2", "i2"), recipe="test_policy")
+    second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
     # The reingested inference pairs with the late report; i1 never retrains.
     assert second_runtime.trained_batches == [["i2"]]
@@ -563,7 +554,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first_runtime = RecordingRuntime()
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    scenario = first.get_or_create_scenario("math", "test_policy")
+    scenario = first.get_or_create_scenario("math")
 
     from reef.train.trainer import Trainer
 
@@ -577,21 +568,21 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
         original_apply_compaction(self, compacted_ids)
 
     scenario.trainer.apply_compaction = exploding_compaction.__get__(scenario.trainer, Trainer)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
     assert crash["armed"] is False
 
     second_runtime = RecordingRuntime()
     second = build_training_dispatcher(second_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     # Recovery replayed the interrupted compaction and resumed at step 1.
     assert recovered.records.get("math", "i1") is None
     assert recovered.scenario_step == 1
 
-    second.accept_record(sft_inference("i2"), recipe="test_policy")
-    second.accept_record(sft_report("r2", "i2"), recipe="test_policy")
+    second.accept_record(sft_inference("i2"))
+    second.accept_record(sft_report("r2", "i2"))
     wait_for_step(second, 2)
     assert second_runtime.trained_batches == [["i2"]]
     assert recovered.scenario_step == 2
@@ -617,8 +608,8 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
         checkpoint_strategy=EveryNVersions(1),
         agent_record_dir=agent_record_dir,
     )
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first.get_or_create_scenario("math").scenario_step == 1
     committed = first.training_status["scenarios"]["math"]["last_committed_step"]
@@ -634,7 +625,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     second = build_training_dispatcher(
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state == {"steps": 1}
     # The healed log carries the adopted checkpoint record, with the record
@@ -669,8 +660,8 @@ def test_checkpoint_snapshot_metadata_doubles_as_a_commit_record(tmp_path) -> No
         checkpoint_strategy=EveryNVersions(1),
         agent_record_dir=tmp_path / "agent-record",
     )
-    dispatcher.accept_record(sft_inference("i1"), recipe="test_policy")
-    dispatcher.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    dispatcher.accept_record(sft_inference("i1"))
+    dispatcher.accept_record(sft_report("r1", "i1"))
     wait_for_step(dispatcher, 1)
 
     backend = dispatcher.get_or_create_scenario("math").repository.backend
@@ -693,8 +684,8 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     for index in (1, 2, 3):
-        first.accept_record(sft_inference(f"i{index}"), recipe="test_policy")
-        first.accept_record(sft_report(f"r{index}", f"i{index}"), recipe="test_policy")
+        first.accept_record(sft_inference(f"i{index}"))
+        first.accept_record(sft_report(f"r{index}", f"i{index}"))
     wait_for_step(first, 3)
 
     path = commit_log_path(agent_record_dir)
@@ -705,7 +696,7 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
         RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     with pytest.raises(ReefError, match="corrupt"):
-        second.get_or_create_scenario("math", "test_policy")
+        second.get_or_create_scenario("math")
 
 
 @pytest.mark.unit
@@ -715,14 +706,14 @@ def test_recovery_warns_when_the_engine_disagrees_with_the_live_head(tmp_path, c
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
 
     disagreeing = RecordingRuntime(served_version="w999")
     second = build_training_dispatcher(disagreeing, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     with caplog.at_level(logging.WARNING, logger="reef.surface.weights"):
-        recovered = second.get_or_create_scenario("math", "test_policy")
+        recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 1
     assert any("w1" in record.message and "w999" in record.message for record in caplog.records)
 
@@ -730,7 +721,7 @@ def test_recovery_warns_when_the_engine_disagrees_with_the_live_head(tmp_path, c
     third = build_training_dispatcher(agreeing, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="reef.surface.weights"):
-        third.get_or_create_scenario("math", "test_policy")
+        third.get_or_create_scenario("math")
     assert not caplog.records
 
 
@@ -741,8 +732,8 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     initial.mkdir()
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
 
     assert first.get_or_create_scenario("math").commit_log is None
@@ -754,7 +745,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     # Recovery still works from the release chain: the live head is forgotten, as
     # before the log existed, and the step reverts to the checkpointed 0.
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
     assert second.training_status["scenarios"]["math"]["last_committed_step"] is None
     assert not isinstance(recovered.repository.require_current_artifact(), LiveWeightArtifactRef)
@@ -773,8 +764,8 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
         backend_factory,
         checkpoint_strategy=EveryNVersions(1),
     )
-    first.accept_record(sft_inference("i1"), recipe="test_policy")
-    first.accept_record(sft_report("r1", "i1"), recipe="test_policy")
+    first.accept_record(sft_inference("i1"))
+    first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     committed = first.training_status["scenarios"]["math"]["last_committed_step"]
 
@@ -784,7 +775,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
         backend_factory,
         checkpoint_strategy=EveryNVersions(1),
     )
-    recovered = second.get_or_create_scenario("math", "test_policy")
+    recovered = second.get_or_create_scenario("math")
 
     assert recovered.scenario_step == 1
     assert recovered.commit_log is None
@@ -856,7 +847,7 @@ def build_harness_evolve_dispatcher(
 ):
     recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, runtime=runtime)
     return Dispatcher(
-        RecipeRegistry(recipes={"harness_evolve": recipe}),
+        recipe,
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
@@ -908,7 +899,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         propose=blocking_proposer,
     )
-    dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
 
     returned = Event()
     errors: list[Exception] = []
@@ -917,7 +908,6 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         try:
             dispatcher.accept_record(
                 trace_report("a-r1", "a-i1", scenario="skills-a"),
-                recipe="harness_evolve",
             )
         except Exception as exc:
             errors.append(exc)
@@ -946,10 +936,9 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         status = status_values[0]["scenarios"]["skills-a"]
         assert status["scenario_step"] == 0
         assert status["last_committed_step"] is None
-        dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"), recipe="harness_evolve")
+        dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"))
         dispatcher.accept_record(
             trace_report("b-r1", "b-i1", scenario="skills-b"),
-            recipe="harness_evolve",
         )
         wait_for_step(dispatcher, 1, scenario="skills-b")
     finally:
@@ -985,8 +974,8 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         propose=proposer,
     )
-    dispatcher.accept_record(trace_inference("i1"), recipe="harness_evolve")
-    dispatcher.accept_record(trace_report("r1", "i1"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("i1"))
+    dispatcher.accept_record(trace_report("r1", "i1"))
 
     for _ in range(1000):
         if dispatcher.training_status["error"] is not None:
@@ -996,7 +985,7 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
 
     failed_attempts = calls
     should_fail = False
-    dispatcher.accept_record(trace_inference("i2"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("i2"))
     wait_for_step(dispatcher, 1, scenario="skills")
     assert calls == failed_attempts + 1
     assert dispatcher.training_status["error"] is None
@@ -1016,7 +1005,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
         backend_factory,
         agent_record_dir=agent_record_dir,
     )
-    original = dispatcher.get_or_create_scenario("skills", "harness_evolve")
+    original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
     rollback_target = original.current_artifact_ref().release_id
     compaction_failed = Event()
@@ -1036,8 +1025,8 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
 
     original.trainer.apply_compaction = fail_compaction.__get__(original.trainer, Trainer)
     dispatcher._registry.reload = blocking_reload
-    dispatcher.accept_record(trace_inference("i1"), recipe="harness_evolve")
-    dispatcher.accept_record(trace_report("r1", "i1"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("i1"))
+    dispatcher.accept_record(trace_report("r1", "i1"))
 
     assert compaction_failed.wait(1)
     assert reload_started.wait(1)
@@ -1080,8 +1069,8 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
     assert records[0].metrics is not None
     assert records[0].metrics["skipped"] == "no proposal"
 
-    dispatcher.accept_record(trace_inference("i2"), recipe="harness_evolve")
-    dispatcher.accept_record(trace_report("r2", "i2"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("i2"))
+    dispatcher.accept_record(trace_report("r2", "i2"))
     wait_for_step(dispatcher, 2, scenario="skills")
 
     assert [record.step for record in log.records()] == [1, 2]
@@ -1108,8 +1097,8 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     dispatcher = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
 
-    dispatcher.accept_record(trace_inference("i1"), recipe="harness_evolve")
-    dispatcher.accept_record(trace_report("r1", "i1"), recipe="harness_evolve")
+    dispatcher.accept_record(trace_inference("i1"))
+    dispatcher.accept_record(trace_report("r1", "i1"))
 
     scenario = dispatcher.get_or_create_scenario("skills")
     wait_for_step(dispatcher, 1, scenario="skills")
@@ -1138,8 +1127,8 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     first = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    first.accept_record(trace_inference("i1"), recipe="harness_evolve")
-    first.accept_record(trace_report("r1", "i1"), recipe="harness_evolve")
+    first.accept_record(trace_inference("i1"))
+    first.accept_record(trace_report("r1", "i1"))
     wait_for_step(first, 1, scenario="skills")
     assert first.get_or_create_scenario("skills").scenario_step == 1
     committed = first.training_status["scenarios"]["skills"]["last_committed_step"]
@@ -1147,7 +1136,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     assert committed["metrics"]["skipped"] == "no proposal"
 
     second = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    recovered = second.get_or_create_scenario("skills", "harness_evolve")
+    recovered = second.get_or_create_scenario("skills")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state["steps"] == 1
     assert second.training_status["scenarios"]["skills"]["last_committed_step"] == committed

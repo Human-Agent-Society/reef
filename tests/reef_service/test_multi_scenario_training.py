@@ -59,8 +59,8 @@ def _report(scenario: str, agent_record_id: str, reference: str) -> AgentRecord:
 
 
 def _feed(dispatcher, scenario: str, index: int) -> None:
-    dispatcher.accept_record(_inference(scenario, f"{scenario}-i{index}"), recipe="test_policy")
-    dispatcher.accept_record(_report(scenario, f"{scenario}-r{index}", f"{scenario}-i{index}"), recipe="test_policy")
+    dispatcher.accept_record(_inference(scenario, f"{scenario}-i{index}"))
+    dispatcher.accept_record(_report(scenario, f"{scenario}-r{index}", f"{scenario}-i{index}"))
 
 
 @pytest.mark.unit
@@ -119,9 +119,9 @@ def test_a_full_weight_runtime_still_trains_one_scenario_only(tmp_path) -> None:
         RecordingRuntime(), tmp_path, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     )
     try:
-        dispatcher.get_or_create_scenario("math", "test_policy")
+        dispatcher.get_or_create_scenario("math")
         with pytest.raises(ReefError, match="already bound"):
-            dispatcher.get_or_create_scenario("code", "test_policy")
+            dispatcher.get_or_create_scenario("code")
     finally:
         dispatcher.close()
 
@@ -147,8 +147,8 @@ def test_one_scenarios_failure_reloads_only_that_scenario(tmp_path) -> None:
         agent_record_dir=tmp_path / "agent-record",
     )
     try:
-        math = dispatcher.get_or_create_scenario("math", "test_policy")
-        code = dispatcher.get_or_create_scenario("code", "test_policy")
+        math = dispatcher.get_or_create_scenario("math")
+        code = dispatcher.get_or_create_scenario("code")
         _feed(dispatcher, "math", 1)
         _feed(dispatcher, "code", 1)
         wait_for_step(dispatcher, 1, scenario="math")

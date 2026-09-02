@@ -12,7 +12,6 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
-from reef.recipe import RecipeRegistry
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.scenario import ReleaseNotRestorable
@@ -134,12 +133,10 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
     runtime = RollbackRuntime(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     value = Dispatcher(
-        RecipeRegistry(
-            {
-                "test_policy": TestPolicyRecipe(
-                    runtime, batch_size=1, checkpoint_strategy=EveryNVersions(checkpoint_every)
-                )
-            }
+        TestPolicyRecipe(
+            runtime,
+            batch_size=1,
+            checkpoint_strategy=EveryNVersions(checkpoint_every),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
@@ -150,8 +147,8 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
 
 
 def train(dispatcher: Dispatcher, index: int) -> None:
-    dispatcher.accept_record(inference(index), recipe="test_policy")
-    dispatcher.accept_record(report(index), recipe="test_policy")
+    dispatcher.accept_record(inference(index))
+    dispatcher.accept_record(report(index))
     for _ in range(1000):
         if dispatcher.get_or_create_scenario("math").scenario_step >= index:
             return
@@ -162,7 +159,7 @@ def train(dispatcher: Dispatcher, index: int) -> None:
 @pytest.mark.unit
 def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> None:
     value, runtime, _ = dispatcher(tmp_path)
-    created = value.get_or_create_scenario("math", "test_policy").releases()[0]["release_id"]
+    created = value.get_or_create_scenario("math").releases()[0]["release_id"]
     train(value, 1)
     train(value, 2)
     train(value, 3)
@@ -229,19 +226,15 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
     path.write_text("\n".join(records[:-1]) + "\n", encoding="utf-8")
 
     restarted = Dispatcher(
-        RecipeRegistry(
-            {
-                "test_policy": TestPolicyRecipe(
-                    RollbackRuntime(tmp_path / "restarted-export"),
-                    checkpoint_strategy=EveryNVersions(1),
-                )
-            }
+        TestPolicyRecipe(
+            RollbackRuntime(tmp_path / "restarted-export"),
+            checkpoint_strategy=EveryNVersions(1),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
     )
-    recovered = restarted.get_or_create_scenario("math", "test_policy")
+    recovered = restarted.get_or_create_scenario("math")
     assert recovered is not None
     adopted = recovered.commit_log.records()[-1]
 
@@ -264,12 +257,12 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        RecipeRegistry({"test_policy": TestPolicyRecipe(restarted_runtime, checkpoint_strategy=EveryNVersions(1))}),
+        TestPolicyRecipe(restarted_runtime, checkpoint_strategy=EveryNVersions(1)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
     )
-    recovered = restarted.get_or_create_scenario("math", "test_policy")
+    recovered = restarted.get_or_create_scenario("math")
     assert [version["operation"] for version in recovered.releases()] == [
         "training",
         "training",

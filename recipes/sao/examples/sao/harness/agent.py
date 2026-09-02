@@ -135,7 +135,7 @@ class HarborAgent(BaseAgent):
             completion = response["choices"][0]["message"]["content"]
             predicted = extract_answer(completion)
             score = 1.0 if answers_equal(gold, predicted) else 0.0
-            self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]}, recipe=RECIPE)
+            self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]})
             agent_record_ids.append(agent_record_id)
             print(f"[{RECIPE} {index}] score={score:.1f} predicted={predicted!r}", flush=True)
 
@@ -159,7 +159,6 @@ class HarborAgent(BaseAgent):
                 "temperature": 1.0,
                 "top_p": 1.0,
             },
-            recipe=RECIPE,
         )
 
     def _report_trial_result(self) -> None:
@@ -168,5 +167,5 @@ class HarborAgent(BaseAgent):
         while not (result_path.exists() and result_path.stat().st_mtime >= self._report_watch_from):
             time.sleep(1.0)
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        post_report(result, client=self._client, scenario=SCENARIO, recipe=RECIPE)
+        post_report(result, client=self._client, scenario=SCENARIO)
         self.logger.info("reported verifier reward %s to reef", result["verifier_result"]["rewards"]["reward"])

@@ -4,7 +4,8 @@ Architecture
 An agent is a model plus its harness. Reef sits between the harness and the
 runtime that executes the model. It records the release that served
 each response, accepts feedback that refers to those responses, and lets a
-scenario's recipe use eligible records to produce the next release.
+deployment's recipe use each scenario's eligible records to produce the next
+release.
 
 Which package holds which code is `Codebase structure
 <../contributing/codebase-structure.rst>`__.

@@ -18,8 +18,6 @@ from reef.artifact.repository import (
 from reef.core.errors import ReefError
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.errors import ScenarioRecipeConflict
-from reef.recipe.registry import RecipeRegistry
 from reef.records import RecordStore
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.commit_log import CommitLog, CommitRecord
@@ -101,18 +99,18 @@ def _consumed_by_committed_steps(
 
 
 class ScenarioFactory:
-    """Build a complete scenario from recipe and artifact registries."""
+    """Build a complete scenario from the served recipe and artifact backend."""
 
     def __init__(
         self,
-        recipes: RecipeRegistry,
+        recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
         local_artifact_dir: Path | None = None,
         agent_record_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
     ) -> None:
-        self._recipes = recipes
+        self._recipe = recipe
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
@@ -129,23 +127,9 @@ class ScenarioFactory:
     def load_or_create(
         self,
         scenario: str,
-        recipe: str | None = None,
         release_id: str | None = None,
     ) -> Scenario:
-        """Create or recover a scenario.
-
-        Creation binds the scenario to the deployment's served recipe; an
-        in-process caller may name the recipe instead, which a multi-recipe
-        registry (tests) requires.
-        """
-        if recipe is None:
-            recipe = self._recipes.served_recipe
-        if (
-            recipe is None
-            and isinstance(self._backend_factory, RegistrationAwareRepositoryBackendFactory)
-            and not self._backend_factory.has_registration(scenario)
-        ):
-            raise ReefError(f"no served recipe to bind scenario {scenario!r} to")
+        """Create or recover a scenario in this deployment's repository."""
         backend = self._backend_factory(scenario)
         metadata = backend.metadata()
         snapshot_data = None if metadata is None else metadata.get(SCENARIO_SNAPSHOT_METADATA_KEY)
@@ -154,28 +138,23 @@ class ScenarioFactory:
                 scenario,
                 backend,
                 snapshot_data,
-                recipe=recipe,
                 release_id=release_id,
             )
 
-        if recipe is None:
-            raise ReefError(f"no served recipe to bind scenario {scenario!r} to")
-        self._recipes.resolve(recipe)
         selected = backend.resolve_release(release_id)
         backend.fork(
             selected.release_id,
             metadata={
                 SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata_for(
                     name=scenario,
-                    recipe=recipe,
                     base_artifact=selected,
                 )
             },
         )
 
         # fork() is the atomic registration point. Another caller may have
-        # won it, so always rebuild from the durable binding instead of the
-        # recipe this caller proposed.
+        # won it, so always rebuild from the durable registration instead of
+        # assuming this creation attempt won.
         persisted_metadata = backend.metadata()
         persisted_snapshot = (
             None if persisted_metadata is None else persisted_metadata.get(SCENARIO_SNAPSHOT_METADATA_KEY)
@@ -186,7 +165,6 @@ class ScenarioFactory:
             scenario,
             backend,
             persisted_snapshot,
-            recipe=recipe,
             # Freeze moving selectors such as "head" at the release resolved
             # for this create attempt. If another creator won, its persisted
             # base must still match the version this caller observed.
@@ -196,15 +174,12 @@ class ScenarioFactory:
     def validate_existing(
         self,
         current: Scenario,
-        recipe: str | None,
         release_id: str | None,
     ) -> None:
-        self._validate_binding_selectors(
+        self._validate_release_selector(
             current.name,
-            current.recipe,
             current.repository.base_artifact,
             current.repository.backend,
-            recipe,
             release_id,
         )
 
@@ -214,7 +189,6 @@ class ScenarioFactory:
         backend: RepositoryBackend,
         snapshot_data: object,
         *,
-        recipe: str | None,
         release_id: str | None,
     ) -> Scenario:
         if not isinstance(snapshot_data, Mapping):
@@ -223,15 +197,13 @@ class ScenarioFactory:
         if snapshot.scenario != scenario:
             raise ValueError(f"scenario snapshot is for {snapshot.scenario!r}, not {scenario!r}")
         base_artifact = backend.resolve_release(snapshot.base_artifact.release_id)
-        self._validate_binding_selectors(
+        self._validate_release_selector(
             scenario,
-            snapshot.recipe,
             base_artifact,
             backend,
-            recipe,
             release_id,
         )
-        recipe_definition = self._recipes.resolve(snapshot.recipe)
+        recipe_definition = self._recipe
         surface = recipe_definition.build_surface(scenario)
         runtime = recipe_definition.runtime
         checkpoint_head = backend.current()
@@ -273,7 +245,6 @@ class ScenarioFactory:
             surface.loader.activate(Artifact(current_artifact, repository), runtime)
         recovered = self._build(
             scenario,
-            snapshot.recipe,
             recipe_definition,
             surface,
             repository,
@@ -310,7 +281,6 @@ class ScenarioFactory:
     def _build(
         self,
         scenario: str,
-        recipe: str,
         recipe_definition: Recipe,
         surface: Surface,
         repository: Repository,
@@ -326,7 +296,7 @@ class ScenarioFactory:
         records = RecordStore(database)
         experiment_logger = self._experiment_tracker.bind_scenario(
             scenario=scenario,
-            recipe=recipe,
+            recipe=recipe_definition.name,
             source_artifact_ref=repository.require_current_artifact(),
             run_segment=max(
                 (
@@ -347,7 +317,6 @@ class ScenarioFactory:
         return Scenario(
             name=scenario,
             binding=ScenarioBinding(
-                name=recipe,
                 surface=surface,
                 runtime=recipe_definition.runtime,
                 inference_backend=recipe_definition.inference_backend,
@@ -393,26 +362,19 @@ class ScenarioFactory:
         except ArtifactNotFound:
             return False
 
-    def _validate_binding_selectors(
+    def _validate_release_selector(
         self,
         scenario: str,
-        bound_recipe: str,
         base_artifact: ArtifactRef,
         backend: RepositoryBackend,
-        recipe: str | None,
         release_id: str | None,
     ) -> None:
-        """Refuse request selectors that conflict with the existing binding."""
-        if recipe is not None and recipe != bound_recipe:
-            raise ScenarioRecipeConflict(
-                f"scenario {scenario!r} is already bound to recipe {bound_recipe!r}, not {recipe!r}"
-            )
+        """Refuse a release selector that conflicts with the existing binding."""
         if release_id is not None and not self._artifact_selector_matches(
             base_artifact,
             release_id,
             backend,
         ):
             raise ArtifactConflict(
-                f"scenario {scenario!r} is already bound to release "
-                f"{base_artifact.release_id!r}, not {release_id!r}"
+                f"scenario {scenario!r} is already bound to release {base_artifact.release_id!r}, not {release_id!r}"
             )

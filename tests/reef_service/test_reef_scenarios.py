@@ -6,7 +6,7 @@ import inspect
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.recipe import Recipe, RecipeRegistry
+from reef.recipe import Recipe
 from reef.scenario.checkpoint_strategy import EveryNVersions
 
 
@@ -24,17 +24,17 @@ def test_artifact_state_and_snapshot_are_not_parallel_public_types() -> None:
     assert importlib.util.find_spec("reef.scenarios") is None
 
 
-def test_scenario_owns_recipe_and_base_artifact() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
 
-    assert scenario.recipe == "recipe"
+    assert not hasattr(scenario, "recipe")
     assert scenario.repository.base_artifact.release_id
     assert scenario._commit_protocol.checkpoint_strategy is not None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
 
 
 def test_scenario_step_is_owned_by_scenario() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
 
     assert not hasattr(scenario.repository.base_artifact, "scenario")
     assert scenario.scenario_step == 0
@@ -45,7 +45,7 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
 
 def test_scenario_owns_scenario_scoped_repository() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
 
     repository = scenario.repository
 
@@ -61,18 +61,18 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
 def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    dispatcher = Dispatcher(
-        RecipeRegistry(
-            recipes={
-                "fast": Recipe(name="fast", checkpoint_strategy=EveryNVersions(1)),
-                "slow": Recipe(name="slow", checkpoint_strategy=EveryNVersions(3)),
-            },
-        ),
-        InMemoryRepositoryBackend.factory(initial),
+    backend_factory = InMemoryRepositoryBackend.factory(initial)
+    fast_dispatcher = Dispatcher(
+        Recipe(name="fast", checkpoint_strategy=EveryNVersions(1)),
+        backend_factory,
+    )
+    slow_dispatcher = Dispatcher(
+        Recipe(name="slow", checkpoint_strategy=EveryNVersions(3)),
+        backend_factory,
     )
 
-    fast = dispatcher.get_or_create_scenario("fast", "fast")
-    slow = dispatcher.get_or_create_scenario("slow", "slow")
+    fast = fast_dispatcher.get_or_create_scenario("fast")
+    slow = slow_dispatcher.get_or_create_scenario("slow")
 
     assert fast._commit_protocol.checkpoint_strategy.n == 1
     assert slow._commit_protocol.checkpoint_strategy.n == 3
@@ -81,16 +81,16 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
 def test_scenario_snapshot_round_trips() -> None:
     from reef.scenario.snapshot import ScenarioSnapshot, parse_snapshot_metadata
 
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
     metadata = scenario.to_snapshot_metadata()
 
     assert metadata["format"] == "reef-scenario/4"
     assert "scenario" not in metadata["base_artifact"]
     assert metadata["scenario_step"] == 0
     assert metadata["operation"] == "training"
+    assert "recipe" not in metadata
     assert parse_snapshot_metadata(metadata) == ScenarioSnapshot(
         scenario="math",
-        recipe="recipe",
         base_artifact=scenario.repository.base_artifact,
         scenario_step=0,
         algorithm_state=None,
@@ -100,11 +100,15 @@ def test_scenario_snapshot_round_trips() -> None:
         rollback_target_release_id=None,
     )
 
+    # Snapshots written before recipe identity was removed remain readable;
+    # the deployment recipe now supplies those capabilities during recovery.
+    assert parse_snapshot_metadata({**metadata, "recipe": "legacy-name"}) == parse_snapshot_metadata(metadata)
+
 
 def test_rollback_snapshot_preserves_its_operation() -> None:
     from reef.scenario.snapshot import parse_snapshot_metadata
 
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
     assert scenario is not None
     metadata = scenario.to_snapshot_metadata()
     metadata["operation"] = "rollback"
@@ -129,7 +133,7 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
         payload={"score": 1.0},
         created_at=1.0,
     )
-    first.get_or_create_scenario("math", "recipe").records.append(record)
+    first.get_or_create_scenario("math").records.append(record)
 
     second = build_default_dispatcher(backend_factory=backend, agent_record_dir=agent_record_dir)
 
@@ -150,7 +154,6 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
             payload={"score": 1.0},
             created_at=1.0,
         ),
-        recipe="recipe",
     )
     # recipe never trains, so step stays at 0 and records accumulate.
     assert first.get_or_create_scenario("math").trainer.state == {}
@@ -174,7 +177,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
 
 
 def test_scenario_close_closes_processor_before_records() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math", "recipe")
+    scenario = build_default_dispatcher().get_or_create_scenario("math")
     calls: list[str] = []
 
     def _spy(name: str, original):
@@ -197,7 +200,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
 
 def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
     dispatcher = build_default_dispatcher()
-    scenario = dispatcher.get_or_create_scenario("math", "recipe")
+    scenario = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = scenario.close
     scenario.close = lambda: (closed.append("scenario"), original())[-1]
@@ -209,7 +212,7 @@ def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
 
 def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
     dispatcher = build_default_dispatcher()
-    dropped = dispatcher.get_or_create_scenario("math", "recipe")
+    dropped = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = dropped.close
     dropped.close = lambda: (closed.append("dropped"), original())[-1]

@@ -6,8 +6,6 @@ Two axes live here, deliberately separate:
   record-only recipe or an explicit ``package.module:ClassName`` reference.
 - :func:`build_named_recipe` builds the recipe a deployment names: a YAML
   preset from the recipe config directory, or the core record-only recipe.
-- :class:`RecipeRegistry` is the closed *instance* table mapping the public
-  names scenarios bind to onto built ``Recipe`` objects.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ from typing import Any
 
 from reef.recipe.base import Recipe
 from reef.recipe.config import load_recipe_config
-from reef.recipe.errors import RecipeConfigError, UnknownScenarioRecipe
+from reef.recipe.errors import RecipeConfigError
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.registry import RuntimeRegistry
 
@@ -96,8 +94,8 @@ def build_named_recipe(
         available = {"recipe"}
         if directory is not None:
             available.update(preset.stem for preset in directory.glob("*.yaml"))
-        raise UnknownScenarioRecipe(
-            f"unknown scenario recipe {name!r}; available recipes: {', '.join(sorted(available))}"
+        raise RecipeConfigError(
+            f"unknown deployment recipe {name!r}; available recipes: {', '.join(sorted(available))}"
         )
 
     settings = load_recipe_config(path)
@@ -114,41 +112,3 @@ def build_named_recipe(
         else default_runtime
     )
     return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
-
-
-class RecipeRegistry:
-    """The recipes a process serves, by the public name scenarios bind to.
-
-    A closed set: request-time names resolve only to what the operator
-    injected, never materializing another implementation or preset. A reef deployment
-    serves exactly one recipe (see :attr:`served_recipe`); multi-recipe
-    registries exist for tests that exercise scenario bindings across
-    deployments.
-    """
-
-    def __init__(self, recipes: Mapping[str, Recipe]) -> None:
-        self._recipes = dict(recipes)
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(sorted(self._recipes))
-
-    @property
-    def served_recipe(self) -> str | None:
-        """The one recipe this registry serves, or ``None`` for a multi-recipe
-        registry.
-
-        A request that names no recipe binds its scenario to the served one;
-        a multi-recipe registry has no served recipe and requests must name one.
-        """
-        if len(self._recipes) != 1:
-            return None
-        return next(iter(self._recipes))
-
-    def resolve(self, recipe: str) -> Recipe:
-        selected = self._recipes.get(recipe)
-        if selected is None:
-            raise UnknownScenarioRecipe(
-                f"unknown scenario recipe {recipe!r}; available recipes: {', '.join(self.names)}"
-            )
-        return selected

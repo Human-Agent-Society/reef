@@ -83,7 +83,6 @@ class HarborAgent(BaseAgent):
             instruction,
             scenario=SCENARIO,
             model=self.model_name,
-            recipe=RECIPE,
             inference_path=inference_path,
             groups_per_step=GROUPS_PER_STEP,
             rollouts_per_group=ROLLOUTS_PER_GROUP,

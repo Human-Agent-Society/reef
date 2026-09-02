@@ -19,7 +19,6 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.recipe import RecipeRegistry
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
@@ -428,13 +427,13 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        RecipeRegistry(recipes={"sao": SAORecipe(runtime)}),
+        SAORecipe(runtime),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
     try:
-        dispatcher.accept_record(_sao_inference("i1"), recipe="sao")
-        dispatcher.accept_record(_sao_report("r1", "i1", 0.9), recipe="sao")
+        dispatcher.accept_record(_sao_inference("i1"))
+        dispatcher.accept_record(_sao_report("r1", "i1", 0.9))
 
         # batch_size 1 => exactly one accepted rollout drives one training step,
         # executed asynchronously on the dispatcher's training worker.
@@ -473,13 +472,13 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         runtime=runtime,
     )
     dispatcher = Dispatcher(
-        RecipeRegistry(recipes={"sao": recipe}),
+        recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
     try:
-        dispatcher.accept_record(_sao_inference("i1"), recipe="sao")
-        dispatcher.accept_record(_sao_report("r1", "i1", 0.9), recipe="sao")
+        dispatcher.accept_record(_sao_inference("i1"))
+        dispatcher.accept_record(_sao_report("r1", "i1", 0.9))
 
         _wait_for_step(dispatcher, 1)
 
@@ -509,16 +508,16 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        RecipeRegistry(recipes={"sao": SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99))}),
+        SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
     try:
-        pre_head = dispatcher.get_or_create_scenario("math", recipe="sao").repository.require_current_artifact()
+        pre_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
         assert runtime.serving_runtime_load_id() == "slime-v3"
 
-        dispatcher.accept_record(_sao_inference("i1"), recipe="sao")
-        dispatcher.accept_record(_sao_report("r1", "i1", 0.9), recipe="sao")
+        dispatcher.accept_record(_sao_inference("i1"))
+        dispatcher.accept_record(_sao_report("r1", "i1", 0.9))
 
         _wait_for_step(dispatcher, 1)
         head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
@@ -547,7 +546,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            RecipeRegistry(recipes={"sao": SAORecipe(runtime)}),
+            SAORecipe(runtime),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
@@ -555,8 +554,8 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     first = _make_dispatcher()
     try:
-        first.accept_record(_sao_inference("i1"), recipe="sao")
-        first.accept_record(_sao_report("r1", "i1", 0.9), recipe="sao")
+        first.accept_record(_sao_inference("i1"))
+        first.accept_record(_sao_report("r1", "i1", 0.9))
         _wait_for_step(first, 1)
     finally:
         first.close()
@@ -581,8 +580,8 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
         # Training resumes at the next rollout and advances past the recovered
         # step. The serving version already moved to slime-v4 on the first step.
-        second.accept_record(_sao_inference("i2", runtime_load_id="slime-v4"), recipe="sao")
-        second.accept_record(_sao_report("r2", "i2", 0.5), recipe="sao")
+        second.accept_record(_sao_inference("i2", runtime_load_id="slime-v4"))
+        second.accept_record(_sao_report("r2", "i2", 0.5))
         _wait_for_step(second, 2)
         assert second.get_or_create_scenario("math").trainer.state == {"steps": 2}
     finally:

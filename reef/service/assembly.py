@@ -19,7 +19,7 @@ from reef.dispatcher import Dispatcher
 from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.recipe.registry import RecipeRegistry, build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackendFactory
@@ -203,13 +203,8 @@ def build_dispatcher(
         model=settings.model_path,
         training_config=settings.training_settings,
     )
-    # A deployment serves one recipe, so its registry is closed over that
-    # single entry and request-time names never materialize another. Scenarios
-    # bind to the operator's public name; an implementation reference is not a request name,
-    # so it serves under the recipe's own.
-    name = recipe.name if ":" in selected_recipe else selected_recipe
     return Dispatcher(
-        RecipeRegistry({name: recipe}),
+        recipe,
         backend_factory,
         local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
         agent_record_dir=Path(settings.agent_record_dir),

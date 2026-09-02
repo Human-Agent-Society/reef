@@ -122,7 +122,6 @@ class ReefGuidanceTTTHarness:
         model: str,
         contract: TaskContract,
         scorer: Scorer,
-        recipe: str = "tttd",
         groups_per_step: int = 8,
         rollouts_per_group: int = 16,
         guidance_max_tokens: int = 8_192,
@@ -141,7 +140,6 @@ class ReefGuidanceTTTHarness:
         self.model = model
         self.contract = contract
         self.scorer = scorer
-        self.recipe = recipe
         self.groups_per_step = groups_per_step
         self.rollouts_per_group = rollouts_per_group
         self.guidance_max_tokens = guidance_max_tokens
@@ -213,7 +211,6 @@ class ReefGuidanceTTTHarness:
             self.scenario,
             "/v1/chat/completions",
             payload,
-            recipe=self.recipe,
         )
         guidance_text = openai_action(response)
         guidance, guidance_error = extract_strict_guidance(guidance_text)
@@ -343,7 +340,6 @@ class ReefGuidanceTTTHarness:
                     "library_entry_id": entry.id,
                 },
             },
-            recipe=self.recipe,
         )
         return GuidanceRolloutResult(
             step=step,

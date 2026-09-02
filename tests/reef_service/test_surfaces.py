@@ -374,7 +374,6 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.dispatcher import Dispatcher
-    from reef.recipe import RecipeRegistry
     from reef.runtime.inference import InferenceBackend
     from reef.service.app import RequestService
 
@@ -396,9 +395,8 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
     (bootstrap / "skills" / "SKILL.md").write_text("Always check units.", encoding="utf-8")
 
     recipe = SkillRecipe(name="skill_delivery")
-    registry = RecipeRegistry({"skill_delivery": recipe})
     dispatcher = Dispatcher(
-        registry,
+        recipe,
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
@@ -420,7 +418,7 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
         assert recorded[1] == {"role": "user", "content": "hi"}
 
     asyncio.run(run())
-    scenario = dispatcher.get_or_create_scenario("smoke", None)
+    scenario = dispatcher.get_or_create_scenario("smoke")
     assert scenario.surface is scenario.surface
 
 

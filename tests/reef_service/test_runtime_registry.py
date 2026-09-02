@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
-from reef.recipe import Recipe, RecipeRegistry
+from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
 from reef.runtime import InferenceProxyRuntime, InferenceRuntime, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.inference import InferenceBackend
@@ -91,13 +91,13 @@ model:
     initial = tmp_path / "initial"
     initial.mkdir()
     dispatcher = Dispatcher(
-        RecipeRegistry({"qwen": build_named_recipe("qwen", config_directory=recipes)}),
+        build_named_recipe("qwen", config_directory=recipes),
         InMemoryRepositoryBackend.factory(initial),
     )
 
-    scenario = dispatcher.get_or_create_scenario("math", "qwen")
+    scenario = dispatcher.get_or_create_scenario("math")
 
-    assert scenario.recipe == "qwen"
+    assert scenario.runtime is not None
 
 
 @pytest.mark.unit
@@ -119,23 +119,21 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
         initial = tmp_path / "initial"
         initial.mkdir()
-        dispatcher = Dispatcher(
-            RecipeRegistry(
-                recipes={
-                    "qwen": Recipe(name="qwen", runtime=RoutingRuntime("qwen")),
-                    "gemma": Recipe(name="gemma", runtime=RoutingRuntime("gemma")),
-                },
-            ),
-            InMemoryRepositoryBackend.factory(initial),
-        )
+        backend_factory = InMemoryRepositoryBackend.factory(initial)
+        dispatchers = {
+            recipe: Dispatcher(
+                Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
+                backend_factory,
+            )
+            for recipe in ("qwen", "gemma")
+        }
 
         for scenario, recipe in (("math", "qwen"), ("code", "gemma")):
-            dispatcher.get_or_create_scenario(scenario, recipe)
-
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
-            for scenario, recipe in (("math", "qwen"), ("code", "gemma")):
+            dispatcher = dispatchers[recipe]
+            dispatcher.get_or_create_scenario(scenario)
+            client = TestClient(TestServer(create_app(dispatcher)))
+            await client.start_server()
+            try:
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={"x-reef-scenario": scenario},
@@ -143,8 +141,8 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 )
                 assert response.status == 200
                 assert await response.json() == {"runtime": recipe}
-        finally:
-            await client.close()
+            finally:
+                await client.close()
 
     asyncio.run(run())
 

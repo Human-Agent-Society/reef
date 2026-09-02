@@ -10,7 +10,7 @@ from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.recipe import RecipeRegistry, WeightTrainingRecipe
+from reef.recipe import WeightTrainingRecipe
 from reef.records import RecordStore
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.train import ProcessorContext, Trainer
@@ -817,13 +817,13 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             )
 
     dispatcher = Dispatcher(
-        RecipeRegistry(recipes={"grouped_pg": GroupedPgRecipe(training_runtime, name="grouped_pg")}),
+        GroupedPgRecipe(training_runtime, name="grouped_pg"),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
     )
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
-        dispatcher.accept_record(inference(rid), recipe="grouped_pg")
-        dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"), recipe="grouped_pg")
+        dispatcher.accept_record(inference(rid))
+        dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
     runtime = dispatcher.get_or_create_scenario("math")
     for _ in range(1000):

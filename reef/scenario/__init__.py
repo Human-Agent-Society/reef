@@ -4,7 +4,7 @@ A scenario is one durable training aggregate. Its lifecycle, and the module
 responsible for each piece:
 
 - **create** — ``factory`` forks a base artifact and persists a registration
-  snapshot (format in ``snapshot``); ``binding`` freezes the recipe-selected
+  snapshot (format in ``snapshot``); ``binding`` freezes the deployment-selected
   admission, surface, runtime, and inference backend.
 - **train** — ``scenario`` exposes the trainer through lock-guarded methods
   so every mutating path serializes against commit and rollback.
@@ -19,8 +19,9 @@ responsible for each piece:
 - **rollback** — ``commit_protocol`` republishes an older checkpointed
   version as a new fenced commit; history is never rewritten.
 
-The scenario domain does not import recipes: a recipe configures a scenario
-through the factory, and the aggregate never reaches back. Every
+The scenario aggregate does not retain recipe identity: the deployment's
+recipe configures its runtime binding through the factory, and the aggregate
+never reaches back. Every
 step-advancing commit appends exactly one atomic record, and recovery
 re-derives every other store from the log. Checkpoint cadence is the one
 extension point (subclass ``CheckpointStrategy``); the commit ordering itself
