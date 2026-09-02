@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Header } from "@/components/header";
+import { ThemeSync } from "@/components/theme-sync";
 import { getSearchDocuments, navigation } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
@@ -28,6 +29,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         {/* Inline so it runs at parse time, before first paint. */}
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+        <ThemeSync />
         <Header documents={searchDocuments} navigation={navigation} />
         {children}
       </body>
