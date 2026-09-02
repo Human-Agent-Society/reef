@@ -35,16 +35,23 @@ from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, run_episode
 from reef.harness.executor import EpisodeExecutor, LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.nodes import NODE_KINDS
+from reef.harness.nodes import NODE_KINDS, secret_shaped
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
-from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation, MutationError, Proposer, accepts_manifest
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Mutation,
+    MutationError,
+    Promoter,
+    Proposer,
+    accepts_manifest,
+)
 from reef.train.evaluation.contracts import CandidateSelector, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TraceBatch, TrainingBatch, TrainStepResult
+from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepResult
 
 from .compose import Context, FiberState
 from .compose.loader import EntryOptions, Loader
@@ -59,9 +66,51 @@ class HarnessCandidate(UpdateCandidate):
     candidate_entries: tuple[Mapping[str, Any], ...]
     current_entries: tuple[Mapping[str, Any], ...]
     mutations: tuple[Mutation, ...]
+    #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
+    gate_tasks: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         super().__post_init__()
+
+
+def _prompt_of(sample: TraceSample) -> str | None:
+    """The trace's last user message, the prompt ``evaluate`` scores; ``None`` for a tool-only turn."""
+    messages = sample.payload.get("messages") if isinstance(sample.payload, Mapping) else None
+    if not isinstance(messages, Sequence):
+        return None
+    for message in reversed(list(messages)):
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content
+        if isinstance(content, Sequence) and not isinstance(content, str):
+            text = "".join(
+                part.get("text", "") for part in content if isinstance(part, Mapping) and part.get("type") == "text"
+            )
+            if text.strip():
+                return text
+    return None
+
+
+def _default_promote(samples: Sequence[TraceSample]) -> list[str]:
+    """The default policy: every trace's user prompt is a candidate task."""
+    prompts = (_prompt_of(sample) for sample in samples)
+    return [prompt for prompt in prompts if prompt is not None]
+
+
+def _admit_promoted(existing: Sequence[str], candidates: Sequence[str], seed: frozenset[str], cap: int) -> list[str]:
+    """Append new candidate prompts under the cap; a secret-shaped or malformed prompt is skipped, never failed."""
+    promoted = list(existing)
+    seen = set(seed) | set(promoted)
+    for prompt in candidates:
+        if len(promoted) >= cap:
+            break
+        if not isinstance(prompt, str) or not prompt.strip() or prompt in seen or secret_shaped(prompt):
+            continue
+        promoted.append(prompt)
+        seen.add(prompt)
+    return promoted
 
 
 class _BudgetedBinding(ModelBinding):
@@ -195,6 +244,9 @@ class CordisBackend(TrainingBackend):
         max_failure_streak: int = 0,
         max_model_calls_per_step: int = 0,
         executor: EpisodeExecutor | None = None,
+        promote_failures: bool = False,
+        max_promoted_tasks: int = 50,
+        promote: Promoter | None = None,
         seed: tuple[Mapping[str, Any], ...] = (),
         episode_workers: int = 1,
     ) -> None:
@@ -248,6 +300,12 @@ class CordisBackend(TrainingBackend):
         # Preflighted at build (recipe.build), so a hosted deployment that
         # requires the sandbox fails to start, not at the first episode.
         self._executor = executor or LocalExecutor()
+        if max_promoted_tasks < 0:
+            raise ValueError("max_promoted_tasks must be at least 0")
+        self._promote_failures = promote_failures
+        self._max_promoted_tasks = max_promoted_tasks
+        self._promote_task = promote
+        self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -307,7 +365,11 @@ class CordisBackend(TrainingBackend):
         # can return; the key is written only when present, so its absence
         # stays "unknown", never an empty manifest (the consumed_ids rule).
         previous_manifest = state.get("failure_manifest")
-        carried = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
+        carried: dict[str, Any] = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
+        # Carried through skips so a budget or streak skip keeps the grown suite.
+        promoted = list(state.get("promoted_tasks", ()))
+        if promoted:
+            carried["promoted_tasks"] = promoted
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
         # The budgets are circuit breakers, not schedulers: a skipped step
@@ -327,9 +389,24 @@ class CordisBackend(TrainingBackend):
                     "skipped": f"failure streak breaker open after {streak} consecutive rejections",
                 },
             )
+        manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
+        # Failing traces become permanent gate tasks; off by default. The method picks which, Reef screens them.
+        if self._promote_failures:
+            if self._promote_task is None:
+                candidates: Sequence[str] = _default_promote(batch.samples)
+            elif self._promote_accepts_manifest:
+                candidates = self._promote_task(batch.samples, manifest=manifest)
+            else:
+                candidates = self._promote_task(batch.samples)
+            promoted = _admit_promoted(promoted, candidates, frozenset(self._tasks), self._max_promoted_tasks)
+            if promoted:
+                carried["promoted_tasks"] = promoted
+        gate_tasks = (*self._tasks, *(task for task in promoted if task not in frozenset(self._tasks)))
+        if self._promote_failures:
+            metrics["gate_tasks"] = len(gate_tasks)
+            metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
         models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
         if self._propose_accepts_manifest:
-            manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
             proposal = self._propose(self._nodes(), batch.samples, models, manifest=manifest)
         else:
             proposal = self._propose(self._nodes(), batch.samples, models)
@@ -375,6 +452,7 @@ class CordisBackend(TrainingBackend):
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
                 current_entries=snapshot,
                 mutations=mutations,
+                gate_tasks=gate_tasks,
             ),
             state={"steps": steps, **carried},
             metrics=metrics,
@@ -396,9 +474,11 @@ class CordisBackend(TrainingBackend):
         # worker the pairings run in one pool - a large task set costs one
         # wave instead of a long turn-taking pass - and the results are read
         # back in submission order either way.
+        # An older candidate carries no gate_tasks and falls back to the seed set.
+        gate_tasks = candidate.gate_tasks or self._tasks
         pairings = [
             (files, task)
-            for task in self._tasks
+            for task in gate_tasks
             for _ in range(self._episode_repeats)
             for files in (candidate_files, current_files)
         ]

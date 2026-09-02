@@ -33,6 +33,12 @@ proposal under one verdict, or ``None`` to skip. An optional keyword-only
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
 that could not run never reach it.
 
+``promote`` is optional and only matters with ``evolution.promote_failures``:
+it receives the step's trace samples, plus the ``FailureManifest`` when its
+signature names ``manifest``, and returns the prompts to add to the gate as
+permanent tasks. Reef dedupes, screens for credentials, and caps what it
+returns. Without it every failing trace's user prompt is promoted.
+
 ``selection`` defaults to ``score_comparison``: select when the candidate wins
 more task comparisons than it loses. ``always`` selects every applied mutation.
 

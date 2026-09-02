@@ -12,7 +12,7 @@ import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from reef.core.errors import ReefError
 from reef.harness.episode import EpisodeResult
@@ -200,3 +200,66 @@ def resolve_episode_scorer(value: object) -> EpisodeScorer:
     raise ValueError(
         "evaluate must be an EpisodeScorer instance, a callable, or a dotted 'module:attribute' reference"
     )
+
+
+class Promoter(ABC):
+    """Base class for choosing which trace prompts become permanent gate tasks.
+
+    Implement ``__call__``: given the step's trace samples, return the prompts
+    to promote. Reef still dedupes, screens for credentials, and caps them.
+    ``manifest`` is forwarded only to a signature that names it.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        samples: tuple[TraceSample, ...],
+        *,
+        manifest: FailureManifest | None = None,
+    ) -> Sequence[str]:
+        """Return the prompts this step should promote into the gate."""
+
+
+class PromotePolicy(Protocol):
+    """A plain promote callable, ``(samples, *, manifest=None) -> Sequence[str]``, the keyword optional."""
+
+    def __call__(self, samples: tuple[TraceSample, ...], /, **kwargs: Any) -> Sequence[str]: ...
+
+
+class _CallablePromoter(Promoter):
+    """Adapter wrapping a plain callable as a :class:`Promoter` instance."""
+
+    def __init__(self, policy: PromotePolicy) -> None:
+        self._policy = policy
+        self._forward_manifest = accepts_manifest(policy)
+
+    def __call__(
+        self,
+        samples: tuple[TraceSample, ...],
+        *,
+        manifest: FailureManifest | None = None,
+    ) -> Sequence[str]:
+        if self._forward_manifest:
+            return self._policy(samples, manifest=manifest)
+        return self._policy(samples)
+
+
+def resolve_promoter(value: object) -> Promoter:
+    """Resolve a callable or dotted reference into a :class:`Promoter` instance."""
+    if isinstance(value, Promoter):
+        return value
+    if callable(value):
+        return _CallablePromoter(value)
+    if isinstance(value, str) and ":" in value:
+        import importlib
+
+        module_name, _, attribute = value.partition(":")
+        try:
+            resolved = getattr(importlib.import_module(module_name), attribute)
+        except (ImportError, AttributeError) as exc:
+            raise ValueError(f"cannot import promoter {value!r}: {exc}") from exc
+        if isinstance(resolved, Promoter):
+            return resolved
+        if callable(resolved):
+            return _CallablePromoter(resolved)
+    raise ValueError("promote must be a Promoter instance, a callable, or a dotted 'module:attribute' reference")

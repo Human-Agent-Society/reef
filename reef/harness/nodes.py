@@ -118,6 +118,11 @@ def config_node(ctx: Any, config: Any) -> None:
     _reject_inline_secret(data, "data")
 
 
+def secret_shaped(text: str) -> bool:
+    """Whether free text carries a credential-shaped literal; shared by the tree boundary and the task ledger."""
+    return _SECRET_TEXT.search(text) is not None
+
+
 def _reject_secret_shaped_text(text: str, where: str) -> None:
     """Refuse a node body carrying a credential-shaped literal.
 
@@ -126,7 +131,7 @@ def _reject_secret_shaped_text(text: str, where: str) -> None:
     command, or extension would outlive rotation in every commit record and
     published artifact. The message names the field, never the value.
     """
-    if _SECRET_TEXT.search(text):
+    if secret_shaped(text):
         raise ValueError(
             f"{where} carries an inline credential; the composition tree never holds secrets: "
             "set reef.upstream_api_key for the served model or "
