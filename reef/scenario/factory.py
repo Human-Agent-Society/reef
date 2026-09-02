@@ -243,6 +243,7 @@ class ScenarioFactory:
             snapshot_state=snapshot.algorithm_state,
             snapshot_record_progress=snapshot.record_progress,
             snapshot_training_job_id=snapshot.training_job_id,
+            snapshot_metrics=snapshot.metrics,
             snapshot_operation=snapshot.operation,
             snapshot_rollback_target_release_id=snapshot.rollback_target_release_id,
             checkpoint_head=checkpoint_head,
@@ -279,6 +280,7 @@ class ScenarioFactory:
             scenario_step=head.step,
             algorithm_state=head.algorithm_state,
             commit_log=commit_log,
+            recovered_head_record=head_record,
         )
         # Derive the record store and trainer progress from the recovered
         # head: re-apply any compaction the crash interrupted, rebuild
@@ -316,6 +318,7 @@ class ScenarioFactory:
         scenario_step: int = 0,
         algorithm_state: Mapping[str, Any] | None = None,
         commit_log: CommitLog | None = None,
+        recovered_head_record: CommitRecord | None = None,
     ) -> Scenario:
         database = None
         if self._agent_record_dir is not None:
@@ -357,6 +360,7 @@ class ScenarioFactory:
             trainer=trainer,
             scenario_step=scenario_step,
             commit_log=commit_log,
+            recovered_head_record=recovered_head_record,
         )
 
     @staticmethod
