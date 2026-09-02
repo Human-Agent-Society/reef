@@ -1138,3 +1138,26 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter", "env_var", "compose_dir"),
+    [
+        ("pi", "PI_CODING_AGENT_DIR", "pi-agent"),
+        ("opencode", "OPENCODE_CONFIG_DIR", "opencode"),
+        ("claude", "CLAUDE_CONFIG_DIR", "claude"),
+        # dsh's config file sits inside a profile; the relocated directory is the home two levels up.
+        ("dsh", "DSH_HOME", "dsh"),
+    ],
+)
+def test_install_script_relocates_every_bundled_adapters_compose_directory(
+    adapter: str, env_var: str, compose_dir: str
+) -> None:
+    descriptor = get_adapter(adapter)
+    files = render_composition([("rules", {"text": "hello"})], descriptor)
+    script = render_install_script(
+        descriptor=descriptor, files=files, release_id="v1", content_id="content-v1", scenario="s"
+    )
+    assert f'export REEF_HARNESS_ENV_VAR="{env_var}"' in script
+    assert f'COMPOSE_ABS="$(mkdir -p "$DEST/{compose_dir}" && cd "$DEST/{compose_dir}" && pwd)"' in script
