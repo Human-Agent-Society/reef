@@ -49,8 +49,7 @@ jobs:
         with:
           name: python-distributions
           path: dist/
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
-        with:
-          generate_release_notes: true
-          files: dist/*
-          fail_on_unmatched_files: true
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
