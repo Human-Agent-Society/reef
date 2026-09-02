@@ -88,23 +88,29 @@ Everything under `./work`, and a rerun resumes from it:
 
 ## The validation contract
 
-Four runs on 2026-09-02, all under the same settings: two of the upstream
-optimizer and two of this method, at seeds 0 and 1. Every one produced four
-candidates inside the 198-call budget. On the sealed AIME-2025 split:
+Four runs on 2026-09-02, two of the upstream optimizer and two of this method,
+across two seeds, with the models, split, budget, scorer, and worker count
+held fixed. Every run produced four candidates and consumed 198 metric calls.
+The runs pair by seed: at a given seed both arms reflect on the same training
+problems in the same order.
 
-| arm | seed | frozen | selected | improvement |
-| --- | ---: | ---: | ---: | ---: |
-| upstream GEPA | 0 | 31.33% | 42.67% | +11.33 pp |
-| upstream GEPA | 1 | 26.67% | 40.67% | +14.00 pp |
-| this method | 0 | 26.67% | 46.67% | +20.00 pp |
-| this method | 1 | 24.00% | 36.00% | +12.00 pp |
+| seed | arm | frozen | selected | improvement |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | upstream GEPA | 31.33% | 42.67% | +11.33 pp |
+| 0 | this method | 26.67% | 46.67% | +20.00 pp |
+| 1 | upstream GEPA | 26.67% | 40.67% | +14.00 pp |
+| 1 | this method | 24.00% | 36.00% | +12.00 pp |
+| | upstream mean | | | +12.67 pp |
+| | this method mean | | | +16.00 pp |
 
-Two runs an arm cannot separate a mean of +12.67 from a mean of +16.00 when
-each arm spreads eight points internally, so the reading is that the two agree.
-The same seed prompt scored between 36 and 47 of 150 across the four runs,
-which is the task model's own run-to-run variation. The records are in
-[`results/`](results/), including the earlier
-[`quickstart-seed-0-2026-09-01`](results/quickstart-seed-0-2026-09-01/README.md).
+The means are across seeds because one run of this search has no stable number
+to report. GEPA is a stochastic optimization: the reflection model writes a
+different prompt each time, and the task model scores a given prompt
+differently from run to run. This method is 8.67 points above upstream at seed
+0 and 2.00 below it at seed 1, and a difference that changes sign between seeds
+is sampling. The frozen column is the yardstick, being the same seed prompt in
+all four runs, and it scores between 36 and 47 of 150. The records are in
+[`results/`](results/).
 
 The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,
