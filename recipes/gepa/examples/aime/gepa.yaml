@@ -1,0 +1,104 @@
+# The recipe the AIME driver boots: run.py loads this file, fills
+# evolution.tasks with the pinned validation split, builds the implementation
+# below, and serves it from its own embedded Reef service. The Pi episodes the
+# driver runs point at that service, so the problems it solves are recorded
+# traffic and the method reflects on the composition's own transcripts.
+#
+# ${REEF_*} values interpolate from the environment through reef's config
+# loader; run.sh exports the defaults.
+
+# The method package: GEPA's archive, Pareto parent sampling, reflective
+# proposal, and strict aggregate promotion, under the evolution contract.
+implementation: recipes.gepa.recipe:GEPARecipe
+
+model:
+  path: ${REEF_MODEL}
+
+evolution:
+  adapter: pi
+  # The harness binary the evaluation episodes run headless, from the environment.
+  binary: ${REEF_PI_BINARY}
+  # The task side, in the harness/ package: evaluate is the quickstart's
+  # containment score over one episode, feedback is the wording GEPA's own
+  # default evaluator writes into the reflective records.
+  evaluate: harness.aime:evaluate
+  feedback: harness.aime:feedback
+  # The validation set, which is what the mechanism scores every candidate on.
+  # Left empty here because it is data, not configuration: run.py fills it with
+  # the 45 validation problems from the pinned split before build_recipe.
+  tasks: []
+  models:
+    # GEPA's reflection model. The key stays out of this file and out of every
+    # published tree; only the named environment variable carries it.
+    reflection:
+      url: https://api.openai.com
+      model: gpt-5-2025-08-07
+      api_key_env: OPENAI_API_KEY
+  gepa:
+    # The archive is the method's own state: one JSON file per scenario with
+    # the candidates, their validation vectors, the fronts, and the metric-call
+    # count a resumed run continues from.
+    archive: ${REEF_WORK}/gepa
+    minibatch_size: 3
+    seed: 0
+    skip_perfect_score: true
+    perfect_score: 1.0
+    max_metric_calls: 150
+    # The evolvable node kinds. run.py appends "skill" under REEF_GEPA_MULTI=1.
+    components: [rules]
+  # The seed composition. The rules node is the quickstart's system prompt and
+  # the only evolvable entry; the other two reproduce the quickstart's request
+  # envelope and never change.
+  seed:
+    - id: rules
+      name: rules
+      config:
+        text: "You are a helpful assistant. Answer the question. Put your final answer in the format '### <answer>'"
+    # Pi 0.84.2 starts with no built-in tools when settings.json says so
+    # (docs/settings.md in the Pi package), which is the upstream envelope:
+    # one model call per problem, no tool loop.
+    - id: quickstart-settings
+      name: config
+      config:
+        target: primary
+        data:
+          defaultTools: []
+    # The rest of the envelope: the rendered rules text becomes Pi's entire
+    # system prompt instead of being appended to Pi's own coding-agent prompt,
+    # and a single text part is flattened to the plain string upstream sends.
+    # The extension reads AGENTS.md at startup, so it stays fixed while the
+    # rules node underneath it evolves.
+    - id: reef-quickstart-system
+      name: code_extension
+      config:
+        name: reef-quickstart-system
+        code: |
+          import { readFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          export default function reefQuickstartSystem(pi) {
+            pi.on("before_agent_start", async () => {
+              const root = process.env.PI_CODING_AGENT_DIR;
+              const rules = readFileSync(join(root, "AGENTS.md"), "utf8").replace(/\n+$/, "");
+              return { systemPrompt: rules };
+            });
+            pi.on("before_provider_request", async ({ payload }) => {
+              if (!payload || typeof payload !== "object" || !Array.isArray(payload.messages)) return payload;
+              const messages = payload.messages.map((message) => {
+                const content = message?.content;
+                if (Array.isArray(content) && content.length === 1 && content[0]?.type === "text") {
+                  return { ...message, content: content[0].text };
+                }
+                return message;
+              });
+              return { ...payload, messages };
+            });
+          }
+
+data:
+  # The minibatch is the batch: the driver reports one score per problem and
+  # the third report closes the window and schedules the training step. The
+  # window opens all the way (max_score .inf) because GEPA reflects on correct
+  # and incorrect transcripts alike.
+  batch_size: 3
+  max_score: .inf

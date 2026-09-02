@@ -71,11 +71,16 @@ for client pull via `GET /reef/harness`. Setup here is just
 `pip install reef-client`: the loop drives `reef_client` directly,
 no Harbor task or reef-eval.
 
-[GEPA](gepa/examples/aime_harness_evolve/README.md) reproduces the upstream
-AIME reflective Pareto search and then runs the same search over fixed Reef
-harness compositions. It keeps a frozen control, a rules-only conformance
-cell, a multi-node rules-plus-skill cell, sealed held-out scoring, resumable
-cost accounting, and durable publication of the selected composition.
+[GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
+method package on the same mechanism: `propose` is one GEPA iteration - Pareto
+sample a parent from the method's own archive, reflect on one component with a
+stronger model over the served composition's failing traffic, and accept the
+child only if it beats its parent on the minibatch - and `selection` publishes
+only on a strict mean improvement over the full validation set. Nothing in it
+imports the upstream package. Its AIME example is the validation: the driver
+embeds the Reef service, runs the quickstart's 45 training problems through it
+three at a time, and seals the two 150-problem test passes against the retained
+official record (26.67% to 38.67% on AIME 2025, seed 0).
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
