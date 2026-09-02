@@ -1,0 +1,113 @@
+# DeepSeek Harness (dsh), driven headless per episode.
+#
+# DSH_HOME relocates the whole harness home (the headless profile and its
+# patch layer, sessions, storages, the user AGENTS.md and skills) under the
+# episode root, and DSH_AGENTS_HOME relocates the second skill root, where
+# agent_command nodes render as user invocable skills (dsh has no other
+# command surface). DSH_TELEMETRY_MODE stops the OTLP session telemetry. The
+# default workspace-write permission runs tools inside the working directory
+# with no approval prompt, so no danger mode is needed. The profile patch is
+# a YAML list of plugin entries; config nodes write it as an object keyed by
+# plugin id and the quirks module emits the list.
+name: dsh
+binary: dsh
+# The vendor's install channel at the pinned version; consumed by the
+# GET /reef/harness/install script, never by episode runs. The pin follows
+# the alpha tag: the source line that was mapped and the binary that was
+# measured.
+install:
+  kind: npm
+  package: "@deepseek-ai/dsh"
+  version: "0.1.2-alpha.5"
+  binary_path: "node_modules/.bin/dsh"
+# Two commander layers parse the command line (the launcher, then the
+# headless app); each "--" ends one layer's options, so a task that starts
+# with a dash still reaches the app as its positional.
+argv: ["--profile", "headless", "--", "--", "{prompt}"]
+env:
+  DSH_HOME: "{root}/dsh"
+  DSH_AGENTS_HOME: "{root}/dsh-agents"
+  DSH_TELEMETRY_MODE: "DISABLED"
+files:
+  config:
+    primary:
+      path: "dsh/profiles/headless/cordis.patch.yml"
+      # A patched config replaces the plugin's whole config, so every key
+      # the adapter relies on rides along: the session log stays where the
+      # bundle put it and uncompressed (the reader cannot parse zstd), and
+      # the LLM title call (one extra model request per episode) and the
+      # telemetry stay off.
+      defaults:
+        session-persistence-jsonl:
+          config:
+            root: "!!js dshHomePath('sessions')"
+            compression: none
+        session-title-llm:
+          disabled: true
+        session-telemetry-otel:
+          disabled: true
+    # The lowest trust layer of dsh's launch environment; the model binding
+    # puts the key of its apiKeyEnv route here.
+    env:
+      path: "dsh/.env"
+      defaults: {}
+  rules: "dsh/AGENTS.md"
+  agent_command: "dsh-agents/skills/{name}/SKILL.md"
+  skill: "dsh/skills/{name}/SKILL.md"
+  # A cordis plugin module the patch layer inserts by relative path.
+  code_extension: "dsh/profiles/headless/extensions/{name}.mjs"
+trajectory:
+  # One session per episode under sessions/<cwd slug>/session-<id>/session.jsonl,
+  # the {type, seq, time, data} envelope, read by the deepseek-session-jsonl reader.
+  format: deepseek-session-jsonl
+  path: "dsh/sessions"
+cleanup_whitelist:
+  - "dsh/sessions/**"
+  - "dsh/storages/**"
+quirks: reef.harness.adapters.dsh.quirks
+# How to point dsh at a model endpoint, per API dialect: a hand declared
+# llm-pi-ai route selected by agent-default-model, its key named by
+# apiKeyEnv and supplied through the .env file. Reef renders the set matching
+# its model binding's api into evaluation episodes; the served tree never
+# carries a provider or a key.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        llm-pi-ai:
+          config:
+            providers:
+              reef:
+                displayName: Reef
+                apiKeyEnv: REEF_API_KEY
+                api: openai-completions
+                baseURL: "{base_url}/v1"
+                models:
+                  - id: "{model}"
+        agent-default-model:
+          config:
+            provider: reef
+            model: "{model}"
+    - target: env
+      data:
+        REEF_API_KEY: "{api_key}"
+  anthropic:
+    - target: primary
+      data:
+        llm-pi-ai:
+          config:
+            providers:
+              reef:
+                displayName: Reef
+                apiKeyEnv: REEF_API_KEY
+                api: anthropic-messages
+                baseURL: "{base_url}"
+                models:
+                  - id: "{model}"
+        agent-default-model:
+          config:
+            provider: reef
+            model: "{model}"
+    - target: env
+      data:
+        REEF_API_KEY: "{api_key}"
