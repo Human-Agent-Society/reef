@@ -168,6 +168,9 @@ zero.
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
+   evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
+   evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
+   evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind

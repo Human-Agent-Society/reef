@@ -62,6 +62,59 @@ class HarnessCandidate(UpdateCandidate):
         super().__post_init__()
 
 
+class _BudgetedBinding(ModelBinding):
+    """A ModelBinding that delegates ``chat`` to a wrapped binding under a
+    shared per-step call budget.
+
+    A subclass so the proposer still receives ModelBinding values, but it
+    holds the real binding and forwards to its ``chat`` (never the base
+    implementation), so a method's own binding behavior is preserved. The
+    shared counter is a mutable one-element list so every binding in the set
+    decrements the same budget.
+    """
+
+    _inner: ModelBinding
+    _spent: list[int]
+    _cap: int
+
+    def __init__(self, inner: ModelBinding, spent: list[int], cap: int) -> None:
+        super().__init__(
+            base_url=inner.base_url,
+            model=inner.model,
+            api_key=inner.api_key,
+            api=inner.api,
+            timeout_s=inner.timeout_s,
+        )
+        object.__setattr__(self, "_inner", inner)
+        object.__setattr__(self, "_spent", spent)
+        object.__setattr__(self, "_cap", cap)
+
+    def chat(self, *args: Any, **kwargs: Any) -> str:
+        if self._spent[0] >= self._cap:
+            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
+        self._spent[0] += 1
+        return self._inner.chat(*args, **kwargs)
+
+
+def _budgeted_bindings(models: ModelBindings, cap: int) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares one per-step budget.
+
+    With ``cap`` 0 the bindings pass through unchanged. The counter is per
+    prepare_step call, so a cap bounds one step's model bill, never the
+    campaign's.
+    """
+    if not cap:
+        return models
+    spent: list[int] = [0]
+
+    def wrap(binding: ModelBinding) -> ModelBinding:
+        return _BudgetedBinding(binding, spent, cap)
+
+    return ModelBindings(
+        served=wrap(models.served), named={name: wrap(models[name]) for name in models if name != "served"}
+    )
+
+
 class ScoreComparisonSelector(CandidateSelector):
     """Select a candidate when it wins more task comparisons than it loses."""
 
@@ -136,6 +189,9 @@ class CordisBackend(TrainingBackend):
         episode_timeout_s: float = 600.0,
         episode_repeats: int = 1,
         forbid_residue: bool = False,
+        max_steps: int = 0,
+        max_failure_streak: int = 0,
+        max_model_calls_per_step: int = 0,
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -168,10 +224,20 @@ class CordisBackend(TrainingBackend):
             raise ValueError("episode_repeats must be an integer of at least 1")
         if not isinstance(forbid_residue, bool):
             raise ValueError("forbid_residue must be a boolean")
+        for label, value in (
+            ("max_steps", max_steps),
+            ("max_failure_streak", max_failure_streak),
+            ("max_model_calls_per_step", max_model_calls_per_step),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         self._binary = binary
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
         self._forbid_residue = forbid_residue
+        self._max_steps = max_steps
+        self._max_failure_streak = max_failure_streak
+        self._max_model_calls_per_step = max_model_calls_per_step
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -234,11 +300,29 @@ class CordisBackend(TrainingBackend):
         carried = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
+        # The budgets are circuit breakers, not schedulers: a skipped step
+        # commits its reason and consumes the batch, so a runaway loop stops
+        # burning episodes and model calls instead of queueing forever.
+        if self._max_steps and steps > self._max_steps:
+            return PreparedStep.skipped(
+                state={"steps": steps, "entries": self._entries(), **carried},
+                metrics={**metrics, "skipped": f"step budget of {self._max_steps} exhausted"},
+            )
+        streak = int(state.get("failure_streak", 0))
+        if self._max_failure_streak and streak >= self._max_failure_streak:
+            return PreparedStep.skipped(
+                state={"steps": steps, "entries": self._entries(), **carried},
+                metrics={
+                    **metrics,
+                    "skipped": f"failure streak breaker open after {streak} consecutive rejections",
+                },
+            )
+        models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
         if self._propose_accepts_manifest:
             manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
-            proposal = self._propose(self._nodes(), batch.samples, self._models, manifest=manifest)
+            proposal = self._propose(self._nodes(), batch.samples, models, manifest=manifest)
         else:
-            proposal = self._propose(self._nodes(), batch.samples, self._models)
+            proposal = self._propose(self._nodes(), batch.samples, models)
         mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         if not mutations:
             return PreparedStep.skipped(
@@ -358,7 +442,13 @@ class CordisBackend(TrainingBackend):
             "persisting": len(manifest.persisting),
             "fixed": len(manifest.fixed),
         }
-        state = {**prepared.state, "failure_manifest": manifest.to_state()}
+        streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
+        metrics["gated_against"] = {
+            "model": self._models.served.model,
+            "adapter": self._descriptor.name,
+            "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
+        }
+        state = {**prepared.state, "failure_manifest": manifest.to_state(), "failure_streak": streak}
 
         metrics.update(
             {

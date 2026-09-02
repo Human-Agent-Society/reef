@@ -166,5 +166,8 @@ console.log(JSON.stringify(events));
         execution = events[2]
         assert execution["command"] == "bash"
         assert "/reef/harness/install?adapter=pi" in execution["args"][1]
-        assert execution["args"][-3:] == ["code-repair", "http://reef:8900", ""]
+        assert "bash -s --" in execution["args"][1]
+        # scenario, serviceUrl, token, destDir: destDir defaults to agentDir/..
+        assert execution["args"][-4:-1] == ["code-repair", "http://reef:8900", ""]
+        assert execution["args"][-1].endswith("pi-agent/..") or "/" in execution["args"][-1]
         assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."

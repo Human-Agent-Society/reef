@@ -348,6 +348,51 @@ def test_per_receipt_report_posts_one_report_for_each_capture(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_report_carries_the_installed_release_as_metadata(tmp_path) -> None:
+    """report reads the sidecar beside the compose dir and stamps the report
+    with the release the client is running."""
+    compose = tmp_path / "reef-harness" / "pi-agent"
+    compose.mkdir(parents=True)
+    (tmp_path / "reef-harness" / ".reef-harness-release").write_text(
+        json.dumps({"release_id": "rel-42"}), encoding="utf-8"
+    )
+    scenario_key = hashlib.sha256(b"scenario").hexdigest()
+    captures = tmp_path / f"{scenario_key}-{1:020d}-run.pending.json"
+    captures.write_text(json.dumps({"reef_url": "http://reef", "scenario": "scenario", "turns": [{"receipt": "r1"}]}))
+    posted: list[dict] = []
+
+    def record(req, timeout=None):
+        posted.append(json.loads(req.data))
+        return _Response()
+
+    with (
+        patch.dict(
+            os.environ,
+            {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path), "REEF_HARNESS_COMPOSE": str(compose)},
+        ),
+        patch("reef.harness.harness_wrapper.urllib.request.urlopen", record),
+    ):
+        report("scenario", "pi", 0.0, "note")
+
+    assert posted[0]["metadata"] == {"client_release": "rel-42"}
+
+
+@pytest.mark.unit
+def test_run_agent_tags_records_with_the_installed_release(tmp_path) -> None:
+    """run_agent reads the sidecar and sends x-reef-tag-release, so the record
+    keeps which release answered."""
+    from reef.harness import harness_wrapper
+
+    compose = tmp_path / "reef-harness" / "pi-agent"
+    compose.mkdir(parents=True)
+    (tmp_path / "reef-harness" / ".reef-harness-release").write_text(
+        json.dumps({"release_id": "rel-7"}), encoding="utf-8"
+    )
+    assert harness_wrapper._installed_release(str(compose)) == "rel-7"
+    assert harness_wrapper._installed_release(str(tmp_path / "missing")) is None
+
+
+@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""
