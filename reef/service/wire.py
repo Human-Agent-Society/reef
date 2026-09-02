@@ -7,6 +7,7 @@ aiohttp request and that record.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +85,8 @@ class ReportPayload:
         if score is not None:
             if not isinstance(score, (int, float)) or isinstance(score, bool):
                 raise ValueError("score must be a number")
+            if not math.isfinite(score):
+                raise ValueError("score must be finite")
             score = float(score)
         feedback = payload.get("feedback")
         if feedback is not None and not isinstance(feedback, (str, Mapping)):
