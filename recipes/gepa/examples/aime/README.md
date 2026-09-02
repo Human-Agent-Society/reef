@@ -88,21 +88,23 @@ Everything under `./work`, and a rerun resumes from it:
 
 ## The validation contract
 
-The target is the retained record in
-[`results/quickstart-seed-0-2026-09-01/`](results/quickstart-seed-0-2026-09-01/README.md):
-the official GEPA quickstart at seed 0 improved sealed AIME-2025 accuracy from
-**26.67%** (40/150) to **38.67%** (58/150), selecting candidate 3 of 4 after
-198 metric calls, with validation moving from 15.56% to 44.44%.
+Four runs on 2026-09-02, all under the same settings: two of the upstream
+optimizer and two of this method, at seeds 0 and 1. Every one produced four
+candidates inside the 198-call budget. On the sealed AIME-2025 split:
 
-[`results/method-seed-0-2026-09-02/`](results/method-seed-0-2026-09-02/README.md)
-is this method at the same seed. It reflected from the same parents on the same
-training problems at every iteration, produced four candidates in 198 metric
-calls, scored the identical 40/150 frozen, and improved to **46.67%** (70/150),
-a gain of 20 points against the official 12.
-[`results/method-seed-1-2026-09-02/`](results/method-seed-1-2026-09-02/README.md)
-is seed 1: four candidates in 198 metric calls again, 24.00% to 36.00%, a gain
-of exactly 12 points. Two seeds of a stochastic search bracket the official
-result rather than estimate its variance.
+| arm | seed | frozen | selected | improvement |
+| --- | ---: | ---: | ---: | ---: |
+| upstream GEPA | 0 | 31.33% | 42.67% | +11.33 pp |
+| upstream GEPA | 1 | 26.67% | 40.67% | +14.00 pp |
+| this method | 0 | 26.67% | 46.67% | +20.00 pp |
+| this method | 1 | 24.00% | 36.00% | +12.00 pp |
+
+Two runs an arm cannot separate a mean of +12.67 from a mean of +16.00 when
+each arm spreads eight points internally, so the reading is that the two agree.
+The same seed prompt scored between 36 and 47 of 150 across the four runs,
+which is the task model's own run-to-run variation. The records are in
+[`results/`](results/), including the earlier
+[`quickstart-seed-0-2026-09-01`](results/quickstart-seed-0-2026-09-01/README.md).
 
 The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,

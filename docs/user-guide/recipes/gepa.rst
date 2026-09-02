@@ -144,20 +144,19 @@ problems, 45 validation problems, and sealed 150-problem AIME-2025 split, the
 same 150-call budget, and dated snapshots of the same task and reflection
 models.
 
-At seed 0 the method produced four candidates within 198 metric calls and
-improved the sealed split from 26.67 percent to 46.67 percent. The upstream run
-at the same seed went from 26.67 to 38.67. More telling than the final numbers
-is that the search took the same route: at every round it reflected from the
-same parent on the same training problems as the upstream run, and the two runs
-scored the starting composition identically.
+Four runs were made on the same day under identical settings, two of the
+upstream optimizer and two of this method, at seeds 0 and 1. Every one of them
+produced four candidates within the 198-call budget. On the sealed split the
+upstream arm improved by 11.33 and 14.00 points, and this method improved by
+20.00 and 12.00 points.
 
-The selected scores differ because two of the model calls remain stochastic
-even once the search path is pinned. The reflection model writes a different
-prompt each time it is asked, and the task model scores the same prompt
-differently from one run to the next, so a single seed of this benchmark has a
-wide spread. Seed 1 of the method landed on the upstream run's twelve-point
-gain exactly. Both records are kept under
-``recipes/gepa/examples/aime/results/``.
+The honest reading of those numbers is that they agree, not that one arm is
+better. Two runs per arm, with an eight-point spread inside each arm, cannot
+separate a mean of 12.67 from a mean of 16.00. The noise is easy to see in the
+starting scores: the very same seed prompt, on the very same problems, scored
+anywhere between 36 and 47 out of 150 across the four runs, because the model
+being tested answers differently each time it is asked. The records for all of
+them are kept under ``recipes/gepa/examples/aime/results/``.
 
 Exact agreement is checked in the one place it can be. The test at
 ``tests/reef_service/test_gepa_fidelity.py`` drives the real upstream optimizer
