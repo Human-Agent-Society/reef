@@ -13,7 +13,7 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
-  1. Reads the persisted receipts from the last agent run.
+  1. Claims the oldest pending run's persisted receipts.
   2. POSTs a report to Reef with all captured receipts as ``references``.
   3. Clears the persisted receipts.
 
@@ -33,6 +33,7 @@ Optional:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -43,6 +44,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -51,6 +53,94 @@ from reef_client.serve import CaptureStore, ServeConfig, build_handler
 
 def _captures_dir() -> Path:
     return Path(os.environ.get("REEF_HARNESS_CAPTURES_DIR", str(Path.home() / ".reef" / "captures")))
+
+
+def _scenario_key(scenario: str) -> str:
+    return hashlib.sha256(scenario.encode()).hexdigest()
+
+
+def _publish_captures(reef_url: str, scenario: str, turns: list[dict]) -> None:
+    captures_dir = _captures_dir()
+    captures_dir.mkdir(parents=True, exist_ok=True)
+    key = _scenario_key(scenario)
+    destination = captures_dir / f"{key}-{time.time_ns():020d}-{uuid.uuid4().hex}.pending.json"
+    payload = json.dumps({"reef_url": reef_url, "scenario": scenario, "turns": turns})
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=captures_dir, prefix=f".{key}-", suffix=".tmp", delete=False
+        ) as temporary:
+            temporary.write(payload)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_path = Path(temporary.name)
+        os.replace(temporary_path, destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _process_is_running(process_id: int) -> bool:
+    try:
+        os.kill(process_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _process_start_id(process_id: int) -> str | None:
+    try:
+        fields = Path(f"/proc/{process_id}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+    except (IndexError, OSError):
+        return None
+    return fields[19] if len(fields) > 19 else None
+
+
+def _claim_is_abandoned(owner: int, owner_start_id: str) -> bool:
+    if not _process_is_running(owner):
+        return True
+    current_start_id = _process_start_id(owner)
+    return current_start_id is not None and current_start_id != owner_start_id
+
+
+def _claim_captures(scenario: str) -> tuple[Path, Path] | None:
+    captures_dir = _captures_dir()
+    key = _scenario_key(scenario)
+    pending_files = sorted(captures_dir.glob(f"{key}-*.pending.json")) if captures_dir.exists() else []
+
+    # A process that dies after claiming a spool entry cannot restore it. Once
+    # its PID is gone, make that exact entry eligible for the next report.
+    if captures_dir.exists():
+        for claimed_file in sorted(captures_dir.glob(f"{key}-*.reporting-*.json")):
+            owner_parts = claimed_file.name.rsplit(".reporting-", 1)[1].split("-", 2)
+            if (
+                len(owner_parts) >= 2
+                and owner_parts[0].isdigit()
+                and _claim_is_abandoned(int(owner_parts[0]), owner_parts[1])
+            ):
+                pending_files.append(claimed_file)
+        pending_files.sort(key=lambda path: path.name.split(".", 1)[0])
+
+    legacy_file = captures_dir / f"{scenario}.json"
+    if legacy_file.is_file():
+        pending_files.insert(0, legacy_file)
+
+    for pending_file in pending_files:
+        if pending_file == legacy_file:
+            stem = f"{key}-00000000000000000000-legacy"
+        else:
+            stem = pending_file.name.split(".pending.json", 1)[0].split(".reporting-", 1)[0]
+        process_id = os.getpid()
+        process_start_id = _process_start_id(process_id) or "unknown"
+        claimed_file = captures_dir / f"{stem}.reporting-{process_id}-{process_start_id}-{uuid.uuid4().hex}.json"
+        try:
+            os.replace(pending_file, claimed_file)
+        except FileNotFoundError:
+            continue
+        return pending_file, claimed_file
+    return None
 
 
 def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
@@ -169,13 +259,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     try:
         result = subprocess.run([binary, *args], env=env)
     finally:
-        captures_dir = _captures_dir()
-        captures_dir.mkdir(parents=True, exist_ok=True)
-        captures_file = captures_dir / f"{scenario}.json"
-        captures_file.write_text(
-            json.dumps({"reef_url": upstream, "scenario": scenario, "turns": store.snapshot()}),
-            encoding="utf-8",
-        )
+        _publish_captures(upstream, scenario, store.snapshot())
         server.shutdown()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -183,15 +267,22 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
 
 
 def report(scenario: str, adapter: str, score: float, feedback: str) -> None:
-    captures_file = _captures_dir() / f"{scenario}.json"
-    if not captures_file.exists():
-        sys.exit(f"reef-{adapter}: no captured receipts for scenario {scenario!r}")
+    while True:
+        claim = _claim_captures(scenario)
+        if claim is None:
+            sys.exit(f"reef-{adapter}: no captured receipts for scenario {scenario!r}")
+        pending_file, captures_file = claim
 
-    data = json.loads(captures_file.read_text(encoding="utf-8"))
-    reef_url = data["reef_url"]
-    receipts = [t["receipt"] for t in data["turns"] if t.get("receipt")]
-    if not receipts:
-        sys.exit(f"reef-{adapter}: no captured receipts for scenario {scenario!r}")
+        try:
+            data = json.loads(captures_file.read_text(encoding="utf-8"))
+            reef_url = data["reef_url"]
+            receipts = [t["receipt"] for t in data["turns"] if t.get("receipt")]
+        except BaseException:
+            os.replace(captures_file, pending_file)
+            raise
+        if receipts:
+            break
+        captures_file.unlink()
 
     payload = json.dumps({"score": score, "feedback": feedback, "references": receipts}).encode()
     headers: dict[str, str] = {
@@ -212,8 +303,12 @@ def report(scenario: str, adapter: str, score: float, feedback: str) -> None:
         with urllib.request.urlopen(req, timeout=30) as response:
             response.read()
     except urllib.error.HTTPError as exc:
+        os.replace(captures_file, pending_file)
         body = exc.read().decode(errors="replace")
         sys.exit(f"reef-{adapter}: report failed ({exc.code}): {body}")
+    except BaseException:
+        os.replace(captures_file, pending_file)
+        raise
 
     captures_file.unlink()
     print(f"reef-{adapter}: reported {len(receipts)} receipt(s) to {scenario}")
