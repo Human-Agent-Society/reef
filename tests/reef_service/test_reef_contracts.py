@@ -441,8 +441,8 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
 
         from aiohttp import web
 
-        first_chunk = b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
-        final_chunk = b"data: [DONE]\n\n"
+        first_chunk = b'data: {"choices":[{"delta":{"content":"hello"}}]}\r\n\n'
+        final_chunk = b"data: [DONE]\n\r"
         finish_upstream = asyncio.Event()
         received = {}
 
