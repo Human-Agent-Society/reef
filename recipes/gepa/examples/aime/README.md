@@ -92,12 +92,14 @@ The target is the retained record in
 [`results/quickstart-seed-0-2026-09-01/`](results/quickstart-seed-0-2026-09-01/README.md):
 the official GEPA quickstart at seed 0 improved sealed AIME-2025 accuracy from
 **26.67%** (40/150) to **38.67%** (58/150), selecting candidate 3 of 4 after
-198 metric calls, with validation moving from 15.56% to 44.44%. A method run
-that lands in that neighbourhood - a frozen score near 27% and a selected score
-near 38%, with a handful of candidates and a strictly improving validation mean
-- has reproduced the quickstart. One seed of a stochastic search is a
-conformance check, not an estimate of variance; seeds 1 and 2 remain follow-up
-work.
+198 metric calls, with validation moving from 15.56% to 44.44%.
+
+[`results/method-seed-0-2026-09-02/`](results/method-seed-0-2026-09-02/README.md)
+is this method at the same seed. It reflected from the same parents on the same
+training problems at every iteration, produced four candidates in 198 metric
+calls, scored the identical 40/150 frozen, and improved to **46.67%** (70/150),
+a gain of 20 points against the official 12. One seed of a stochastic search is
+a conformance check, not an estimate of variance.
 
 The deterministic half of the contract is `tests/test_gepa_aime_harness.py`,
 which runs with no model and no Pi binary: the scorer, the feedback wording,

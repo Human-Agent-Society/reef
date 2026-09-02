@@ -80,7 +80,8 @@ only on a strict mean improvement over the full validation set. Nothing in it
 imports the upstream package. Its AIME example is the validation: the driver
 embeds the Reef service, runs the quickstart's 45 training problems through it
 three at a time, and seals the two 150-problem test passes against the retained
-official record (26.67% to 38.67% on AIME 2025, seed 0).
+official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
+run reflected from the same parents on the same problems and reached 46.67%.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
