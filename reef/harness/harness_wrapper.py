@@ -296,7 +296,16 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
     # One report referencing the whole run batches as one trajectory sample;
     # --per-receipt sends the same score against each receipt on its own.
     reference_lists = [[receipt] for receipt in receipts] if per_receipt else [receipts]
-    for references in reference_lists:
+
+    def restore_unsent(sent: int) -> None:
+        # A partial per-receipt failure must not resend what already posted:
+        # the retry claim keeps only the receipts that never went out.
+        posted = {receipt for references in reference_lists[:sent] for receipt in references}
+        data["turns"] = [turn for turn in data["turns"] if turn.get("receipt") not in posted]
+        captures_file.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(captures_file, pending_file)
+
+    for sent, references in enumerate(reference_lists):
         payload = json.dumps({"score": score, "feedback": feedback, "references": references}).encode()
         req = urllib.request.Request(
             f"{reef_url}/reef/report",
@@ -308,11 +317,11 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
             with urllib.request.urlopen(req, timeout=30) as response:
                 response.read()
         except urllib.error.HTTPError as exc:
-            os.replace(captures_file, pending_file)
+            restore_unsent(sent)
             body = exc.read().decode(errors="replace")
             sys.exit(f"reef-{adapter}: report failed ({exc.code}): {body}")
         except BaseException:
-            os.replace(captures_file, pending_file)
+            restore_unsent(sent)
             raise
 
     captures_file.unlink()

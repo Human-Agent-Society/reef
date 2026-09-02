@@ -158,10 +158,20 @@ class CordisBackend(TrainingBackend):
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
+        if (
+            isinstance(episode_timeout_s, bool)
+            or not isinstance(episode_timeout_s, (int, float))
+            or episode_timeout_s <= 0
+        ):
+            raise ValueError("episode_timeout_s must be a positive number")
+        if isinstance(episode_repeats, bool) or not isinstance(episode_repeats, int) or episode_repeats < 1:
+            raise ValueError("episode_repeats must be an integer of at least 1")
+        if not isinstance(forbid_residue, bool):
+            raise ValueError("forbid_residue must be a boolean")
         self._binary = binary
         self._episode_timeout_s = float(episode_timeout_s)
-        self._episode_repeats = int(episode_repeats)
-        self._forbid_residue = bool(forbid_residue)
+        self._episode_repeats = episode_repeats
+        self._forbid_residue = forbid_residue
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 

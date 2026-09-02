@@ -984,3 +984,23 @@ def test_recipe_parses_and_validates_the_episode_gate_knobs(tmp_path: Path, monk
         CordisRecipe.from_environment({}, config=config(episode_repeats=0))
     with pytest.raises(RecipeConfigError, match=r"forbid_residue must be a boolean"):
         CordisRecipe.from_environment({}, config=config(forbid_residue="yes"))
+
+
+def test_backend_rejects_invalid_gate_knobs(tmp_path: Path) -> None:
+    def build(**kwargs) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(lambda n, s, m: None),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match="episode_timeout_s must be a positive number"):
+        build(episode_timeout_s=0)
+    with pytest.raises(ValueError, match="episode_repeats must be an integer"):
+        build(episode_repeats=0)
+    with pytest.raises(ValueError, match="forbid_residue must be a boolean"):
+        build(forbid_residue="no")

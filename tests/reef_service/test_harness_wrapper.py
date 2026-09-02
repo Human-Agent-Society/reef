@@ -348,6 +348,45 @@ def test_per_receipt_report_posts_one_report_for_each_capture(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
+    """When a later per-receipt post fails, the restored claim holds only the
+    receipts that never went out, so a retry cannot duplicate reports."""
+    scenario_key = hashlib.sha256(b"scenario").hexdigest()
+    captures = tmp_path / f"{scenario_key}-{1:020d}-run.pending.json"
+    captures.write_text(
+        json.dumps(
+            {
+                "reef_url": "http://reef",
+                "scenario": "scenario",
+                "turns": [{"receipt": "receipt-1"}, {"receipt": "receipt-2"}],
+            }
+        )
+    )
+    failure = urllib.error.HTTPError("http://reef/reef/report", 503, "unavailable", {}, io.BytesIO(b"later"))
+    posted: list[dict] = []
+
+    def flaky(req, timeout=None):
+        posted.append(json.loads(req.data))
+        if len(posted) == 2:
+            raise failure
+        return _Response()
+
+    with (
+        patch.dict(os.environ, {"REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}),
+        patch("reef.harness.harness_wrapper.urllib.request.urlopen", flaky),
+    ):
+        with pytest.raises(SystemExit, match=r"report failed \(503\)"):
+            report("scenario", "pi", 0.0, "per turn", per_receipt=True)
+
+        restored = json.loads(captures.read_text())
+        assert [turn["receipt"] for turn in restored["turns"]] == ["receipt-2"]
+
+        report("scenario", "pi", 0.0, "per turn", per_receipt=True)
+
+    assert [item["references"] for item in posted] == [["receipt-1"], ["receipt-2"], ["receipt-2"]]
+
+
+@pytest.mark.unit
 def test_report_recovers_reused_process_id_before_newer_run(tmp_path) -> None:
     claimed_file = _write_spool_entry(
         tmp_path,
