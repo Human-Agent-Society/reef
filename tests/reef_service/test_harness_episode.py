@@ -17,6 +17,7 @@ from reef.harness.render import render_composition
 from reef.harness.trajectory import (
     TrajectoryError,
     read_claude_session,
+    read_deepseek_session,
     read_opencode_storage,
     read_pi_session,
     reader_for,
@@ -160,6 +161,21 @@ def test_claude_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
 
 def test_claude_format_resolves_through_reader_for() -> None:
     assert reader_for("claude-session-jsonl").format == "claude-session-jsonl"
+
+
+def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:
+    # dsh lays sessions out as sessions/<cwd-slug>/session-<id>/session.jsonl.
+    first = tmp_path / "slug" / "session-01" / "session.jsonl"
+    second = tmp_path / "slug" / "session-02" / "session.jsonl"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text('{"type": "session", "version": 0}\n{"type": "turn/start", "seq": 0}\n')
+    second.write_text('{"type": "session", "version": 0}\n{"type": "turn/end", "seq": 0\n')  # crash mid-write
+    assert [event["type"] for event in read_deepseek_session(tmp_path)] == ["session", "turn/start", "session"]
+    second.write_text('{"type": "session"\n{"type": "turn/end", "seq": 0}\n')  # torn in the middle: corruption
+    with pytest.raises(TrajectoryError, match=r"deepseek session .* corrupt event at line 1"):
+        read_deepseek_session(tmp_path)
+    assert reader_for("deepseek-session-jsonl").format == "deepseek-session-jsonl"
 
 
 def test_missing_trajectory_reads_as_empty(tmp_path: Path) -> None:
