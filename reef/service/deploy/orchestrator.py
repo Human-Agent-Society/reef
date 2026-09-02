@@ -35,24 +35,39 @@ def _log(msg):
     print(f"[reef] {msg}", file=sys.stderr)
 
 
+class InvalidOverrideError(ValueError):
+    """A leftover ``reef serve`` argument is not a valid ``--key`` override."""
+
+
 def _parse_overrides(extras: list[str]) -> dict[str, str]:
-    """Parse leftover ``--key value`` / ``--key=value`` pairs from ``parse_known_args``."""
+    """Parse leftover ``--key value`` / ``--key=value`` pairs from ``parse_known_args``.
+
+    Anything that is not a well-formed ``--key`` override — an orphan
+    positional, an unknown short option, or a ``--`` with no name — is
+    rejected instead of silently discarded, so a typo fails fast at the CLI
+    rather than surfacing as an unrelated missing-config error downstream.
+    """
     overrides: dict[str, str] = {}
     i = 0
     while i < len(extras):
         token = extras[i]
         if not token.startswith("--"):
-            i += 1
-            continue
+            raise InvalidOverrideError(f"unrecognized argument: {token!r}")
         key = token[2:]
         if "=" in key:
             key, value = key.split("=", 1)
+            if not key:
+                raise InvalidOverrideError(f"override is missing a name: {token!r}")
             overrides[key] = value
             i += 1
         elif i + 1 < len(extras) and not extras[i + 1].startswith("--"):
+            if not key:
+                raise InvalidOverrideError(f"override is missing a name: {token!r}")
             overrides[key] = extras[i + 1]
             i += 2
         else:
+            if not key:
+                raise InvalidOverrideError(f"override is missing a name: {token!r}")
             overrides[key] = "true"
             i += 1
     return overrides
@@ -373,7 +388,11 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    args, extras = build_parser().parse_known_args(argv)
+    parser = build_parser()
+    args, extras = parser.parse_known_args(argv)
     config_path = args.config or os.environ.get("REEF_CONFIG", "reef.yaml")
-    overrides = _parse_overrides(extras)
+    try:
+        overrides = _parse_overrides(extras)
+    except InvalidOverrideError as exc:
+        parser.error(str(exc))
     sys.exit(_run_orchestrator(config_path, overrides))
