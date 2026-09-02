@@ -1,7 +1,7 @@
 gepa
 ====
 
-GEPA (`gepa-ai/gepa <https://github.com/gepa-ai/gepa>`__) is reflective prompt
+GEPA (`arXiv:2507.19457 <https://arxiv.org/abs/2507.19457>`__) is reflective prompt
 evolution. Instead of training weights, it improves the words an agent is given.
 It keeps an archive of candidate prompts. On each round it picks one of them as
 a parent, looks at how that parent actually did on a handful of problems, and
