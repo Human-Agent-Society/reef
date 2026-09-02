@@ -45,9 +45,9 @@ API_KEY_ENV = "OPENAI_API_KEY"
 # two passes over the 150-example test split.
 SEARCH_BUDGET = 150
 
-# Pi's pinned default output limit. The retained record made it explicit in
-# models.json; the mechanism renders that file from its own model binding, so
-# the cap is documented rather than set (README, "Deviations").
+# Pi's default output limit, which it sends as max_completion_tokens on every
+# request; the retained record pinned the same value explicitly. Kept so a
+# report can name it, not to be set anywhere.
 PI_TASK_MAX_TOKENS = 16_384
 
 # The upstream loader does not pin Hugging Face revisions; these do, and the

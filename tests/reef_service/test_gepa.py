@@ -71,6 +71,22 @@ SAMPLE = TraceSample(
     },
     0.0,
 )
+#: The same exchange as the proxy records a streamed reply: the message it
+#: assembled from the chunks sits beside the raw stream body, no ``choices``.
+STREAMED_SAMPLE = TraceSample(
+    "a2",
+    {
+        "messages": [{"role": "user", "content": TASK}],
+        "response": {"stream": True, "body": "data: ...", "message": {"role": "assistant", "content": "4"}},
+    },
+    0.0,
+)
+
+
+def test_recorded_traffic_reads_buffered_and_streamed_replies() -> None:
+    from recipes.gepa.method import _traffic
+
+    assert [texts for _, texts in _traffic((SAMPLE, STREAMED_SAMPLE))] == [(TASK, "4"), (TASK, "4")]
 
 
 def score_rules(task: str, result: EpisodeResult) -> float:

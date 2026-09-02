@@ -108,10 +108,6 @@ service with a stubbed inference backend.
   upstream GEPA pays 45. The archive counts the method's own metric calls, so
   the budget still means what it means upstream; the wall-clock and spend do
   not compare directly.
-- Upstream pins Pi's 16,384-token output limit explicitly in `models.json`.
-  Here the mechanism renders that file from its own model binding, which
-  carries no output cap, so episodes run at the provider default. The pin
-  stays in `harness/aime.py` as `PI_TASK_MAX_TOKENS` for the record.
 - The training minibatch is real recorded traffic through the service rather
   than a direct evaluation call, which is the point of the exercise but means
   a minibatch problem is scored by the driver and re-read by the method from

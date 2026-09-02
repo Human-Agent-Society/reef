@@ -213,3 +213,6 @@ _examples_synced/
 recipes/*/work/
 tutorials/*/work/
 recipes/basic/work/
+
+# The GEPA AIME example writes its run state here.
+recipes/gepa/examples/aime/work/

@@ -336,13 +336,21 @@ def _prompt_of(payload: Mapping[str, Any]) -> str:
 
 
 def _response_of(payload: Mapping[str, Any]) -> str:
+    """The answer the served composition gave, from either recorded shape.
+
+    A buffered reply is recorded as the provider's chat completion, with the
+    message under ``choices``; a streamed reply is recorded as the message
+    the proxy assembled from the chunks, under ``message`` beside the raw
+    stream body. Pi streams, so the second shape is the common one.
+    """
     response = payload.get("response")
     if not isinstance(response, Mapping):
         return ""
     choices = response.get("choices")
-    if not isinstance(choices, Sequence) or not choices:
-        return ""
-    message = choices[0].get("message") if isinstance(choices[0], Mapping) else None
+    if isinstance(choices, Sequence) and choices and isinstance(choices[0], Mapping):
+        message = choices[0].get("message")
+    else:
+        message = response.get("message")
     return _text(message.get("content")) if isinstance(message, Mapping) else ""
 
 
