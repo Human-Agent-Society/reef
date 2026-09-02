@@ -25,7 +25,10 @@ Each is complete and runnable: a flat `reef:` section (translated into the
 frozen `ServiceSettings` by
 [`reef/service/deploy/settings.py`](../reef/service/deploy/settings.py)) plus
 a `services:` list the orchestrator starts in dependency order, with `${VAR}`
-environment and `${dotted.path}` config interpolation. Copy one and adapt it;
+environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
+defaults to the interpreter running `reef serve`, so Python services that use
+it share Reef's environment without changing the meaning of literal `python`
+commands. Copy one and adapt it;
 `reef serve -c <stack> --<key> <value>` overrides any `reef.*` setting. The
 `recipe` they bind is the base contract in
 [`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
