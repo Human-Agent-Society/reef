@@ -67,6 +67,8 @@ class HarnessCandidate(UpdateCandidate):
     mutations: tuple[Mutation, ...]
     #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
     gate_tasks: tuple[str, ...] = ()
+    #: The candidate is the rollback target, so selecting it rolls back.
+    recheck: bool = False
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -246,6 +248,7 @@ class CordisBackend(TrainingBackend):
         promote_failures: bool = False,
         max_promoted_tasks: int = 50,
         promote: Promoter | None = None,
+        recheck_every: int = 0,
         seed: tuple[Mapping[str, Any], ...] = (),
     ) -> None:
         if not tasks:
@@ -282,6 +285,7 @@ class CordisBackend(TrainingBackend):
             ("max_steps", max_steps),
             ("max_failure_streak", max_failure_streak),
             ("max_model_calls_per_step", max_model_calls_per_step),
+            ("recheck_every", recheck_every),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
@@ -301,6 +305,7 @@ class CordisBackend(TrainingBackend):
         self._max_promoted_tasks = max_promoted_tasks
         self._promote_task = promote
         self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
+        self._recheck_every = recheck_every
         self._seed = tuple(dict(entry) for entry in seed)
         self._validate_seed()
 
@@ -365,6 +370,12 @@ class CordisBackend(TrainingBackend):
         promoted = list(state.get("promoted_tasks", ()))
         if promoted:
             carried["promoted_tasks"] = promoted
+        # Carried through skips so a no-commit step keeps the rollback target.
+        rollback_entries = state.get("rollback_entries")
+        rollback_gated_against = state.get("rollback_gated_against")
+        if rollback_entries is not None:
+            carried["rollback_entries"] = rollback_entries
+            carried["rollback_gated_against"] = rollback_gated_against
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
         # The budgets are circuit breakers, not schedulers: a skipped step
@@ -400,6 +411,28 @@ class CordisBackend(TrainingBackend):
         if self._promote_failures:
             metrics["gate_tasks"] = len(gate_tasks)
             metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
+        # Re-gate the last-good tree against the published one on cadence or when the served model changed.
+        drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
+        due = bool(self._recheck_every) and steps % self._recheck_every == 0
+        if self._recheck_every and rollback_entries is not None and (due or drifted):
+            target = [dict(entry) for entry in rollback_entries]
+            published = [dict(entry) for entry in self._entries()]
+            metrics["recheck"] = True
+            metrics["recheck_reason"] = "drift" if drifted else "cadence"
+            return PreparedStep.with_candidate(
+                HarnessCandidate(
+                    candidate_id=f"{batch.batch_id}:recheck",
+                    candidate_files=render_composition(self._nodes_from(target), self._descriptor),
+                    current_files=render_composition(self._nodes_from(published), self._descriptor),
+                    candidate_entries=tuple(target),
+                    current_entries=tuple(published),
+                    mutations=(),
+                    gate_tasks=gate_tasks,
+                    recheck=True,
+                ),
+                state={"steps": steps, **carried},
+                metrics=metrics,
+            )
         models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
         if self._propose_accepts_manifest:
             proposal = self._propose(self._nodes(), batch.samples, models, manifest=manifest)
@@ -527,13 +560,30 @@ class CordisBackend(TrainingBackend):
             "persisting": len(manifest.persisting),
             "fixed": len(manifest.fixed),
         }
-        streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
-        metrics["gated_against"] = {
-            "model": self._models.served.model,
-            "adapter": self._descriptor.name,
-            "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
-        }
+        # A recheck is not a proposal, so it leaves the failure streak alone.
+        if candidate.recheck:
+            streak = int(prepared.state.get("failure_streak", 0))
+        else:
+            streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
+        metrics["gated_against"] = self._gated_against()
+        # A publish stores the replaced tree and its gate stamp as the rollback target; a rollback consumes it.
+        rollback_entries = prepared.state.get("rollback_entries")
+        rollback_gated_against = prepared.state.get("rollback_gated_against")
+        if candidate.recheck and decision.selected:
+            metrics["rolled_back"] = True
+            rollback_entries = None
+            rollback_gated_against = None
+        elif candidate.recheck:
+            metrics["rolled_back"] = False
+        elif decision.selected and self._recheck_every:
+            rollback_entries = list(candidate.current_entries)
+            rollback_gated_against = metrics["gated_against"]
         state = {**prepared.state, "failure_manifest": manifest.to_state(), "failure_streak": streak}
+        state.pop("rollback_entries", None)
+        state.pop("rollback_gated_against", None)
+        if rollback_entries is not None:
+            state["rollback_entries"] = rollback_entries
+            state["rollback_gated_against"] = rollback_gated_against
 
         metrics.update(
             {
@@ -614,6 +664,14 @@ class CordisBackend(TrainingBackend):
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return score, FailureObservation(task=task, stage="exit", cause=cause), residue
         return score, None, residue
+
+    def _gated_against(self) -> dict[str, Any]:
+        """The served model and adapter version this step's gate runs against."""
+        return {
+            "model": self._models.served.model,
+            "adapter": self._descriptor.name,
+            "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
+        }
 
     def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
         return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)

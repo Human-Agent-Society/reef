@@ -139,6 +139,7 @@ class CordisRecipe(Recipe):
     promote_failures: bool = False
     max_promoted_tasks: int = 50
     promote: Promoter | None = None
+    recheck_every: int = 0
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -171,6 +172,7 @@ class CordisRecipe(Recipe):
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
+            ("recheck_every", self.recheck_every),
         ):
             if value < 0:
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
@@ -202,7 +204,7 @@ class CordisRecipe(Recipe):
         except ReefError as exc:
             raise RecipeConfigError(str(exc)) from exc
         budgets: dict[str, int] = {}
-        for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step"):
+        for label in ("max_steps", "max_failure_streak", "max_model_calls_per_step", "recheck_every"):
             value = evolution.get(label, 0)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise RecipeConfigError(f"evolution.{label} must be an integer of at least 0 (0 disables the limit)")
@@ -313,6 +315,7 @@ class CordisRecipe(Recipe):
             promote_failures=self.promote_failures,
             max_promoted_tasks=self.max_promoted_tasks,
             promote=self.promote,
+            recheck_every=self.recheck_every,
             seed=self.seed,
         )
         return Trainer.build(
