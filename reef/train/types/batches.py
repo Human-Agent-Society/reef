@@ -108,12 +108,13 @@ class TraceSample:
     whose ``trajectory`` holds every referenced payload in reference order
     and whose ``payload`` is the last of them, so single-payload consumers
     keep seeing the exchange that carries the full conversation.
-    ``feedback`` is the report's feedback field, verbatim.
+    ``feedback`` is the report's feedback field, verbatim. ``score`` is
+    ``None`` for a sample batched from recorded traffic without a report.
     """
 
     source_agent_record_id: str
     payload: Mapping[str, Any]
-    score: float
+    score: float | None
     feedback: str | Mapping[str, Any] | None = None
     trajectory: tuple[Mapping[str, Any], ...] = ()
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from reef.core import AgentRecord, RequestType
+from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.reported import (
     NEVER,
     BatchUnit,
@@ -75,3 +77,63 @@ class CordisProcessor(ReportedFeedbackProcessor):
             f"{self.scenario}:harness_evolve:{batch_number}",
             tuple(unit.candidates[0].value for unit in units),
         )
+
+
+class RecordDrivenTraceProcessor(DataProcessor):
+    """Batch recorded inference traffic every ``batch_size`` requests, unscored.
+
+    The report-free half of harness evolution: a deployment that only serves
+    still evolves. Each recorded inference is one unit, in arrival order;
+    when ``batch_size`` have accumulated they batch as trace samples with
+    ``score=None``, and the proposer contract requires handling unscored
+    samples. Reports that arrive under this policy are released untouched;
+    a deployment with real outcome signal selects the reported policy
+    instead, because a measured result beats model self judgment.
+    """
+
+    output_schema = TraceBatch
+
+    def __init__(self, context: ProcessorContext) -> None:
+        super().__init__(context)
+        self._records: list[AgentRecord] = []
+        self._released: set[str] = set()
+
+    def ingest(self, item: AgentRecord) -> None:
+        if item.request_type is RequestType.INFERENCE:
+            self._records.append(item)
+        else:
+            self._released.add(item.agent_record_id)
+
+    def _ready_count(self) -> int:
+        return len(self._records)
+
+    def _make_pending(self, batch_number: int) -> TraceBatch:
+        selected = self._records[: self._batch_size]
+        return TraceBatch(
+            f"{self.scenario}:harness_evolve:{batch_number}",
+            tuple(
+                TraceSample(
+                    source_agent_record_id=record.agent_record_id,
+                    payload=record.payload,
+                    score=None,
+                )
+                for record in selected
+            ),
+        )
+
+    def _consume_pending(self) -> frozenset[str]:
+        if self._pending is None or not isinstance(self._pending, TraceBatch):
+            raise RuntimeError("no pending trace batch to consume")
+        consumed = frozenset(sample.source_agent_record_id for sample in self._pending.samples)
+        self._records = [record for record in self._records if record.agent_record_id not in consumed]
+        self._released |= consumed
+        return consumed
+
+    def retention_decision(self) -> RetentionDecision:
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(record.agent_record_id for record in self._records),
+            releasable_agent_record_ids=frozenset(self._released),
+        )
+
+    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        self._released -= agent_record_ids

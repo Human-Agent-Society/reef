@@ -73,7 +73,10 @@ trajectory sample carrying every referenced exchange in order, which is what
 ``reef-pi report`` sends for a whole run (``--per-receipt`` fans the score
 across the receipts as separate reports instead). When ``batch_size``
 window entries have accumulated, one step runs the loop once. ``batch_size``
-and ``max_score`` live under ``data:`` in the recipe config.
+and ``max_score`` live under ``data:`` in the recipe config, and
+``data.batch_policy: records`` drops the report requirement entirely:
+recorded traffic alone batches, unscored, for methods that judge for
+themselves.
 
 Most of a step's cost is the evaluation. Every task runs on both trees,
 ``episode_repeats`` times each (once by default), which makes

@@ -57,7 +57,9 @@ class Proposer(ABC):
 
     Implement:
         ``__call__`` — given the current composition (as ``(kind, config)``
-        pairs in tree order), a batch of trace samples, and the
+        pairs in tree order), a batch of trace samples (a sample's ``score``
+        is ``None`` when the deployment batches recorded traffic without
+        reports, so a method must handle unscored samples), and the
         :class:`~reef.harness.model_binding.ModelBindings` the method may
         call, return one :class:`~reef.train.cordis_backend.Mutation`, a
         sequence of them (one composite proposal, applied under one snapshot
