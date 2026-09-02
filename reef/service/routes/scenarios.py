@@ -3,6 +3,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from reef.service.request_service import RequestService
+from reef.service.routes.payload import read_object
 
 
 def register_scenario_routes(app: web.Application, *, request_service: RequestService) -> None:
@@ -10,7 +11,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
 
     async def create_scenario(request: web.Request) -> web.Response:
-        payload = await request.json()
+        payload = await read_object(request)
         name = payload.get("name")
         release_id = payload.get("release_id")
         if not isinstance(name, str) or not name.strip():
@@ -52,9 +53,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def rollback_scenario(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="request body must be an object")
+        payload = await read_object(request)
         release_id = payload.get("release_id")
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
