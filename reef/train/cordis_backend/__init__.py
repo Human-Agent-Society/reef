@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 import tempfile
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -260,9 +261,12 @@ class CordisBackend(TrainingBackend):
         recheck_every: int = 0,
         max_rejected_history: int = 25,
         seed: tuple[Mapping[str, Any], ...] = (),
+        episode_workers: int = 1,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        if episode_workers < 1:
+            raise ValueError("harness evolution requires at least one episode worker")
         if isinstance(models, ModelBinding):
             models = ModelBindings(served=models)
         if not isinstance(models, ModelBindings):
@@ -302,6 +306,7 @@ class CordisBackend(TrainingBackend):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         self._binary = binary
+        self._episode_workers = episode_workers
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
         self._forbid_residue = forbid_residue
@@ -515,15 +520,26 @@ class CordisBackend(TrainingBackend):
         # anything that drifts during the run (upstream load, rate limits)
         # lands on both sides of a pair instead of one whole side. A repeat
         # is one more pairing of the same task; the selector compares the
-        # vectors positionally, so every pairing tallies on its own.
-        candidate_runs: list[tuple[float | None, FailureObservation | None, int]] = []
-        current_runs: list[tuple[float | None, FailureObservation | None, int]] = []
+        # vectors positionally, so every pairing tallies on its own. Each
+        # episode is independent work in its own root, so with more than one
+        # worker the pairings run in one pool - a large task set costs one
+        # wave instead of a long turn-taking pass - and the results are read
+        # back in submission order either way.
         # An older candidate carries no gate_tasks and falls back to the seed set.
         gate_tasks = candidate.gate_tasks or self._tasks
-        for task in gate_tasks:
-            for _ in range(self._episode_repeats):
-                candidate_runs.append(self._run_and_score(candidate_files, task))
-                current_runs.append(self._run_and_score(current_files, task))
+        pairings = [
+            (files, task)
+            for task in gate_tasks
+            for _ in range(self._episode_repeats)
+            for files in (candidate_files, current_files)
+        ]
+        if self._episode_workers > 1 and len(pairings) > 1:
+            with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(pairings))) as pool:
+                scored = list(pool.map(lambda pairing: self._run_and_score(*pairing), pairings))
+        else:
+            scored = [self._run_and_score(files, task) for files, task in pairings]
+        candidate_runs = scored[0::2]
+        current_runs = scored[1::2]
         candidate_scores = tuple(score for score, _, _ in candidate_runs)
         current_scores = tuple(score for score, _, _ in current_runs)
         return EvaluationResult(

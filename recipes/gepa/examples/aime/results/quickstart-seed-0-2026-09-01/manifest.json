@@ -1,0 +1,129 @@
+{
+  "schema_version": 2,
+  "kind": "reef-gepa-quickstart-paired-result",
+  "date": "2026-09-01",
+  "scope": {
+    "seed": 0,
+    "search_budget": 150,
+    "cells": [
+      "reference",
+      "rules"
+    ],
+    "not_run": [
+      "frozen control cell",
+      "multi-node cell",
+      "seeds 1 and 2"
+    ]
+  },
+  "pins": {
+    "reef_base_commit": "6a5c88f0dceaa5113b3fcf75c87385e0bb3d6253",
+    "gepa_commit": "92dadfffbe98c8ecf508179a1cab09c1bb85cd32",
+    "pi_version": "0.84.2",
+    "task_model": "gpt-4.1-mini-2025-04-14",
+    "reflection_model": "gpt-5-2025-08-07"
+  },
+  "dataset": {
+    "sha256": "74e81306a9a1debadd64c49a4ab3588615f7bb698b695a59c17c65dd3b895185",
+    "sizes": {
+      "train": 45,
+      "validation": 45,
+      "test": 150
+    },
+    "revisions": {
+      "AI-MO/aimo-validation-aime": "13f9e12f613e720c2a2b2f345dd04b998a29494d",
+      "MathArena/aime_2025": "c94da77eb22bbd6439e62a323bec18493a421302"
+    }
+  },
+  "baseline_alignment": {
+    "imported_from_compatible_run": true,
+    "reef_source_commit": "1748a3a2c3e9952482ad64e31a74bf82109a7d3d",
+    "run_identity_sha256": "0ffbc8e3ed4e8d5bd0def6f16a316409e1183b47105a4307e20c84e926c421e2",
+    "actual_execution": {
+      "official_workers": 10,
+      "reef_workers": 10,
+      "checkpoint_batch_size": 10
+    },
+    "inactive_identity_defaults": {
+      "reef_workers": 32,
+      "reef_heldout_workers": 16
+    },
+    "compatibility_note": "The optimization source only added a worker-concurrency override; model, dataset, prompt, request envelope, and sampling settings were unchanged.",
+    "evaluations_per_arm": 450,
+    "official_score": 0.22,
+    "reef_score": 0.20666666666666667,
+    "reef_minus_official_score": -0.013333333333333336,
+    "lower_confidence_bound": -0.051319580495503114,
+    "noninferiority_margin": 0.1,
+    "baseline_aligned": true,
+    "failed_reef_indices": []
+  },
+  "optimization_run": {
+    "reef_source_commit": "d450f0f4c53336f3074bb9058acdf05e3367aa61",
+    "run_identity_sha256": "8cbd1bb99697b3f238e368ba02cd2294a3347f9655e6bb364d36e33bb0415cd8",
+    "workers": {
+      "reference": 128,
+      "reef": 128,
+      "heldout": 128
+    }
+  },
+  "results": {
+    "reference": {
+      "validation_seed_score": 0.15555555555555556,
+      "validation_selected_score": 0.4444444444444444,
+      "frozen_test_score": 0.26666666666666666,
+      "selected_test_score": 0.38666666666666666,
+      "test_delta": 0.12,
+      "selected_candidate": 3,
+      "num_candidates": 4,
+      "total_metric_calls": 198,
+      "wall_time_s": 15371.48316670896,
+      "observed_cost_usd": 5.458627,
+      "task_requests": 798,
+      "reflection_requests": 3
+    },
+    "rules": {
+      "validation_seed_score": 0.24444444444444444,
+      "validation_selected_score": 0.4,
+      "frozen_test_score": 0.2733333333333333,
+      "selected_test_score": 0.37333333333333335,
+      "test_delta": 0.10000000000000003,
+      "selected_candidate": 3,
+      "num_candidates": 4,
+      "total_metric_calls": 198,
+      "wall_time_s": 2301.3219940839335,
+      "observed_cost_usd": 3.6423705500000003,
+      "task_requests": 497,
+      "reflection_requests": 3
+    }
+  },
+  "known_diagnostic_issue": {
+    "kind": "missing optional additional_context during official heldout feedback",
+    "aggregate_score_impact": false,
+    "affected_zero_score_checkpoints": {
+      "frozen": 110,
+      "selected": 92
+    },
+    "fix_commit": "e8094ce6840ac77e8b8ab25ec9d2c0ce30ca2796"
+  },
+  "reports": {
+    "baseline-result.json": "3e967d080f3f53b07d97b2721849f59eeb01c6dc9281bf2f67b45c5f0fb720d0",
+    "baseline-run-identity.json": "d277616e5b2ec011fa3cc33d46d40016aaeb39274a20736919fb467ed0a6cf1d",
+    "baseline-official-task-usage.json": "761c3a14569d8e3a47a06971882cb7be1b200cb9e8032fad50fba9b17e0e6481",
+    "baseline-reef-task-usage.json": "b128da07d44756ede29347c63c0c0ef831e18974bd33f4ee21411741a4acffae",
+    "optimization-run-identity.json": "77a30e1f805c347edfb491d7e9d96c49fb5fae2bc556cfc105231c86faa103fe",
+    "reference-config.json": "6c5f753a0bb5a0c68cc8758274d63ed1cb6a08b4a512150d1e406752f304389d",
+    "reference-summary.json": "5319ad2a78c1598d2b62fb232abce5efdc3481196788c51e66f1f90ea20a6745",
+    "reference-run-log.json": "bd2e5201372f9ef661625d77ea75c879c6554ad2986916456d23bca87690c9bc",
+    "rules-config.json": "0186fd3bf6094ac847b58e7c2d2bbe87d540b97ff221f9fceed5617616bdde3a",
+    "rules-summary.json": "425b25b8f4dd4c8b699ec358c3327163f558d876ebf0534c806891450a595143",
+    "rules-run-log.json": "97169f7666c7b7877a5092a25d563bc4100de858dadb7fde7180ec2fd41303be"
+  },
+  "excluded": [
+    "credentials",
+    "dataset contents",
+    "model outputs and reasoning",
+    "heldout checkpoints",
+    "binary GEPA state",
+    "local paths"
+  ]
+}
