@@ -223,7 +223,7 @@ class ScenarioCommitProtocol:
                     operation=operation,
                     rollback_target_release_id=release_id,
                 )
-                self._trainer.apply_compaction(prepared.compacted_ids)
+                self._finish_trainer_commit(prepared)
             except Exception:
                 artifacts.discard(staged)
                 raise
@@ -272,7 +272,7 @@ class ScenarioCommitProtocol:
             checkpoint=False,
             prepared=prepared,
         )
-        self._trainer.apply_compaction(prepared.compacted_ids)
+        self._finish_trainer_commit(prepared)
         artifacts.advance(live_ref, expected=head)
         self.advance_to(next_step)
         return result.state
@@ -286,7 +286,7 @@ class ScenarioCommitProtocol:
             checkpoint=False,
             prepared=prepared,
         )
-        self._trainer.apply_compaction(prepared.compacted_ids)
+        self._finish_trainer_commit(prepared)
         self.advance_to(next_step)
         return result.state
 
@@ -340,7 +340,7 @@ class ScenarioCommitProtocol:
                     checkpoint=False,
                     prepared=prepared,
                 )
-            self._trainer.apply_compaction(prepared.compacted_ids)
+            self._finish_trainer_commit(prepared)
         except Exception:
             artifacts.discard(local_artifact)
             raise
@@ -352,6 +352,11 @@ class ScenarioCommitProtocol:
         loader = self._binding.surface.loader
         if isinstance(loader, ArtifactActivator):
             loader.activate(artifact, self._binding.runtime, source=source)
+
+    def _finish_trainer_commit(self, prepared: PreparedCommit) -> None:
+        """Run post-commit effects only after the version record is durable."""
+        self._trainer.commit_applied(prepared.algorithm_state)
+        self._trainer.apply_compaction(prepared.compacted_ids)
 
     def _append_commit_record(
         self,

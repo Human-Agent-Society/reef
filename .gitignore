@@ -205,6 +205,8 @@ local/
 glm/
 _examples_synced/
 .env
+# The dsh adapter's golden tree renders an (empty) .env: render output, not a secret.
+!tests/reef_service/data/harness_goldens/dsh/dsh/.env
 .DS_Store
 .worktrees/
 .reef/
@@ -213,3 +215,6 @@ _examples_synced/
 recipes/*/work/
 tutorials/*/work/
 recipes/basic/work/
+
+# The GEPA AIME example writes its run state here.
+recipes/gepa/examples/aime/work*/

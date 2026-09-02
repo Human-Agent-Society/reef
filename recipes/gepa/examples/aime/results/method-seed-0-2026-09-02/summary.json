@@ -1,0 +1,29 @@
+{
+  "candidates": 4,
+  "components": [
+    "rules"
+  ],
+  "frozen_test_score": 0.26666666666666666,
+  "metric_calls": 198,
+  "official_reference": {
+    "frozen_test_score": 0.26666666666666666,
+    "num_candidates": 4,
+    "observed_cost_usd": 5.458627,
+    "reflection_requests": 3,
+    "selected_candidate": 3,
+    "selected_test_score": 0.38666666666666666,
+    "task_requests": 798,
+    "test_delta": 0.12,
+    "total_metric_calls": 198,
+    "validation_seed_score": 0.15555555555555556,
+    "validation_selected_score": 0.4444444444444444,
+    "wall_time_s": 15371.48316670896
+  },
+  "scenario": "gepa-aime-seed0-plan",
+  "seed": 0,
+  "selected_test_score": 0.4666666666666667,
+  "steps": 3,
+  "test_delta": 0.2,
+  "validation_seed_score": 0.26666666666666666,
+  "validation_selected_score": 0.4
+}

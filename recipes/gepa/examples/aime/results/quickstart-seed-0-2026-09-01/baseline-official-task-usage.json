@@ -1,0 +1,17 @@
+{
+  "pricing": {
+    "cached_input_per_million": 0.1,
+    "input_per_million": 0.4,
+    "observed_at": "2026-08-30",
+    "output_per_million": 1.6,
+    "source": "https://developers.openai.com/api/docs/models/gpt-4.1-mini"
+  },
+  "schema_version": 1,
+  "usage": {
+    "cached_input_tokens": 0,
+    "input_tokens": 58790,
+    "output_tokens": 2033935,
+    "reasoning_tokens": 0,
+    "requests": 450
+  }
+}

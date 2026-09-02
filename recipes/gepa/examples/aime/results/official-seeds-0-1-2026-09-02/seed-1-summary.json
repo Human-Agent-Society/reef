@@ -1,0 +1,42 @@
+{
+  "estimated_cost_usd": {
+    "reflection": 0.20252,
+    "task": 3.3880556,
+    "total": 3.5905755999999998
+  },
+  "frozen_test_score": 0.26666666666666666,
+  "num_candidates": 4,
+  "pareto_candidate_indices": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "promotion": {
+    "candidate_idx": 2,
+    "candidate_score": 0.3333333333333333,
+    "reason": "candidate 2 strictly improved aggregate validation score from 0.177778 to 0.333333",
+    "seed_score": 0.17777777777777778,
+    "selected": true
+  },
+  "selected_test_score": 0.4066666666666667,
+  "test_delta": 0.14,
+  "total_metric_calls": 198,
+  "usage": {
+    "reflection": {
+      "cached_input_tokens": 0,
+      "input_tokens": 80632,
+      "output_tokens": 10173,
+      "reasoning_tokens": 6464,
+      "requests": 3
+    },
+    "task": {
+      "cached_input_tokens": 0,
+      "input_tokens": 378575,
+      "output_tokens": 2022891,
+      "reasoning_tokens": 0,
+      "requests": 498
+    }
+  },
+  "wall_time_s": 2552.1490542920073
+}

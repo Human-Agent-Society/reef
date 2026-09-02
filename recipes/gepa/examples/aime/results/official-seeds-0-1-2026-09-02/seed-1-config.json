@@ -1,0 +1,24 @@
+{
+  "api_key_env": "OPENAI_API_KEY",
+  "base_url": "https://api.openai.com",
+  "cell": "reference",
+  "gepa_version": "0.1.2",
+  "max_metric_calls": 150,
+  "pi_task_max_tokens": null,
+  "pi_version": "0.84.2",
+  "reflection_model": "gpt-5-2025-08-07",
+  "revisions": {
+    "AI-MO/aimo-validation-aime": "13f9e12f613e720c2a2b2f345dd04b998a29494d",
+    "MathArena/aime_2025": "c94da77eb22bbd6439e62a323bec18493a421302"
+  },
+  "seed": 1,
+  "skip_perfect_score": true,
+  "solver": "gepa.DefaultAdapter",
+  "task_model": "gpt-4.1-mini-2025-04-14",
+  "task_sampling": "provider defaults",
+  "workers": {
+    "heldout": 128,
+    "reef": 128,
+    "reference": 128
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "base_url": "https://api.openai.com",
+  "baseline_alignment_required": true,
+  "baseline_noninferiority_margin": 0.1,
+  "baseline_repetitions": 10,
+  "budget": 150,
+  "dataset_sha256": "74e81306a9a1debadd64c49a4ab3588615f7bb698b695a59c17c65dd3b895185",
+  "dataset_sizes": {
+    "test": 150,
+    "train": 45,
+    "validation": 45
+  },
+  "pi_task_max_tokens": 16384,
+  "pins": {
+    "gepa_commit": "92dadfffbe98c8ecf508179a1cab09c1bb85cd32",
+    "pi_version": "0.84.2",
+    "reef_base_commit": "6a5c88f0dceaa5113b3fcf75c87385e0bb3d6253",
+    "reef_source_commit": "d450f0f4c53336f3074bb9058acdf05e3367aa61"
+  },
+  "reef_heldout_workers": 128,
+  "reef_skip_perfect_score": true,
+  "reef_workers": 128,
+  "reference_skip_perfect_score": true,
+  "reference_workers": 128,
+  "reflection_model": "gpt-5-2025-08-07",
+  "schema_version": 2,
+  "sha256": "8cbd1bb99697b3f238e368ba02cd2294a3347f9655e6bb364d36e33bb0415cd8",
+  "smoke": false,
+  "task_model": "gpt-4.1-mini-2025-04-14"
+}

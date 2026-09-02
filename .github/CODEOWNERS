@@ -24,6 +24,7 @@
 /third_party/cordis/ @Benjamin-eecs
 /tutorials/harness_evolve/ @Benjamin-eecs
 /recipes/skillclaw/ @Benjamin-eecs
+/recipes/gepa/ @simonucl
 
 # Runnable examples of the weight methods (the method packages above stay
 # with the product layer).

@@ -13,8 +13,11 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | ``openclawrl``: multi-turn traffic,              |                                          |
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness:** prompts,   | ``skillclaw``: grows a skill pool                  | not available                          |
+| **Harness:** prompts,   | ``skillclaw``: grows a skill pool from           | not available                            |
 | rules, skills, config   | the failures in its own served traffic           |                                          |
+|                         |                                                  |                                          |
+|                         | ``gepa``: rewrites the tree by reflecting on     |                                          |
+|                         | the transcripts it already served                |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 
 Pick by the signal your workload can produce.
@@ -32,6 +35,9 @@ Pick by the signal your workload can produce.
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 | Feedback on individual requests, and failures | `skillclaw <recipes/skillclaw.rst>`__           | harness tree  | no         |
 | worth learning from                           | (built into Reef)                               |               |            |
++-----------------------------------------------+-------------------------------------------------+---------------+------------+
+| A score per request, and a stronger model to  | `gepa <recipes/gepa.rst>`__                     | harness tree  | no         |
+| reflect with                                  | (built into Reef)                               |               |            |
 +-----------------------------------------------+-------------------------------------------------+---------------+------------+
 
 How a recipe is selected

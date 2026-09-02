@@ -41,8 +41,9 @@ file name the entry renders to. Five kinds are registered in
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
-Reef bundles two adapters, ``pi`` and ``opencode``, each for a third-party
-coding agent CLI. With the ``pi`` adapter, ``GET /reef/harness`` serves:
+Reef bundles four adapters, ``pi``, ``opencode``, ``claude``, and ``dsh``
+(DeepSeek Harness), each for a third-party coding agent CLI. With the ``pi``
+adapter, ``GET /reef/harness`` serves:
 
 .. code:: text
 

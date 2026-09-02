@@ -375,6 +375,12 @@ class Trainer:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
 
+    def commit_applied(self, state: Mapping[str, Any]) -> None:
+        """Notify the backend after ``state`` enters the durable commit log."""
+        backend = self._training_backend
+        if backend is not None:
+            backend.commit_applied(state)
+
     def close(self) -> None:
         """Release the processor's resources; the trainer owns its lifecycle.
 

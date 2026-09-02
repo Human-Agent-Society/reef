@@ -19,6 +19,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
+from reef.harness.executor import LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
@@ -1190,6 +1191,39 @@ def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> Non
         CordisRecipe.from_environment({}, config=config(executor="sandbox"))
 
 
+def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, monkeypatch) -> None:
+    class SentinelExecutor(LocalExecutor):
+        pass
+
+    executor = SentinelExecutor()
+    seen = []
+    original = reef_cordis_backend.run_episode
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["executor"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    built = CordisRecipe(
+        resolve_proposer(
+            lambda nodes, samples, models: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        executor=executor,
+        runtime=runtime(),
+    )
+    trainer = built.build("demo", RecordStore())
+    backend = trainer.training_backend
+    assert isinstance(backend, CordisBackend)
+
+    run_backend_step(backend, batch(), backend.initial_state())
+
+    assert seen
+    assert all(received is executor for received in seen)
+
+
 def _traced_batch(*prompts: str) -> TraceBatch:
     samples = tuple(
         TraceSample(f"a{i}", {"messages": [{"role": "user", "content": p}]}, 0.0) for i, p in enumerate(prompts)
@@ -1398,6 +1432,50 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
     assert isinstance(on.promote, Promoter) and on.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
+
+
+def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path, monkeypatch) -> None:
+    """With more than one worker, evaluation episodes of the candidate and
+    the current composition run at once and still report in task order."""
+    import threading
+
+    barrier = threading.Barrier(4, timeout=10)  # two sides times two tasks, all in flight together
+    started: list[str] = []
+
+    def concurrent_episode(descriptor, files, prompt, **kwargs):
+        started.append(prompt)
+        barrier.wait()
+        return EpisodeResult(0, "", "", ({"rules": files.get("pi-agent/AGENTS.md", "")},), ())
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", concurrent_episode)
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "x"}})),
+        score_episode=resolve_episode_scorer(lambda task, result: float(task == "task two")),
+        tasks=("task one", "task two"),
+        models=MODEL,
+        episode_workers=4,
+    )
+    prepared = b.prepare_step(batch(), b.initial_state(), 0)
+    assert prepared.candidate is not None
+
+    evaluation = b.evaluate(prepared.candidate)
+
+    assert sorted(started) == ["task one", "task one", "task two", "task two"]
+    assert evaluation.metrics["candidate_scores"] == (0.0, 1.0)
+    assert evaluation.metrics["current_scores"] == (0.0, 1.0)
+
+
+def test_episode_workers_config_is_a_positive_integer(tmp_path: Path) -> None:
+    def config(**evolution):
+        return {"evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], **evolution}}
+
+    assert CordisRecipe.from_environment({}, config=config(episode_workers=3)).episode_workers == 3
+    assert CordisRecipe.from_environment({}, config=config(episode_workers="16")).episode_workers == 16  # ${VAR}
+    assert CordisRecipe.from_environment({}, config=config()).episode_workers == 1
+    for bad in (0, "many", True):
+        with pytest.raises(RecipeConfigError, match="episode_workers"):
+            CordisRecipe.from_environment({}, config=config(episode_workers=bad))
 
 
 def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
