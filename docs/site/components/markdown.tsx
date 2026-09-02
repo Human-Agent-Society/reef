@@ -8,6 +8,7 @@ import parse, {
   type HTMLReactParserOptions,
 } from "html-react-parser";
 import { CircleAlert, ExternalLink, Info, Lightbulb, TriangleAlert } from "lucide-react";
+import { CodeBlock } from "./code-block";
 import { MermaidDiagram } from "@/components/mermaid-diagram";
 import { getDoc } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
@@ -67,6 +68,10 @@ export function ReStructuredText({ content, sourcePath }: { content: string; sou
 
       if (node.name === "pre" && node.attribs.class?.split(" ").includes("language-mermaid")) {
         return <MermaidDiagram chart={textFromNodes(children).replace(/\n$/, "")} />;
+      }
+
+      if (node.name === "pre") {
+        return <CodeBlock className={node.attribs.class}>{domToReact(children, options)}</CodeBlock>;
       }
 
       if (node.name === "div" && node.attribs.class?.split(" ").includes("admonition")) {
