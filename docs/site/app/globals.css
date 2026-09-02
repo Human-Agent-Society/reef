@@ -90,7 +90,7 @@ button { cursor: pointer; }
 
 /* Header and navigation */
 .site-header { position: fixed; z-index: 50; top: 0; right: 0; left: 0; height: 68px; border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent); background: color-mix(in srgb, var(--background) 82%, transparent); backdrop-filter: blur(20px) saturate(140%); }
-.header-inner { width: min(1440px, 100%); height: 68px; margin: 0 auto; padding: 0 28px; display: flex; align-items: center; gap: 32px; }
+.header-inner { width: 100%; height: 68px; padding: 0 28px; display: flex; align-items: center; gap: 32px; }
 .logo { display: inline-flex; align-items: center; gap: 11px; color: var(--foreground); font-weight: 600; }
 .logo-mark { color: var(--brand); stroke-width: 2.4; }
 .logo-name { color: var(--foreground); font-size: 15px; font-weight: 700; letter-spacing: .15em; }
@@ -218,7 +218,7 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 
 /* Documentation layout */
 .docs-layout { width: 100%; min-height: 100vh; padding-top: 68px; display: grid; grid-template-columns: 270px minmax(0, 760px) minmax(220px, 1fr); }
-.docs-sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: 270px; padding: 38px 22px 48px; overflow-y: auto; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: color-mix(in srgb, var(--background) 92%, var(--accent)); }
+.docs-sidebar { position: fixed; z-index: 20; top: 68px; bottom: 0; left: 0; width: 270px; padding: 38px 18px 48px; overflow-y: auto; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); background: color-mix(in srgb, var(--background) 92%, var(--accent)); }
 .sidebar-group { margin-bottom: 30px; }
 .sidebar-group-items { display: grid; gap: 3px; }
 .sidebar-group a { padding: 7px 10px; color: var(--muted); border-radius: 7px; font-size: 13px; line-height: 20px; }
