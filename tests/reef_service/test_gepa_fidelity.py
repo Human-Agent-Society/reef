@@ -19,17 +19,17 @@ import pytest
 
 gepa = pytest.importorskip("gepa")
 
-from gepa.core.adapter import EvaluationBatch  # noqa: E402
-from gepa.core.state import GEPAState  # noqa: E402
+from gepa.core.adapter import EvaluationBatch
+from gepa.core.state import GEPAState
 
-from recipes.gepa.archive import Archive  # noqa: E402
-from recipes.gepa.method import GEPAProposer, GEPASelector  # noqa: E402
-from reef.harness.adapters import get_adapter  # noqa: E402
-from reef.harness.episode import EpisodeResult  # noqa: E402
-from reef.harness.model_binding import ModelBinding, ModelBindings  # noqa: E402
-from reef.train.cordis_backend.strategies import resolve_episode_scorer  # noqa: E402
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate  # noqa: E402
-from reef.train.types import TraceSample  # noqa: E402
+from recipes.gepa.archive import Archive
+from recipes.gepa.method import GEPAProposer, GEPASelector
+from reef.harness.adapters import get_adapter
+from reef.harness.episode import EpisodeResult
+from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.train.cordis_backend.strategies import resolve_episode_scorer
+from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
+from reef.train.types import TraceSample
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]
