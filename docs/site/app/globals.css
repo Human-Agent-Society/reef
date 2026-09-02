@@ -493,7 +493,9 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 
 @media (pointer: coarse) {
   .icon-button { width: 44px; height: 44px; }
-  .code-copy { width: 44px; height: 44px; opacity: 1; top: 8px; right: 8px; }
+  /* the button centers in a one-line block; the band fades scrolled text out beside and beneath it */
+  .code-block::before { content: ""; position: absolute; top: 1px; right: 1px; width: 72px; height: 58px; max-height: calc(100% - 2px); pointer-events: none; border-radius: 0 9px 9px 0; background: linear-gradient(90deg, transparent, var(--code) 38%); }
+  .code-copy { width: 44px; height: 44px; opacity: 1; top: min(8px, calc(50% - 22px)); right: 8px; }
   .search-input-row button { width: 44px; height: 44px; }
   .search-trigger { min-width: 44px; min-height: 44px; }
   .logo { min-height: 44px; }
