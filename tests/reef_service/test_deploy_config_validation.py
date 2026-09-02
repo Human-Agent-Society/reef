@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shlex
+import sys
 from pathlib import Path
 
 import pytest
@@ -40,13 +42,68 @@ def test_empty_file_loads_as_an_empty_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_services_must_be_a_non_empty_list_of_objects() -> None:
-    with pytest.raises(DeployConfigError, match="non-empty 'services' list"):
-        validate_services({}, "stack.yaml")
+def test_reef_python_defaults_to_the_launching_interpreter(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("REEF_PYTHON", raising=False)
+    config = load_config(
+        _write(tmp_path, "services:\n  - name: worker\n    command: '\"${REEF_PYTHON}\" -m worker'\n")
+    )
+
+    assert shlex.split(config["services"][0]["command"])[0] == sys.executable
+
+
+@pytest.mark.unit
+def test_reef_python_can_be_overridden_without_changing_bare_python(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REEF_PYTHON", "/opt/worker venv/bin/python")
+    config = load_config(
+        _write(
+            tmp_path,
+            "services:\n"
+            "  - name: managed-worker\n"
+            "    command: '\"${REEF_PYTHON}\" -m managed_worker'\n"
+            "  - name: path-worker\n"
+            "    command: python -m path_worker\n",
+        )
+    )
+
+    assert shlex.split(config["services"][0]["command"])[0] == "/opt/worker venv/bin/python"
+    assert config["services"][1]["command"] == "python -m path_worker"
+
+
+@pytest.mark.unit
+def test_auxiliary_services_are_optional_but_must_be_a_list_of_named_objects() -> None:
+    assert validate_services({}, "stack.yaml") == []
+    assert validate_services({"services": []}, "stack.yaml") == []
+    with pytest.raises(DeployConfigError, match="'services' must be a list"):
+        validate_services({"services": "worker"}, "stack.yaml")
     with pytest.raises(DeployConfigError, match=r"services\[0\] must be an object, not str"):
         validate_services({"services": ["not-an-object"]}, "stack.yaml")
     with pytest.raises(DeployConfigError, match=r"services\[1\] must have a non-empty 'name'"):
         validate_services({"services": [{"name": "a"}, {"command": "x"}]}, "stack.yaml")
+
+
+@pytest.mark.unit
+def test_reef_is_a_reserved_service_name() -> None:
+    with pytest.raises(DeployConfigError, match="service name 'reef' is reserved"):
+        validate_services({"services": [{"name": "reef", "command": "anything"}]}, "stack.yaml")
+
+
+@pytest.mark.unit
+def test_builtin_reef_service_uses_the_launcher_and_depends_on_auxiliary_services() -> None:
+    config = {"reef": {"recipe": "recipe", "port": 9123, "process": {"ready_timeout": 45}}}
+    auxiliaries = [{"name": "model"}, {"name": "trainer"}]
+
+    service = orchestrator._builtin_reef_service(config, auxiliaries)
+
+    assert shlex.split(service["command"]) == [sys.executable, "-m", "reef.service"]
+    assert service["ready"] == "curl -sf http://127.0.0.1:9123/healthz"
+    assert service["depends_on"] == ["model", "trainer"]
+    assert service["ready_timeout"] == 45
+
+
+@pytest.mark.unit
+def test_builtin_reef_process_options_must_be_an_object() -> None:
+    with pytest.raises(DeployConfigError, match=r"reef\.process must be an object"):
+        orchestrator._builtin_reef_service({"reef": {"recipe": "recipe", "process": "invalid"}}, [])
 
 
 @pytest.mark.unit
@@ -75,6 +132,44 @@ def test_invalid_stack_never_downloads_or_launches(tmp_path: Path, monkeypatch) 
     with pytest.raises(DeployConfigError, match="duplicated: worker"):
         orchestrator._run_orchestrator(str(path))
     assert not (tmp_path / "reef-stack").exists()
+
+
+@pytest.mark.unit
+def test_orchestrator_appends_the_builtin_reef_service(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class StackStub:
+        exit_code = 0
+
+        def __init__(self, config, services, run_dir, ready_timeout_default, config_path):
+            captured["services"] = services
+
+        def start(self):
+            pass
+
+        def block(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(orchestrator, "_Stack", StackStub)
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
+    path = _write(
+        tmp_path,
+        f"run_dir: {tmp_path / 'run'}\n"
+        "reef:\n"
+        "  recipe: recipe\n"
+        "services:\n"
+        "  - name: model\n"
+        "    command: model-server\n",
+    )
+
+    assert orchestrator._run_orchestrator(str(path)) == 0
+    services = captured["services"]
+    assert isinstance(services, list)
+    assert [service["name"] for service in services] == ["model", "reef"]
+    assert services[-1]["depends_on"] == ["model"]
 
 
 @pytest.mark.unit

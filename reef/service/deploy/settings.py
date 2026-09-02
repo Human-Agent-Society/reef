@@ -162,7 +162,7 @@ def service_owned_keys() -> frozenset[str]:
         settings_field.name
         for settings_field in dataclasses.fields(ServiceSettings)
         if settings_field.name not in non_reef_fields
-    ) | frozenset(SERVICE_CONFIG_ALIASES)
+    ) | frozenset((*SERVICE_CONFIG_ALIASES, "process"))
 
 
 def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:

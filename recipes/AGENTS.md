@@ -113,11 +113,6 @@ reef:
   artifact_repository: ${REEF_WORK}/artifacts.git
   artifact_work_dir: ${REEF_WORK}/artifact-work
   artifact_cache_dir: ${REEF_WORK}/artifact-cache
-
-services:
-  - name: reef
-    command: ${PYTHON} -m reef.service
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 ```
 
 For a training example (GPU + Ray + Slime/Megatron + SGLang), see

@@ -25,8 +25,3 @@ reef:
   artifact_work_dir: .reef/artifact-work
   artifact_cache_dir: .reef/artifact-cache
   agent_record_dir: .reef/agent-record
-
-services:
-  - name: reef
-    command: python -m reef.service
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz

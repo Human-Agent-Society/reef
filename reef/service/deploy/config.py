@@ -1,14 +1,16 @@
 """Config loading and interpolation shared by app assembly and orchestrator.
 
 ``reef serve`` configs are YAML with two interpolation passes: ``${VAR}``
-against the process environment at load time, and ``${dotted.path}`` against
-the config itself when a service command or setting is materialized.
+against the process environment at load time (with ``REEF_PYTHON`` defaulting
+to the current interpreter), and ``${dotted.path}`` against the config itself
+when a service command or setting is materialized.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -90,14 +92,18 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         config = {}
     if not isinstance(config, dict):
         raise DeployConfigError(f"config {path} must be a YAML object at the root, not {type(config).__name__}")
-    return _deep_interp_env(config, os.environ)
+    environ = dict(os.environ)
+    environ.setdefault("REEF_PYTHON", sys.executable)
+    return _deep_interp_env(config, environ)
 
 
 def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
-    """Services as a non-empty list of objects with unique names, checked before any download, run dir, or process."""
+    """Optional auxiliary services with unique names, checked before any process starts."""
     services = config.get("services")
-    if not isinstance(services, list) or not services:
-        raise DeployConfigError(f"config {config_path} must declare a non-empty 'services' list")
+    if services is None:
+        return []
+    if not isinstance(services, list):
+        raise DeployConfigError(f"config {config_path}: 'services' must be a list, not {type(services).__name__}")
     names: list[str] = []
     for index, service in enumerate(services):
         if not isinstance(service, dict):
@@ -107,6 +113,10 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
         name = service.get("name")
         if not isinstance(name, str) or not name.strip():
             raise DeployConfigError(f"config {config_path}: services[{index}] must have a non-empty 'name'")
+        if name == "reef":
+            raise DeployConfigError(
+                f"config {config_path}: service name 'reef' is reserved; the reef section starts it automatically"
+            )
         names.append(name)
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:

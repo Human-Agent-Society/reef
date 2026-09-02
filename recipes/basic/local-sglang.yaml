@@ -27,13 +27,8 @@ sglang:
 services:
   - name: sglang
     command: >-
-      python -m sglang.launch_server
+      "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${reef.model_path} --tp 1
       --host 0.0.0.0 --port=${sglang.port}
     ready: curl -sf http://127.0.0.1:${sglang.port}/health
     cuda: ${sglang.cuda_visible_devices}
-
-  - name: reef
-    command: python -m reef.service
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
-    depends_on: [sglang]

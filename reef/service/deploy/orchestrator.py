@@ -1,9 +1,10 @@
 """Process orchestrator behind ``reef serve``.
 
-Starts every service a config declares in dependency order, probes readiness,
-mirrors child output, watches for unexpected exits, and tears the stack down
-in reverse order on signal. Assembly of the Reef HTTP application itself
-lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
+Starts configured auxiliary services in dependency order, then starts the
+built-in Reef HTTP service, probes readiness, mirrors child output, watches
+for unexpected exits, and tears the stack down in reverse order on signal.
+Assembly of the HTTP application itself lives in
+:mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,16 +27,43 @@ import yaml
 
 from reef.service.deploy.config import (
     PROJECT_ROOT,
+    DeployConfigError,
     config_value,
     interpolate_config,
     load_config,
     resolve_model_paths,
     validate_services,
 )
-from reef.service.deploy.settings import build_parser
+from reef.service.deploy.settings import ServiceSettings, build_parser, service_settings_from_config
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
+
+
+def _builtin_reef_service(
+    config: Mapping[str, Any], auxiliary_services: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Build the internal HTTP service managed implicitly by ``reef serve``."""
+    try:
+        settings: ServiceSettings = service_settings_from_config(config)
+    except ValueError as exc:
+        raise DeployConfigError(str(exc)) from exc
+
+    reef = config.get("reef")
+    assert isinstance(reef, Mapping)  # validated by service_settings_from_config
+    process = reef.get("process") or {}
+    if not isinstance(process, Mapping):
+        raise DeployConfigError("reef.process must be an object")
+
+    service: dict[str, Any] = {
+        "name": "reef",
+        "command": shlex.join([sys.executable, "-m", "reef.service"]),
+        "ready": f"curl -sf http://127.0.0.1:{settings.port}/healthz",
+        "depends_on": [str(item["name"]) for item in auxiliary_services],
+    }
+    if "ready_timeout" in process:
+        service["ready_timeout"] = process["ready_timeout"]
+    return service
 
 
 def _log(msg):
@@ -358,7 +386,8 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     if overrides:
         config = _apply_overrides(config, overrides)
     # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
-    services = validate_services(config, resolved_config_path)
+    auxiliary_services = validate_services(config, resolved_config_path)
+    services = [*auxiliary_services, _builtin_reef_service(config, auxiliary_services)]
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     if overrides or paths_changed:

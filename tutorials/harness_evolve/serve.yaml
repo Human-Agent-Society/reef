@@ -81,8 +81,3 @@ reef:
   artifact_cache_dir: work/artifact-cache
 
 run_dir: work/stack
-
-services:
-  - name: reef
-    command: python3 -m reef.service
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz

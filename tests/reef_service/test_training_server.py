@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shlex
 import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
 from reef.service.deploy.config import interpolate_config
+from reef.service.deploy.orchestrator import _builtin_reef_service
 from reef.service.deploy.settings import ServiceSettings
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -173,7 +176,7 @@ def test_service_config_requires_recipe() -> None:
         ("recipes/openclawrl/examples/openclawrl/serve.yaml", OPENCLAWRL_RECIPE),
     ],
 )
-def test_cookbook_configs_launch_internal_service_from_reef_settings(
+def test_cookbook_configs_configure_the_builtin_reef_service(
     config_name: str,
     recipe: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -183,11 +186,13 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
         pytest.skip("repo-owned stack: shipped with the repo, not with the package")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     config = deploy.load_config(config_path)
-    service = next(item for item in config["services"] if item["name"] == "reef")
+    auxiliary_services = config.get("services") or []
+    service = _builtin_reef_service(config, auxiliary_services)
     args = deploy.service_settings_from_config(config)
 
-    assert service["command"] == "python -m reef.service"
-    assert "REEF_TOKEN" not in service.get("env", {})
+    assert all(item["name"] != "reef" for item in auxiliary_services)
+    assert shlex.split(service["command"]) == [sys.executable, "-m", "reef.service"]
+    assert service["depends_on"] == [item["name"] for item in auxiliary_services]
     assert args.tokens == ()
     assert args.recipe == recipe
 
@@ -534,7 +539,15 @@ def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
     training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings
 
-    config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}
+    config = {
+        "reef": {
+            "recipe": "openclawrl",
+            "token": "secret",
+            "tokens": ["next"],
+            "process": {"ready_timeout": 30},
+            "batch_size": 2,
+        }
+    }
     owned = _recipe_owned_settings(deploy.service_settings_from_config(config))
     assert set(owned) == {"batch_size"}
 
