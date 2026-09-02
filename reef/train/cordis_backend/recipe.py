@@ -29,7 +29,7 @@ from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Proposer, ScoreComparisonSelector
-from reef.train.cordis_backend.processor import CordisProcessor
+from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
@@ -136,6 +136,7 @@ class CordisRecipe(Recipe):
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
+    batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
 
     @property
@@ -151,6 +152,8 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires tasks")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if self.batch_policy not in ("reports", "records"):
+            raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
@@ -272,8 +275,10 @@ class CordisRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
+            processor_factory=lambda context: (
+                RecordDrivenTraceProcessor(context.with_config({"batch_size": self.batch_size}))
+                if self.batch_policy == "records"
+                else CordisProcessor(context.with_config({"batch_size": self.batch_size, "max_score": self.max_score}))
             ),
             training_backend=training_backend,
             candidate_evaluator=DefaultCandidateEvaluationPlugin(training_backend, self.candidate_selector),

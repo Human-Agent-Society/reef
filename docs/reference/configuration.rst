@@ -152,6 +152,7 @@ Harness evolution keys
 
    data.batch_size | 1 | traces per mutation attempt
    data.max_score | 0.0 | upper bound of the score window that batches
+   data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
 
 The window has no lower bound, so the default keeps only traces at or below
 zero.

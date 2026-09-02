@@ -1004,3 +1004,42 @@ def test_backend_rejects_invalid_gate_knobs(tmp_path: Path) -> None:
         build(episode_repeats=0)
     with pytest.raises(ValueError, match="forbid_residue must be a boolean"):
         build(forbid_residue="no")
+
+
+def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch) -> None:
+    """data.batch_policy records swaps the processor; the default stays the
+    reported window."""
+    module = tmp_path / "demo_batch_policy.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(policy: str | None):
+        data = {} if policy is None else {"batch_policy": policy}
+        return {
+            "data": data,
+            "evolution": {
+                "propose": "demo_batch_policy:propose",
+                "evaluate": "demo_batch_policy:evaluate",
+                "tasks": ["task one"],
+                "binary": str(make_binary(tmp_path)),
+            },
+        }
+
+    records = CordisRecipe.from_environment(
+        {}, config=config("records"), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
+    )
+    assert records.batch_policy == "records"
+    trainer = records.build("demo", RecordStore())
+    assert type(trainer.processor).__name__ == "RecordDrivenTraceProcessor"
+
+    reported = CordisRecipe.from_environment(
+        {}, config=config(None), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
+    )
+    assert reported.batch_policy == "reports"
+    trainer = reported.build("demo", RecordStore())
+    assert type(trainer.processor).__name__ == "CordisProcessor"
+
+    with pytest.raises(RecipeConfigError, match="batch_policy must be 'reports' or 'records'"):
+        CordisRecipe.from_environment({}, config=config("sometimes"))

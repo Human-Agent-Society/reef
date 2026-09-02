@@ -137,6 +137,8 @@ def _dispatcher(
     *,
     bootstrap_files: dict[str, str] | None = None,
     recipe_names: tuple[str, ...] = ("evolve",),
+    batch_policy: str = "reports",
+    batch_size: int = 1,
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -148,6 +150,8 @@ def _dispatcher(
         ("task one",),
         binary=str(binary),
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
+        batch_policy=batch_policy,
+        batch_size=batch_size,
     )
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
@@ -1095,6 +1099,46 @@ def test_install_route_refuses_an_unknown_version_with_a_404_naming_it(tmp_path)
             )
             assert response.status == 404
             assert "no-such-version" in await response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
+    """The report-free policy end to end through the real service: recorded
+    inference traffic alone fills the batch, one evolve step runs on the
+    unscored samples, and the harness read channel serves the winner. No
+    report is ever posted."""
+
+    async def run() -> None:
+        dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], batch_policy="records", batch_size=2)
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            for prompt in ("first", "second"):
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "delivery"},
+                    json={"messages": [{"role": "user", "content": prompt}]},
+                )
+                assert response.status == 200
+                await response.read()
+
+            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+                if response.status == 200:
+                    manifest = await response.json()
+                    assert manifest["gate"]["published"] is True
+                    assert "marker rules" in manifest["files"]["pi-agent/AGENTS.md"]
+                    break
+                assert response.status == 404
+                await response.read()
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("record-driven step did not publish")
+                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
         finally:
             await client.close()
 
