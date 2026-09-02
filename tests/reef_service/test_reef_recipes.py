@@ -13,13 +13,7 @@ from recipes.sao import SAOProcessor, SAORecipe
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor, TTTDRecipe
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
-from reef.recipe import (
-    Recipe,
-    RecipeConfigError,
-    WeightTrainingRecipe,
-    WeightTrainingSpec,
-    load_recipe_config,
-)
+from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.records import RecordStore
 from reef.runtime import InferenceProxyRuntime

@@ -135,7 +135,7 @@ curl http://localhost:8900/healthz`}</code></pre>
       <section className="home-section">
         <div className="section-heading-row">
           <h2>Two surfaces</h2>
-          <p>The deployment's recipe decides which surface its scenarios evolve.</p>
+          <p>The deployment&apos;s recipe decides which surface its scenarios evolve.</p>
         </div>
         <div className="path-grid path-grid-2">
           {surfaces.map((item) => {
