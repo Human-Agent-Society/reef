@@ -1395,3 +1395,155 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:promote"))
     assert isinstance(on.promote, Promoter) and on.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
+
+
+def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:
+    """A real publish records the tree it replaced as the rollback target, so
+    a later health recheck has somewhere to revert to."""
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        recheck_every=5,
+    )
+    result = run_backend_step(b, batch(), b.initial_state())
+    assert result.metrics["selected"] is True
+    # The rollback target is the pre-publish tree: the seed, without the rules
+    # node this step added.
+    target_ids = {entry["id"] for entry in result.state["rollback_entries"]}
+    assert target_ids == {"models", "settings"}
+
+
+def test_healthy_recheck_keeps_the_published_tree(tmp_path: Path) -> None:
+    """When the published tree still wins on the suite, the recheck publishes
+    nothing and keeps the rollback target on file for next time."""
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        recheck_every=1,
+    )
+    first = run_backend_step(b, batch(), b.initial_state())
+    assert first.metrics["selected"] is True
+    second = run_backend_step(b, batch(), first.state)
+    assert second.metrics["recheck"] is True
+    assert second.metrics["rolled_back"] is False
+    assert second.metrics["selected"] is False
+    # The marker tree is still live and the target is retained.
+    assert any(entry.get("id") == "r1" for entry in second.state["entries"])
+    assert {entry["id"] for entry in second.state["rollback_entries"]} == {"models", "settings"}
+
+
+def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path) -> None:
+    """The publish passes the seed gate but the grown suite exposes it as a
+    regression: the recheck re-gates the last-good tree against the published
+    tree on the union and rolls back when the last-good tree wins."""
+
+    def split(task: str, result: EpisodeResult) -> float:
+        has_marker = "marker" in result.trajectory[-1]["rules"]
+        if task == "task one":
+            return 1.0 if has_marker else 0.0
+        return 0.0 if has_marker else 1.0
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(split),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        promote_failures=True,
+        recheck_every=2,
+    )
+    first = run_backend_step(b, batch(), b.initial_state())
+    assert first.metrics["selected"] is True
+    # Two prompts the marker tree fails join the gate, then the recheck fires.
+    second = run_backend_step(b, _traced_batch("probe alpha", "probe beta"), first.state)
+    assert second.metrics["recheck"] is True
+    assert second.metrics["rolled_back"] is True
+    assert second.metrics["selected"] is True
+    # Rolled back to the pre-publish tree: the rules node is gone.
+    live_ids = {entry["id"] for entry in second.state["entries"]}
+    assert "r1" not in live_ids and {"models", "settings"} <= live_ids
+    # The target is consumed once used.
+    assert "rollback_entries" not in second.state
+
+
+def test_recipe_parses_recheck_config(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_recheck.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_recheck:propose",
+                "evaluate": "demo_recheck:evaluate",
+                "tasks": ["t"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    on = CordisRecipe.from_environment({}, config=config(recheck_every=5))
+    assert on.recheck_every == 5
+    off = CordisRecipe.from_environment({}, config=config())
+    assert off.recheck_every == 0
+    with pytest.raises(RecipeConfigError, match="recheck_every must be an integer"):
+        CordisRecipe.from_environment({}, config=config(recheck_every=-1))
+
+
+def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
+    """A publish is gated against one served model. When the deployment
+    serves a different one the recheck runs at once instead of waiting for
+    the cadence, so the harness is re-gated on the ground it now runs on."""
+    calls = {"n": 0}
+
+    def propose(n, s, m):
+        calls["n"] += 1
+        return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}) if calls["n"] == 1 else None
+
+    def build(model: ModelBinding) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(propose),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=model,
+            binary=str(make_binary(tmp_path)),
+            seed=(SEED_MODELS, SEED_SETTINGS),
+            recheck_every=100,
+        )
+
+    b = build(MODEL)
+    first = run_backend_step(b, batch(), b.initial_state())
+    assert first.metrics["selected"] is True
+    assert first.state["rollback_gated_against"]["model"] == MODEL.model
+    # Same model, step 2 of a 100 step cadence: no recheck, and the stamp
+    # rides through the skipped step.
+    same = run_backend_step(b, batch(), first.state)
+    assert "recheck" not in same.metrics
+    assert same.state["rollback_gated_against"]["model"] == MODEL.model
+    # A different served model: the stamp differs, so the recheck fires now.
+    moved = ModelBinding(base_url=MODEL.base_url, model="qwen3-32b", api_key=MODEL.api_key)
+    drift = run_backend_step(build(moved), batch(), same.state)
+    assert drift.metrics["recheck"] is True
+    assert drift.metrics["recheck_reason"] == "drift"
+    assert drift.metrics["rolled_back"] is False

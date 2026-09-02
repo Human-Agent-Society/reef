@@ -90,6 +90,19 @@ and ``max_score`` live under ``data:`` in the recipe config, and
 recorded traffic alone batches, unscored, for methods that judge for
 themselves.
 
+A publish passes the gate as the suite stood at the time, so a suite that
+keeps growing can later expose a published tree as a regression on a task the
+gate had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
+closes that gap: every ``N`` steps, and at once when the served model or the
+adapter version has changed since the publish, the loop re-gates the last
+published tree against the tree it replaced on the current suite instead of
+proposing. If
+the older tree now wins, the loop publishes it, which rolls the deployment
+back; if the published tree still wins, nothing changes. Only the tree from
+the most recent publish is kept as a rollback target, and a rollback consumes
+it, so the recheck reverts one bad publish rather than walking the whole
+history back.
+
 Most of a step's cost is the evaluation. Every task runs on both trees,
 ``episode_repeats`` times each (once by default), which makes
 ``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both
