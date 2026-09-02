@@ -5,8 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.model_binding import ModelBinding
 from reef.harness.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -55,6 +57,67 @@ def test_opencode_render_matches_the_golden_tree() -> None:
 def test_claude_render_matches_the_golden_tree() -> None:
     nodes = [node for node in NODES if node[1].get("target") != "models"]
     assert render_composition(nodes, get_adapter("claude")) == golden_tree("claude")
+
+
+DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
+
+
+def _dsh_nodes():
+    # dsh's config target is keyed by plugin id, so the pi shaped config nodes are swapped for one of its own.
+    nodes = [node for node in NODES if node[0] != "config"]
+    return [("config", {"data": {"agent-loop": {"config": {"maxSteps": 40}}}}), *nodes]
+
+
+def test_dsh_render_matches_the_golden_tree() -> None:
+    assert render_composition(_dsh_nodes(), get_adapter("dsh")) == golden_tree("dsh")
+
+
+def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
+    by_id = {row["id"]: row for row in patch if "id" in row}
+    # Every entry in id order, the defaults that keep an episode readable and quiet, the binding, then the inserts.
+    assert [row.get("id", "insert") for row in patch] == [
+        "agent-default-model",
+        "agent-loop",
+        "llm-pi-ai",
+        "session-persistence-jsonl",
+        "session-telemetry-otel",
+        "session-title-llm",
+        "insert",
+    ]
+    assert by_id["session-persistence-jsonl"]["config"] == {"compression": "none", "root": "dshHomePath('sessions')"}
+    assert "root: !!js 'dshHomePath(''sessions'')'" in files[DSH_PATCH]
+    assert by_id["session-telemetry-otel"] == {"id": "session-telemetry-otel", "disabled": True}
+    route = by_id["llm-pi-ai"]["config"]["providers"]["reef"]
+    assert route["baseURL"] == "http://127.0.0.1:9/v1" and route["apiKeyEnv"] == "REEF_API_KEY"
+    assert by_id["agent-default-model"]["config"] == {"provider": "reef", "model": "m1"}
+    assert patch[-1] == {"insert": [{"id": "extension-tracer", "name": "./extensions/tracer.mjs"}]}
+    assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
+    # A skill without frontmatter gets name and description; a command is a user invocable skill.
+    assert (
+        files["dsh/skills/notes/SKILL.md"]
+        == "---\nname: notes\ndescription: Notes skill\n---\n# Notes skill\n\nKeep short notes.\n"
+    )
+    assert files["dsh-agents/skills/summarize/SKILL.md"] == (
+        "---\nname: summarize\ndescription: Summarize $1.\ndisable-model-invocation: true\n---\nSummarize $1.\n"
+    )
+    own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
+    assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+
+
+def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
+    descriptor = get_adapter("dsh")
+    with pytest.raises(RenderError, match="uncompressed"):
+        render_composition(
+            [("config", {"data": {"session-persistence-jsonl": {"config": {"compression": "zstd"}}}})], descriptor
+        )
+    with pytest.raises(RenderError, match="session-telemetry-otel disabled"):
+        render_composition([("config", {"data": {"session-telemetry-otel": {"disabled": False}}})], descriptor)
+    with pytest.raises(RenderError, match="must be an object"):
+        render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
 
 
 def test_config_nodes_deep_merge_in_tree_order() -> None:

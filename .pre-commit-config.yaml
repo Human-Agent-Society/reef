@@ -8,14 +8,17 @@ ci:
 
 # The one list of files no formatter or linter touches. Vendored benchmark
 # content stays byte identical to its upstream pin; saved TTTD result programs
-# are published as produced. CI lints by running pre-commit over all files, so
-# this exclude is the enforced boundary — the tools' pyproject sections carry
-# no copy of it.
+# are published as produced; harness golden trees are byte exact render
+# output. CI lints by running pre-commit over all files, so this exclude is
+# the enforced boundary — the tools' pyproject sections carry no copy of it.
 exclude: |
-  (?x)^recipes/(
-    skillclaw/harbor/(environment/workspace/|tests/grade\.py)
-    |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
-    |tttd/examples/tttd/results/.*/best_solution\.py
+  (?x)^(
+    recipes/(
+      skillclaw/harbor/(environment/workspace/|tests/grade\.py)
+      |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
+      |tttd/examples/tttd/results/.*/best_solution\.py
+    )
+    |tests/reef_service/data/harness_goldens/
   )
 
 repos:

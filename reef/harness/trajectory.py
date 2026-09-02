@@ -129,6 +129,30 @@ def _resolve_dotted(reference: str) -> TrajectoryReader:
     raise TrajectoryError(f"trajectory reader {reference!r} is not callable")
 
 
+def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
+    """Every ``*.jsonl`` under ``path`` in path order, one event object per line.
+
+    Each file tolerates one torn final line, the residue a crash mid-write
+    leaves behind; a corrupt line anywhere else is an error naming ``label``.
+    """
+    events: list[dict[str, Any]] = []
+    for file in sorted(Path(path).rglob("*.jsonl")):
+        lines = file.read_text(encoding="utf-8").splitlines()
+        for index, line in enumerate(lines):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as exc:
+                if index == len(lines) - 1:
+                    break  # torn tail from a crash mid-write; the event never landed
+                raise TrajectoryError(f"{label} {file} has a corrupt event at line {index + 1}") from exc
+            if not isinstance(event, dict):
+                raise TrajectoryError(f"{label} {file} line {index + 1} is not an event object")
+            events.append(event)
+    return tuple(events)
+
+
 @register_trajectory_reader
 class PiSessionReader(TrajectoryReader):
     """Read pi session JSONL trees: every ``*.jsonl`` under ``path``, in order."""
@@ -136,22 +160,7 @@ class PiSessionReader(TrajectoryReader):
     format = "pi-session-jsonl"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        events: list[dict[str, Any]] = []
-        for file in sorted(Path(path).rglob("*.jsonl")):
-            lines = file.read_text(encoding="utf-8").splitlines()
-            for index, line in enumerate(lines):
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    if index == len(lines) - 1:
-                        break  # torn tail from a crash mid-write; the event never landed
-                    raise TrajectoryError(f"pi session {file} has a corrupt event at line {index + 1}") from exc
-                if not isinstance(event, dict):
-                    raise TrajectoryError(f"pi session {file} line {index + 1} is not an event object")
-                events.append(event)
-        return tuple(events)
+        return _read_jsonl_tree(path, "pi session")
 
 
 @register_trajectory_reader
@@ -168,22 +177,23 @@ class ClaudeSessionReader(TrajectoryReader):
     format = "claude-session-jsonl"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        events: list[dict[str, Any]] = []
-        for file in sorted(Path(path).rglob("*.jsonl")):
-            lines = file.read_text(encoding="utf-8").splitlines()
-            for index, line in enumerate(lines):
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    if index == len(lines) - 1:
-                        break  # torn tail from a crash mid-write; the event never landed
-                    raise TrajectoryError(f"claude session {file} has a corrupt event at line {index + 1}") from exc
-                if not isinstance(event, dict):
-                    raise TrajectoryError(f"claude session {file} line {index + 1} is not an event object")
-                events.append(event)
-        return tuple(events)
+        return _read_jsonl_tree(path, "claude session")
+
+
+@register_trajectory_reader
+class DeepseekSessionReader(TrajectoryReader):
+    """Read DeepSeek Harness session JSONL trees: every ``*.jsonl`` under ``path``.
+
+    dsh writes one log per session under
+    ``DSH_HOME/sessions/<cwd-slug>/session-<id>/session.jsonl``: a ``session``
+    header line, then one ``{type, seq, time, data}`` event object per line.
+    The adapter keeps the log uncompressed (dsh's default is zstd framed).
+    """
+
+    format = "deepseek-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "deepseek session")
 
 
 @register_trajectory_reader
@@ -213,4 +223,5 @@ class OpencodeStorageReader(TrajectoryReader):
 # Module-level instances for backward-compatible call syntax.
 read_pi_session = PiSessionReader()
 read_claude_session = ClaudeSessionReader()
+read_deepseek_session = DeepseekSessionReader()
 read_opencode_storage = OpencodeStorageReader()
