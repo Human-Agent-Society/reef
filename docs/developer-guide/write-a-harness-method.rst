@@ -27,7 +27,12 @@ binding returns the assistant text. ``propose`` returns one ``Mutation``
 (``create``, ``update``, or
 ``remove`` on one root-level entry), a sequence applied as one composite
 proposal under one verdict, or ``None`` to skip. An optional keyword-only
-``manifest`` argument receives the previous step's ``FailureManifest``.
+``manifest`` argument receives the previous step's ``FailureManifest``, and an
+optional keyword-only ``rejected`` argument receives the recent rejected
+proposals, oldest first, each a mapping of ``step``, ``mutations`` (``op`` and
+``id`` pairs), and the verdict's ``reason``; a method uses it to stop
+re-proposing what the gate already refused. Reef passes each keyword only to
+a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
@@ -40,7 +45,8 @@ permanent tasks. Reef dedupes, screens for credentials, and caps what it
 returns. Without it every failing trace's user prompt is promoted.
 
 ``selection`` defaults to ``score_comparison``: select when the candidate wins
-more task comparisons than it loses. ``always`` selects every applied mutation.
+more task comparisons than it loses, by more than ``evolution.min_win_margin``
+when that is set. ``always`` selects every applied mutation.
 
 .. warning::
 
