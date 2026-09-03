@@ -7,8 +7,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
+    import tomli as tomllib
+
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.model_binding import ModelBinding, ModelBindingError, temporary_model_proxy
 from reef.harness.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -59,6 +64,90 @@ def test_claude_render_matches_the_golden_tree() -> None:
     assert render_composition(nodes, get_adapter("claude")) == golden_tree("claude")
 
 
+def test_codex_render_matches_the_golden_tree() -> None:
+    nodes = [node for node in NODES if node[0] != "config" and node[0] != "code_extension"]
+    assert render_composition(nodes, get_adapter("codex")) == golden_tree("codex")
+
+
+def test_codex_binding_uses_the_responses_api_in_transient_config() -> None:
+    descriptor = get_adapter("codex")
+    base = render_composition([], descriptor)
+    assert "model_provider" not in tomllib.loads(base["codex/config.toml"])
+
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1", api="responses")
+    with temporary_model_proxy(binding) as proxied:
+        files = render_composition([], descriptor, model_binding_nodes=proxied.compose_nodes(descriptor))
+    config = tomllib.loads(files["codex/config.toml"])
+    assert config["model"] == "m1" and config["model_provider"] == "reef"
+    assert config["model_providers"]["reef"] == {
+        "name": "Reef",
+        "base_url": f"{proxied.base_url}/v1",
+        "wire_api": "responses",
+        "supports_websockets": False,
+        "experimental_bearer_token": config["model_providers"]["reef"]["experimental_bearer_token"],
+    }
+    assert config["model_providers"]["reef"]["experimental_bearer_token"]
+    assert "k-1" not in files["codex/config.toml"]
+
+
+@pytest.mark.parametrize("field", ["model", "model_provider", "model_providers"])
+def test_codex_reserves_transient_binding_fields_from_persisted_config(field: str) -> None:
+    with pytest.raises(RenderError, match="reserved for Reef's transient model binding"):
+        render_composition([("config", {"data": {field: "untrusted"}})], get_adapter("codex"))
+
+
+def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> None:
+    with pytest.raises(RenderError, match="native hooks run outside the command sandbox"):
+        render_composition(
+            [("code_extension", {"name": "tracer", "code": "export default () => null"})], get_adapter("codex")
+        )
+
+
+def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
+    descriptor = get_adapter("codex")
+    with pytest.raises(RenderError, match="approval_policy never"):
+        render_composition([("config", {"data": {"approval_policy": "on-request"}})], descriptor)
+    with pytest.raises(RenderError, match="web_search disabled"):
+        render_composition([("config", {"data": {"web_search": "live"}})], descriptor)
+    for data, message in (
+        ({"features": {"apps": True}}, r"features\.apps disabled"),
+        ({"features": {"hooks": True}}, r"features\.hooks disabled"),
+        ({"features": {"plugins": True}}, r"features\.plugins disabled"),
+        ({"features": {"skill_mcp_dependency_install": True}}, r"skill_mcp_dependency_install disabled"),
+        ({"sandbox_workspace_write": {"network_access": True}}, r"network_access false"),
+        ({"sandbox_workspace_write": {"writable_roots": ["/tmp/outside"]}}, "may not add"),
+        ({"otel": {"exporter": "otlp-http"}}, "OpenTelemetry exporter disabled"),
+        ({"mcp_servers": {"untrusted": {"command": "tool"}}}, "config keys are not admitted"),
+        ({"hooks": {"SessionStart": []}}, "config keys are not admitted"),
+        ({"notify": ["untrusted-command"]}, "config keys are not admitted"),
+        ({"model_instructions_file": "/etc/passwd"}, "config keys are not admitted"),
+        ({"experimental_compact_prompt_file": "/etc/passwd"}, "config keys are not admitted"),
+        ({"model_catalog_json": "/etc/passwd"}, "config keys are not admitted"),
+        ({"agents": {"reviewer": {"config_file": "/etc/passwd"}}}, "config keys are not admitted"),
+    ):
+        with pytest.raises(RenderError, match=message):
+            render_composition([("config", {"data": data})], descriptor)
+
+
+def test_codex_accepts_admitted_model_tuning() -> None:
+    files = render_composition(
+        [("config", {"data": {"model_reasoning_effort": "high", "model_verbosity": "low"}})],
+        get_adapter("codex"),
+    )
+    config = tomllib.loads(files["codex/config.toml"])
+    assert config["model_reasoning_effort"] == "high"
+    assert config["model_verbosity"] == "low"
+
+
+def test_codex_requires_responses_and_refuses_to_render_an_upstream_bearer() -> None:
+    descriptor = get_adapter("codex")
+    with pytest.raises(ModelBindingError, match="declares no model_binding for the 'openai' api"):
+        ModelBinding("http://up", "m").compose_nodes(descriptor)
+    binding = ModelBinding("http://up", "m", api_key="do-not-render", api="responses")
+    with pytest.raises(ModelBindingError, match="requires a temporary model proxy"):
+        binding.compose_nodes(descriptor)
+
+
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
 
 
@@ -75,7 +164,7 @@ def test_dsh_render_matches_the_golden_tree() -> None:
 def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
     descriptor = get_adapter("dsh")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
-    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    files = render_composition(_dsh_nodes(), descriptor, model_binding_nodes=binding.compose_nodes(descriptor))
     patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
     by_id = {row["id"]: row for row in patch if "id" in row}
     # Every entry in id order, the defaults that keep an episode readable and quiet, the binding, then the inserts.
@@ -157,4 +246,4 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
 
 
 def test_bundled_adapters_are_discoverable() -> None:
-    assert set(available_adapters()) >= {"claude", "opencode", "pi"}
+    assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}

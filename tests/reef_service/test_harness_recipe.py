@@ -364,6 +364,40 @@ def test_single_mutation_metrics_are_unchanged_by_the_composite_seam(tmp_path: P
     assert "mutations" not in result.metrics
 
 
+def test_codex_evaluation_uses_a_transient_credential_proxy(tmp_path: Path, monkeypatch) -> None:
+    served = ModelBinding("https://upstream.invalid", "served", api_key="upstream-secret", api="responses")
+    backend = CordisBackend(
+        descriptor=get_adapter("codex"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=served,
+        binary="unused",
+    )
+    prepared = backend.prepare_step(batch(), backend.initial_state(), 0)
+    candidate = prepared.candidate
+    assert candidate is not None
+    rendered: list[dict[str, str]] = []
+
+    def fake_run(files, task):
+        del task
+        rendered.append(dict(files))
+        return 1.0, None, 0
+
+    monkeypatch.setattr(backend, "_run_and_score", fake_run)
+    backend.evaluate(candidate)
+
+    assert len(rendered) == 2
+    for files in rendered:
+        config = files["codex/config.toml"]
+        assert 'base_url = "http://127.0.0.1:' in config
+        assert "experimental_bearer_token" in config
+        assert "upstream-secret" not in config
+    assert "model_provider" not in candidate.candidate_files["codex/config.toml"]
+
+
 def test_composition_state_recovers_from_algorithm_state(tmp_path: Path) -> None:
     """A second backend resumes the composition from the first backend's
     algorithm state — the entries list carries the tree through recovery."""

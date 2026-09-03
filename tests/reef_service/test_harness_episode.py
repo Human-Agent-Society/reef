@@ -6,17 +6,19 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import time
 from pathlib import Path
 
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, run_episode
+from reef.harness.episode import EpisodeError, _remove_episode_root, run_episode
 from reef.harness.render import render_composition
 from reef.harness.trajectory import (
     TrajectoryError,
     read_claude_session,
+    read_codex_session,
     read_deepseek_session,
     read_opencode_storage,
     read_pi_session,
@@ -68,6 +70,34 @@ storage.mkdir(parents=True)
 print(json.dumps({"type": "done"}))
 """
 
+CODEX_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+assert args[:6] == [
+    "exec", "--json", "--strict-config", "--sandbox", "workspace-write", "--skip-git-repo-check",
+], args
+prompt = args[6]
+codex_home = Path(os.environ["CODEX_HOME"])
+assert Path(os.environ["HOME"]) == codex_home.parent
+config = (codex_home / "config.toml").read_text()
+assert 'approval_policy = "never"' in config and 'web_search = "disabled"' in config
+rollout = codex_home / "sessions" / "2026" / "09" / "02" / "rollout.jsonl"
+rollout.parent.mkdir(parents=True)
+events = [
+    {"type": "session_meta", "payload": {"cwd": str(codex_home.parent / "workspace")}},
+    {"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "done"}},
+]
+rollout.write_text("".join(json.dumps(event) + "\\n" for event in events))
+(codex_home / "installation_id").write_text("test-install")
+(codex_home / ".tmp").mkdir()
+(codex_home / ".tmp" / "probe").write_text("ephemeral")
+print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}))
+sys.exit(3 if prompt == "fail" else 0)
+"""
+
 
 def fake_binary(tmp_path: Path, script: str) -> str:
     binary = tmp_path / "fake-harness"
@@ -102,6 +132,32 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    locked = root / "locked"
+    locked.mkdir(parents=True)
+    (locked / "credential").write_text("secret")
+    locked.chmod(0)
+    try:
+        _remove_episode_root(root)
+    finally:
+        if locked.exists():
+            locked.chmod(stat.S_IRWXU)
+    assert not root.exists()
+
+
+def test_episode_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+
+    def fail(*_args, **_kwargs):
+        raise OSError("locked")
+
+    monkeypatch.setattr("reef.harness.episode.shutil.rmtree", fail)
+    with pytest.raises(EpisodeError, match=r"cannot remove episode root.*locked"):
+        _remove_episode_root(root)
+
+
 def test_nonzero_exit_code_is_reported_not_raised(tmp_path: Path) -> None:
     result = run_episode(get_adapter("pi"), pi_files(), "fail", binary=fake_binary(tmp_path, PI_FAKE))
     assert result.exit_code == 3
@@ -113,6 +169,15 @@ def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path
     assert result.exit_code == 0
     assert [event["role"] for event in result.trajectory] == ["user", "assistant"]
     assert result.residue == ("stray.txt",)  # boot mutations tolerated, the stray file is a finding
+
+
+def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
+    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("codex"))
+    result = run_episode(get_adapter("codex"), files, "list files", binary=fake_binary(tmp_path, CODEX_FAKE))
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["item"]["text"] == "done"
+    assert [event["type"] for event in result.trajectory] == ["session_meta", "event_msg"]
+    assert result.residue == ()
 
 
 def test_missing_binary_raises_episode_error(tmp_path: Path) -> None:
@@ -161,6 +226,17 @@ def test_claude_reader_tolerates_exactly_one_torn_tail(tmp_path: Path) -> None:
 
 def test_claude_format_resolves_through_reader_for() -> None:
     assert reader_for("claude-session-jsonl").format == "claude-session-jsonl"
+
+
+def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:
+    first = tmp_path / "2026" / "09" / "01" / "rollout-01.jsonl"
+    second = tmp_path / "2026" / "09" / "02" / "rollout-02.jsonl"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    first.write_text('{"type": "session_meta"}\n')
+    second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
+    assert [event["type"] for event in read_codex_session(tmp_path)] == ["session_meta", "event_msg"]
+    assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
 
 
 def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:

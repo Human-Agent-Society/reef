@@ -5,12 +5,16 @@ from __future__ import annotations
 
 import io
 import json
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings, temporary_model_proxy
 from reef.harness.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -23,6 +27,58 @@ class _Response(io.BytesIO):
 
     def __exit__(self, *exc):
         return False
+
+
+class _Upstream(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, *, stall: bool = False, stall_request_body: bool = False) -> None:
+        super().__init__(("127.0.0.1", 0), _UpstreamHandler)
+        self.requests: list[dict[str, Any]] = []
+        self.stall = stall
+        self.stall_request_body = stall_request_body
+        self.request_started = threading.Event()
+        self.release = threading.Event()
+
+
+class _UpstreamHandler(BaseHTTPRequestHandler):
+    server: _Upstream
+
+    def log_message(self, format: str, *args: Any) -> None:
+        del format, args
+
+    def do_POST(self) -> None:
+        if self.server.stall_request_body:
+            self.server.request_started.set()
+            self.server.release.wait(5)
+            return
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.server.requests.append(
+            {
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+                "body": body,
+            }
+        )
+        reply = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "proxied"}],
+                }
+            ]
+        }
+        payload = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.server.request_started.set()
+        if self.server.stall:
+            self.server.release.wait(5)
+            return
+        self.wfile.write(payload)
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch, reply: Any) -> list[dict[str, Any]]:
@@ -60,6 +116,28 @@ def test_openai_chat_posts_chat_completions_with_a_bearer(monkeypatch) -> None:
     assert [m["role"] for m in call["body"]["messages"]] == ["system", "user"]
 
 
+def test_responses_chat_posts_input_with_a_bearer(monkeypatch) -> None:
+    reply = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}],
+            }
+        ]
+    }
+    seen = _capture(monkeypatch, reply)
+    binding = ModelBinding("http://up/", "m", api_key="k", api="responses")
+    assert binding.chat([{"role": "user", "content": "u"}], temperature=0.2, max_tokens=16) == "hi"
+    call = seen[0]
+    assert call["url"] == "http://up/v1/responses"
+    assert call["headers"]["authorization"] == "Bearer k"
+    assert call["body"]["input"] == [{"role": "user", "content": "u"}]
+    assert call["body"]["max_output_tokens"] == 16 and "max_tokens" not in call["body"]
+    with pytest.raises(ValueError, match="both max_tokens and max_output_tokens"):
+        binding.chat([{"role": "user", "content": "u"}], max_tokens=1, max_output_tokens=2)
+
+
 def test_anthropic_chat_posts_messages_with_x_api_key_and_a_system_field(monkeypatch) -> None:
     seen = _capture(monkeypatch, {"content": [{"type": "text", "text": "hi"}, {"type": "text", "text": "!"}]})
     binding = ModelBinding("http://up", "claude", api_key="k", api="anthropic")
@@ -79,7 +157,7 @@ def test_anthropic_chat_supplies_the_required_max_tokens(monkeypatch) -> None:
     assert seen[0]["body"]["max_tokens"] > 0
 
 
-def test_streams_fold_to_one_reply_in_both_dialects(monkeypatch) -> None:
+def test_streams_fold_to_one_reply_in_all_dialects(monkeypatch) -> None:
     openai = b'data: {"choices":[{"delta":{"role":"assistant","content":"a"}}]}\ndata: {"choices":[{"delta":{"content":"b"}}]}\ndata: [DONE]\n'
     _capture(monkeypatch, openai)
     assert ModelBinding("http://up", "m").chat([{"role": "user", "content": "u"}], stream=True) == "ab"
@@ -94,6 +172,15 @@ def test_streams_fold_to_one_reply_in_both_dialects(monkeypatch) -> None:
         ModelBinding("http://up", "claude", api="anthropic").chat([{"role": "user", "content": "u"}], stream=True)
         == "ab"
     )
+    responses = (
+        b'data: {"type":"response.output_text.delta","delta":"a"}\n'
+        b'data: {"type":"response.output_text.delta","delta":"b"}\n'
+        b"data: [DONE]\n"
+    )
+    _capture(monkeypatch, responses)
+    assert (
+        ModelBinding("http://up", "m", api="responses").chat([{"role": "user", "content": "u"}], stream=True) == "ab"
+    )
 
 
 def test_unknown_api_is_refused() -> None:
@@ -101,10 +188,150 @@ def test_unknown_api_is_refused() -> None:
         ModelBinding("http://up", "m", api="cohere")
 
 
+def test_temporary_proxy_keeps_the_bearer_in_reef_and_pins_the_model() -> None:
+    upstream = _Upstream()
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    host, port = upstream.server_address
+    binding = ModelBinding(f"http://{host}:{port}", "served", api_key="upstream-secret", api="responses")
+    try:
+        with temporary_model_proxy(binding) as proxied:
+            assert proxied.api_key and proxied.api_key != binding.api_key
+            for bad_key in (None, "wrong-capability"):
+                unauthorized = ModelBinding(proxied.base_url, proxied.model, api_key=bad_key, api=proxied.api)
+                with pytest.raises(ModelBindingError) as rejected:
+                    unauthorized.complete({"input": "blocked"})
+                assert rejected.value.status == 401
+            response = proxied.complete({"model": "untrusted", "input": "hello"})
+    finally:
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join()
+
+    assert response["output"][0]["content"][0]["text"] == "proxied"
+    assert upstream.requests == [
+        {
+            "path": "/v1/responses",
+            "authorization": "Bearer upstream-secret",
+            "body": {"model": "served", "input": "hello"},
+        }
+    ]
+
+
+def test_temporary_proxy_cancels_a_stalled_upstream_on_exit() -> None:
+    upstream = _Upstream(stall=True)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    host, port = upstream.server_address
+    binding = ModelBinding(f"http://{host}:{port}", "served", api_key="upstream-secret", api="responses")
+    stopped: list[BaseException] = []
+
+    def call(proxied: ModelBinding) -> None:
+        try:
+            proxied.complete({"input": "wait"})
+        except BaseException as exc:
+            stopped.append(exc)
+
+    try:
+        with temporary_model_proxy(binding) as proxied:
+            call_thread = threading.Thread(target=call, args=(proxied,), daemon=True)
+            call_thread.start()
+            assert upstream.request_started.wait(2)
+        call_thread.join(1)
+    finally:
+        upstream.release.set()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join()
+
+    assert not call_thread.is_alive()
+    assert stopped
+
+
+def test_temporary_proxy_never_starts_a_request_after_a_stalled_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    upstream = _Upstream()
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    host, port = upstream.server_address
+    binding = ModelBinding(f"http://{host}:{port}", "served", api_key="upstream-secret", api="responses")
+    connect_started = threading.Event()
+    release_connect = threading.Event()
+    original_connect = socket.create_connection
+
+    def delayed_connect(address, *args, **kwargs):
+        if address[1] == port:
+            connect_started.set()
+            release_connect.wait(5)
+        return original_connect(address, *args, **kwargs)
+
+    monkeypatch.setattr("reef.harness.model_binding.socket.create_connection", delayed_connect)
+    stopped: list[BaseException] = []
+
+    def call(proxied: ModelBinding) -> None:
+        try:
+            proxied.complete({"input": "wait"})
+        except BaseException as exc:
+            stopped.append(exc)
+
+    try:
+        with temporary_model_proxy(binding) as proxied:
+            call_thread = threading.Thread(target=call, args=(proxied,), daemon=True)
+            call_thread.start()
+            assert connect_started.wait(2)
+        release_connect.set()
+        call_thread.join(1)
+    finally:
+        release_connect.set()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join()
+
+    assert not call_thread.is_alive()
+    assert stopped
+    assert upstream.requests == []
+
+
+def test_temporary_proxy_cancels_a_stalled_request_body_on_exit() -> None:
+    upstream = _Upstream(stall_request_body=True)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    host, port = upstream.server_address
+    binding = ModelBinding(f"http://{host}:{port}", "served", api_key="upstream-secret", api="responses", timeout_s=2)
+    stopped: list[BaseException] = []
+
+    def call(proxied: ModelBinding) -> None:
+        try:
+            proxied.complete({"input": "x" * (12 * 1024 * 1024)})
+        except BaseException as exc:
+            stopped.append(exc)
+
+    try:
+        started = time.monotonic()
+        with temporary_model_proxy(binding) as proxied:
+            call_thread = threading.Thread(target=call, args=(proxied,), daemon=True)
+            call_thread.start()
+            assert upstream.request_started.wait(2)
+        elapsed = time.monotonic() - started
+        call_thread.join(1)
+    finally:
+        upstream.release.set()
+        upstream.shutdown()
+        upstream.server_close()
+        upstream_thread.join()
+
+    assert elapsed < 1.0
+    assert not call_thread.is_alive()
+    assert stopped
+
+
 def test_episode_templates_follow_the_dialect() -> None:
     pi = get_adapter("pi")
-    openai = render_composition(ModelBinding("http://up", "m", api_key="k").compose_nodes(pi), pi)
-    anthropic = render_composition(ModelBinding("http://up", "m", api_key="k", api="anthropic").compose_nodes(pi), pi)
+    openai_binding = ModelBinding("http://up", "m", api_key="k")
+    anthropic_binding = ModelBinding("http://up", "m", api_key="k", api="anthropic")
+    openai = render_composition([], pi, model_binding_nodes=openai_binding.compose_nodes(pi))
+    anthropic = render_composition([], pi, model_binding_nodes=anthropic_binding.compose_nodes(pi))
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-completions"
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["api"] == "anthropic-messages"
@@ -117,6 +344,10 @@ def test_the_dialect_rides_the_proxy_runtime_into_the_binding() -> None:
     runtime = InferenceProxyRuntime(model_path="claude", base_url="http://up", api_key="k", api="anthropic")
     binding = ModelBinding.from_runtime(runtime)
     assert (binding.api, binding.model, binding.api_key) == ("anthropic", "claude", "k")
+    responses = ModelBinding.from_runtime(
+        InferenceProxyRuntime(model_path="gpt", base_url="http://up", api="responses")
+    )
+    assert responses.api == "responses"
     with pytest.raises(ValueError, match="api must be one of"):
         InferenceProxyRuntime(base_url="http://up", api="grpc")
 

@@ -923,6 +923,18 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, field: str,
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
+def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
+    source = Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml"
+    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    data["writable_paths"] = [path]
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+        load_descriptor(target)
+
+
+@pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))

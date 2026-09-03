@@ -3,6 +3,7 @@ and the fail-fast contract when a required sandbox cannot isolate."""
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,8 +21,8 @@ from reef.harness.executor import (
 )
 
 
-def _script(tmp_path: Path, body: str) -> Path:
-    path = tmp_path / "prog"
+def _script(tmp_path: Path, body: str, name: str = "prog") -> Path:
+    path = tmp_path / name
     path.write_text(f"#!/usr/bin/env python3\n{body}\n")
     path.chmod(0o755)
     return path
@@ -36,6 +37,31 @@ def test_local_executor_runs_in_the_workspace_and_returns_the_outcome(tmp_path: 
     assert outcome.exit_code == 0
     assert outcome.stdout.strip() == str(workspace)
     assert "err" in outcome.stderr
+
+
+def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    reader = _script(tmp_path, "import sys; print(sys.stdin.read())", "reader")
+    driver = _script(
+        tmp_path,
+        "\n".join(
+            [
+                "import sys",
+                "from pathlib import Path",
+                "from reef.harness.executor import LocalExecutor",
+                f"root = Path({str(root)!r})",
+                f"outcome = LocalExecutor().launch([sys.executable, {str(reader)!r}], ",
+                "    root=root, workspace=root / 'workspace', env={}, timeout=10.0)",
+                "print(outcome.stdout, end='')",
+            ]
+        ),
+    )
+    result = subprocess.run(
+        [sys.executable, str(driver)], input="INJECTED_STDIN_MARKER", text=True, capture_output=True, check=True
+    )
+    assert result.stdout == "\n"
 
 
 def test_local_executor_maps_a_missing_binary(tmp_path: Path) -> None:
@@ -97,6 +123,34 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
     assert "--setenv" in argv
     joined = " ".join(argv)
     assert "A b" in joined
+
+
+def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    state = root / "codex"
+    config = state / "config.toml"
+    workspace.mkdir(parents=True)
+    state.mkdir()
+    config.write_text("model = 'm'\n")
+
+    argv = SandboxExecutor()._bwrap_argv(
+        ["true"],
+        root=root,
+        workspace=workspace,
+        env={},
+        writable_paths=(state,),
+        readonly_paths=(config,),
+    )
+
+    root_mount = argv.index("--ro-bind", argv.index(str(root)) - 1)
+    state_mount = argv.index("--bind", root_mount + 1)
+    config_mount = argv.index("--ro-bind", root_mount + 1)
+    workspace_mount = argv.index("--bind", state_mount + 1)
+    assert root_mount < state_mount < config_mount < workspace_mount
+    assert argv[state_mount + 1 : state_mount + 3] == [str(state), str(state)]
+    assert argv[config_mount + 1 : config_mount + 3] == [str(config), str(config)]
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:

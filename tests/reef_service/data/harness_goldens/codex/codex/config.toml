@@ -1,0 +1,26 @@
+approval_policy = "never"
+check_for_update_on_startup = false
+web_search = "disabled"
+
+[analytics]
+enabled = false
+
+[features]
+apps = false
+enable_request_compression = false
+hooks = false
+plugins = false
+shell_snapshot = false
+skill_mcp_dependency_install = false
+
+[feedback]
+enabled = false
+
+[otel]
+exporter = "none"
+log_user_prompt = false
+metrics_exporter = "none"
+trace_exporter = "none"
+
+[sandbox_workspace_write]
+network_access = false
