@@ -187,8 +187,11 @@ OpenClaw-RL
 
 The cookbook `openclawrl <../user-guide/recipes/openclawrl.rst>`__ recipe (`arXiv:2603.10165
 <https://arxiv.org/abs/2603.10165>`__). It trains an unmodified agent from live
-conversation traffic using a next-state binary reward, with no external grader
-and no session headers.
+conversation traffic using a next-state binary reward, with no external
+grader or training report. A harness-provided ``x-reef-tag-session`` value is
+the supported way to correlate a conversation; it stays stable within that
+conversation and is not reused for another one in the same scenario.
+Transcript matching is the fallback when the tag is absent.
 
 Runtime load ID
 --------------
