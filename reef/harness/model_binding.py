@@ -405,10 +405,10 @@ class _ModelProxyHandler(BaseHTTPRequestHandler):
         # Never let a harness request another upstream model through the proxy.
         body["model"] = binding.model
         url = urllib.parse.urlsplit(binding.base_url)
-        connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
         if url.scheme not in ("http", "https") or url.hostname is None:
             self.send_error(502)
             return
+        connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
         connection = connection_type(url.hostname, url.port, timeout=binding.timeout_s)
         if not self.server.track(connection):
             connection.close()
@@ -442,7 +442,9 @@ class _ModelProxyHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             try:
-                while chunk := upstream.read(64 * 1024):
+                # read1, not read: read blocks until it has the full amount,
+                # which would hold an SSE stream until the response completes.
+                while chunk := upstream.read1(64 * 1024):
                     self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -616,4 +618,11 @@ def _fold_responses_stream(response: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings"]
+__all__ = [
+    "MODEL_APIS",
+    "ModelBinding",
+    "ModelBindingError",
+    "ModelBindings",
+    "episode_model_binding",
+    "temporary_model_proxy",
+]
