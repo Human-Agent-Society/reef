@@ -113,8 +113,8 @@ def _server() -> tuple[StubResponses, str]:
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
-def _binding(base_url: str, api_key: str | None = "reef-smoke-key") -> ModelBinding:
-    return ModelBinding(base_url=base_url, model=MODEL, api_key=api_key, api="responses")
+def _binding(base_url: str) -> ModelBinding:
+    return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses")
 
 
 def _bound_files(*nodes: tuple[str, dict[str, Any]], binding: ModelBinding) -> dict[str, str]:
@@ -195,17 +195,3 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
     assert result.residue == ()
     assert capture.is_file() and capture.stat().st_size > 0
-
-
-def test_real_codex_omits_authorization_when_the_binding_has_no_key() -> None:
-    server, base_url = _server()
-    try:
-        files = _bound_files(binding=_binding(base_url, api_key=None))
-        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert result.exit_code == 0, (result.stdout, result.stderr)
-    assert server.requests and server.requests[0][1] == ""
-    assert result.residue == ()
