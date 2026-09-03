@@ -3,12 +3,14 @@ and the fail-fast contract when a required sandbox cannot isolate."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+import reef
 from reef.core.errors import ReefError
 from reef.harness.executor import (
     EpisodeLaunchError,
@@ -58,8 +60,16 @@ def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
             ]
         ),
     )
+    # The driver runs from tmp_path, so it needs reef on its own path: the
+    # test job type-checks and tests the source tree without installing it.
+    env = {**os.environ, "PYTHONPATH": str(Path(reef.__file__).resolve().parents[1])}
     result = subprocess.run(
-        [sys.executable, str(driver)], input="INJECTED_STDIN_MARKER", text=True, capture_output=True, check=True
+        [sys.executable, str(driver)],
+        input="INJECTED_STDIN_MARKER",
+        text=True,
+        capture_output=True,
+        check=True,
+        env=env,
     )
     assert result.stdout == "\n"
 
