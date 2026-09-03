@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import contextlib
+import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -20,9 +23,8 @@ SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
 class _Process:
     """Small Popen stand-in for orchestrator lifecycle tests."""
 
-    pid = 123
-
-    def __init__(self, returncode=None, stop_on_poll=None):
+    def __init__(self, returncode=None, stop_on_poll=None, *, pid=123):
+        self.pid = pid
         self.returncode = returncode
         self._stop_on_poll = stop_on_poll
 
@@ -567,6 +569,160 @@ def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: 
 
     assert process.returncode == -signal.SIGTERM
     assert stack.exit_code == 0
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_terminates_descendants_after_the_service_leader_exits(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy.orchestrator import _Stack
+
+    run_dir = tmp_path / "stack"
+    run_dir.mkdir()
+    child_ready = tmp_path / "child.ready"
+    child_stopped = tmp_path / "child.stopped"
+    child_code = f"""
+import os
+import signal
+import time
+from pathlib import Path
+
+def stop(signum, frame):
+    Path({str(child_stopped)!r}).write_text(str(signum))
+    raise SystemExit(0)
+
+signal.signal(signal.SIGTERM, stop)
+Path({str(child_ready)!r}).write_text(str(os.getpid()))
+while True:
+    time.sleep(1)
+"""
+    leader_code = f"""
+import subprocess
+import sys
+
+subprocess.Popen([sys.executable, "-c", {child_code!r}])
+"""
+    service = {
+        "name": "service",
+        "command": [sys.executable, "-c", leader_code],
+    }
+    stack = _Stack({}, [service], run_dir, 60, tmp_path / "serve.yaml")
+    # This test targets lifecycle, not readiness polling.
+    monkeypatch.setattr(stack, "_wait_ready", lambda service, process: None)
+
+    try:
+        stack.start()
+        leader = stack._procs["service"]
+        deadline = time.monotonic() + 5
+        while not child_ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_ready.exists(), "descendant did not start"
+        child_pid = int(child_ready.read_text())
+        assert leader.wait(timeout=5) == 0
+        assert os.getpgid(child_pid) == leader.pid
+
+        stack.shutdown(grace=2)
+
+        assert child_stopped.read_text() == str(int(signal.SIGTERM))
+    finally:
+        group = stack._process_groups.get("service")
+        if group is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(group, signal.SIGKILL)
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy import orchestrator
+
+    stack = orchestrator._Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack._procs["service"] = _Process(returncode=0)
+    stack._process_groups["service"] = 123
+    group_alive = True
+    signals = []
+
+    def killpg(pgid, signum):
+        nonlocal group_alive
+        if signum == 0:
+            if not group_alive:
+                raise ProcessLookupError
+            return
+        signals.append((pgid, signum))
+        group_alive = False
+
+    monkeypatch.setattr(orchestrator.os, "killpg", killpg)
+    monkeypatch.setattr(
+        orchestrator.os,
+        "getpgid",
+        lambda pid: (_ for _ in ()).throw(ProcessLookupError),
+    )
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+
+    stack.shutdown(grace=1)
+
+    assert signals == [(123, signal.SIGTERM)]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy import orchestrator
+
+    stack = orchestrator._Stack(
+        {},
+        [{"name": "dependency"}, {"name": "dependent"}],
+        tmp_path,
+        60,
+        tmp_path / "serve.yaml",
+    )
+    stack._procs = {
+        "dependency": _Process(pid=101),
+        "dependent": _Process(pid=202),
+    }
+    stack._process_groups = {"dependency": 101, "dependent": 202}
+    alive_groups = {101, 202}
+    signals = []
+
+    def killpg(pgid, signum):
+        if signum == 0:
+            if pgid not in alive_groups:
+                raise ProcessLookupError
+            return
+        signals.append((pgid, signum))
+        if signum == signal.SIGKILL:
+            alive_groups.remove(pgid)
+
+    monkeypatch.setattr(orchestrator.os, "killpg", killpg)
+    monkeypatch.setattr(orchestrator.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+
+    stack.shutdown(grace=0)
+
+    assert signals == [
+        (202, signal.SIGTERM),
+        (101, signal.SIGTERM),
+        (202, signal.SIGKILL),
+        (101, signal.SIGKILL),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
+def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkeypatch) -> None:
+    from reef.service.deploy import orchestrator
+
+    stack = orchestrator._Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack._procs["service"] = _Process(returncode=0, pid=123)
+    stack._process_groups["service"] = 123
+    signals = []
+
+    monkeypatch.setattr(orchestrator.os, "getpgid", lambda pid: 123)
+    monkeypatch.setattr(orchestrator.os, "getpgrp", lambda: 999)
+    monkeypatch.setattr(orchestrator.os, "killpg", lambda pgid, signum: signals.append((pgid, signum)))
+
+    stack.shutdown(grace=0)
+
+    assert signals == []
 
 
 @pytest.mark.unit
