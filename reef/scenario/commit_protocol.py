@@ -264,6 +264,9 @@ class ScenarioCommitProtocol:
             raise ReefError(
                 "checkpoint-selected training results must include the artifact returned by execute_training_job"
             )
+        if result.pending:
+            # Live weights have no durable bytes to promote later, so holding them back is not expressible.
+            raise ReefError("a pending release requires a durable checkpoint; this step publishes live weights only")
         head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
         prepared = self._trainer.commit()
         self._append_commit_record(
@@ -278,6 +281,7 @@ class ScenarioCommitProtocol:
         return result.state
 
     def _commit_without_artifact(self, result: TrainStepResult) -> Any:
+        # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
         prepared = self._trainer.commit()
         self._append_commit_record(
@@ -299,7 +303,7 @@ class ScenarioCommitProtocol:
         prepared = self._trainer.commit()
         local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         # A pending release is minted into the catalog but never activated and moves no head.
-        pending = bool(result.metrics.get("pending"))
+        pending = result.pending
         try:
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version

@@ -62,6 +62,12 @@ class TrainStepResult:
     ``artifact`` and ``runtime_load_id`` is normal for a durable train step; the
     version travels in the artifact's metadata. Combinations with no meaning
     are rejected here instead of being silently dropped by ``publication``.
+
+    ``pending`` asks for the publication to be minted into the catalog without
+    being served, for a person to promote later. It is a publication decision,
+    so it travels as a field rather than as a metrics key: only durable bytes
+    can be held back, and a step that publishes live weights or nothing at all
+    is rejected here instead of having the request silently dropped.
     """
 
     state: Mapping[str, Any] | None
@@ -71,6 +77,7 @@ class TrainStepResult:
     checkpoint_path: str | None = None
     training_job_id: str | None = None
     source_runtime_load_id: str | None = None
+    pending: bool = False
 
     def __post_init__(self) -> None:
         if self.checkpoint_path is not None and self.runtime_load_id is None:
@@ -84,6 +91,10 @@ class TrainStepResult:
             not isinstance(self.source_runtime_load_id, str) or not self.source_runtime_load_id
         ):
             raise ValueError("source_runtime_load_id must be a non-empty string or None")
+        if not isinstance(self.pending, bool):
+            raise ValueError("pending must be a boolean")
+        if self.pending and self.artifact is None and self.checkpoint_path is None:
+            raise ValueError("a pending step must carry durable bytes: set artifact or checkpoint_path")
 
     @property
     def has_model_update(self) -> bool:

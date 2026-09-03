@@ -13,8 +13,9 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 import reef.train.cordis_backend as reef_cordis_backend
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -25,6 +26,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import create_app
 from reef.train.cordis_backend import (
     CordisBackend,
@@ -1730,7 +1732,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         head_before = scenario.current_artifact_ref()
         _report_once(scenario, "review", "1")
         result = scenario.prepare_training_step()
-        assert result is not None and result.metrics["pending"] is True
+        assert result is not None and result.pending is True
         scenario.commit(result)
 
         record = scenario.commit_log.records()[-1]
@@ -1773,11 +1775,11 @@ def test_review_kinds_hold_only_wins_that_touch_a_listed_kind(tmp_path: Path) ->
         )
 
     held = build(review_kinds=("rules",))
-    assert run_backend_step(held, batch(), held.initial_state()).metrics["pending"] is True
+    assert run_backend_step(held, batch(), held.initial_state()).pending is True
     free = build(review_kinds=("skill",))
-    assert "pending" not in run_backend_step(free, batch(), free.initial_state()).metrics
+    assert run_backend_step(free, batch(), free.initial_state()).pending is False
     reviewed = build(publish="review")
-    assert run_backend_step(reviewed, batch(), reviewed.initial_state()).metrics["pending"] is True
+    assert run_backend_step(reviewed, batch(), reviewed.initial_state()).pending is True
     with pytest.raises(ValueError, match="publish must be 'auto' or 'review'"):
         build(publish="staged")
 
@@ -1850,5 +1852,45 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
 
     try:
         asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_pending_requires_durable_bytes() -> None:
+    """Only a step with bytes to promote later can ask to be held back, so a
+    live-weights or no-artifact step is refused where it is built."""
+    assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
+    assert TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path="/ckpt", pending=True).pending is True
+    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
+        TrainStepResult({}, {}, runtime_load_id="w1", pending=True)
+    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
+        TrainStepResult({}, {}, pending=True)
+    with pytest.raises(ValueError, match="pending must be a boolean"):
+        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
+
+
+def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) -> None:
+    """Checkpoint policy runs after the result is built, so a durable-weights
+    step can still land on the live path; holding it back there is not
+    expressible and must fail loudly rather than serve the tree anyway."""
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: None),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        checkpoint_strategy=EveryNVersions(1000),
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    try:
+        scenario = dispatcher.get_or_create_scenario("live-pending")
+        assert scenario is not None
+        held = TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path=str(tmp_path / "ckpt"), pending=True)
+        with pytest.raises(ReefError, match="pending release requires a durable checkpoint"):
+            scenario.commit(held)
     finally:
         dispatcher.close()
