@@ -1,8 +1,9 @@
 """OpenClaw-RL (arXiv:2603.10165): one method, one package.
 
 - ``recipe`` — the OpenClaw-RL recipe class and its ``WeightTrainingSpec``.
-- ``processor`` — the computed-feedback processor: sessions trace-matched
-  from records, turns judged on a processor-private PRM worker.
+- ``processor`` — the computed-feedback processor: sessions correlated from
+  record tags or, as a fallback, matching traces; turns judged on a
+  processor-private PRM worker.
 - ``sessions`` / ``turns`` / ``prm`` — the derivation machinery the
   processor calls: how a session is recognized, what one turn's judgment
   gets and answers, what one PRM call does.

@@ -1,10 +1,11 @@
-"""Header-free session reconstruction by trace matching.
+"""Session reconstruction from harness tags or trace matching.
 
-No cooperating shim, no session headers: a session is recognized purely
-from how each main-turn request's message list relates to the ones seen
-before it. :class:`SessionIndex` is the whole mechanism; a
-:class:`Binding` is its one product — "a previous turn just received its
-next state".
+A stable, conversation-unique ``x-reef-tag-session`` value identifies a
+conversation directly and binds its turns in arrival order. Without one, a
+session is inferred from how each main-turn request's message list relates to
+the ones seen before it. :class:`SessionIndex` is the whole mechanism; a
+:class:`Binding` is its one product — "a previous turn just received its next
+state".
 """
 
 from __future__ import annotations
