@@ -84,10 +84,6 @@ cleanup_whitelist:
   - "codex/thread-writer-locks/**"
   - "codex/thread_history_1.sqlite*"
 quirks: reef.harness.adapters.codex.quirks
-# Codex can read its own config through a model-generated shell command. Keep
-# the real bearer in Reef's process: evaluation renders a temporary loopback
-# endpoint with a short-lived capability whose proxy injects upstream auth.
-model_binding_proxy: true
 model_binding:
   responses:
     - target: primary

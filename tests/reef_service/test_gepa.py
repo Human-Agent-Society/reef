@@ -102,7 +102,6 @@ class FakeEpisodes:
 
     def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
         self.prompts: list[str] = []
-        self.files: list[dict[str, str]] = []
         self.rules: list[str] = []
         self.executors = []
         self.timeouts: list[float] = []
@@ -111,7 +110,6 @@ class FakeEpisodes:
 
     def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         self.prompts.append(prompt)
-        self.files.append(dict(files))
         self.executors.append(executor)
         self.timeouts.append(timeout)
         text = next((value for path, value in files.items() if path.endswith("AGENTS.md")), "")
@@ -457,34 +455,6 @@ def test_proposer_episodes_use_the_configured_execution_policy(tmp_path: Path) -
     assert proposal is not None
     assert episodes.executors == [executor]
     assert episodes.timeouts == [12.5]
-
-
-def test_proposer_episodes_use_the_codex_credential_proxy(tmp_path: Path) -> None:
-    episodes = FakeEpisodes()
-    proposer = GEPAProposer(
-        archive=Archive(tmp_path / "archive.json"),
-        descriptor=get_adapter("codex"),
-        binary=None,
-        score_episode=resolve_episode_scorer(score_rules),
-        feedback=default_feedback,
-        minibatch_size=1,
-        rng_seed=0,
-        skip_perfect_score=False,
-        perfect_score=1.0,
-        max_metric_calls=None,
-        kinds=("rules",),
-        valset_size=1,
-        episode_runner=episodes,
-    )
-    served = ModelBinding("https://upstream.invalid", "served-model", api_key="upstream-secret", api="responses")
-
-    score, _, error = proposer._score(NODES[:1], {"rules": REFLECTED}, TASK, ModelBindings(served=served))
-
-    assert score == 1.0 and error == ""
-    config = episodes.files[0]["codex/config.toml"]
-    assert 'base_url = "http://127.0.0.1:' in config
-    assert "experimental_bearer_token" in config
-    assert "upstream-secret" not in config
 
 
 def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> None:

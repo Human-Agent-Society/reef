@@ -19,10 +19,6 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
-- ``model_binding_proxy`` (optional): keep the served-model credential in
-  Reef and give the harness a temporary loopback endpoint instead. For these
-  adapters, fields owned by ``model_binding`` are reserved from evolved
-  config nodes so evaluation cannot mask a provider redirect in the artifact.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -115,7 +111,6 @@ class AdapterDescriptor:
     writable_paths: tuple[str, ...] = ()
     finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
     install: InstallSpec | None = None
-    model_binding_proxy: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -171,9 +166,6 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'env' must map strings to strings")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
     writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
-    model_binding_proxy = data.get("model_binding_proxy", False)
-    if not isinstance(model_binding_proxy, bool):
-        raise DescriptorError(f"{where} 'model_binding_proxy' must be a boolean")
     finalize, quirk_whitelist = _load_quirks(data.get("quirks"), where)
     return AdapterDescriptor(
         name=name,
@@ -188,7 +180,6 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         writable_paths=writable_paths,
         finalize_render=finalize,
         install=_parse_install(data.get("install"), where),
-        model_binding_proxy=model_binding_proxy,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
     )
 

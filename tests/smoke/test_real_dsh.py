@@ -87,8 +87,8 @@ def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
         binding = ModelBinding(
             base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key"
         )
-        nodes = [("rules", {"text": RULES_SENTENCE})]
-        files = render_composition(nodes, descriptor, model_binding_nodes=binding.compose_nodes(descriptor))
+        nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(descriptor)]
+        files = render_composition(nodes, descriptor)
         # The task starts with a dash on purpose: it must pass both commander layers as a positional.
         result = run_episode(descriptor, files, "- Reply with exactly the word READY", binary=REAL_DSH, timeout=180.0)
     finally:

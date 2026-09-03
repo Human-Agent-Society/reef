@@ -33,7 +33,7 @@ from typing import Any, Protocol
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
 from reef.harness.executor import EpisodeExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings, episode_model_binding
+from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.render import render_composition
 from reef.harness.trajectory import TrajectoryError
 from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation
@@ -268,24 +268,22 @@ class GEPAProposer:
         models: ModelBindings,
     ) -> tuple[float, str, str]:
         """Run one task on a composition of ``texts`` and charge one metric call."""
-        with episode_model_binding(models.served, self._descriptor) as binding:
-            files = render_composition(
-                _substituted(nodes, texts),
+        files = render_composition(
+            (*_substituted(nodes, texts), *models.served.compose_nodes(self._descriptor)),
+            self._descriptor,
+        )
+        self._archive.charge(1)
+        try:
+            result = self._run_episode(
                 self._descriptor,
-                model_binding_nodes=binding.compose_nodes(self._descriptor),
+                files,
+                task,
+                binary=self._binary,
+                timeout=self._episode_timeout_s,
+                executor=self._executor,
             )
-            self._archive.charge(1)
-            try:
-                result = self._run_episode(
-                    self._descriptor,
-                    files,
-                    task,
-                    binary=self._binary,
-                    timeout=self._episode_timeout_s,
-                    executor=self._executor,
-                )
-            except (EpisodeError, TrajectoryError) as error:
-                return 0.0, "", str(error)
+        except (EpisodeError, TrajectoryError) as error:
+            return 0.0, "", str(error)
         if result.residue and self._forbid_residue:
             cause = f"{len(result.residue)} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return 0.0, "", cause

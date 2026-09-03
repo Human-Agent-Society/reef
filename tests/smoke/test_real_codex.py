@@ -19,7 +19,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import run_episode
-from reef.harness.model_binding import ModelBinding, temporary_model_proxy
+from reef.harness.model_binding import ModelBinding
 from reef.harness.render import render_composition
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
@@ -119,7 +119,7 @@ def _binding(base_url: str, api_key: str | None = "reef-smoke-key") -> ModelBind
 
 def _bound_files(*nodes: tuple[str, dict[str, Any]], binding: ModelBinding) -> dict[str, str]:
     descriptor = get_adapter("codex")
-    return render_composition(nodes, descriptor, model_binding_nodes=binding.compose_nodes(descriptor))
+    return render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
 
 
 def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
@@ -138,25 +138,24 @@ def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
 def test_real_codex_accepts_every_admitted_tuning_key() -> None:
     server, base_url = _server()
     try:
-        with temporary_model_proxy(_binding(base_url)) as episode_binding:
-            files = _bound_files(
-                (
-                    "config",
-                    {
-                        "data": {
-                            "model_auto_compact_token_limit": 100_000,
-                            "model_auto_compact_token_limit_scope": "total",
-                            "model_context_window": 200_000,
-                            "model_reasoning_effort": "low",
-                            "model_reasoning_summary": "none",
-                            "model_verbosity": "low",
-                            "tool_output_token_limit": 1_000,
-                        }
-                    },
-                ),
-                binding=episode_binding,
-            )
-            result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+        files = _bound_files(
+            (
+                "config",
+                {
+                    "data": {
+                        "model_auto_compact_token_limit": 100_000,
+                        "model_auto_compact_token_limit_scope": "total",
+                        "model_context_window": 200_000,
+                        "model_reasoning_effort": "low",
+                        "model_reasoning_summary": "none",
+                        "model_verbosity": "low",
+                        "tool_output_token_limit": 1_000,
+                    }
+                },
+            ),
+            binding=_binding(base_url),
+        )
+        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
     finally:
         server.shutdown()
         server.server_close()
@@ -166,21 +165,19 @@ def test_real_codex_accepts_every_admitted_tuning_key() -> None:
 def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     server, base_url = _server()
     try:
-        with temporary_model_proxy(_binding(base_url)) as episode_binding:
-            files = _bound_files(
-                ("rules", {"text": RULES_MARKER}),
-                ("skill", {"name": "reef-smoke", "text": f"# Reef smoke skill\n\n{SKILL_MARKER}"}),
-                binding=episode_binding,
-            )
-            assert "reef-smoke-key" not in files["codex/config.toml"]
-            capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
-            result = run_episode(
-                get_adapter("codex"),
-                files,
-                "Reply with exactly the word READY",
-                binary=_capturing_wrapper(tmp_path, capture),
-                timeout=120.0,
-            )
+        files = _bound_files(
+            ("rules", {"text": RULES_MARKER}),
+            ("skill", {"name": "reef-smoke", "text": f"# Reef smoke skill\n\n{SKILL_MARKER}"}),
+            binding=_binding(base_url),
+        )
+        capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
+        result = run_episode(
+            get_adapter("codex"),
+            files,
+            "Reply with exactly the word READY",
+            binary=_capturing_wrapper(tmp_path, capture),
+            timeout=120.0,
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -200,12 +197,11 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert capture.is_file() and capture.stat().st_size > 0
 
 
-def test_proxy_omits_upstream_authorization_when_the_binding_has_no_key() -> None:
+def test_real_codex_omits_authorization_when_the_binding_has_no_key() -> None:
     server, base_url = _server()
     try:
-        with temporary_model_proxy(_binding(base_url, api_key=None)) as episode_binding:
-            files = _bound_files(binding=episode_binding)
-            result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+        files = _bound_files(binding=_binding(base_url, api_key=None))
+        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
     finally:
         server.shutdown()
         server.server_close()

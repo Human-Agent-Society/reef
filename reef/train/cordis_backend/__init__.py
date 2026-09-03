@@ -34,7 +34,7 @@ from reef.artifact.artifact import Artifact
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, run_episode
 from reef.harness.executor import EpisodeExecutor, LocalExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings, episode_model_binding
+from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS, secret_shaped
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
@@ -280,16 +280,10 @@ class CordisBackend(TrainingBackend):
         self._score_episode = score_episode
         self._tasks = tasks
         self._models = models
-        # The served binding renders into episodes only, and a proxied adapter
-        # cannot resolve one until evaluation opens the proxy. The dialect is
-        # checked here so an adapter without a matching model_binding refuses
-        # boot, not the first step.
-        if not descriptor.model_binding.get(models.served.api):
-            known = ", ".join(sorted(descriptor.model_binding)) or "none"
-            raise ModelBindingError(
-                f"adapter {descriptor.name!r} declares no model_binding for the {models.served.api!r} api "
-                f"(declared: {known}); episodes cannot reach a model"
-            )
+        # The served binding renders into episodes only. It is resolved once
+        # here so an adapter without a matching model_binding refuses boot,
+        # not the first step.
+        self._binding_nodes = models.served.compose_nodes(descriptor)
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
@@ -528,16 +522,11 @@ class CordisBackend(TrainingBackend):
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         candidate = self._require_harness_candidate(candidate)
-        with episode_model_binding(self._models.served, self._descriptor) as binding:
-            return self._evaluate_with_binding(candidate, binding)
-
-    def _evaluate_with_binding(self, candidate: HarnessCandidate, binding: ModelBinding) -> EvaluationResult:
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
-        binding_nodes = binding.compose_nodes(self._descriptor)
-        candidate_files = self._render_for_episode(candidate.candidate_entries, binding_nodes)
-        current_files = self._render_for_episode(candidate.current_entries, binding_nodes)
+        candidate_files = self._render_for_episode(candidate.candidate_entries)
+        current_files = self._render_for_episode(candidate.current_entries)
         # Episodes interleave candidate and current inside each pairing, so
         # anything that drifts during the run (upstream load, rate limits)
         # lands on both sides of a pair instead of one whole side. A repeat
@@ -764,16 +753,8 @@ class CordisBackend(TrainingBackend):
             "adapter_version": self._descriptor.install.version if self._descriptor.install else None,
         }
 
-    def _render_for_episode(
-        self,
-        entries: Sequence[Mapping[str, Any]],
-        binding_nodes: Sequence[tuple[str, Mapping[str, Any]]],
-    ) -> dict[str, str]:
-        return render_composition(
-            self._nodes_from(entries),
-            self._descriptor,
-            model_binding_nodes=binding_nodes,
-        )
+    def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+        return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)
 
     def _nodes(self) -> tuple[tuple[str, Any], ...]:
         """The enabled composition in tree order, as (kind, config) pairs."""
