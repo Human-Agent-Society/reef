@@ -70,6 +70,21 @@ def terminus_kwargs(files: Mapping[str, str]) -> dict[str, Any]:
     return config
 
 
+def _without_frontmatter(text: str) -> str:
+    """A SKILL.md body without its YAML header.
+
+    The render quirk writes ``name`` and ``description`` frontmatter so the
+    file is a well-formed skill on disk. Terminus 2 takes this text as
+    instruction rather than parsing it, so the delimiters would reach the
+    model as literal noise.
+    """
+    if not text.startswith("---\n"):
+        return text.strip()
+    _, _, rest = text.partition("---\n")
+    body, delimiter, tail = rest.partition("\n---\n")
+    return tail.strip() if delimiter else body.strip()
+
+
 def instruction_text(files: Mapping[str, str]) -> str:
     """The tree's rules, skills, and commands as one instruction supplement.
 
@@ -83,7 +98,7 @@ def instruction_text(files: Mapping[str, str]) -> str:
     for prefix, label in ((SKILL_PREFIX, ""), (COMMAND_PREFIX, "User-invocable. ")):
         for path in sorted(files):
             if path.startswith(prefix) and path.endswith("/SKILL.md"):
-                body = files[path].strip()
+                body = _without_frontmatter(files[path])
                 if body:
                     sections.append(f"{label}{body}" if label else body)
     return "\n\n".join(sections)

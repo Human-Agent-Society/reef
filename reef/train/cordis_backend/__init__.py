@@ -31,9 +31,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.core.errors import ReefError
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, run_episode
-from reef.harness.executor import EpisodeExecutor, LocalExecutor
+from reef.harness.executor import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS, secret_shaped
 from reef.harness.render import RenderError, render_composition
@@ -318,6 +319,15 @@ class CordisBackend(TrainingBackend):
         # Preflighted at build (recipe.build), so a hosted deployment that
         # requires the sandbox fails to start, not at the first episode.
         self._executor = executor or LocalExecutor()
+        # An adapter that isolates episodes itself cannot also run inside the
+        # jail: a task container does not nest in bubblewrap. Refuse here so a
+        # deployment that asked for the sandbox is told, rather than quietly
+        # getting the adapter's own boundary instead of the one it configured.
+        if descriptor.self_isolating and isinstance(self._executor, SandboxExecutor):
+            raise ReefError(
+                f"adapter {descriptor.name!r} isolates episodes in its own container and cannot run under "
+                "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
+            )
         if max_promoted_tasks < 0:
             raise ValueError("max_promoted_tasks must be at least 0")
         self._promote_failures = promote_failures

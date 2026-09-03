@@ -18,6 +18,7 @@ argv:
 env:
   REEF_TERMINUS_DIR: "{root}/terminus"
   REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
+  REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
 files:
   config:
     primary:
@@ -38,7 +39,13 @@ trajectory:
   path: "terminus/sessions"
 cleanup_whitelist:
   - "terminus/sessions/**"
+  # Harbor writes its trial tree here: logs, the container's outputs, and the
+  # ATIF trajectory the runner reads back.
+  - "terminus/trials/**"
   - "terminus/context/__pycache__/**"
+# Docker does not nest in bubblewrap: harbor's task container is the
+# boundary, so a sandbox-executor deployment refuses to boot instead.
+self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.

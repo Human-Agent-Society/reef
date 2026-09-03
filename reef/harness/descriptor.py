@@ -17,6 +17,10 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``self_isolating`` (optional): the adapter runs episodes inside its own
+  container, so it cannot be nested in Reef's jail. A deployment that
+  configures the sandbox executor for one of these refuses to boot rather
+  than running it unisolated under a config that promised otherwise.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -108,6 +112,9 @@ class AdapterDescriptor:
     cleanup_whitelist: tuple[str, ...] = ()
     finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
     install: InstallSpec | None = None
+    #: True when the adapter isolates episodes itself (a task container) and
+    #: cannot be nested inside :class:`~reef.harness.executor.SandboxExecutor`.
+    self_isolating: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -153,6 +160,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     ):
         raise DescriptorError(f"{where} 'env' must map strings to strings")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
+    self_isolating = data.get("self_isolating", False)
+    if not isinstance(self_isolating, bool):
+        raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
     finalize, quirk_whitelist = _load_quirks(data.get("quirks"), where)
     return AdapterDescriptor(
         name=name,
@@ -166,6 +176,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         cleanup_whitelist=whitelist + quirk_whitelist,
         finalize_render=finalize,
         install=_parse_install(data.get("install"), where),
+        self_isolating=self_isolating,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
     )
 

@@ -31,10 +31,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The terminus adapter's runner. harbor drives Terminal-Bench task containers,
-# so it is never a core dependency and the runner imports it lazily.
+# The terminus adapter's runner. reef-eval is the same primitive the examples
+# under recipes/ use to reach Harbor; it pulls Harbor's Docker-bound stack, so
+# it is never a core dependency and the runner imports it lazily.
 terminus = [
-    "harbor>=0.22.0",
+    "reef-eval[harbor]>=0.1.1",
 ]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.

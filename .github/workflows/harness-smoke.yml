@@ -52,6 +52,25 @@ jobs:
           path: ${{ runner.temp }}/real-pi-session.jsonl
           if-no-files-found: error
 
+  # The terminus adapter has no binary to pin: its runner is a harbor agent
+  # class. The equivalent guard is that the real harbor still validates the
+  # agent spec, imports the class, and binds the tree. No Docker, no model —
+  # a full episode is the opt-in tests/smoke/test_real_terminus.py.
+  terminus-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ./third_party/reef-client
+      - run: python -m pip install -e ".[terminus]" pytest
+      - run: python -m pytest tests/reef_service/test_terminus_agent.py -v
+
   # The same guard for the pinned DeepSeek Harness (tests/smoke/test_real_dsh.py).
   real-dsh:
     runs-on: ubuntu-latest

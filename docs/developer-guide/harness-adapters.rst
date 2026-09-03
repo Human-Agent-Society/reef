@@ -30,18 +30,19 @@ rather than a CLI and so is driven by a runner Reef owns.
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                           | harbor via ``reef-infra[terminus]``       |
+|              |                                                           | reef-eval via ``reef-infra[terminus]``       |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
 The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
-a harbor agent class, so the adapter ships its own runner,
+a Harbor agent class, so the adapter ships its own runner,
 ``reef-terminus``, which reads the tree from ``REEF_TERMINUS_DIR``, binds it
-to a Terminus 2 subclass, runs one Terminal-Bench task through harbor, and
-writes the ATIF trajectory and the verifier's reward under
-``REEF_TERMINUS_SESSION_DIR`` for the ``terminus-atif-json`` reader. harbor
-is an optional extra (``pip install reef-infra[terminus]``) imported only
-when the runner runs, so the adapter registry and its tests need neither
-harbor nor Docker.
+to a Terminus 2 subclass, runs one Terminal-Bench task, and writes the ATIF
+trajectory and the verifier's reward under ``REEF_TERMINUS_SESSION_DIR`` for
+the ``terminus-atif-json`` reader. It reaches Harbor through reef-eval, the
+same primitive the examples under ``recipes/`` use, so Reef has one way in
+rather than two. That is an optional extra (``pip install
+reef-infra[terminus]``) imported only when the runner runs, so the adapter
+registry and the render path need neither Harbor nor Docker.
 
 Each node kind binds to one agent seam. ``config`` becomes Terminus 2
 constructor arguments, and a key that is not one is refused at render.

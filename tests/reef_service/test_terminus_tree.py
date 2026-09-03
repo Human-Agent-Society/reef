@@ -14,7 +14,15 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.render import render_composition
-from reef.harness.terminus import TerminusTreeError, context_policy, instruction_text, load_tree, terminus_kwargs
+from reef.harness.terminus import (
+    TerminusTreeError,
+    context_policy,
+    instruction_text,
+    load_tree,
+    runner,
+    terminus_kwargs,
+)
+from reef.harness.trajectory import read_terminus_atif
 
 ASSEMBLE = """
 def assemble(state, request, files):
@@ -110,3 +118,111 @@ def test_load_tree_reads_a_rendered_tree_back_the_way_render_keyed_it(tmp_path: 
 def test_load_tree_refuses_a_root_that_is_not_a_directory(tmp_path: Path) -> None:
     with pytest.raises(TerminusTreeError, match="is not a directory"):
         load_tree(tmp_path / "missing")
+
+
+def _trajectory(steps):
+    return json.dumps({"schema_version": "ATIF-v1.4", "steps": steps})
+
+
+@pytest.mark.unit
+def test_atif_steps_reads_continuations_in_order(tmp_path: Path) -> None:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    # Terminus 2 opens a new continuation file after each summarization pass.
+    (trial / "trajectory.json").write_text(_trajectory([{"n": 1}]))
+    (trial / "trajectory.cont-1.json").write_text(_trajectory([{"n": 2}]))
+    assert runner.atif_steps(trial) == [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.unit
+def test_a_torn_trajectory_costs_its_steps_not_the_trial(tmp_path: Path) -> None:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    (trial / "trajectory.json").write_text(_trajectory([{"n": 1}]))
+    (trial / "trajectory.cont-1.json").write_text("{ truncated")
+    assert runner.atif_steps(trial) == [{"n": 1}]
+
+
+@pytest.mark.unit
+def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
+    record = runner.trial_record("hello-world", {"accuracy": 1.0}, tmp_path)
+    assert record["task"] == "hello-world"
+    assert record["rewards"] == {"accuracy": 1.0}
+    assert record["reward"] == 1.0
+    assert record["failed"] is False
+
+
+@pytest.mark.unit
+def test_a_trial_the_verifier_never_scored_is_recorded_as_failed(tmp_path: Path) -> None:
+    record = runner.trial_record("hello-world", None, tmp_path)
+    assert record["failed"] is True
+    assert record["rewards"] == {} and record["reward"] is None
+
+
+@pytest.mark.unit
+def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
+    trials, sessions = tmp_path / "trials", tmp_path / "sessions"
+    trials.mkdir()
+    (trials / "trajectory.json").write_text(_trajectory([{"n": 1}]))
+    runner.write_trial(runner.trial_record("hello-world", {"accuracy": 1.0}, trials), sessions)
+
+    events = read_terminus_atif(sessions)
+    assert [event["type"] for event in events] == ["verifier", "step"]
+    assert events[0]["reward"] == 1.0 and events[0]["task"] == "hello-world"
+    assert events[1]["n"] == 1
+
+
+@pytest.mark.unit
+def test_the_agent_spec_names_the_class_and_carries_the_tree_location(tmp_path: Path) -> None:
+    tree = _tree(**{"terminus/config.json": json.dumps({"model_name": "gpt-4o"})})
+    spec = runner.agent_spec(tree, "/episode/terminus")
+    assert spec == {
+        "name": "reef.harness.terminus.agent:ReefTerminus",
+        "model_name": "gpt-4o",
+        "kwargs": {"reef_dir": "/episode/terminus"},
+    }
+
+
+@pytest.mark.unit
+def test_a_tree_without_a_model_name_cannot_run() -> None:
+    with pytest.raises(TerminusTreeError, match="carries no model_name"):
+        runner.agent_spec({}, "/episode/terminus")
+
+
+@pytest.mark.unit
+def test_task_path_resolves_a_task_inside_the_dataset(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "hello-world").mkdir()
+    monkeypatch.setenv("REEF_TERMINUS_DATASET", str(tmp_path))
+    assert runner.task_path("hello-world") == str(tmp_path / "hello-world")
+    with pytest.raises(TerminusTreeError, match="holds no task"):
+        runner.task_path("absent")
+
+
+@pytest.mark.unit
+def test_atif_steps_orders_continuations_numerically(tmp_path: Path) -> None:
+    trial = tmp_path / "trial"
+    trial.mkdir()
+    for index, step in ((0, 1), (2, 3), (10, 11)):
+        name = "trajectory.json" if index == 0 else f"trajectory.cont-{index}.json"
+        (trial / name).write_text(_trajectory([{"n": step}]))
+    assert runner.atif_steps(trial) == [{"n": 1}, {"n": 3}, {"n": 11}]
+
+
+@pytest.mark.unit
+def test_skill_frontmatter_does_not_reach_the_instruction() -> None:
+    # The quirk writes the header so the file is a well-formed skill on disk;
+    # Terminus 2 reads this text as instruction, so the delimiters would be
+    # literal noise in the prompt.
+    rendered = render_composition(
+        [("skill", {"name": "notes", "text": "# Notes\n\nTake notes."})], get_adapter("terminus")
+    )
+    assert rendered["terminus/skills/notes/SKILL.md"].startswith("---\n")
+    text = instruction_text(rendered)
+    assert text == "# Notes\n\nTake notes."
+    assert "---" not in text and "description:" not in text
+
+
+@pytest.mark.unit
+def test_a_skill_that_already_had_frontmatter_keeps_only_its_body() -> None:
+    tree = _tree(**{"terminus/skills/n/SKILL.md": "---\nname: n\ndescription: d\n---\nBody here.\n"})
+    assert instruction_text(tree) == "Body here."
