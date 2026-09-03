@@ -62,7 +62,9 @@ dev = [
     "mypy",
     "pre-commit",
     "pytest",
-    "ruff==0.16.5",
+    # CI measures coverage against the [tool.coverage.report] floor below.
+    "pytest-cov",
+    "ruff==0.14.7",
 ]
 
 [dependency-groups]

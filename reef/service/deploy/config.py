@@ -143,7 +143,7 @@ def resolve_hf_snapshot(repo_id: str) -> str:
     If the value is already a local path, return it unchanged.
     """
     value = os.path.expanduser(repo_id)
-    if Path(value).exists():
+    if is_local_path(repo_id):
         return value
     if "/" not in value or value.startswith(("/", "~")):
         raise DeployConfigError(
