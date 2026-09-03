@@ -11,9 +11,9 @@ development run and a hosted one, so that step is the seam:
 * :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
   fresh non-root namespace, a read-only base filesystem with only the episode
   root exposed (its workspace and declared runtime state writable, rendered
-  inputs read-only), no host
-  environment or credentials, resource limits, network disabled unless an
-  egress allowlist is configured, and death with the parent.
+  inputs read-only), no host environment or credentials, resource limits,
+  network disabled unless an egress allowlist is configured, and death with
+  the parent.
 
 A deployment selects the executor by config; a hosted deployment that requires
 the sandbox refuses to start when the sandbox runtime is unavailable, through

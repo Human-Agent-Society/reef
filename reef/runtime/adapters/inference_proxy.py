@@ -66,9 +66,10 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     @property
     def api(self) -> str:
-        """The provider's API dialect (``openai``, ``responses``, or ``anthropic``). The proxy
-        forwards whatever path a client calls; this tells the training side
-        which dialect to speak when it calls the model itself."""
+        """The provider's API dialect (``openai``, ``responses``, or
+        ``anthropic``). The proxy forwards whatever path a client calls; this
+        tells the training side which dialect to speak when it calls the model
+        itself."""
         return self._api
 
     @property

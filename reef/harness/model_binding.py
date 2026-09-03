@@ -198,10 +198,10 @@ class ModelBinding:
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
-        ``responses``, and Messages for ``anthropic``. ``model`` defaults to this binding's. A streaming
-        request is read to the end and folded into the non-streaming response
-        shape, so callers see one contract either way. Prefer :meth:`chat`
-        unless the method needs the raw response.
+        ``responses``, and Messages for ``anthropic``. ``model`` defaults to
+        this binding's. A streaming request is read to the end and folded into
+        the non-streaming response shape, so callers see one contract either
+        way. Prefer :meth:`chat` unless the method needs the raw response.
         """
 
         request_body = {"model": self.model, **body}
@@ -464,6 +464,11 @@ def temporary_model_proxy(binding: ModelBinding) -> Iterator[ModelBinding]:
     upstream authentication from Reef's process, and pins every request to
     the served model. Harness config receives only the returned short-lived
     capability, so reading it cannot disclose the upstream credential.
+
+    It listens on loopback, so a sandboxed episode reaches it only when the
+    deployment allowlists it under ``evolution.sandbox.egress_hosts``: an
+    empty allowlist unshares the network namespace (see
+    :class:`~reef.harness.executor.SandboxExecutor`).
     """
 
     try:

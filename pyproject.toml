@@ -28,6 +28,8 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    # No stdlib TOML writer exists (`tomllib` only reads, and only on 3.11+);
+    # the codex adapter serializes its `config.toml` with this.
     "tomli-w",
 ]
 

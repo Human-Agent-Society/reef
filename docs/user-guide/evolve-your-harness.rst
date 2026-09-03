@@ -36,7 +36,7 @@ file name the entry renders to. Five kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``skill``          | a named ``SKILL.md``                                     |
 +--------------------+----------------------------------------------------------+
-| ``code_extension`` | a named extension or lifecycle-hook module               |
+| ``code_extension`` | a named code file the harness loads in process           |
 +--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is

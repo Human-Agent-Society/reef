@@ -98,13 +98,13 @@ class CordisRecipe(Recipe):
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
-    ``reef.upstream_api`` when it uses Responses or an Anthropic-style provider). It reaches
-    ``propose`` as ``models.served`` and is rendered into each evaluation
-    episode through the adapter's ``model_binding`` template, so the seed
-    carries no provider nodes and neither does the published tree; a client
-    points its own harness at Reef. A method's auxiliary models - a stronger
-    proposer, a judge - are declared under ``evolution.models`` and reach
-    ``propose`` as ``models["name"]``::
+    ``reef.upstream_api`` for a Responses or Anthropic-style provider). It
+    reaches ``propose`` as ``models.served`` and is rendered into each
+    evaluation episode through the adapter's ``model_binding`` template, so
+    the seed carries no provider nodes and neither does the published tree; a
+    client points its own harness at Reef. A method's auxiliary models - a
+    stronger proposer, a judge - are declared under ``evolution.models`` and
+    reach ``propose`` as ``models["name"]``::
 
         evolution:
           models:

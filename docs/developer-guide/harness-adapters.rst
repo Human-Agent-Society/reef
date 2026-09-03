@@ -24,22 +24,27 @@ adapter does. Reef bundles five, one per third-party coding-agent CLI.
 
 The ``codex`` adapter runs ``codex exec --json`` with its Codex state root
 relocated by ``CODEX_HOME`` (``run_episode`` separately relocates ``HOME``).
-Reef's JSON ``config`` nodes render as Codex
-TOML; rules render to ``AGENTS.md``; skills use the shared user skill root
-under ``$HOME/.agents/skills``; and ``agent_command`` uses Codex's legacy
-custom-prompt directory. Custom prompts remain supported but are deprecated
-upstream in favor of skills. Codex ``code_extension`` nodes are rejected for
-now: native hooks run outside Codex's command sandbox, so activating arbitrary
-evolved JavaScript would cross Reef's isolation boundary. The model binding
-uses Codex's Responses wire API, so set
+Reef's JSON ``config`` nodes render as Codex TOML; rules render to
+``AGENTS.md``; skills use the shared user skill root under
+``$HOME/.agents/skills``; and ``agent_command`` uses Codex's legacy
+custom-prompt directory, which remains supported but is deprecated upstream
+in favor of skills. Codex ``code_extension`` nodes are rejected for now:
+native hooks run outside Codex's command sandbox, so activating arbitrary
+evolved JavaScript would cross Reef's isolation boundary.
+
+The model binding uses Codex's Responses wire API, so set
 ``reef.upstream_api: responses``; the default Chat Completions dialect fails
 at recipe construction. Its bearer token is added only to the transient
 Reef-owned proxy; Codex receives only the proxy's temporary loopback address
 and a short-lived capability, so neither the evaluation render nor the
-committed tree contains the upstream token.
+committed tree contains the upstream token. That proxy listens on loopback,
+so a deployment running ``evolution.executor: sandbox`` must allowlist it
+under ``evolution.sandbox.egress_hosts``: an empty allowlist unshares the
+network namespace and the episode cannot reach the proxy.
+
 Codex config evolution is limited to model-behavior fields; Reef pins or
-rejects settings that can load host paths, launch integrations, add egress, or
-override the transient model, provider, or endpoint.
+rejects settings that can load host paths, launch integrations, add egress,
+or override the transient model, provider, or endpoint.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
