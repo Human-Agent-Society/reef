@@ -98,21 +98,25 @@ def _write_file_block(target: str, content: str) -> str:
 def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
     """The env var and compose subdirectory that point the binary at the composition.
 
-    The compose directory is the parent of the primary config target's path
-    (e.g. ``pi-agent`` for pi, ``opencode`` for opencode). The env var is the
-    one whose value is ``{root}/<compose_dir>`` — the entry that relocates
-    the binary's whole composition at the episode root, and the only env
+    The compose directory is the deepest directory above the primary config
+    target that an env entry relocates with a ``{root}/<dir>`` value: the
+    target's own parent for pi and opencode, the home two levels up for dsh,
+    whose config file sits inside a profile. That entry relocates the
+    binary's whole composition at the episode root, and it is the only env
     entry the user-facing wrapper needs (session/state dirs use the binary's
     own defaults outside episodes).
     """
-    compose_dir = str(PurePosixPath(descriptor.config_targets["primary"].path).parent)
-    marker = f"{{root}}/{compose_dir}"
-    for key, value in descriptor.env.items():
-        if value == marker:
-            return key, compose_dir
+    primary = PurePosixPath(descriptor.config_targets["primary"].path)
+    for parent in primary.parents:
+        if parent == PurePosixPath("."):
+            break
+        marker = f"{{root}}/{parent}"
+        for key, value in descriptor.env.items():
+            if value == marker:
+                return key, str(parent)
     raise DescriptorError(
-        f"adapter {descriptor.name!r} has no env var pointing at {compose_dir!r} "
-        f"(expected an entry with value {marker!r})"
+        f"adapter {descriptor.name!r} has no env var relocating a directory above {str(primary)!r} "
+        "(expected an entry with a {root}/<dir> value)"
     )
 
 
