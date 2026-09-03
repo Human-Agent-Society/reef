@@ -31,9 +31,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The terminus adapter's runner. reef-eval is the same primitive the examples
-# under recipes/ use to reach Harbor; it pulls Harbor's Docker-bound stack, so
-# it is never a core dependency and the runner imports it lazily.
 terminus = [
     "reef-eval[harbor]>=0.1.1",
 ]
