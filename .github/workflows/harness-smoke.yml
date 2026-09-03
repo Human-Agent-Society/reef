@@ -1,6 +1,6 @@
 name: harness-smoke
 
-# Runs the real pinned pi and dsh binaries through render, run_episode, and
+# Runs the real pinned pi, Codex, and dsh binaries through render, run_episode, and
 # the trajectory reader against a stub model server (tests/smoke/): the guard
 # against a release changing a format the hermetic fakes only imitate.
 # Non-blocking: not in the required check set until stable.
@@ -49,6 +49,33 @@ jobs:
         with:
           name: real-pi-session
           path: ${{ runner.temp }}/real-pi-session.jsonl
+          if-no-files-found: error
+
+  real-codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: python -m pip install ./third_party/reef-client
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.152.1
+      - run: python -m pytest tests/smoke/test_real_codex.py
+        env:
+          REEF_REAL_CODEX_BINARY: ${{ runner.temp }}/codex/node_modules/.bin/codex
+          REEF_REAL_CODEX_SESSION_OUT: ${{ runner.temp }}/real-codex-session.jsonl
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-codex-session
+          path: ${{ runner.temp }}/real-codex-session.jsonl
           if-no-files-found: error
 
   # The same guard for the pinned DeepSeek Harness (tests/smoke/test_real_dsh.py).
