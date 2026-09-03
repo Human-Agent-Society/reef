@@ -181,6 +181,21 @@ class ClaudeSessionReader(TrajectoryReader):
 
 
 @register_trajectory_reader
+class CodexSessionReader(TrajectoryReader):
+    """Read Codex rollout JSONL trees: every ``*.jsonl`` under ``path``.
+
+    Codex writes rollouts below ``CODEX_HOME/sessions/YYYY/MM/DD``. Sorting
+    by relative path preserves the date hierarchy and rollout id order; the
+    common JSONL reader tolerates one torn final line per rollout.
+    """
+
+    format = "codex-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return _read_jsonl_tree(path, "codex session")
+
+
+@register_trajectory_reader
 class DeepseekSessionReader(TrajectoryReader):
     """Read DeepSeek Harness session JSONL trees: every ``*.jsonl`` under ``path``.
 
@@ -255,6 +270,7 @@ class OpencodeStorageReader(TrajectoryReader):
 # Module-level instances for backward-compatible call syntax.
 read_pi_session = PiSessionReader()
 read_claude_session = ClaudeSessionReader()
+read_codex_session = CodexSessionReader()
 read_deepseek_session = DeepseekSessionReader()
 read_hermes_session = HermesSessionReader()
 read_opencode_storage = OpencodeStorageReader()

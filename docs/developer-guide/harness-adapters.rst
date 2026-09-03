@@ -4,7 +4,7 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles five, one per third-party coding-agent CLI, and
+adapter does. Reef bundles six, one per third-party coding-agent CLI, and
 one for its own agent, ``native``, whose loop lives in this tree and whose
 tools are ``native_tool`` nodes, so a mutation can add, rewrite, or remove a
 tool.
@@ -19,6 +19,8 @@ tool.
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``claude``   | ``primary`` → ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
++--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
@@ -28,6 +30,24 @@ tool.
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+
+The ``codex`` adapter runs ``codex exec --json`` with its Codex state root
+relocated by ``CODEX_HOME`` (``run_episode`` separately relocates ``HOME``).
+Reef's JSON ``config`` nodes render as Codex TOML; rules render to
+``AGENTS.md``; skills use the shared user skill root under
+``$HOME/.agents/skills``; and ``agent_command`` uses Codex's legacy
+custom-prompt directory, which remains supported but is deprecated upstream
+in favor of skills. Codex ``code_extension`` nodes are rejected for now:
+native hooks run outside Codex's command sandbox, so activating arbitrary
+evolved JavaScript would cross Reef's isolation boundary.
+
+The model binding uses Codex's Responses wire API, so set
+``reef.upstream_api: responses``; the default Chat Completions dialect fails
+at recipe construction.
+
+Codex config evolution is limited to model-behavior fields; Reef pins or
+rejects settings that can load host paths, launch integrations, add egress,
+or redirect the model provider or endpoint.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
@@ -115,7 +135,8 @@ agent.
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
-   model_binding | per API dialect (``openai``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 

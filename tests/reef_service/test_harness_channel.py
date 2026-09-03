@@ -947,6 +947,18 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, field: str,
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
+def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
+    source = Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml"
+    data = yaml.safe_load(source.read_text(encoding="utf-8"))
+    data["writable_paths"] = [path]
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+        load_descriptor(target)
+
+
+@pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
@@ -1039,10 +1051,10 @@ def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path)
         await client.start_server()
         try:
             response = await client.get(
-                "/reef/harness/install", params={"adapter": "codex"}, headers={"x-reef-scenario": "delivery"}
+                "/reef/harness/install", params={"adapter": "acme"}, headers={"x-reef-scenario": "delivery"}
             )
             assert response.status == 404
-            assert "codex" in await response.text()
+            assert "acme" in await response.text()
             # A missing adapter parameter is a caller error, not a lookup miss.
             response = await client.get("/reef/harness/install", headers={"x-reef-scenario": "delivery"})
             assert response.status == 400

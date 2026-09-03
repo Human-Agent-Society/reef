@@ -29,10 +29,9 @@ from reef.core.errors import ReefError
 from reef.harness.descriptor import AdapterDescriptor
 from reef.runtime.base import InferenceRuntime
 
-#: The API dialects a binding can speak. ``openai`` is chat completions at
-#: ``/v1/chat/completions`` with a Bearer token; ``anthropic`` is messages at
-#: ``/v1/messages`` with ``x-api-key``.
-MODEL_APIS = ("openai", "anthropic")
+#: The API dialects a binding can speak. ``openai`` is Chat Completions,
+#: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.
+MODEL_APIS = ("openai", "responses", "anthropic")
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
@@ -138,6 +137,26 @@ class ModelBinding:
         the binding's timeout for this call.
         """
 
+        if self.api == "responses":
+            responses_params = dict(params)
+            if "max_tokens" in responses_params:
+                if "max_output_tokens" in responses_params:
+                    raise ValueError("responses chat cannot set both max_tokens and max_output_tokens")
+                responses_params["max_output_tokens"] = responses_params.pop("max_tokens")
+            response = self.complete(
+                {"input": [dict(message) for message in messages], **responses_params}, timeout_s=timeout_s
+            )
+            pieces = [
+                content.get("text", "")
+                for item in response.get("output", ())
+                if isinstance(item, Mapping) and item.get("type") == "message" and item.get("role") == "assistant"
+                for content in item.get("content", ())
+                if isinstance(content, Mapping) and content.get("type") == "output_text"
+            ]
+            if not all(isinstance(piece, str) for piece in pieces) or not pieces:
+                raise ModelBindingError(f"model endpoint returned no completion: {response!r}"[:600])
+            return "".join(pieces)
+
         if self.api == "anthropic":
             system = "\n\n".join(
                 str(message.get("content", "")) for message in messages if message.get("role") == "system"
@@ -168,11 +187,11 @@ class ModelBinding:
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
-        response object: chat completions for ``openai``, messages for
-        ``anthropic``. ``model`` defaults to this binding's. A streaming
-        request is read to the end and folded into the non-streaming response
-        shape, so callers see one contract either way. Prefer :meth:`chat`
-        unless the method needs the raw response.
+        response object: Chat Completions for ``openai``, Responses for
+        ``responses``, and Messages for ``anthropic``. ``model`` defaults to
+        this binding's. A streaming request is read to the end and folded into
+        the non-streaming response shape, so callers see one contract either
+        way. Prefer :meth:`chat` unless the method needs the raw response.
         """
 
         request_body = {"model": self.model, **body}
@@ -183,7 +202,7 @@ class ModelBinding:
             if self.api_key:
                 headers["x-api-key"] = self.api_key
         else:
-            path = "/v1/chat/completions"
+            path = "/v1/responses" if self.api == "responses" else "/v1/chat/completions"
             if self.api_key:
                 headers["authorization"] = f"Bearer {self.api_key}"
         request = urllib.request.Request(
@@ -195,7 +214,11 @@ class ModelBinding:
         try:
             with urllib.request.urlopen(request, timeout=timeout_s or self.timeout_s) as response:
                 if request_body.get("stream"):
-                    return _fold_anthropic_stream(response) if self.api == "anthropic" else _fold_stream(response)
+                    if self.api == "anthropic":
+                        return _fold_anthropic_stream(response)
+                    if self.api == "responses":
+                        return _fold_responses_stream(response)
+                    return _fold_stream(response)
                 return json.load(response)
         except urllib.error.HTTPError as exc:
             try:
@@ -337,6 +360,31 @@ def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
         "model": model,
         "content": [{"type": "text", "text": "".join(pieces)}],
         "stop_reason": stop_reason,
+    }
+
+
+def _fold_responses_stream(response: Any) -> dict[str, Any]:
+    """Fold an SSE Responses stream into one response object."""
+
+    pieces: list[str] = []
+    completed: dict[str, Any] | None = None
+    for event in _sse_payloads(response):
+        if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
+            pieces.append(event["delta"])
+        elif event.get("type") == "response.completed" and isinstance(event.get("response"), dict):
+            completed = event["response"]
+    if completed is not None:
+        return completed
+    return {
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "".join(pieces)}],
+            }
+        ],
     }
 
 

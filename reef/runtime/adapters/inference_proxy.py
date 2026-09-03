@@ -16,7 +16,7 @@ from reef.runtime.inference import (
 from reef.runtime.registry import RuntimeFactory, config_secret, config_string, register_runtime_kind
 
 #: Provider API dialects the proxy can describe to the training side.
-PROVIDER_APIS = ("openai", "anthropic")
+PROVIDER_APIS = ("openai", "responses", "anthropic")
 
 
 class InferenceProxyRuntime(InferenceRuntime):
@@ -66,9 +66,10 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     @property
     def api(self) -> str:
-        """The provider's API dialect (``openai`` or ``anthropic``). The proxy
-        forwards whatever path a client calls; this tells the training side
-        which dialect to speak when it calls the model itself."""
+        """The provider's API dialect (``openai``, ``responses``, or
+        ``anthropic``). The proxy forwards whatever path a client calls; this
+        tells the training side which dialect to speak when it calls the model
+        itself."""
         return self._api
 
     @property

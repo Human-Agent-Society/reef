@@ -60,6 +60,28 @@ def test_openai_chat_posts_chat_completions_with_a_bearer(monkeypatch) -> None:
     assert [m["role"] for m in call["body"]["messages"]] == ["system", "user"]
 
 
+def test_responses_chat_posts_input_with_a_bearer(monkeypatch) -> None:
+    reply = {
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}],
+            }
+        ]
+    }
+    seen = _capture(monkeypatch, reply)
+    binding = ModelBinding("http://up/", "m", api_key="k", api="responses")
+    assert binding.chat([{"role": "user", "content": "u"}], temperature=0.2, max_tokens=16) == "hi"
+    call = seen[0]
+    assert call["url"] == "http://up/v1/responses"
+    assert call["headers"]["authorization"] == "Bearer k"
+    assert call["body"]["input"] == [{"role": "user", "content": "u"}]
+    assert call["body"]["max_output_tokens"] == 16 and "max_tokens" not in call["body"]
+    with pytest.raises(ValueError, match="both max_tokens and max_output_tokens"):
+        binding.chat([{"role": "user", "content": "u"}], max_tokens=1, max_output_tokens=2)
+
+
 def test_anthropic_chat_posts_messages_with_x_api_key_and_a_system_field(monkeypatch) -> None:
     seen = _capture(monkeypatch, {"content": [{"type": "text", "text": "hi"}, {"type": "text", "text": "!"}]})
     binding = ModelBinding("http://up", "claude", api_key="k", api="anthropic")
@@ -79,7 +101,7 @@ def test_anthropic_chat_supplies_the_required_max_tokens(monkeypatch) -> None:
     assert seen[0]["body"]["max_tokens"] > 0
 
 
-def test_streams_fold_to_one_reply_in_both_dialects(monkeypatch) -> None:
+def test_streams_fold_to_one_reply_in_all_dialects(monkeypatch) -> None:
     openai = b'data: {"choices":[{"delta":{"role":"assistant","content":"a"}}]}\ndata: {"choices":[{"delta":{"content":"b"}}]}\ndata: [DONE]\n'
     _capture(monkeypatch, openai)
     assert ModelBinding("http://up", "m").chat([{"role": "user", "content": "u"}], stream=True) == "ab"
@@ -93,6 +115,15 @@ def test_streams_fold_to_one_reply_in_both_dialects(monkeypatch) -> None:
     assert (
         ModelBinding("http://up", "claude", api="anthropic").chat([{"role": "user", "content": "u"}], stream=True)
         == "ab"
+    )
+    responses = (
+        b'data: {"type":"response.output_text.delta","delta":"a"}\n'
+        b'data: {"type":"response.output_text.delta","delta":"b"}\n'
+        b"data: [DONE]\n"
+    )
+    _capture(monkeypatch, responses)
+    assert (
+        ModelBinding("http://up", "m", api="responses").chat([{"role": "user", "content": "u"}], stream=True) == "ab"
     )
 
 
@@ -117,6 +148,10 @@ def test_the_dialect_rides_the_proxy_runtime_into_the_binding() -> None:
     runtime = InferenceProxyRuntime(model_path="claude", base_url="http://up", api_key="k", api="anthropic")
     binding = ModelBinding.from_runtime(runtime)
     assert (binding.api, binding.model, binding.api_key) == ("anthropic", "claude", "k")
+    responses = ModelBinding.from_runtime(
+        InferenceProxyRuntime(model_path="gpt", base_url="http://up", api="responses")
+    )
+    assert responses.api == "responses"
     with pytest.raises(ValueError, match="api must be one of"):
         InferenceProxyRuntime(base_url="http://up", api="grpc")
 
