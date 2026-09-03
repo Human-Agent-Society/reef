@@ -21,6 +21,11 @@ _MEGATRON_TO_HF_TARGETS = {
 }
 _DEFAULT_MEGATRON_TARGETS = tuple(_MEGATRON_TO_HF_TARGETS)
 
+#: Publications between frozen-base checksum verifications. The base is frozen
+#: for the life of the run, so a fault that corrupts it is still observable at
+#: the next sampled publication.
+DEFAULT_BASE_CHECKSUM_INTERVAL = 16
+
 
 def validate_megatron_lora_args(args: Namespace) -> None:
     """Normalize and validate Slime's optional Megatron LoRA configuration."""
@@ -57,6 +62,30 @@ def validate_megatron_lora_args(args: Namespace) -> None:
     slots = getattr(args, "max_loaded_loras", None)
     if slots is not None and int(slots) < 1:
         raise ValueError("--max-loaded-loras must be at least 1")
+    interval = getattr(args, "verify_lora_base_weights_interval", None)
+    if interval is not None and int(interval) < 1:
+        raise ValueError("--verify-lora-base-weights-interval must be at least 1")
+
+
+def base_checksum_verification_due(args: Namespace, publication_sequence: int) -> bool:
+    """Whether publication ``publication_sequence`` re-verifies the frozen base.
+
+    The guard exists to catch an engine or transport fault that writes into
+    the base weights SGLang holds, and it pays for that with two full-model
+    checksums per publication, both inside the window where generation is
+    paused. Those weights never change, so a corruption is still there at the
+    next sampled publication: verifying every
+    ``--verify-lora-base-weights-interval``-th publication keeps the guard and
+    takes its cost off the other steps. The first publication always verifies,
+    so a deployment that is broken from the start fails immediately.
+    """
+
+    if not getattr(args, "verify_lora_base_weights", False):
+        return False
+    interval = int(getattr(args, "verify_lora_base_weights_interval", 1))
+    if interval <= 1:
+        return True
+    return (publication_sequence - 1) % interval == 0
 
 
 def lora_engine_slots(args: Namespace) -> int:

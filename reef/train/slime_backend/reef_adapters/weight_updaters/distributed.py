@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    base_checksum_verification_due,
     build_sglang_lora_config,
     is_lora_weight_name,
     megatron_lora_enabled,
@@ -146,7 +147,7 @@ class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeigh
                 lambda: ray.get([engine.flush_cache.remote() for engine in self.rollout_engines]),
                 phase="flush rollout cache",
             )
-        if getattr(self.args, "verify_lora_base_weights", False):
+        if base_checksum_verification_due(self.args, self.weight_update_sequence):
             self._run_rank_zero_action(
                 lambda: self._capture_or_verify_base_checksums("before adapter publication"),
                 phase="verify frozen base before adapter publication",
@@ -185,7 +186,7 @@ class ReefUpdateWeightFromDistributed(SynchronizedWeightUpdateMixin, UpdateWeigh
             publication_error = exc
         self._raise_synchronized_update_error(publication_error, phase="distributed LoRA publication")
 
-        if getattr(self.args, "verify_lora_base_weights", False):
+        if base_checksum_verification_due(self.args, self.weight_update_sequence):
             self._run_rank_zero_action(
                 lambda: self._capture_or_verify_base_checksums("after adapter publication"),
                 phase="verify frozen base after adapter publication",

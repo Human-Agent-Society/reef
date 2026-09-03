@@ -7,7 +7,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from reef.train.slime_backend.loss_families import LOSS_FAMILIES
-from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
+from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    DEFAULT_BASE_CHECKSUM_INTERVAL,
+    validate_megatron_lora_args,
+)
 
 REEF_MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.model_provider.provide_actor_model"
@@ -33,6 +36,15 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--verify-lora-base-weights-interval",
+        type=int,
+        default=DEFAULT_BASE_CHECKSUM_INTERVAL,
+        help=(
+            "Publications between frozen-base checksum verifications; 1 verifies every publication. "
+            "Each verification hashes the engine's whole base model twice while generation is paused."
+        ),
+    )
     parser.add_argument(
         "--critic-steps-per-actor",
         type=int,
