@@ -22,10 +22,11 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     """Reproduces upstream OpenClaw-RL's binary-RL configuration on reef.
 
     The whole method runs server-side: the processor correlates main-turn
-    records into sessions by trace matching, judges each turn by its next
-    state against the PRM's sglang server, and batches judgments directly —
-    no external grader. The step preparer then applies the verbatim
-    upstream top-K select objective.
+    records into sessions by preferring a harness-supplied session tag and
+    falling back to trace matching, judges each turn by its next state against
+    the PRM's sglang server, and batches judgments directly — no external
+    grader. The step preparer then applies the verbatim upstream top-K select
+    objective.
 
     Empty ``prm_url`` is correlate-only mode: sessions resolve, nothing
     trains, records stay compactable. ``batch_size`` must equal the slime

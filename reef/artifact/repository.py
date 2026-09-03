@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import shutil
 import tempfile
 import uuid
@@ -50,6 +51,7 @@ class RepositoryBackend(ABC):
         artifact: Artifact,
         *,
         expected_parent: ArtifactRef,
+        advance_head: bool = True,
     ) -> ArtifactRef: ...
 
 
@@ -269,7 +271,15 @@ class Repository:
         *,
         expected_parent: ArtifactRef,
         metadata: Mapping[str, object] | None = None,
+        advance_heads: bool = True,
     ) -> ArtifactRef:
+        # A pending release (advance_heads=False) needs a backend that can mint without moving its head; the
+        # keyword is only passed then, so backends on the older signature keep working for normal publishes.
+        options: dict[str, bool] = {}
+        if not advance_heads:
+            if "advance_head" not in inspect.signature(self._backend.publish).parameters:
+                raise ArtifactPublicationError("repository backend cannot hold a pending release")
+            options["advance_head"] = False
         ref = self._backend.publish(
             (
                 artifact.with_repository(self)
@@ -282,10 +292,12 @@ class Repository:
                 )
             ),
             expected_parent=expected_parent,
+            **options,
         )
-        with self._head_lock:
-            self._current_artifact = ref
-            self._checkpoint_artifact = ref
+        if advance_heads:
+            with self._head_lock:
+                self._current_artifact = ref
+                self._checkpoint_artifact = ref
         self.discard(artifact)
         return ref
 
