@@ -27,7 +27,7 @@ Reef 的推理接口，而不是模型厂商的接口。
 
 **[快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
 [路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
-[发布博文](https://x.com/ao_qu18465/status/2094867930081337730) |
+[博客](https://x.com/ao_qu18465/status/2094867930081337730) |
 [加入 Discord](https://discord.gg/5y8e5f937k)**
 
 </div>
