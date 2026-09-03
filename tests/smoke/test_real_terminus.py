@@ -50,7 +50,7 @@ def test_real_terminus_renders_runs_and_reports_a_verifier_reward(tmp_path: Path
         target.write_text(text, encoding="utf-8")
 
     sessions, trials = root / "terminus" / "sessions", root / "terminus" / "trials"
-    monkeypatch.setenv("REEF_TERMINUS_DIR", str(root / "terminus"))
+    monkeypatch.setenv("REEF_TERMINUS_DIR", str(root))
     monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(sessions))
     monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(trials))
     monkeypatch.setenv("REEF_TERMINUS_DATASET", DATASET)
@@ -66,7 +66,11 @@ def test_real_terminus_renders_runs_and_reports_a_verifier_reward(tmp_path: Path
     events = read_terminus_atif(sessions)
     assert events and events[0]["type"] == "verifier"
     assert events[0]["task"] == TASK
-    assert isinstance(events[0]["rewards"], dict)
-    # A scored trial exits 0; an unscored one is a failed episode, not a
-    # silent zero, and either way the reward reached the trajectory.
-    assert exit_code == (0 if events[0]["rewards"] else 1)
+    # The verifier has to have run. Accepting an empty reward here would let
+    # this pass on an episode whose container never built.
+    assert not events[0]["error"], events[0]["error"]
+    assert events[0]["rewards"], "the verifier scored nothing"
+    assert exit_code == 0
+    # recipes/basic/harbor is deterministic: 17 * 23 into answer.txt.
+    if TASK == "harbor" and DATASET.endswith("basic"):
+        assert events[0]["reward"] == 1.0

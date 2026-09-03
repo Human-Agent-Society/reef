@@ -160,6 +160,15 @@ def test_a_trial_the_verifier_never_scored_is_recorded_as_failed(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_an_episode_that_never_ran_records_why(tmp_path: Path) -> None:
+    # A container that failed to build scores nothing. Without the reason, the
+    # trial reads as an agent that failed rather than a run that never happened.
+    record = runner.trial_record("hello-world", {}, tmp_path, "docker compose build failed")
+    assert record["failed"] is True
+    assert record["error"] == "docker compose build failed"
+
+
+@pytest.mark.unit
 def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
     trials, sessions = tmp_path / "trials", tmp_path / "sessions"
     trials.mkdir()
@@ -226,3 +235,26 @@ def test_skill_frontmatter_does_not_reach_the_instruction() -> None:
 def test_a_skill_that_already_had_frontmatter_keeps_only_its_body() -> None:
     tree = _tree(**{"terminus/skills/n/SKILL.md": "---\nname: n\ndescription: d\n---\nBody here.\n"})
     assert instruction_text(tree) == "Body here."
+
+
+@pytest.mark.unit
+def test_load_tree_reads_both_roots_and_skips_the_run_s_own_output(tmp_path: Path) -> None:
+    # terminus-commands is a sibling of terminus, and the episode root also
+    # holds the task workspace and, once running, sessions and trials.
+    files = render_composition(
+        [("rules", {"text": "Be brief."}), ("agent_command", {"name": "summarize", "text": "Summarize."})],
+        get_adapter("terminus"),
+    )
+    for path, text in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    for noise in ("workspace/answer.txt", "terminus/sessions/harbor.json", "terminus/trials/t/trajectory.json"):
+        target = tmp_path / noise
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("{}", encoding="utf-8")
+
+    loaded = load_tree(tmp_path)
+    assert loaded == files
+    assert "terminus-commands/summarize/SKILL.md" in loaded
+    assert instruction_text(loaded).endswith("User-invocable. Summarize.")

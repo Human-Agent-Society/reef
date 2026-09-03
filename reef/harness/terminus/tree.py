@@ -28,6 +28,11 @@ RULES_PATH = "terminus/AGENTS.md"
 CONTEXT_PREFIX = "terminus/context/"
 SKILL_PREFIX = "terminus/skills/"
 COMMAND_PREFIX = "terminus-commands/"
+#: Where the adapter renders. ``terminus-commands`` is a sibling of
+#: ``terminus``, not a child, so the tree is read from the episode root.
+TREE_PREFIXES = ("terminus/", "terminus-commands/")
+#: Written during the run, under the tree but not part of it.
+RUNTIME_PREFIXES = ("terminus/sessions/", "terminus/trials/")
 
 
 class TerminusTreeError(ReefError):
@@ -35,20 +40,31 @@ class TerminusTreeError(ReefError):
 
 
 def load_tree(root: Path | str) -> dict[str, str]:
-    """Read a rendered tree from disk, keyed the way ``render_composition`` keys it.
+    """Read a rendered tree from the episode root, keyed as ``render_composition`` keys it.
+
+    ``root`` is the episode root rather than the ``terminus`` directory,
+    because ``terminus-commands`` sits beside it; reading one level down would
+    drop every ``agent_command`` and rekey the rest.
+
+    Only rendered paths are read back. The episode root also holds the task
+    workspace and, once the run starts, the session and trial directories,
+    none of which are the composition under evaluation.
 
     The runner and the agent both read the tree here rather than passing it
-    through harbor's agent kwargs, so the agent behaves the same whether
-    harbor constructs it in this process or another.
+    through the agent's kwargs, so the agent behaves the same whether it is
+    constructed in this process or another.
     """
     base = Path(root)
     if not base.is_dir():
         raise TerminusTreeError(f"terminus tree root {base} is not a directory")
-    return {
-        path.relative_to(base).as_posix(): path.read_text(encoding="utf-8")
-        for path in sorted(base.rglob("*"))
-        if path.is_file()
-    }
+    tree = {}
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        key = path.relative_to(base).as_posix()
+        if key.startswith(TREE_PREFIXES) and not key.startswith(RUNTIME_PREFIXES):
+            tree[key] = path.read_text(encoding="utf-8")
+    return tree
 
 
 def terminus_kwargs(files: Mapping[str, str]) -> dict[str, Any]:

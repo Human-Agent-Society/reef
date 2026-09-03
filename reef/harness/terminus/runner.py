@@ -90,14 +90,20 @@ def atif_steps(trial_dir: Path) -> list[dict[str, Any]]:
     return steps
 
 
-def trial_record(task: str, rewards: Any, trials_dir: Path) -> dict[str, Any]:
-    """One trial as the ``terminus-atif-json`` reader expects it."""
+def trial_record(task: str, rewards: Any, trials_dir: Path, error: str = "") -> dict[str, Any]:
+    """One trial as the ``terminus-atif-json`` reader expects it.
+
+    ``error`` is recorded rather than dropped: an episode whose container never
+    built scores nothing, and a bare zero would read as a candidate the agent
+    failed instead of a run that never happened.
+    """
     scores = dict(rewards or {})
     return {
         "task": task,
         "rewards": scores,
         "reward": next(iter(scores.values()), None),
         "failed": not scores,
+        "error": error,
         "steps": atif_steps(trials_dir),
     }
 
@@ -127,6 +133,7 @@ def run(task: str) -> int:
     trials.mkdir(parents=True, exist_ok=True)
 
     row = asyncio.run(Lab(trials).run(task_path(task), agent_spec(tree, tree_dir)))
-    record = trial_record(task, getattr(row, "rewards", None), trials)
+    error = str((getattr(row, "tags", None) or {}).get("error") or "")
+    record = trial_record(task, getattr(row, "rewards", None), trials, error)
     write_trial(record, sessions)
     return 1 if record["failed"] else 0

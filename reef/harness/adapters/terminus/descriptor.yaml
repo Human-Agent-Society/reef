@@ -16,7 +16,9 @@ argv:
   - --task
   - "{prompt}"
 env:
-  REEF_TERMINUS_DIR: "{root}/terminus"
+  # The episode root, not the terminus directory: terminus-commands is a
+  # sibling of terminus, so the runner reads the tree from one level up.
+  REEF_TERMINUS_DIR: "{root}"
   REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
   REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
 files:

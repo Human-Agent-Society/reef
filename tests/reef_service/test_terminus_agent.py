@@ -71,7 +71,7 @@ def test_harbor_can_import_the_agent_the_spec_names() -> None:
 def test_constructing_the_agent_binds_every_seam_to_the_tree(tmp_path: Path) -> None:
     from reef.harness.terminus.agent import ReefTerminus
 
-    agent = ReefTerminus(tmp_path / "logs", reef_dir=str(_rendered(tmp_path / "tree")))
+    agent = ReefTerminus(tmp_path / "logs", reef_dir=str(_rendered(tmp_path / "root")))
     # Rules and the skill body join the instruction; the frontmatter the quirk
     # wrote stays on disk rather than reaching the prompt.
     assert agent._reef_instruction == "Be brief.\n\n# Notes\n\nTake notes."
