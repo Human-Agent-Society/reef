@@ -5,7 +5,7 @@
   <img src="docs/assets/reef-logo-light.svg" alt="Reef" width="220">
 </picture>
 
-<h3>让 Agent 自我进化的持续学习基础设施</h3>
+<h3>面向自我进化 Agent 的持续学习基础设施</h3>
 
 [![CI](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml)
 [![PyPI package: reef-infra](https://img.shields.io/pypi/v/reef-infra?label=PyPI%3A%20reef-infra&logo=pypi&logoColor=white)](https://pypi.org/project/reef-infra/)
@@ -16,12 +16,12 @@
 
 <div align="left">
 
-Reef 是一整套持续学习的后端基础设施，全部包在标准的 HTTP 接口后面：你可以像用
-`curl` 装 `codex`、`opencode` 那样把 agent 装到本地，也可以把 agent 的模型请求
-指向 Reef 的推理接口，而不是模型厂商的。
+Reef 是一套持续学习的后端基础设施，通过标准 HTTP 接口对外提供服务：你可以像用
+`curl` 安装 `codex`、`opencode` 那样安装 agent，也可以把 agent 的模型请求发往
+Reef 的推理接口，而不是模型厂商的接口。
 
-不一样的地方在于，Reef 会一直盯着 agent 的表现，在后端把 harness 和模型权重
-越调越好。你这边什么都不用做，效果自己会变好。
+区别在于，Reef 会持续评估 agent 的表现，并在后端不断改进所提供的 harness 和模型
+权重。你无需额外操作，效果会自行提升。
 
 </div>
 
@@ -37,12 +37,12 @@ Reef 是一整套持续学习的后端基础设施，全部包在标准的 HTTP 
 
 > 💡 **注意**
 >
-> artifact 和 checkpoint 功能依赖系统里的 `git-lfs`，Reef 会在本地给自己的
-> artifact 仓库初始化 Git LFS。
+> artifact 与 checkpoint 功能依赖系统的 `git-lfs`，Reef 会在本地为自身的 artifact
+> 仓库初始化 Git LFS。
 
-下面的命令都用 [uv](https://docs.astral.sh/uv/) 装包，我们也推荐这么用。
+下文命令均使用 [uv](https://docs.astral.sh/uv/) 管理依赖，推荐使用该方式。
 
-### 从 PyPI 装
+### 通过 PyPI 安装
 
 ```bash
 uv venv && source .venv/bin/activate
@@ -50,7 +50,7 @@ uv pip install reef-infra
 python3 -c "import reef; print(reef.__version__)"
 ```
 
-### 从源码装
+### 通过源码安装
 
 ```bash
 git lfs install
@@ -61,37 +61,38 @@ uv pip install -e .
 python3 -c "import reef; print(reef.__version__)"
 ```
 
-做开发、跑下面的训练示例，都用源码装。
+进行开发以及运行下文的训练示例，请使用源码安装。
 
 
-## 它是怎么跑的
+## 工作原理
 
 <div align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/loop-animation-dark.svg">
-  <img src="docs/assets/loop-animation-light.svg" alt="Reef 响应请求、记录反馈、产出更新，把通过的更新提交进版本历史。" width="76%">
+  <img src="docs/assets/loop-animation-light.svg" alt="Reef 响应请求、记录反馈、产出更新，并将通过的更新提交至版本历史。" width="76%">
 </picture>
 </div>
 
-一个学习周期分四步，下表也标出了每步对应的模块。
+Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模块。
 
-| 步骤 | 做什么 | 代码在哪 |
+| 步骤 | 说明 | 对应模块 |
 |---|---|---|
-| **1&nbsp;·&nbsp;Serve** | 响应 agent 请求，记下每次交互。 | [`service/`](reef/service) — agent 请求和交互记录<br>[`runtime/`](reef/runtime) — 推理和 artifact 更新 |
-| **2&nbsp;·&nbsp;Observe** | 把反馈对回之前记下的交互。 | [`records.py`](reef/records.py) — 存下来的交互和反馈<br>[`train/processors/`](reef/train/processors) — 反馈匹配和达标判断 |
-| **3&nbsp;·&nbsp;Grow** | 用达标的记录产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 批次和更新任务 |
-| **4&nbsp;·&nbsp;Commit** | 评估更新，通过的就发布。 | [`train/evaluation/`](reef/train/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史<br>[`surface/`](reef/surface) — artifact 分发 |
+| **1&nbsp;·&nbsp;Serve** | 响应 agent 请求，记录每次交互。 | [`service/`](reef/service) — agent 请求与交互记录<br>[`runtime/`](reef/runtime) — 推理与 artifact 更新 |
+| **2&nbsp;·&nbsp;Observe** | 将反馈匹配到已记录的交互。 | [`records.py`](reef/records.py) — 已存储的交互与反馈<br>[`train/processors/`](reef/train/processors) — 反馈匹配与条件判定 |
+| **3&nbsp;·&nbsp;Grow** | 从符合条件的记录中产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 批次与更新任务 |
+| **4&nbsp;·&nbsp;Commit** | 评估更新，通过后发布。 | [`train/evaluation/`](reef/train/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史<br>[`surface/`](reef/surface) — artifact 分发 |
 
 
-## 怎么用
+## 使用 Reef
 
-Reef 能学两种东西：模型**权重**和 agent 的 **harness**。一个 scenario 到底更新哪种，
-看这套部署用的是什么 recipe。
+Reef 支持两种学习对象：模型**权重**与 agent 的 **harness**。scenario 更新哪一种，由
+部署所用的 recipe 决定。
 
-### 1 · 起服务
+### 1 · 启动服务
 
-下面的例子会启动 SAO（arXiv:2607.07508）示例部署。要在 Reef 源码目录里跑，机器还得
-满足[进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)里写的 GPU 要求。
+下面的示例启动 SAO（arXiv:2607.07508）示例部署，需在 Reef 源码目录下运行，且运行环境
+需满足[进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)中的
+GPU 要求。
 
 ```bash
 uv pip install -e ".[slime]" && uv pip install --no-deps --group runtime
@@ -103,23 +104,23 @@ reef serve -c recipes/sao/examples/sao/serve.yaml \
   --reef.model_path "$MODEL_PATH" \
   --reef.port "8900"
 
-curl -f http://127.0.0.1:8900/healthz          # 服务起来了
+curl -f http://127.0.0.1:8900/healthz          # 服务就绪
 ```
 
 ### 2 · 训练权重
 
-把推理请求发给 Reef，再给每个回复打个分。SAO recipe 拿每条达标的带分 rollout 走一次
-训练。
+将推理请求发送至 Reef，并为每个响应上报分数。SAO recipe 使用每条符合条件的带分
+rollout 执行一次训练。
 
-#### 发一个推理请求，再报反馈
+#### 发送推理请求并上报反馈
 
-Reef 的推理接口同时兼容 OpenAI 和 Anthropic：`/v1/chat/completions` 和 `/v1/messages`
-直接收各家原本的请求体。请求要带 `x-reef-scenario` 头；写一个没用过的名字，就会按这套
-部署配好的 recipe 新建一个 scenario。recipe 不能在请求里选。
+Reef 的推理接口同时兼容 OpenAI 与 Anthropic：`/v1/chat/completions` 与 `/v1/messages`
+直接接收两者原本的请求体。请求需带 `x-reef-scenario` 头，使用未出现过的名称时，会按
+部署配置的 recipe 新建一个 scenario。recipe 无法在请求中指定。
 
-响应体沿用各家的 OpenAI 兼容格式，Reef 会多塞一个 `x-reef-agent-record-id` 响应头。
-这个值就是**回执**（receipt），之后上报时靠它认出是哪次交互。一次上报可以带分数
-`score`、文本或结构化的 `feedback`，还有它评价的那些回执。下面的例子分数和说明都报了。
+响应体沿用各自的 OpenAI 兼容格式，Reef 额外返回 `x-reef-agent-record-id` 响应头。该值
+即**回执**（receipt），后续上报凭它定位本次交互。一次上报可包含分数 `score`、文本或
+结构化的 `feedback`，以及其所评价的回执。下面的示例同时上报分数与简短说明。
 
 ```python
 import os
@@ -131,7 +132,7 @@ reef = httpx.Client(
     timeout=300,
 )
 
-# 用 OpenAI 兼容格式发推理请求
+# 使用 OpenAI 兼容格式发送推理请求
 response = reef.post(
     "/v1/chat/completions",
     json={
@@ -143,7 +144,7 @@ response = reef.post(
 receipt = response.headers["x-reef-agent-record-id"]
 answer = response.json()["choices"][0]["message"]["content"]
 
-# 报一下这次推理的结果
+# 上报本次推理的结果
 matched = answer.strip() == "reef is ready"
 
 reef.post(
@@ -152,25 +153,25 @@ reef.post(
 ).raise_for_status()
 ```
 
-有些 recipe 不只看一个分数，`feedback` 就是给它们准备的，纯文本或结构化对象都行。
-接口会校验**上报的 schema**（[`reef/core/reports/`](reef/core/reports)）。
+部分 recipe 需要的不止一个分数，`feedback` 用于承载更丰富的信号，纯文本或结构化对象
+均可。接口会校验**上报 schema**（[`reef/core/reports/`](reef/core/reports)）。
 
 
-#### 看着它长大
+#### 观察学习效果
 
-反馈攒够以后，recipe 会跑一次训练，把新权重同步给推理运行时。之后的请求直接用上新版本，
-不用重启 Reef。
+反馈积累到一定数量后，recipe 会执行一次训练，并将更新后的权重同步至推理运行时。后续
+请求直接使用新版本，无需重启 Reef。
 
-### 3 · 进化你的 harness
+### 3 · 进化 harness
 
-`harness_evolve` 这个 recipe 更新的是一棵 harness 树，里面可以放规则、技能、配置、
-提示词和扩展。它拿上报的交互拼一个候选 harness 出来，在配好的任务上跟当前版本比一比，
-赢了才发布。各个 harness scenario 之间数据和版本互不相通。
+`harness_evolve` recipe 更新的是一棵 harness 树，其中可包含规则、技能、配置、提示词与
+扩展。它基于上报的交互构建候选 harness，在配置的任务上与当前版本对比评估，胜出后才会
+发布。各 harness scenario 之间不共享数据与版本。
 
-#### 装一个会跟着你长的 Reef harness
+#### 安装持续进化的 Reef harness
 
-装 Reef harness 跟装大多数编程 agent 差不多，比如下面这样。过程中会自动建一个新
-scenario，跟装下来的 harness 绑在一起。
+安装 Reef harness 与安装大多数编程 agent 类似，示例如下。安装过程会自动创建一个新的
+scenario，并与下载的 harness 绑定。
 
 ```bash
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
@@ -179,8 +180,8 @@ curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
 reef-pi -p "fix the bug"
 ```
 
-想拿一个已经进化过的 harness，在请求头里指定 scenario 就行。比如手上已经有
-`harness-evolve-code-repair` 这个 scenario：
+也可以在请求头中指定 scenario，获取已经进化过的 harness。例如已有 scenario
+`harness-evolve-code-repair`：
 
 ```bash
 curl -fsS -H 'x-reef-scenario: harness-evolve-code-repair' \
@@ -188,82 +189,81 @@ curl -fsS -H 'x-reef-scenario: harness-evolve-code-repair' \
   'http://localhost:8900/reef/harness/install?adapter=pi' | bash
 ```
 
-#### 报一次任务结果
+#### 上报任务结果
 
-`reef-pi` 自己存着一次运行留下的回执，所以 `report` 只要给出你想挂到上一次交互上的
-结果就够了：
+`reef-pi` 会保存每次运行产生的回执，因此 `report` 只需提供要关联到上一次交互的结果：
 
 ```bash
 reef-pi -p "fix the failing test in auth.py"
 
-# ... 跑你的测试，给结果打个分 ...
+# ... 运行测试并评估结果 ...
 
 reef-pi report --score 0 --feedback "missed the empty-token case"
 # reef-pi: reported 1 receipt(s) to harness-evolve-code-repair
 ```
 
-Reef 按 recipe 的配置把达标的上报攒成批。开了版本检查的话，adapter 下次启动会看有没有
-新发布的版本：交互式会话在等你输入之前会给 **Update with …** 和 **Skip** 两个选项，选
-更新就直接跑安装脚本；无头会话只打印一句提示。提案、评估、发布这一整套流程，见
+Reef 按 recipe 配置将符合条件的上报合并成批。开启版本检查后，adapter 会在下次启动时
+检查是否有新发布的版本：交互式会话在等待输入前提供 **Update with …** 与 **Skip** 选项，
+选择更新将直接运行安装脚本；无头会话仅打印提示信息。提案、评估与发布的完整流程见
 [harness 进化指南](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)。
 
 
 ## Cookbook recipes
 
-选哪个 recipe，看两件事：你的负载能给出什么反馈，以及你想更新哪个 artifact。下面这些
-实现都放在本仓库的 `recipes/` 里，用带点号的类路径指定，不会打进 Reef 的 wheel 包。
+选择 recipe 主要看两点：负载能提供什么反馈，以及需要更新哪个 artifact。下列实现位于
+本仓库的 `recipes/` 目录，通过带点号的类路径指定，不随 Reef wheel 发布。
 
-| 负载 | recipe 模块 | 更新什么 | 文档 |
+| 负载 | recipe 模块 | 更新对象 | 文档 |
 |---|---|---|---|
-| 靠测试或校验器打分的任务流 | <code>recipes.sao.recipe:SAORecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [示例](recipes/sao/examples/sao/README.md) |
-| 有可用的下一状态信号、但没人显式上报的 agent 流量 | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [示例](recipes/openclawrl/examples/openclawrl/README.md) |
-| 同一个问题反复试、每次都有分 | <code>recipes.tttd.recipe:TTTDRecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [示例](recipes/tttd/examples/tttd/README.md) |
-| 带分数的代码搜索：引导模型可训练，执行器冻结 | <code>recipes.tttd.recipe:TTTDRecipe</code> | 引导模型的权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [示例](recipes/tttd/examples/guidance_ttt/README.md) |
-| 用 agent 反馈进化它自己的技能池 | <code>recipes.skillclaw.recipe:SkillClawRecipe</code> | 技能池（harness 树），不用 GPU | [指南](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) · [示例](recipes/skillclaw/README.md) |
+| 由测试或校验器打分的任务流 | <code>recipes.sao.recipe:SAORecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [示例](recipes/sao/examples/sao/README.md) |
+| 具备可用的下一状态信号、但无显式上报的 agent 流量 | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [示例](recipes/openclawrl/examples/openclawrl/README.md) |
+| 对同一问题的多次带分尝试 | <code>recipes.tttd.recipe:TTTDRecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [示例](recipes/tttd/examples/tttd/README.md) |
+| 带分数的代码搜索：引导模型可训练，执行器冻结 | <code>recipes.tttd.recipe:TTTDRecipe</code> | 引导模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [示例](recipes/tttd/examples/guidance_ttt/README.md) |
+| 使用 agent 反馈进化其技能池 | <code>recipes.skillclaw.recipe:SkillClawRecipe</code> | 技能池（harness 树），无需 GPU | [指南](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) · [示例](recipes/skillclaw/README.md) |
 
 
-## Reef 有什么不一样
+## Reef 有何不同
 
-Reef 想做的是让 AI 能长大的那层基础设施：
+Reef 构建的是让 AI 持续成长所需的基础设施：
 
-| 能做什么 | 推理引擎（vLLM、SGLang…） | RL 训练框架（slime、veRL、AReaL…） | **Reef** |
+| 能力 | 推理引擎（vLLM、SGLang…） | RL 训练框架（slime、veRL、AReaL…） | **Reef** |
 |---|:---:|:---:|:---:|
-| 接线上流量 | ✅ | ❌ | ✅ |
+| 承接线上流量 | ✅ | ❌ | ✅ |
 | 训练权重 | ❌ | ✅ | ✅ |
 | 版本管理 | ❌ | ❌ | ✅ |
-| 更新时服务不断 | ❌ | ❌ | ✅ |
-| 权重之外也能进化（技能、harness） | ❌ | ❌ | ✅ |
+| 更新期间持续服务 | ❌ | ❌ | ✅ |
+| 可进化权重以外的部分（技能、harness） | ❌ | ❌ | ✅ |
 
 
-## 想了解更多
+## 技术文档
 
-[文档](https://reefinfra.ai/docs/)按下面的顺序编排：
+[文档](https://reefinfra.ai/docs/)按以下顺序编排：
 
-- [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/)：装好 Reef，接上客户端，看看版本历史
-- [HTTP API](https://reefinfra.ai/docs/reference/http-api/)：接口怎么调，反馈怎么报
-- [写一个 recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/)：配置 Reef 怎么处理数据、怎么产出更新
-- [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训权重，改进 harness
-- [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：训练部署怎么配、怎么运维
-- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：本仓库 cookbook 实现的更多说明
+- [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/)：安装 Reef，接入客户端，查看版本历史
+- [HTTP API](https://reefinfra.ai/docs/reference/http-api/)：接口调用与反馈上报
+- [编写 recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/)：配置 Reef 如何处理数据、产出更新
+- [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训练权重，改进 harness
+- [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：训练部署的配置与运维
+- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：本仓库 cookbook 实现的进一步说明
 - [架构](https://reefinfra.ai/docs/getting-started/architecture/)：Reef 的整体架构
-- [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档里各种术语是什么意思
+- [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档所用术语的解释
 
 ## 社区与贡献
 
-也在折腾会自我进化的 agent？
+也在做能够自我进化的 agent？
 
-- 来 [Discord](https://discord.gg/5y8e5f937k) 聊聊：分享你的 recipe，问实现细节，聊想加的功能。
-- 去 [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) 提问、发想法、认识同好。
-- 想动手，从[贡献指南](CONTRIBUTING.md)开始。
-- 有设计上的提案，走 [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml)。
-- 发现疑似漏洞，按[安全策略](SECURITY.md)私下报给我们。
+- 加入 [Discord](https://discord.gg/5y8e5f937k)，分享 recipe、交流实现细节、讨论新功能。
+- 在 [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) 提问、分享想法、结识同好。
+- 参与开发请从[贡献指南](CONTRIBUTING.md)开始。
+- 设计方案请通过 [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) 提出。
+- 发现疑似漏洞请按[安全策略](SECURITY.md)私下反馈。
 
-觉得 Reef 有用的话，点个 ⭐ 吧，能让更多人发现它、一起来建设。
+如果 Reef 对你有帮助，欢迎点个 ⭐，让更多人发现并参与这个项目。
 
 
 ## 致谢
 
-Reef 有几块关键的地方靠这些项目撑着，特别感谢：
+Reef 的多个关键部分依赖以下项目，特此致谢：
 
 - [SGLang](https://github.com/sgl-project/sglang) — 高性能推理
 - [slime](https://github.com/THUDM/slime) — 模型权重训练
