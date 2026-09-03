@@ -160,6 +160,42 @@ class RecordingExperimentTracker:
         self.closed = True
 
 
+class CommitOrderRuntime(DurableRuntime):
+    """Records the moment Reef tells the runtime its commit is durable.
+
+    That call is what lets a colocated backend resume generation, so the
+    recorded order shows what Reef makes serving wait for.
+    """
+
+    def __init__(self, checkpoint_root: Path, *, order: list[tuple[str, str | None]], **options) -> None:
+        super().__init__(checkpoint_root, **options)
+        self.order = order
+
+    def reconcile_training_job(
+        self,
+        scenario_step,
+        *,
+        committed_training_job_id=None,
+        committed_training_without_job_id=False,
+        scenario=None,
+    ):
+        del scenario_step, committed_training_without_job_id, scenario
+        if committed_training_job_id is not None:
+            self.order.append(("acknowledged", committed_training_job_id))
+
+
+class CommitOrderExperimentTracker(RecordingExperimentTracker):
+    """A tracker that records when its provider round trip happened."""
+
+    def __init__(self, order: list[tuple[str, str | None]]) -> None:
+        super().__init__()
+        self.order = order
+
+    def record(self, event):
+        self.order.append(("recorded", event.training_job_id))
+        super().record(event)
+
+
 class RecordingExperimentLogger:
     def __init__(self) -> None:
         self.logged = []
@@ -172,10 +208,10 @@ class RecordingExperimentLogger:
 def start_dispatcher(tmp_path: Path):
     opened = []
 
-    def start(backend_type=None, *, experiment_tracker=None, **runtime_options):
+    def start(backend_type=None, *, experiment_tracker=None, runtime_type=DurableRuntime, **runtime_options):
         initial = tmp_path / "initial"
         initial.mkdir(exist_ok=True)
-        runtime = DurableRuntime(tmp_path / "checkpoints", **runtime_options)
+        runtime = runtime_type(tmp_path / "checkpoints", **runtime_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
             TestPolicyRecipe(runtime, batch_size=1),
@@ -394,6 +430,29 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
         ("recipe", {"batch_size": 1}),
         ("processor", {"accepted": 1}),
     ]
+
+
+@pytest.mark.unit
+def test_commit_is_acknowledged_before_experiment_telemetry(start_dispatcher) -> None:
+    order: list[tuple[str, str | None]] = []
+    tracker = CommitOrderExperimentTracker(order)
+    _, dispatcher = start_dispatcher(
+        experiment_tracker=tracker,
+        runtime_type=CommitOrderRuntime,
+        order=order,
+    )
+
+    _submit_pair(dispatcher)
+    _wait_for_step(dispatcher, 1)
+    deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
+    while len(order) < 2 and time.monotonic() < deadline:
+        time.sleep(_ASYNC_WAIT_POLL_S)
+
+    assert order[:2] == [
+        ("acknowledged", "job-0"),
+        ("recorded", "job-0"),
+    ], "serving resumes on the durable commit, not on the telemetry round trip"
+    assert len(tracker.events) == 1
 
 
 @pytest.mark.unit

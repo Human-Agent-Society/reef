@@ -53,6 +53,14 @@ _UNDRAINED_WARNING_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
+class _CommittedStep:
+    """One durably committed training step, before its telemetry is recorded."""
+
+    context: TrainingExperimentContext
+    result: TrainStepResult
+
+
+@dataclass(frozen=True)
 class _LocalBackendWorkerState:
     ready: Event
     thread: Thread
@@ -264,12 +272,14 @@ class Dispatcher:
             # compaction, and moves the serving head — in that order, so a
             # crash in any gap is recovered by replaying the scenario's
             # commit log instead of silently losing the batch.
-            self._commit_result(current.name, result)
+            committed = self._commit_result(current.name, result)
+            self._record_committed_step(current.name, committed)
         return stored
 
     # -- Commit & publication --------------------------------------------
 
-    def _commit_result(self, scenario: str, result: TrainStepResult) -> None:
+    def _commit_result(self, scenario: str, result: TrainStepResult) -> _CommittedStep:
+        """Commit one training result durably and move the scenario's head."""
         current = self._registry.get(scenario)
         context = self._experiment_context(current)
         tracked_result = result
@@ -282,17 +292,23 @@ class Dispatcher:
 
         value = current.commit(tracked_result)
         self._publication.record(scenario, value)
+        return _CommittedStep(context=context, result=tracked_result)
+
+    def _record_committed_step(self, scenario: str, committed: _CommittedStep) -> None:
+        """Report a committed step to the experiment tracker; never fatal."""
+        current = self._registry.get(scenario)
+        result = committed.result
         try:
             self._experiment_tracker.record(
                 TrainingExperimentEvent(
-                    context=context,
+                    context=committed.context,
                     produced_artifact_ref=current.current_artifact_ref(),
-                    metrics=dict(tracked_result.metrics),
-                    outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
-                    training_job_id=tracked_result.training_job_id,
-                    source_runtime_load_id=tracked_result.source_runtime_load_id,
-                    produced_runtime_load_id=tracked_result.runtime_load_id,
-                    checkpoint_path=tracked_result.checkpoint_path,
+                    metrics=dict(result.metrics),
+                    outcome="rejected" if result.metrics.get("selected") is False else "committed",
+                    training_job_id=result.training_job_id,
+                    source_runtime_load_id=result.source_runtime_load_id,
+                    produced_runtime_load_id=result.runtime_load_id,
+                    checkpoint_path=result.checkpoint_path,
                 )
             )
         except Exception:
@@ -424,13 +440,14 @@ class Dispatcher:
             if self._registry.get_optional(scenario) is not current:
                 raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
             try:
-                self._commit_result(scenario, result)
+                committed = self._commit_result(scenario, result)
             except Exception:
                 # A record may already have crossed the fsync commit point.
                 # Reload before rollback or acceptance can observe the stale
                 # in-memory step and append the same step number again.
                 self._reload_durable_local_scenario(scenario, current)
                 raise
+            self._record_committed_step(scenario, committed)
         return True
 
     def _run_training(self) -> None:
@@ -556,9 +573,17 @@ class Dispatcher:
         result = execution.result
         if execution.outcome != "commit" or result is None:
             raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
-        self._commit_result(current.name, result)
-        if result.training_job_id is not None:
-            backend.acknowledge_commit(current.scenario_step, result.training_job_id)
+        committed = self._commit_result(current.name, result)
+        # A colocated backend holds serving paused until the commit is
+        # acknowledged, so nothing that is not part of the durable commit
+        # belongs between the two. Experiment telemetry is best effort and
+        # can involve a provider round trip; record it once generation is
+        # free to resume, and still record it if the resume itself fails.
+        try:
+            if result.training_job_id is not None:
+                backend.acknowledge_commit(current.scenario_step, result.training_job_id)
+        finally:
+            self._record_committed_step(current.name, committed)
         return True
 
     def _record_training_error(self, scenario: str, value: str | None) -> None:
