@@ -21,6 +21,7 @@ import base64
 import contextlib
 import logging
 from collections.abc import Iterator, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,13 @@ def _adapter_params(model: Sequence[torch.nn.Module]) -> Iterator[tuple[str, tor
                 yield f"chunk{index}.{name}", parameter
 
 
+def _write_snapshot(path: Path, payload: dict[str, Any]) -> None:
+    """Replace ``path`` with ``payload``; an interrupted write keeps the old file."""
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
+
+
 def _to_cpu(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
         return value.detach().to("cpu", copy=True)
@@ -101,6 +109,10 @@ class AdapterSlotSwitcher:
         self._rank = rank
         self._snapshots: dict[str, dict[str, Any]] = {}
         self._active: str | None = None
+        # One writer, so snapshot writes stay ordered among themselves and a
+        # slot movement has exactly one write to wait for.
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="adapter-slot-persist")
+        self._pending_write: Future[None] | None = None
         adapter_count = sum(1 for _ in _adapter_params(model))
         if adapter_count == 0:
             raise RuntimeError("adapter slot switching requires a model with Megatron LoRA parameters")
@@ -128,6 +140,9 @@ class AdapterSlotSwitcher:
         _require(scenario)
         if self._active == scenario:
             return True
+        # The occupant is about to leave the slot, so its file must be on
+        # disk before anything else can overwrite the state it holds.
+        self.wait_for_persist()
         snapshot = self._snapshots.get(scenario)
         existed = snapshot is not None
         if snapshot is None:
@@ -146,19 +161,35 @@ class AdapterSlotSwitcher:
     # -- Persistence -----------------------------------------------------
 
     def persist(self, scenario: str) -> Path | None:
-        """Write ``scenario``'s snapshot for this rank; None without a store."""
+        """Start writing ``scenario``'s snapshot for this rank; None without a store.
+
+        The write runs on the switcher's writer thread and the returned path
+        is where it will land. A colocated save runs with serving paused,
+        while the bytes being written are a host-side copy no later step
+        mutates, so the write overlaps the publication that follows instead
+        of extending the pause. :meth:`wait_for_persist` joins it, and both
+        a slot movement and the next ``persist`` join it first: a scenario's
+        file is durable before its state can leave the slot, and a write that
+        failed is reported rather than dropped.
+        """
         _require(scenario)
         if self._store_dir is None:
             return None
         snapshot = self._snapshots.get(scenario)
         if snapshot is None:
             raise RuntimeError(f"scenario {scenario!r} has no captured adapter state to persist")
+        self.wait_for_persist()
         path = self.snapshot_path(scenario)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".tmp")
-        torch.save({"format": SNAPSHOT_FORMAT, "scenario": scenario, **snapshot}, temporary)
-        temporary.replace(path)
+        payload = {"format": SNAPSHOT_FORMAT, "scenario": scenario, **snapshot}
+        self._pending_write = self._writer.submit(_write_snapshot, path, payload)
         return path
+
+    def wait_for_persist(self) -> None:
+        """Finish the pending snapshot write, raising the failure it hit."""
+        pending, self._pending_write = self._pending_write, None
+        if pending is not None:
+            pending.result()
 
     def snapshot_path(self, scenario: str) -> Path:
         if self._store_dir is None:
