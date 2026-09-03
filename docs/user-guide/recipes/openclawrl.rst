@@ -28,24 +28,35 @@ What it does
 The learning signal comes from the conversation itself: when the user
 accepts a reply and moves on, the turn counts as positive, and when the user complains, it counts as
 negative. Reef reads this from the traffic it already records, so the agent
-only needs to use Reef as its inference endpoint. It does not send reports,
-set session headers, or run behind a proxy.
+does not send training reports. For reliable correlation, the harness should
+send a stable ``x-reef-tag-session`` value, unique to the conversation within
+its scenario, on every inference in that conversation. Reef stores this opaque
+tag with each record and the processor uses it to bind turns in arrival order,
+so one tag must not be shared by concurrent or distinct conversations. Without
+the tag, the processor falls back to matching the transcripts that clients
+resend on later requests.
 
 .. flow::
    :loop: the next session is served by the updated weights
 
    Traffic :: requests and responses recorded by Reef
-   Sessions :: sessions rebuilt by matching traces
+   Sessions :: turns correlated by session tag, with trace matching as a fallback
    Judge* :: score each turn from the state that followed it
    Step :: train the policy on judged turns
 
 How Reef implements it
 ----------------------
 
-The processor rebuilds sessions from the recorded traffic. A chat agent
-resends the transcript on every request, so each request can be matched to
-its session by trace. When a session's next user message arrives, the
-finished turn is judged by a PRM on a private worker. The PRM votes on
+The processor rebuilds sessions from the recorded traffic. It prefers the
+``x-reef-tag-session`` value supplied by the harness, which also supports
+agents that keep or rewrite their history locally. If the tag is absent, a
+chat agent must resend an extending transcript so each request can be matched
+to its session by trace. Identical histories can be ambiguous, while history
+changes that no longer preserve a prefix, such as compaction or sliding
+windows, break the chain and leave the pre-rewrite turn unmatched. The
+included Hermes example uses a small header shim because Hermes cannot set the
+tag itself. When a session's next state arrives, the finished turn is judged
+by a PRM on a private worker. The PRM votes on
 whether the message shows acceptance, and on acceptance it also proposes a
 hindsight hint, a short instruction that would have produced this reply if
 the user had given it up front. Judged turns are batched for training

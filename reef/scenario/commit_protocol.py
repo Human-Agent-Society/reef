@@ -146,6 +146,7 @@ class ScenarioCommitProtocol:
                     high_water_sequence=record.high_water_sequence,
                     high_water_offset=record.high_water_offset,
                     metrics=record.metrics,
+                    pending=record.pending,
                 )
                 for record in records
             )
@@ -161,8 +162,8 @@ class ScenarioCommitProtocol:
                 )
             return tuple(reversed(rows))
 
-    def rollback(self, release_id: str) -> ArtifactRef:
-        """Publish a durable copy of an older version as a new fenced commit."""
+    def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
+        """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
@@ -198,7 +199,7 @@ class ScenarioCommitProtocol:
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
                     prepared=prepared,
-                    operation="rollback",
+                    operation=operation,
                     rollback_target_release_id=release_id,
                 )
                 snapshot_metadata["rollback"] = {
@@ -219,7 +220,7 @@ class ScenarioCommitProtocol:
                     artifact_ref=published_ref,
                     checkpoint=True,
                     prepared=prepared,
-                    operation="rollback",
+                    operation=operation,
                     rollback_target_release_id=release_id,
                 )
                 self._finish_trainer_commit(prepared)
@@ -263,6 +264,9 @@ class ScenarioCommitProtocol:
             raise ReefError(
                 "checkpoint-selected training results must include the artifact returned by execute_training_job"
             )
+        if result.pending:
+            # Live weights have no durable bytes to promote later, so holding them back is not expressible.
+            raise ReefError("a pending release requires a durable checkpoint; this step publishes live weights only")
         head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
         prepared = self._trainer.commit()
         self._append_commit_record(
@@ -277,6 +281,7 @@ class ScenarioCommitProtocol:
         return result.state
 
     def _commit_without_artifact(self, result: TrainStepResult) -> Any:
+        # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
         prepared = self._trainer.commit()
         self._append_commit_record(
@@ -297,12 +302,15 @@ class ScenarioCommitProtocol:
         self._binding.artifact_validator.validate(publication.artifact)
         prepared = self._trainer.commit()
         local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
+        # A pending release is minted into the catalog but never activated and moves no head.
+        pending = result.pending
         try:
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version
             # minted by publication then aliases them.
-            self._activate(local_artifact)
-            if self._should_checkpoint(result):
+            if not pending:
+                self._activate(local_artifact)
+            if pending or self._should_checkpoint(result):
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
@@ -317,13 +325,16 @@ class ScenarioCommitProtocol:
                         **dict(publication.artifact.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
+                    advance_heads=not pending,
                 )
-                self._activate(artifacts.resolve(published_ref), source=local_artifact)
+                if not pending:
+                    self._activate(artifacts.resolve(published_ref), source=local_artifact)
                 self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
                     checkpoint=True,
                     prepared=prepared,
+                    pending=pending,
                 )
             else:
                 artifacts.advance(local_artifact.ref, expected=head)
@@ -360,12 +371,14 @@ class ScenarioCommitProtocol:
         prepared: PreparedCommit,
         operation: str = "training",
         rollback_target_release_id: str | None = None,
+        pending: bool = False,
     ) -> CommitRecord:
         record = CommitRecord(
             scenario=self._name,
             step=step,
             artifact_ref=artifact_ref,
             checkpoint=checkpoint,
+            pending=pending,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,
@@ -468,6 +481,7 @@ class ScenarioCommitProtocol:
         high_water_sequence: int = 0,
         high_water_offset: int = 0,
         metrics: Mapping[str, Any] | None = None,
+        pending: bool = False,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "release_id": artifact_ref.release_id,
@@ -478,6 +492,7 @@ class ScenarioCommitProtocol:
             "restorable": checkpoint and not isinstance(artifact_ref, LiveWeightArtifactRef),
             "recorded_at": recorded_at,
             "operation": operation,
+            "pending": pending,
             "current": current,
             "record_progress": {
                 "high_water_sequence": high_water_sequence,

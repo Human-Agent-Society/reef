@@ -20,6 +20,7 @@ from reef.harness.trajectory import (
     read_claude_session,
     read_codex_session,
     read_deepseek_session,
+    read_hermes_session,
     read_opencode_storage,
     read_pi_session,
     reader_for,
@@ -252,6 +253,30 @@ def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_p
     with pytest.raises(TrajectoryError, match=r"deepseek session .* corrupt event at line 1"):
         read_deepseek_session(tmp_path)
     assert reader_for("deepseek-session-jsonl").format == "deepseek-session-jsonl"
+
+
+def test_hermes_reader_emits_a_session_event_then_one_event_per_message(tmp_path: Path) -> None:
+    snapshot = {
+        "session_id": "s1",
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}], "finish_reason": "tool_calls"},
+            {"role": "tool", "tool_name": "terminal", "tool_call_id": "c1", "content": "ok"},
+        ],
+    }
+    (tmp_path / "session_s1.json").write_text(json.dumps(snapshot))
+    events = read_hermes_session(tmp_path)
+    assert [event["type"] for event in events] == ["session", "message", "message", "message"]
+    assert events[0] == {"type": "session", "session_id": "s1", "model": "m"}
+    assert events[2]["tool_calls"] == [{"id": "c1"}] and events[3]["tool_name"] == "terminal"
+    (tmp_path / "session_s2.json").write_text("{not json")
+    with pytest.raises(TrajectoryError, match="not valid JSON"):
+        read_hermes_session(tmp_path)
+    (tmp_path / "session_s2.json").write_text(json.dumps({"session_id": "s2"}))
+    with pytest.raises(TrajectoryError, match="messages list"):
+        read_hermes_session(tmp_path)
+    assert reader_for("hermes-session-json").format == "hermes-session-json"
 
 
 def test_missing_trajectory_reads_as_empty(tmp_path: Path) -> None:

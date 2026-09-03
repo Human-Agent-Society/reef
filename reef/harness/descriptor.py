@@ -49,6 +49,8 @@ ENTRY_POINT_GROUP = "reef.harness_adapters"
 
 #: Node kinds rendered to one path per named node; templates need ``{name}``.
 NAMED_NODE_KINDS = ("agent_command", "skill", "code_extension")
+#: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
+OPTIONAL_NODE_KINDS = ("native_tool",)
 
 
 class DescriptorError(ReefError):
@@ -63,14 +65,18 @@ class ConfigTarget:
     defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
-#: Vendor install kinds the install-script generator can render.
-INSTALL_KINDS = ("npm",)
+#: Vendor install kinds the install-script generator can render: an npm
+#: package at a version, or a git checkout at a ref installed editable into
+#: a venv (the channel of a Python agent that publishes no wheel).
+INSTALL_KINDS = ("npm", "git")
 
 #: Install fields land inside generated shell text, so their charsets are
 #: pinned to what package registries actually use: names may add ``@`` and
-#: ``/`` for scopes, versions stay to dotted identifiers.
+#: ``/`` for scopes, versions and refs stay to dotted identifiers, and a
+#: repository is an https URL.
 _INSTALL_PACKAGE_PATTERN = re.compile(r"^[@A-Za-z0-9._/-]+$")
 _INSTALL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_INSTALL_REPOSITORY_PATTERN = re.compile(r"^https://[A-Za-z0-9._/-]+$")
 
 
 @dataclass(frozen=True)
@@ -79,14 +85,18 @@ class InstallSpec:
 
     Reef never hosts or proxies binaries; this section only names the
     vendor's own install path (``kind``), the package it installs, the
-    pinned ``version``, and where the installed binary lands relative to
-    the install prefix (``binary_path``).
+    pinned ``version`` (what ``--version`` must report), and where the
+    installed binary lands relative to the install prefix (``binary_path``).
+    The ``git`` kind adds the ``repository`` to clone and the ``ref`` to
+    check out.
     """
 
     kind: str
     package: str
     version: str
     binary_path: str
+    repository: str = ""
+    ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -250,17 +260,36 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
     version = _require_str(raw, "version", f"{where} install")
     if not _INSTALL_VERSION_PATTERN.fullmatch(version):
         raise DescriptorError(f"{where} install 'version' {version!r} must match {_INSTALL_VERSION_PATTERN.pattern}")
+    repository = ref = ""
+    if kind == "git":
+        repository = _require_str(raw, "repository", f"{where} install")
+        if not _INSTALL_REPOSITORY_PATTERN.fullmatch(repository):
+            raise DescriptorError(
+                f"{where} install 'repository' {repository!r} must match {_INSTALL_REPOSITORY_PATTERN.pattern}"
+            )
+        ref = _require_str(raw, "ref", f"{where} install")
+        if not _INSTALL_VERSION_PATTERN.fullmatch(ref):
+            raise DescriptorError(f"{where} install 'ref' {ref!r} must match {_INSTALL_VERSION_PATTERN.pattern}")
     return InstallSpec(
         kind=kind,
         package=package,
         version=version,
         binary_path=_require_str(raw, "binary_path", f"{where} install"),
+        repository=repository,
+        ref=ref,
     )
 
 
 def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
     node_paths = {"rules": _require_str(files, "rules", f"{where} files")}
     for kind in NAMED_NODE_KINDS:
+        template = _require_str(files, kind, f"{where} files")
+        if "{name}" not in template:
+            raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
+        node_paths[kind] = template
+    for kind in OPTIONAL_NODE_KINDS:
+        if kind not in files:
+            continue
         template = _require_str(files, kind, f"{where} files")
         if "{name}" not in template:
             raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")

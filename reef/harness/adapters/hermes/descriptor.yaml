@@ -1,0 +1,97 @@
+# Hermes Agent, driven headless per episode.
+#
+# HERMES_HOME relocates the whole home (config.yaml, the session snapshots,
+# SOUL.md, skills, plugins, the state store, logs and caches) under the
+# episode root. `chat -Q --oneshot -q` answers one task on a non TTY and
+# exits; hermes's own approval policy runs file and terminal tools inside
+# the working directory with no prompt and refuses a command it flags as
+# dangerous with a tool error, so no bypass flag is used (the top level -z
+# one shot would bypass those approvals). The config defaults keep an
+# episode hermetic and single request: no scanner download, no session
+# title call, no background review, and a plain file session snapshot the
+# reader can parse.
+name: hermes
+binary: hermes
+# The vendor's channel is a git checkout installed editable into a venv:
+# PyPI is stale and upstream refuses wheel builds. Consumed by the
+# GET /reef/harness/install script, never by episode runs.
+install:
+  kind: git
+  package: hermes-agent
+  version: "0.21.0"
+  repository: "https://github.com/NousResearch/hermes-agent"
+  ref: "v2026.8.31"
+  binary_path: "venv/bin/hermes"
+argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
+env:
+  HERMES_HOME: "{root}/hermes"
+files:
+  config:
+    primary:
+      path: "hermes/config.yaml"
+      defaults:
+        # tirith_enabled downloads a scanner binary from GitHub at boot;
+        # title_generation is one extra model call per episode; the memory
+        # nudge spawns a background review agent; the snapshot is the
+        # trajectory the reader parses.
+        approval:
+          tirith_enabled: false
+        auxiliary:
+          title_generation:
+            enabled: false
+        memory:
+          nudge_interval: 0
+        sessions:
+          write_json_snapshots: true
+        skills:
+          external_dirs:
+            - "${HERMES_HOME}/../hermes-commands"
+  # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
+  # scoped and read from the working directory chain, never from the home.
+  rules: "hermes/SOUL.md"
+  # Every skill is also a /name slash command in the interactive CLI, and
+  # hermes has no other command surface, so a command is a skill under the
+  # second root skills.external_dirs lists.
+  agent_command: "hermes-commands/{name}/SKILL.md"
+  skill: "hermes/skills/{name}/SKILL.md"
+  # A hermes plugin: register(ctx) in the package init, the manifest and
+  # the config grants come from the quirks module.
+  code_extension: "hermes/plugins/{name}/__init__.py"
+trajectory:
+  # One JSON snapshot per session under sessions/, rewritten after every
+  # persistence point, read by the hermes-session-json reader.
+  format: hermes-session-json
+  path: "hermes/sessions"
+cleanup_whitelist:
+  - "hermes/state.db"
+  - "hermes/state.db*"
+  - "hermes/auth.lock"
+  - "hermes/skills/.bundled_manifest"
+  - "hermes/logs/**"
+  - "hermes/cache/**"
+  - "hermes/runtime/**"
+  - "hermes/memories/**"
+  - "hermes/skills/autonomous-ai-agents/**"
+  - "hermes/.skills_prompt_snapshot.json"
+  - "hermes/.update_check"
+  # The first boot of a fresh venv repairs its dependencies through uv or pip
+  # under HOME, which Reef points at the root; on a host with rustup (the CI
+  # runner) its settings file appeared there after a run as well.
+  - ".cache/uv/**"
+  - ".cache/pip/**"
+  - ".local/**"
+  - ".rustup/**"
+quirks: reef.harness.adapters.hermes.quirks
+# How to point hermes at a model endpoint: a custom provider with a literal
+# key in config.yaml. Reef renders this set into evaluation episodes; the
+# served tree never carries a provider or a key. Only the openai dialect is
+# bound; hermes's anthropic_messages api mode was not measured.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        model:
+          provider: custom
+          default: "{model}"
+          base_url: "{base_url}/v1"
+          api_key: "{api_key}"

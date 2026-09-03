@@ -21,7 +21,7 @@ called the tree. A tree is a flat list of entries, and each entry has three
 fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``), ``config.name`` is the
-file name the entry renders to. Five kinds are registered in
+file name the entry renders to. Six kinds are registered in
 `reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
@@ -38,16 +38,21 @@ file name the entry renders to. Five kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``code_extension`` | a named code file the harness loads in process           |
 +--------------------+----------------------------------------------------------+
+| ``native_tool``    | a named tool the native harness loads (schema and code)  |
++--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
-Reef bundles five adapters: ``pi``, ``opencode``, ``claude``, ``codex``, and
-``dsh`` (DeepSeek Harness), each for a third-party coding agent CLI.
+Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
+``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
+Agent)) and ``native``, its own agent: a loop inside the reef tree whose tools
+are ``native_tool`` nodes, so the agent can evolve the tools it runs, not only
+the text around a vendor binary. Only ``native`` renders that kind.
 
 Codex supports ``config``, ``rules``, ``agent_command``, and ``skill``. It
 rejects ``code_extension`` because Codex lifecycle hooks run outside its
-command sandbox; Reef will not activate arbitrary evolved JavaScript without
-a separate isolation boundary.
+command sandbox; Reef will not activate arbitrary evolved JavaScript without a
+separate isolation boundary.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -118,6 +123,15 @@ single lucky flip does not publish. ``evolution.max_rejected_history: N``
 scenario state, each with its step, its mutations, and the verdict's reason;
 a ``propose`` whose signature names ``rejected`` receives them and can stop
 re-proposing what the gate already refused.
+
+By default a gate win is served at once. ``evolution.publish: review`` holds
+every win as a pending release instead, and ``evolution.review_kinds`` (a
+list of node kinds, empty by default) holds only the wins that touch those
+kinds, so ``[code_extension]`` lets rules and config auto publish while code
+waits for a person. A pending release sits in the catalog with its gate
+metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
+names it; the loop keeps evolving from it in the meantime, so promoting the
+latest pending release serves everything accumulated since the head.
 
 Most of a step's cost is the evaluation. Every task runs on both trees,
 ``episode_repeats`` times each (once by default), which makes

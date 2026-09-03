@@ -4,7 +4,10 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles five, one per third-party coding-agent CLI.
+adapter does. Reef bundles six, one per third-party coding-agent CLI, and
+one for its own agent, ``native``, whose loop lives in this tree and whose
+tools are ``native_tool`` nodes, so a mutation can add, rewrite, or remove a
+tool.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -20,6 +23,12 @@ adapter does. Reef bundles five, one per third-party coding-agent CLI.
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
++--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
+|              |                                                           | at ``v2026.8.31`` (0.21.0)                |
++--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
+|              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
 The ``codex`` adapter runs ``codex exec --json`` with its Codex state root
@@ -66,6 +75,57 @@ relative path. The model binding declares an ``llm-pi-ai`` route whose key
 is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's
 ``.env`` launch environment layer.
 
+The ``hermes`` adapter runs Hermes Agent headless (``hermes chat -Q --oneshot
+-q "<task>"``) with its whole home relocated by ``HERMES_HOME``. Its
+``primary`` config target is ``config.yaml``, which the quirks emit as YAML
+from the merged JSON object; the defaults keep an episode hermetic and single
+request: the terminal scanner download off (``approval.tirith_enabled``), the
+session title call off (``auxiliary.title_generation.enabled``), the memory
+nudge that spawns a background review off (``memory.nudge_interval: 0``), and
+the per session JSON snapshot on (``sessions.write_json_snapshots``), which is
+the trajectory the ``hermes-session-json`` reader parses. A composition that
+flips any of them is refused at render. The quirks also write the
+``.no-bundled-skills`` marker, so an episode carries the tree's skills and not
+hermes's bundled catalog. Rules render to ``SOUL.md``, the one home level
+rules file hermes reads (``AGENTS.md`` is project scoped, read from the
+working directory chain); skills to ``skills/<name>/SKILL.md`` with the
+``name`` and ``description`` frontmatter hermes requires synthesized when the
+node text has none; an ``agent_command`` to a second skill root,
+``hermes-commands``, that ``skills.external_dirs`` lists, since every hermes
+skill is also a ``/name`` slash command in the interactive CLI and hermes has
+no other command surface; a ``code_extension`` to a plugin package
+(``plugins/<name>/__init__.py`` defining ``register(ctx)``) whose manifest,
+``plugins.enabled`` entry, and ``tools.override`` grant the quirks write,
+because hermes loads no plugin without that consent; a plugin tool then sits
+behind hermes's ``tool_search`` and ``tool_call`` discovery surface. The model
+binding is a custom provider with a literal key in ``config.yaml``; only the
+``openai`` dialect is bound. hermes's own default approval policy runs tools
+inside the working directory with no prompt and refuses a command it flags as
+dangerous with a tool error, so no bypass flag is used.
+
+The native adapter also renders the optional ``native_tool`` kind to
+``native/tools/{name}.py``: a module whose ``NAME``, ``DESCRIPTION``, and
+``PARAMETERS`` come from the node config and whose ``code`` defines
+``run(args, workdir) -> str``. ``reef.harness.native.seed.SEED_TOOLS`` holds
+the starting ``read_file``, ``write_file``, and ``run_bash`` tools as entries
+a recipe can seed and the loop can then evolve. An adapter that declares no
+``files.native_tool`` path refuses to render that kind, so the mutation fails
+under it instead of silently dropping the tool.
+
+The native loop writes its trajectory as ``native-jsonl``: one
+``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
+``session`` header line names the task, model, and tools; then ``turn/start``,
+per step ``step/start``, ``request/header`` (the rendered system prompt and
+the tool declarations, logged on the first step so the log holds everything
+the model saw), ``assistant/message`` (``content``, ``tool_calls``,
+``finish``), ``tool/call`` (the raw argument string), ``tool/result``
+(``content``, ``is_error``, and on error a closed ``code``: ``UNKNOWN_TOOL``,
+``INVALID_ARGS``, ``TOOL_FAILED``), ``step/end``, and finally ``turn/end``
+with a ``reason`` of ``completed``, ``max-steps``, or ``error``. Arguments are
+validated against the tool's declared schema before ``run`` sees them, and a
+``user/message`` from the ``loop-guard`` plugin lands when the same call
+repeats three, five, or eight times in a row.
+
 The descriptor
 --------------
 
@@ -80,7 +140,7 @@ agent.
    files | where each node kind renders, like ``skills/{name}/SKILL.md``
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
-   install | the one-command install pin: ``kind`` (``npm`` only), ``package``, ``version``, and ``binary_path`` under the install prefix
+   install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    model_binding_proxy | keep the upstream credential in Reef and render a temporary capability-authenticated loopback endpoint; its binding-owned config fields are reserved from evolved nodes
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only

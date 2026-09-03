@@ -8,8 +8,10 @@ a complaint as rejection, and the policy updates while it keeps serving. The
 method itself is the `openclawrl` recipe package (`recipes/openclawrl/`). Its
 processor rebuilds sessions from the traffic Reef already records, judges
 every completed turn with a PRM on a private worker, and turns accepted
-hindsight hints into a training signal. The agent needs no proxy, no session
-header and no report call; it only has to use Reef as its inference endpoint.
+hindsight hints into a training signal. No report call is required. The
+processor prefers a stable, conversation-unique `x-reef-tag-session` value
+and otherwise falls back to matching transcripts; this example's header shim
+supplies the tag for the unmodified Hermes agent.
 
 This directory is the experiment around that recipe: a simulated student
 brings GSM8K homework problems to a real Hermes agent, one session after
@@ -98,8 +100,8 @@ position. Around the unmodified agent it makes three changes:
 
 1. It runs a small header shim (`reef_client.serve`) on the host and points
    hermes's model endpoint at it. Hermes cannot set the `x-reef-scenario`
-   header itself, so the shim attaches the scenario and forwards the request
-   to Reef.
+   or `x-reef-tag-session` header itself, so the shim attaches the scenario
+   and stable conversation tag, then forwards the request to Reef.
 2. It mints a Reef scenario id at position 0 and writes it to
    `$REEF_EVAL_STATE_DIR`. One stream is one scenario, which is one chain of
    runtime load IDs in Reef.
@@ -114,8 +116,8 @@ reef-eval starts the task container and the judge sidecar for the next session
   -> hermes runs one turn; its model calls go through the shim to Reef
   -> the SGLang backend records the sampled tokens, loss mask, log-probabilities, and top-K capture
   -> the harness posts hermes's reply to the sidecar, and the student reacts
-  -> the next turn resends the transcript; the processor matches it to the session by trace
-  -> the PRM votes on the completed turn from the student's reaction and proposes a hindsight hint
+  -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
+  -> the PRM judges that next state and may propose a hindsight hint
   -> batch_size judged turns form one batch; the top-K select loss trains the policy
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> the next session runs on the updated weights

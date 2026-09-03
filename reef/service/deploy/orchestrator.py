@@ -35,6 +35,7 @@ from reef.service.deploy.config import (
 from reef.service.deploy.settings import build_parser
 
 _DEFAULT_GRACE_TIMEOUT = 30
+_PROCESS_REAP_TIMEOUT = 5
 _WATCHDOG_INTERVAL = 5
 
 
@@ -187,6 +188,11 @@ class _Stack:
         self.ready_timeout_default = ready_timeout_default
         self.config_path = Path(config_path)
         self._procs: dict[str, subprocess.Popen] = {}
+        # Every POSIX service starts a fresh session, so its process-group ID
+        # is the leader PID. Keep that identity after the leader exits:
+        # launchers such as Ray and SGLang can leave workers alive after their
+        # direct child has gone, and shutdown must still reach those workers.
+        self._process_groups: dict[str, int] = {}
         self._log_fps: dict[str, object] = {}
         self._tees: dict[str, _TeeStream] = {}
         self._names = [svc["name"] for svc in services]
@@ -273,8 +279,11 @@ class _Stack:
             cwd=svc.get("cwd"),
             stdout=tee.write_fd,
             stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
         )
         self._procs[name] = proc
+        if os.name == "posix":
+            self._process_groups[name] = proc.pid
         self._pid_file(name).write_text(str(proc.pid))
         self._wait_ready(svc, proc)
         _log(f"{name}: ready")
@@ -320,27 +329,105 @@ class _Stack:
         watcher.start()
         self._stopping.wait()
 
+    def _safe_process_group(self, name, proc):
+        """Return the spawn-time PGID only when it is safe to signal."""
+        pgid = self._process_groups.get(name)
+        if os.name != "posix" or pgid is None or pgid <= 1 or pgid != proc.pid or pgid == os.getpgrp():
+            return None
+
+        # A process group may outlive its leader, but the numeric PID can be
+        # reused once that group disappears.  If the leader has exited and a
+        # process with its PID is present again, the stored PGID is stale and
+        # must never be signalled.  ``getpgid`` raising is the expected state
+        # while descendants keep the original leaderless group alive.
+        leader_exited = proc.poll() is not None
+        try:
+            current_pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            if not leader_exited and proc.poll() is None:
+                return None
+        except PermissionError:
+            return None
+        else:
+            if leader_exited or current_pgid != pgid:
+                return None
+        return pgid
+
+    def _process_tree_alive(self, name, proc):
+        """Whether a managed leader or one of its process-group children lives."""
+        # Reap an exited direct child before probing the group; otherwise its
+        # zombie can make killpg(..., 0) report a group that has already gone.
+        proc.poll()
+        pgid = self._safe_process_group(name, proc)
+        if pgid is None:
+            return proc.returncode is None
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return proc.returncode is None
+        except PermissionError:
+            # The group still exists even if the current process unexpectedly
+            # lost permission to signal it.
+            return True
+        return True
+
+    def _signal_process_tree(self, name, proc, signum):
+        """Signal one service's whole tree, with a direct-child test fallback."""
+        pgid = self._safe_process_group(name, proc)
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signum)
+                return
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                _log(f"could not signal {name} process group {pgid}; falling back to leader {proc.pid}")
+        if proc.poll() is None:
+            if signum == signal.SIGTERM:
+                proc.terminate()
+            else:
+                proc.kill()
+
     def shutdown(self, grace=_DEFAULT_GRACE_TIMEOUT):
-        """Kill services in reverse-dependency order: SIGTERM → wait → SIGKILL."""
+        """Kill service process groups in reverse order: SIGTERM → wait → SIGKILL."""
+        self._stopping.set()
+        deadline = time.monotonic() + max(0, grace)
+        targets = []
         for name in reversed(self._names):
             proc = self._procs.get(name)
-            if proc is None or proc.poll() is not None:
+            if proc is None or not self._process_tree_alive(name, proc):
                 continue
-            _log(f"stopping {name} (pid {proc.pid})")
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-        deadline = time.monotonic() + grace
+            pgid = self._safe_process_group(name, proc)
+            identity = f"process group {pgid}" if pgid is not None else f"pid {proc.pid}"
+            _log(f"stopping {name} ({identity})")
+            self._signal_process_tree(name, proc, signal.SIGTERM)
+            targets.append((name, proc))
+
+        # Every group gets the full grace window concurrently. Waiting for
+        # leaders one by one would both miss descendants and let an early
+        # service consume the entire shared deadline.
+        pending = targets
+        while pending and time.monotonic() < deadline:
+            pending = [(name, proc) for name, proc in pending if self._process_tree_alive(name, proc)]
+            if pending:
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+
+        pending = [(name, proc) for name, proc in pending if self._process_tree_alive(name, proc)]
+        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+        for name, proc in pending:
+            _log(f"{name}: process tree did not exit in {grace}s, SIGKILL")
+            self._signal_process_tree(name, proc, kill_signal)
+
+        reap_deadline = time.monotonic() + _PROCESS_REAP_TIMEOUT
         for name in reversed(self._names):
             proc = self._procs.get(name)
             if proc is None:
                 continue
-            remaining = max(0, deadline - time.monotonic())
-            try:
-                proc.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                _log(f"{name}: did not exit in {grace}s, SIGKILL")
-                proc.kill()
-                proc.wait()
+            if proc.poll() is None:
+                try:
+                    proc.wait(timeout=max(0, reap_deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    _log(f"{name}: leader pid {proc.pid} could not be reaped after SIGKILL")
             self._pid_file(name).unlink(missing_ok=True)
         for tee in self._tees.values():
             tee.close()

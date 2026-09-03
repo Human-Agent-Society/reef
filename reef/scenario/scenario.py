@@ -198,8 +198,8 @@ class Scenario:
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
 
-    def rollback(self, release_id: str) -> ArtifactRef:
-        return self._commit_protocol.rollback(release_id)
+    def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
+        return self._commit_protocol.rollback(release_id, operation=operation)
 
     def commit(self, result: TrainStepResult) -> Any:
         return self._commit_protocol.commit(result)

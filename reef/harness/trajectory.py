@@ -212,6 +212,38 @@ class DeepseekSessionReader(TrajectoryReader):
 
 
 @register_trajectory_reader
+class HermesSessionReader(TrajectoryReader):
+    """Read Hermes Agent session snapshots: every ``*.json`` under ``path``, in path order.
+
+    With ``sessions.write_json_snapshots`` on, hermes rewrites
+    ``HERMES_HOME/sessions/session_<id>.json`` after every persistence point:
+    one object holding the session facts and a ``messages`` list. Each
+    snapshot becomes a ``session`` event carrying the facts, then one
+    ``message`` event per message (``role``, ``content``, and for the
+    assistant ``tool_calls`` and ``finish_reason``, for tool rows
+    ``tool_name`` and ``tool_call_id``).
+    """
+
+    format = "hermes-session-json"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events: list[dict[str, Any]] = []
+        for file in sorted(Path(path).rglob("*.json")):
+            try:
+                snapshot = json.loads(file.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                raise TrajectoryError(f"hermes session {file} is not valid JSON") from exc
+            if not isinstance(snapshot, dict) or not isinstance(snapshot.get("messages"), list):
+                raise TrajectoryError(f"hermes session {file} is not a session snapshot with a messages list")
+            events.append({"type": "session", **{key: value for key, value in snapshot.items() if key != "messages"}})
+            for message in snapshot["messages"]:
+                if not isinstance(message, dict):
+                    raise TrajectoryError(f"hermes session {file} holds a message that is not an object")
+                events.append({"type": "message", **message})
+        return tuple(events)
+
+
+@register_trajectory_reader
 class OpencodeStorageReader(TrajectoryReader):
     """Read opencode storage JSON trees: every ``*.json`` under ``path``.
 
@@ -240,4 +272,15 @@ read_pi_session = PiSessionReader()
 read_claude_session = ClaudeSessionReader()
 read_codex_session = CodexSessionReader()
 read_deepseek_session = DeepseekSessionReader()
+read_hermes_session = HermesSessionReader()
 read_opencode_storage = OpencodeStorageReader()
+
+
+@register_trajectory_reader
+class NativeSessionReader(TrajectoryReader):
+    """Read the native harness session tree: every ``*.jsonl`` under ``path``, in order, like a pi session."""
+
+    format = "native-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return PiSessionReader()(path)

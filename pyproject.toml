@@ -81,6 +81,7 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 
 [project.scripts]
 reef = "reef.cli:main"
+reef-native = "reef.harness.native:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"

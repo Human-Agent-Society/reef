@@ -5,7 +5,7 @@ A recipe is the method a deployment runs: which recorded traffic is eligible,
 how it becomes a batch, what signal that batch carries, and whether the
 candidate it produces replaces the served version.
 
-`Quickstart <../getting-started/quickstart.rst#recipe-and-artifact>`__ defines the term.
+`Quickstart <../getting-started/quickstart.rst>`__ defines the term.
 
 Accepting records, replaying them after a restart, holding a batch until it is
 acknowledged, committing algorithm state, running the backend, and publishing

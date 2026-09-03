@@ -71,6 +71,7 @@ class CommitRecord:
         recorded_at: float | None = None,
         operation: str = "training",
         operation_verified: bool = True,
+        pending: bool = False,
         rollback_target_release_id: str | None = None,
         metrics: Mapping[str, Any] | None = None,
         training_job_id: str | None = None,
@@ -90,18 +91,21 @@ class CommitRecord:
         self.compacted_ids = frozenset(compacted_ids)
         self.consumed_ids = frozenset(consumed_ids)
         self.recorded_at = time.time() if recorded_at is None else recorded_at
-        if operation not in ("training", "rollback"):
-            raise CommitLogError("commit record operation must be 'training' or 'rollback'")
+        if operation not in ("training", "rollback", "promote"):
+            raise CommitLogError("commit record operation must be 'training', 'rollback', or 'promote'")
         if not isinstance(operation_verified, bool):
             raise CommitLogError("commit record operation_verified must be a boolean")
-        if operation == "rollback":
+        if operation in ("rollback", "promote"):
             if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
-                raise CommitLogError("rollback commit requires rollback_target_release_id")
+                raise CommitLogError(f"{operation} commit requires rollback_target_release_id")
         elif rollback_target_release_id is not None:
             raise CommitLogError("training commit must not carry rollback_target_release_id")
+        if not isinstance(pending, bool) or (pending and operation != "training"):
+            raise CommitLogError("only a training commit may be pending")
         self.operation = operation
         self.operation_verified = operation_verified
         self.rollback_target_release_id = rollback_target_release_id
+        self.pending = pending
         if metrics is not None and not isinstance(metrics, Mapping):
             raise CommitLogError("commit record metrics must be an object or null")
         self.metrics = None if metrics is None else deepcopy(dict(metrics))
@@ -133,6 +137,8 @@ class CommitRecord:
             value["rollback_target_release_id"] = self.rollback_target_release_id
         if not self.operation_verified:
             value["operation_verified"] = False
+        if self.pending:
+            value["pending"] = True
         if self.metrics is not None:
             value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
@@ -175,7 +181,9 @@ class CommitRecord:
         operation = value.get("operation", "training")
         operation_verified = value.get("operation_verified", True)
         rollback_target_release_id = value.get("rollback_target_release_id")
+        pending = value.get("pending", False)
         return cls(
+            pending=pending,
             scenario=scenario,
             step=step,
             artifact_ref=artifact_ref,
