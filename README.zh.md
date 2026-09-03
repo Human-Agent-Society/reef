@@ -12,7 +12,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-[English](README.md) | 简体中文
+[English](README.md) | 中文
 
 <div align="left">
 
