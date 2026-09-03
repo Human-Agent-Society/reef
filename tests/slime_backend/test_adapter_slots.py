@@ -115,6 +115,30 @@ def test_persisted_snapshots_survive_a_restart(tmp_path: Path) -> None:
     assert all(p in fresh_optimizer.optimizer.state for p in fresh_optimizer.main)
 
 
+def test_persist_after_restore_writes_the_slot_without_recapture(tmp_path: Path) -> None:
+    """A save can persist the active scenario without capturing it again.
+
+    The training actor relies on this: ``train_actor`` captures the slot on
+    its way out and ``restore`` records what it put back, so the snapshot the
+    switcher holds for the active scenario is already the slot's state.
+    """
+    model, optimizer, scheduler, slots = _build(tmp_path)
+    slots.restore("math")
+    _train_step(model, optimizer, scheduler)
+    slots.capture("math")
+    trained = _adapter_values(model)
+    assert slots.restore("code") is False, "the slot moves to another scenario"
+    assert slots.restore("math") is True
+
+    slots.persist("math")
+
+    fresh_model, _, fresh_scheduler, fresh_slots = _build(tmp_path)
+    assert fresh_slots.restore("math") is True
+    for got, want in zip(_adapter_values(fresh_model), trained, strict=True):
+        assert torch.equal(got, want)
+    assert fresh_scheduler.num_steps == 1
+
+
 def test_snapshot_layout_mismatch_fails_closed(tmp_path: Path) -> None:
     _, _, _, slots = _build(tmp_path)
     slots.restore("a")
