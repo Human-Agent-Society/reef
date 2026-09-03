@@ -43,6 +43,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                   | a shell script that installs the tree             |
 +-------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/adapters``                  | every harness adapter this process resolves       |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/status``                            | training, serving, and storage state              |
 +-------------------------------------------------+---------------------------------------------------+
 
@@ -195,8 +197,12 @@ Harness artifacts
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary and writes the tree                                    |
 +--------------------------------+---------------------------------------------------------------+
+| ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
+|                                | each with ``name``, ``binary``, ``trajectory_format``,        |
+|                                | ``model_bindings``, and the pinned ``install`` spec           |
++--------------------------------+---------------------------------------------------------------+
 
-All three are read-only and take ``x-reef-scenario``. Install also requires
+The first three are read-only and take ``x-reef-scenario``. Install also requires
 ``?adapter=``, whose value may be ``pi``, ``opencode``, ``claude``, ``dsh``, or an external
 descriptor. If install omits ``x-reef-scenario``, Reef creates a scenario with a
 generated ``harness-`` name and embeds that assignment in the wrapper script;
