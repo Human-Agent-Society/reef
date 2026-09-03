@@ -1,8 +1,9 @@
 name: harness-smoke
 
-# Runs the real pinned pi and dsh binaries through render, run_episode, and
-# the trajectory reader against a stub model server (tests/smoke/): the guard
-# against a release changing a format the hermetic fakes only imitate.
+# Runs the real pinned pi, dsh, and hermes binaries through render,
+# run_episode, and the trajectory reader against a stub model server
+# (tests/smoke/): the guard against a release changing a format the hermetic
+# fakes only imitate.
 # Non-blocking: not in the required check set until stable.
 
 on:
@@ -72,3 +73,27 @@ jobs:
       - run: python -m pytest tests/smoke/test_real_dsh.py
         env:
           REEF_REAL_DSH_BINARY: ${{ runner.temp }}/dsh/node_modules/.bin/dsh
+
+  # The same guard for the pinned Hermes Agent (tests/smoke/test_real_hermes.py):
+  # the vendor's channel is a git checkout installed editable into a venv.
+  real-hermes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: git submodule update --init third_party/reef-client
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ./third_party/reef-client
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: |
+          git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes/src"
+          rm -rf "$RUNNER_TEMP/hermes/src/.git"
+          python3 -m venv "$RUNNER_TEMP/hermes/venv"
+          "$RUNNER_TEMP/hermes/venv/bin/python" -m pip install --quiet -e "$RUNNER_TEMP/hermes/src"
+      - run: python -m pytest tests/smoke/test_real_hermes.py
+        env:
+          REEF_REAL_HERMES_BINARY: ${{ runner.temp }}/hermes/venv/bin/hermes
