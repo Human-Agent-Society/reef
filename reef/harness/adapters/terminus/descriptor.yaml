@@ -1,0 +1,52 @@
+# Terminal-Bench's Terminus 2, driven through a Reef-owned harbor runner.
+#
+# Unlike the CLI adapters, Terminus 2 is not a binary that takes a prompt: it
+# is a harbor agent class that harbor runs against a task container. The
+# ``reef-terminus`` console script is that runner. It reads the rendered tree
+# from REEF_TERMINUS_DIR, subclasses harbor's Terminus2 to bind each node kind
+# to one agent seam, runs the task, and writes the ATIF trajectory and the
+# verifier's reward under REEF_TERMINUS_SESSION_DIR.
+#
+# Isolation is harbor's task container, not Reef's jail: Docker cannot nest in
+# bubblewrap, so the runner refuses ``evolution.executor: sandbox`` at boot
+# rather than running unisolated under a config that promised otherwise.
+name: terminus
+binary: reef-terminus
+argv:
+  - --task
+  - "{prompt}"
+env:
+  REEF_TERMINUS_DIR: "{root}/terminus"
+  REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
+files:
+  config:
+    primary:
+      path: "terminus/config.json"
+      defaults: {}
+  rules: "terminus/AGENTS.md"
+  # Terminus 2 has no slash-command surface, so an agent_command is a skill the
+  # instruction names as user-invocable. Same resolution the dsh adapter uses,
+  # under a second skill root the runner joins after the first.
+  agent_command: "terminus-commands/{name}/SKILL.md"
+  skill: "terminus/skills/{name}/SKILL.md"
+  # Loaded in the runner's own process, which is what this node kind means:
+  # assemble(state, request, files) rebuilds the message list before every
+  # model call the Terminus 2 main loop makes.
+  code_extension: "terminus/context/{name}.py"
+trajectory:
+  format: terminus-atif-json
+  path: "terminus/sessions"
+cleanup_whitelist:
+  - "terminus/sessions/**"
+  - "terminus/context/__pycache__/**"
+quirks: reef.harness.adapters.terminus.quirks
+# Terminus 2 reaches the model through litellm, so the binding is the provider
+# base URL, key, and model name. The served tree never carries a provider.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        model_name: "{model}"
+        api_base: "{base_url}/v1"
+        llm_kwargs:
+          api_key: "{api_key}"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,61 @@ def test_opencode_render_matches_the_golden_tree() -> None:
 def test_claude_render_matches_the_golden_tree() -> None:
     nodes = [node for node in NODES if node[1].get("target") != "models"]
     assert render_composition(nodes, get_adapter("claude")) == golden_tree("claude")
+
+
+def _terminus_nodes():
+    # Terminus has no JS extension surface: its code_extension is the Python
+    # context seam, and its config target holds Terminus 2 constructor knobs.
+    nodes = [node for node in NODES if node[0] not in ("config", "code_extension")]
+    return [
+        *nodes,
+        (
+            "code_extension",
+            {"name": "assemble", "code": 'def assemble(state, request, files):\n    return request["messages"]\n'},
+        ),
+        ("config", {"data": {"max_turns": 40}}),
+    ]
+
+
+def test_terminus_render_matches_the_golden_tree() -> None:
+    assert render_composition(_terminus_nodes(), get_adapter("terminus")) == golden_tree("terminus")
+
+
+def test_terminus_folds_agent_commands_into_a_second_skill_root() -> None:
+    files = render_composition(_terminus_nodes(), get_adapter("terminus"))
+    # Both roots carry a SKILL.md, and the quirk synthesized frontmatter on each.
+    assert files["terminus/skills/notes/SKILL.md"].startswith("---\nname: notes\n")
+    assert files["terminus-commands/summarize/SKILL.md"].startswith("---\nname: summarize\n")
+
+
+def test_terminus_rejects_config_keys_that_are_not_constructor_arguments() -> None:
+    with pytest.raises(RenderError, match="not Terminus 2 arguments"):
+        render_composition([("config", {"data": {"tmux_pane_width": 200}})], get_adapter("terminus"))
+
+
+@pytest.mark.parametrize("turns", [0, -1, True, "many"])
+def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> None:
+    with pytest.raises(RenderError, match="max_turns must be a positive integer"):
+        render_composition([("config", {"data": {"max_turns": turns}})], get_adapter("terminus"))
+
+
+def test_terminus_admits_one_context_module_because_the_seam_is_one_call() -> None:
+    nodes = [
+        ("code_extension", {"name": "assemble", "code": "def assemble(state, request, files): return None\n"}),
+        ("code_extension", {"name": "other", "code": "def assemble(state, request, files): return None\n"}),
+    ]
+    with pytest.raises(RenderError, match="admits one context module"):
+        render_composition(nodes, get_adapter("terminus"))
+
+
+def test_terminus_binding_renders_the_litellm_provider() -> None:
+    descriptor = get_adapter("terminus")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
+    config = json.loads(files["terminus/config.json"])
+    assert config["model_name"] == "m1"
+    assert config["api_base"] == "http://127.0.0.1:9/v1"
+    assert config["llm_kwargs"] == {"api_key": "k-1"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"

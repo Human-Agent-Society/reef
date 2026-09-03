@@ -4,10 +4,11 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles five, one per third-party coding-agent CLI, and
-one for its own agent, ``native``, whose loop lives in this tree and whose
-tools are ``native_tool`` nodes, so a mutation can add, rewrite, or remove a
-tool.
+adapter does. Reef bundles five, one per third-party coding-agent CLI;
+``native``, its own agent, whose loop lives in this tree and whose tools are
+``native_tool`` nodes, so a mutation can add, rewrite, or remove a tool; and
+``terminus``, Terminal-Bench's Terminus 2, which is a harbor agent class
+rather than a CLI and so is driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -28,6 +29,38 @@ tool.
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
+|              |                                                           | harbor via ``reef-infra[terminus]``       |
++--------------+-----------------------------------------------------------+-------------------------------------------+
+
+The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
+a harbor agent class, so the adapter ships its own runner,
+``reef-terminus``, which reads the tree from ``REEF_TERMINUS_DIR``, binds it
+to a Terminus 2 subclass, runs one Terminal-Bench task through harbor, and
+writes the ATIF trajectory and the verifier's reward under
+``REEF_TERMINUS_SESSION_DIR`` for the ``terminus-atif-json`` reader. harbor
+is an optional extra (``pip install reef-infra[terminus]``) imported only
+when the runner runs, so the adapter registry and its tests need neither
+harbor nor Docker.
+
+Each node kind binds to one agent seam. ``config`` becomes Terminus 2
+constructor arguments, and a key that is not one is refused at render.
+``rules``, ``skill`` and ``agent_command`` join the instruction; Terminus 2
+has no slash-command surface, so a command renders under a second skill root
+and is named as user-invocable, the resolution the ``dsh`` adapter also
+uses. ``code_extension`` is the context seam: one module defining
+``assemble(state, request, files)``, loaded in the runner's process and
+called before every model call the main loop makes, so an evolved policy can
+rewrite history, compact it, or carry notes between turns. It is limited to
+one module because the seam is a single call. A policy that raises is logged
+and skipped, so a defective candidate degrades to stock assembly and still
+earns a score.
+
+On an empty tree every seam is a no-op and the agent is stock Terminus 2.
+That equivalence is what makes the stock benchmark score the baseline a
+gated change is measured against. Isolation is harbor's task container, not
+Reef's jail: Docker cannot nest in bubblewrap, so this adapter does not run
+under ``evolution.executor: sandbox``.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its

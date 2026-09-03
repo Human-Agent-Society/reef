@@ -31,6 +31,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The terminus adapter's runner. harbor drives Terminal-Bench task containers,
+# so it is never a core dependency and the runner imports it lazily.
+terminus = [
+    "harbor>=0.22.0",
+]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [
@@ -79,6 +84,7 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 [project.scripts]
 reef = "reef.cli:main"
 reef-native = "reef.harness.native:main"
+reef-terminus = "reef.harness.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
