@@ -98,21 +98,25 @@ def _write_file_block(target: str, content: str) -> str:
 def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
     """The env var and compose subdirectory that point the binary at the composition.
 
-    The compose directory is the parent of the primary config target's path
-    (e.g. ``pi-agent`` for pi, ``opencode`` for opencode). The env var is the
-    one whose value is ``{root}/<compose_dir>`` — the entry that relocates
-    the binary's whole composition at the episode root, and the only env
+    The compose directory is the deepest directory above the primary config
+    target that an env entry relocates with a ``{root}/<dir>`` value: the
+    target's own parent for pi and opencode, the home two levels up for dsh,
+    whose config file sits inside a profile. That entry relocates the
+    binary's whole composition at the episode root, and it is the only env
     entry the user-facing wrapper needs (session/state dirs use the binary's
     own defaults outside episodes).
     """
-    compose_dir = str(PurePosixPath(descriptor.config_targets["primary"].path).parent)
-    marker = f"{{root}}/{compose_dir}"
-    for key, value in descriptor.env.items():
-        if value == marker:
-            return key, compose_dir
+    primary = PurePosixPath(descriptor.config_targets["primary"].path)
+    for parent in primary.parents:
+        if parent == PurePosixPath("."):
+            break
+        marker = f"{{root}}/{parent}"
+        for key, value in descriptor.env.items():
+            if value == marker:
+                return key, str(parent)
     raise DescriptorError(
-        f"adapter {descriptor.name!r} has no env var pointing at {compose_dir!r} "
-        f"(expected an entry with value {marker!r})"
+        f"adapter {descriptor.name!r} has no env var relocating a directory above {str(primary)!r} "
+        "(expected an entry with a {root}/<dir> value)"
     )
 
 
@@ -161,21 +165,59 @@ def _wrapper_lines(
 
 
 def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) -> list[str]:
-    """The vendor-delegating install step: check the pin, else npm install."""
-    pin = _single_quoted(f"{install.package}@{install.version}")
+    """The vendor-delegating install step: check the pin, else install through the vendor's channel."""
+    prelude: list[str] = []
+    # Extra condition the "already installed" gate ands onto the binary check.
+    gate = ""
+    if install.kind == "git":
+        # A checkout installed editable into a venv; the checkout's .git goes so
+        # the agent's own startup update check has nothing to fetch.
+        pin = f"{install.repository} at {install.ref}"
+        # ``--version`` reports the package version, which a git ref moves
+        # independently of (hermes pins date tags but reports 0.21.0), so the
+        # version match alone would leave a ref-only bump on the old checkout.
+        # The installed ref is recorded beside the prefix and gates too, and is
+        # cleared before installing so an interrupted install never reads back
+        # as current.
+        prelude = [
+            f"PIN={_single_quoted(f'{install.repository}@{install.ref}')}",
+            'PIN_FILE="$PREFIX/.reef-install-pin"',
+        ]
+        gate = ' && [ "$(cat "$PIN_FILE" 2>/dev/null || true)" = "$PIN" ]'
+        steps = [
+            '        rm -f "$PIN_FILE"',
+            # git clone refuses a non-empty target, so the checkout (and the
+            # venv installed editable off it) is cleared first: without this a
+            # failed install or a pin bump wedges every rerun on "destination
+            # path already exists". The npm branch is idempotent the same way.
+            '        rm -rf "$PREFIX/src" "$PREFIX/venv"',
+            f"        git clone --quiet --depth 1 --branch {_single_quoted(install.ref)} "
+            f'{_single_quoted(install.repository)} "$PREFIX/src"',
+            '        rm -rf "$PREFIX/src/.git"',
+            '        python3 -m venv "$PREFIX/venv"',
+            '        "$PREFIX/venv/bin/python" -m pip install --quiet -e "$PREFIX/src"',
+            '        printf \'%s\\n\' "$PIN" > "$PIN_FILE"',
+        ]
+        # A Python CLI prints its version inside a label ("Hermes Agent v0.21.0"), so the match is a substring.
+        pattern = f"    *{install.version}*)"
+    else:
+        pin = f"{install.package}@{install.version}"
+        steps = [f'        npm install --prefix "$PREFIX" {_single_quoted(pin)}']
+        pattern = f'    *" {install.version} "*)'
     return [
-        f"# Ensure the pinned binary ({install.package}@{install.version}) via the vendor's channel.",
+        f"# Ensure the pinned binary ({pin}) via the vendor's channel.",
+        *prelude,
         'installed=""',
-        'if [ -x "$BINARY" ]; then',
+        f'if [ -x "$BINARY" ]{gate}; then',
         '    installed="$("$BINARY" --version 2>/dev/null || true)"',
         "fi",
         'case " $installed " in',
-        f'    *" {install.version} "*)',
+        pattern,
         f'        echo "reef: {descriptor.binary} {install.version} already installed"',
         "        ;;",
         "    *)",
         '        mkdir -p "$PREFIX"',
-        f'        npm install --prefix "$PREFIX" {pin}',
+        *steps,
         "        ;;",
         "esac",
         "",

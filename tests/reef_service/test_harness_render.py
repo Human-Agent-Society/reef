@@ -120,6 +120,91 @@ def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
 
 
+HERMES_CONFIG = "hermes/config.yaml"
+
+
+def _hermes_nodes():
+    # hermes's config target is its config.yaml, so the pi shaped config nodes are swapped for one of its own.
+    nodes = [node for node in NODES if node[0] != "config"]
+    extension = ("code_extension", {"name": "tracer", "code": "def register(ctx):\n    pass\n"})
+    return [
+        ("config", {"data": {"agent": {"max_turns": 40}}}),
+        *[n for n in nodes if n[0] != "code_extension"],
+        extension,
+    ]
+
+
+def test_hermes_render_matches_the_golden_tree() -> None:
+    assert render_composition(_hermes_nodes(), get_adapter("hermes")) == golden_tree("hermes")
+
+
+def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter() -> None:
+    descriptor = get_adapter("hermes")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    files = render_composition([*_hermes_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    config = yaml.safe_load(files[HERMES_CONFIG])
+    assert config["model"] == {
+        "provider": "custom",
+        "default": "m1",
+        "base_url": "http://127.0.0.1:9/v1",
+        "api_key": "k-1",
+    }
+    assert config["agent"] == {"max_turns": 40}
+    # The defaults that keep an episode hermetic and single request, and the second skill root.
+    assert config["approval"] == {"tirith_enabled": False}
+    assert config["auxiliary"] == {"title_generation": {"enabled": False}}
+    assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
+    assert config["skills"] == {"external_dirs": ["${HERMES_HOME}/../hermes-commands"]}
+    # A rendered plugin is enabled and granted, and gets its manifest.
+    assert config["plugins"] == {
+        "enabled": ["tracer"],
+        "entries": {"tracer": {"granted_capabilities": ["tools.override"]}},
+    }
+    assert files["hermes/plugins/tracer/plugin.yaml"] == "name: tracer\nversion: '0.1'\ndescription: tracer\n"
+    assert files["hermes/plugins/tracer/__init__.py"] == "def register(ctx):\n    pass\n"
+    assert files["hermes/.no-bundled-skills"] == ""
+    # A skill without frontmatter gets name and description under both roots; the author's frontmatter is left alone.
+    assert (
+        files["hermes/skills/notes/SKILL.md"]
+        == "---\nname: notes\ndescription: Notes skill\n---\n# Notes skill\n\nKeep short notes.\n"
+    )
+    assert (
+        files["hermes-commands/summarize/SKILL.md"]
+        == "---\nname: summarize\ndescription: Summarize $1.\n---\nSummarize $1.\n"
+    )
+    own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
+    assert render_composition([own], descriptor)["hermes/skills/own/SKILL.md"] == own[1]["text"]
+    assert files["hermes/SOUL.md"] == "Answer briefly.\n\nPrefer the standard library.\n"
+
+
+def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
+    descriptor = get_adapter("hermes")
+    with pytest.raises(RenderError, match="tirith_enabled false"):
+        render_composition([("config", {"data": {"approval": {"tirith_enabled": True}}})], descriptor)
+    with pytest.raises(RenderError, match=r"title_generation\.enabled false"):
+        render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
+    with pytest.raises(RenderError, match="write_json_snapshots true"):
+        render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
+
+
+NATIVE_TOOL = (
+    "native_tool",
+    {
+        "name": "shout",
+        "description": "Upper-case a string.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        "code": "def run(args, workdir):\n    return str(args.get('text', '')).upper()\n",
+    },
+)
+
+
+def test_native_render_matches_the_golden_tree() -> None:
+    # The native harness loads Python extensions, so its golden carries a Python body.
+    nodes = [node for node in NODES if node[0] != "code_extension"]
+    extension = ("code_extension", {"name": "tracer", "code": "def tracer():\n    pass\n"})
+    assert render_composition([*nodes, extension, NATIVE_TOOL], get_adapter("native")) == golden_tree("native")
+
+
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [
