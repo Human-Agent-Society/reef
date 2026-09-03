@@ -37,6 +37,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/rollback``    | republish an earlier release as the head          |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/promote``     | serve a release held for review                   |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                           | the served harness tree                           |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
@@ -203,7 +205,7 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 
 The first three are read-only and take ``x-reef-scenario``. Install also requires
-``?adapter=``, whose value may be ``pi``, ``opencode``, ``claude``, ``dsh``, or an external
+``?adapter=``, whose value may be ``pi``, ``opencode``, ``claude``, ``dsh``, ``hermes``, or an external
 descriptor. If install omits ``x-reef-scenario``, Reef creates a scenario with a
 generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe

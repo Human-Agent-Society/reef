@@ -62,7 +62,9 @@ dev = [
     "mypy",
     "pre-commit",
     "pytest",
-    "ruff==0.16.5",
+    # CI measures coverage against the [tool.coverage.report] floor below.
+    "pytest-cov",
+    "ruff==0.14.7",
 ]
 
 [dependency-groups]
@@ -78,6 +80,7 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 
 [project.scripts]
 reef = "reef.cli:main"
+reef-native = "reef.harness.native:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"

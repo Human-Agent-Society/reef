@@ -273,7 +273,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             if slots is not None and slots.active is not None:
                 # The Megatron checkpoint above holds only the active slot;
                 # every scenario's state must survive a restart on its own.
-                slots.capture(slots.active)
+                # The slot and its snapshot already agree: training captures
+                # the slot on its way out and ``restore`` records whatever it
+                # put back, so re-capturing here would copy the whole adapter
+                # and optimizer shard to the host a second time inside the
+                # window where serving is paused.
                 slots.persist(slots.active)
                 dist.barrier(group=get_gloo_group())
         finally:

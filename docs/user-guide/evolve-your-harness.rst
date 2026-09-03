@@ -21,7 +21,7 @@ called the tree. A tree is a flat list of entries, and each entry has three
 fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``), ``config.name`` is the
-file name the entry renders to. Five kinds are registered in
+file name the entry renders to. Six kinds are registered in
 `reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
@@ -38,12 +38,17 @@ file name the entry renders to. Five kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``code_extension`` | a named code file the harness loads in process           |
 +--------------------+----------------------------------------------------------+
+| ``native_tool``    | a named tool the native harness loads (schema and code)  |
++--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
-Reef bundles four adapters, ``pi``, ``opencode``, ``claude``, and ``dsh``
-(DeepSeek Harness), each for a third-party coding agent CLI. With the ``pi``
-adapter, ``GET /reef/harness`` serves:
+Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
+``claude``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes Agent)) and
+``native``, its own agent: a loop inside the reef tree whose tools are
+``native_tool`` nodes, so the agent can evolve the tools it runs, not only the
+text around a vendor binary. Only ``native`` renders that kind. With the
+``pi`` adapter, ``GET /reef/harness`` serves:
 
 .. code:: text
 

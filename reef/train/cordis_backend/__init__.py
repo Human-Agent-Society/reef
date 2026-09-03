@@ -331,6 +331,11 @@ class CordisBackend(TrainingBackend):
         self._publish = publish
         self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
+        # Selected compositions render into temporary source trees before the
+        # scenario commit protocol copies them into repository-owned storage.
+        # Track only trees created by this backend so a durable commit can
+        # remove its source without touching caller-owned Artifact.local paths.
+        self._rendered_publications: dict[int, Artifact] = {}
         self._validate_seed()
 
     def _validate_seed(self) -> None:
@@ -657,6 +662,11 @@ class CordisBackend(TrainingBackend):
             entries = [dict(entry) for entry in candidate.candidate_entries]
             self._loader.root.update(entries)
             artifact = Artifact.local(_write_rendered_files(candidate.candidate_files))
+            step = int(state["steps"])
+            replaced = self._rendered_publications.get(step)
+            if replaced is not None:
+                replaced.discard()
+            self._rendered_publications[step] = artifact
             # Under review, or when a reviewed kind is touched, the release waits for a promote.
             pending = self._publish == "review" or bool(self._review_kinds & self._mutation_kinds(candidate))
             return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
@@ -664,6 +674,12 @@ class CordisBackend(TrainingBackend):
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update(entries)
         return TrainStepResult({**state, "entries": entries}, metrics)
+
+    def commit_applied(self, state: Mapping[str, Any]) -> None:
+        """Discard this backend's render source after its commit is durable."""
+        artifact = self._rendered_publications.pop(int(state["steps"]), None)
+        if artifact is not None:
+            artifact.discard()
 
     def abort_step(self, prepared: PreparedStep) -> None:
         candidate = self._candidate_from(prepared)

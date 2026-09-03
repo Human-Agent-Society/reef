@@ -81,9 +81,15 @@ if (!homeSource.includes(`localhost:${port}${health}`)) {
 if (!rootReadme.includes(`127.0.0.1:${port}${health}`)) {
   failures.push(`README.md must use 127.0.0.1:${port}${health}`);
 }
+// Scoped to the Routes table, not the whole page: a route named only in the
+// prose of a later section still leaves the table an incomplete index.
+const routesTable = wireGuide.match(/\nRoutes\n-+\n([\s\S]*?)\n[A-Z][^\n]*\n-{3,}\n/)?.[1];
+if (!routesTable) {
+  throw new Error("Could not find the Routes table in docs/reference/http-api.rst");
+}
 for (const { method, path } of routes) {
-  if (!wireGuide.includes(`\`${method} ${path}\``)) {
-    failures.push(`docs/reference/http-api.rst is missing the ${method} ${path} route`);
+  if (!routesTable.includes(`\`${method} ${path}\``)) {
+    failures.push(`docs/reference/http-api.rst Routes table is missing the ${method} ${path} route`);
   }
 }
 
