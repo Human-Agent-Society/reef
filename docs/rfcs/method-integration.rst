@@ -12,8 +12,9 @@ Method integration: one method, one trust domain
 
    **Status (2026-08): resolved, beyond M3.** The judging half moved all the
    way into the recipe's processor (``recipes/openclawrl/processor.py``):
-   sessions are reconstructed from recorded traffic by trace matching (no
-   tags, no headers), PRM judging runs on a processor-private worker
+   sessions are reconstructed from recorded traffic by preferring the stored
+   ``x-reef-tag-session`` value and falling back to trace matching, PRM
+   judging runs on a processor-private worker
    sanctioned by the ``DataProcessor`` contract, and verdicts become batch
    candidates directly, without a report round trip. The grader proxy and
    its ``x-reef-return-training`` opt-in are retired; agents point at Reef
