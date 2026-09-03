@@ -43,11 +43,17 @@ evolved JavaScript would cross Reef's isolation boundary.
 
 The model binding uses Codex's Responses wire API, so set
 ``reef.upstream_api: responses``; the default Chat Completions dialect fails
-at recipe construction.
+at recipe construction. Its bearer token is added only to the transient
+Reef-owned proxy; Codex receives only the proxy's temporary loopback address
+and a short-lived capability, so neither the evaluation render nor the
+committed tree contains the upstream token. That proxy listens on loopback,
+so a deployment running ``evolution.executor: sandbox`` must allowlist it
+under ``evolution.sandbox.egress_hosts``: an empty allowlist unshares the
+network namespace and the episode cannot reach the proxy.
 
 Codex config evolution is limited to model-behavior fields; Reef pins or
 rejects settings that can load host paths, launch integrations, add egress,
-or redirect the model provider or endpoint.
+or override the transient model, provider, or endpoint.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
@@ -136,6 +142,7 @@ agent.
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   model_binding_proxy | keep the upstream credential in Reef and render a temporary capability-authenticated loopback endpoint; its binding-owned config fields are reserved from evolved nodes
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations

@@ -13,7 +13,7 @@ except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
     import tomli as tomllib
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindingError
+from reef.harness.model_binding import ModelBinding, ModelBindingError, temporary_model_proxy
 from reef.harness.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -69,22 +69,31 @@ def test_codex_render_matches_the_golden_tree() -> None:
     assert render_composition(nodes, get_adapter("codex")) == golden_tree("codex")
 
 
-def test_codex_binding_uses_the_responses_api() -> None:
+def test_codex_binding_uses_the_responses_api_in_transient_config() -> None:
     descriptor = get_adapter("codex")
     base = render_composition([], descriptor)
     assert "model_provider" not in tomllib.loads(base["codex/config.toml"])
 
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1", api="responses")
-    files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
+    with temporary_model_proxy(binding) as proxied:
+        files = render_composition([], descriptor, model_binding_nodes=proxied.compose_nodes(descriptor))
     config = tomllib.loads(files["codex/config.toml"])
     assert config["model"] == "m1" and config["model_provider"] == "reef"
     assert config["model_providers"]["reef"] == {
         "name": "Reef",
-        "base_url": "http://127.0.0.1:9/v1",
+        "base_url": f"{proxied.base_url}/v1",
         "wire_api": "responses",
         "supports_websockets": False,
-        "experimental_bearer_token": "k-1",
+        "experimental_bearer_token": config["model_providers"]["reef"]["experimental_bearer_token"],
     }
+    assert config["model_providers"]["reef"]["experimental_bearer_token"]
+    assert "k-1" not in files["codex/config.toml"]
+
+
+@pytest.mark.parametrize("field", ["model", "model_provider", "model_providers"])
+def test_codex_reserves_transient_binding_fields_from_persisted_config(field: str) -> None:
+    with pytest.raises(RenderError, match="reserved for Reef's transient model binding"):
+        render_composition([("config", {"data": {field: "untrusted"}})], get_adapter("codex"))
 
 
 def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> None:
@@ -130,9 +139,13 @@ def test_codex_accepts_admitted_model_tuning() -> None:
     assert config["model_verbosity"] == "low"
 
 
-def test_codex_requires_the_responses_dialect() -> None:
+def test_codex_requires_responses_and_refuses_to_render_an_upstream_bearer() -> None:
+    descriptor = get_adapter("codex")
     with pytest.raises(ModelBindingError, match="declares no model_binding for the 'openai' api"):
-        ModelBinding("http://up", "m").compose_nodes(get_adapter("codex"))
+        ModelBinding("http://up", "m").compose_nodes(descriptor)
+    binding = ModelBinding("http://up", "m", api_key="do-not-render", api="responses")
+    with pytest.raises(ModelBindingError, match="requires a temporary model proxy"):
+        binding.compose_nodes(descriptor)
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
@@ -151,7 +164,7 @@ def test_dsh_render_matches_the_golden_tree() -> None:
 def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
     descriptor = get_adapter("dsh")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
-    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    files = render_composition(_dsh_nodes(), descriptor, model_binding_nodes=binding.compose_nodes(descriptor))
     patch = yaml.safe_load(files[DSH_PATCH].replace("!!js ", ""))
     by_id = {row["id"]: row for row in patch if "id" in row}
     # Every entry in id order, the defaults that keep an episode readable and quiet, the binding, then the inserts.

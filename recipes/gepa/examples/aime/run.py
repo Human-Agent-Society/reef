@@ -314,7 +314,9 @@ def episode_files(files: Mapping[str, str], binding: ModelBinding, descriptor: A
     rendered separately and merged into the tree's JSON here; the driver reaches
     the same episode input the mechanism's own evaluation renders."""
     merged = dict(files)
-    for path, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
+    for path, text in render_composition(
+        [], descriptor, model_binding_nodes=binding.compose_nodes(descriptor)
+    ).items():
         merged[path] = json.dumps(_merge(json.loads(merged.get(path, "{}")), json.loads(text)), indent=2)
     return merged
 
