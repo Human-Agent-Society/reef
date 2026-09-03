@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    base_checksum_verification_due,
     build_sglang_lora_config,
     is_lora_weight_name,
     lora_engine_identity,
@@ -123,7 +124,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             ray.get([engine.flush_cache.remote() for engine in serving_engines])
 
         if self.rank == 0:
-            if self.is_lora and getattr(self.args, "verify_lora_base_weights", False):
+            if self.is_lora and base_checksum_verification_due(self.args, self.weight_update_sequence):
                 self._capture_or_verify_base_checksums("before adapter publication")
             elif self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
                 post_process_weights(
@@ -196,7 +197,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
         dist.barrier(group=get_gloo_group())
         if self.rank == 0:
             if self.is_lora:
-                if getattr(self.args, "verify_lora_base_weights", False):
+                if base_checksum_verification_due(self.args, self.weight_update_sequence):
                     self._capture_or_verify_base_checksums("after adapter publication")
                 ray.get([engine.set_runtime_load_id.remote(str(self.runtime_load_id)) for engine in serving_engines])
             elif self.quantization_config and self.quantization_config["quant_method"] in ["compressed-tensors"]:
