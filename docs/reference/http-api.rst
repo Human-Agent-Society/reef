@@ -225,6 +225,18 @@ Choose a target from ``GET /reef/scenarios/{scenario}/releases``, which lists
 **newest first**; ``GET /reef/harness/releases`` lists oldest first. Only
 releases marked ``restorable`` can be rolled back.
 
+Review before serving
+~~~~~~~~~~~~~~~~~~~~~
+
+With ``evolution.publish: review``, or when a gate win touches a node kind
+listed in ``evolution.review_kinds``, the winning tree is committed to the
+catalog but not served: its row carries ``pending: true``, the manifest and
+install routes keep serving the previous head, and ``?release_id=`` can pull
+the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote``
+with ``{"release_id": "..."}`` serves it by the same republish path as
+rollback, so the promotion is itself a commit record with
+``operation: promote`` and the promoted tree becomes a new release.
+
 Status
 ------
 

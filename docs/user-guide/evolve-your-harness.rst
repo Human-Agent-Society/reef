@@ -113,6 +113,15 @@ scenario state, each with its step, its mutations, and the verdict's reason;
 a ``propose`` whose signature names ``rejected`` receives them and can stop
 re-proposing what the gate already refused.
 
+By default a gate win is served at once. ``evolution.publish: review`` holds
+every win as a pending release instead, and ``evolution.review_kinds`` (a
+list of node kinds, empty by default) holds only the wins that touch those
+kinds, so ``[code_extension]`` lets rules and config auto publish while code
+waits for a person. A pending release sits in the catalog with its gate
+metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
+names it; the loop keeps evolving from it in the meantime, so promoting the
+latest pending release serves everything accumulated since the head.
+
 Most of a step's cost is the evaluation. Every task runs on both trees,
 ``episode_repeats`` times each (once by default), which makes
 ``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both

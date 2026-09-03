@@ -133,6 +133,7 @@ class InMemoryRepositoryBackend(RepositoryBackend):
         artifact: Artifact,
         *,
         expected_parent: ArtifactRef,
+        advance_head: bool = True,
     ) -> ArtifactRef:
         if artifact.local_path is None or not artifact.local_path.is_dir():
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
@@ -147,9 +148,11 @@ class InMemoryRepositoryBackend(RepositoryBackend):
                 parent_release_id=current.release_id,
                 content_id=artifact.ref.content_id,
             )
-            self._current = ref
-            self._metadata = dict(artifact.metadata)
-            self._storage.head = ref
+            # advance_head=False mints a pending release the head does not move to.
+            if advance_head:
+                self._current = ref
+                self._metadata = dict(artifact.metadata)
+                self._storage.head = ref
             return ref
 
 
