@@ -21,7 +21,7 @@ Reef 是一套持续学习的后端基础设施，通过标准 HTTP 接口对外
 Reef 的推理接口，而不是模型厂商的接口。
 
 区别在于，Reef 会持续评估 agent 的表现，并在后端不断改进所提供的 harness 和模型
-权重。你无需额外操作，效果会自行提升。
+权重。你不需要做任何改动，就能持续得到更好的效果。
 
 </div>
 
@@ -40,7 +40,7 @@ Reef 的推理接口，而不是模型厂商的接口。
 > artifact 与 checkpoint 功能依赖系统的 `git-lfs`，Reef 会在本地为自身的 artifact
 > 仓库初始化 Git LFS。
 
-下文命令均使用 [uv](https://docs.astral.sh/uv/) 管理依赖，推荐使用该方式。
+推荐使用 [uv](https://docs.astral.sh/uv/) 管理依赖，下文命令均基于 uv。
 
 ### 通过 PyPI 安装
 
@@ -61,7 +61,7 @@ uv pip install -e .
 python3 -c "import reef; print(reef.__version__)"
 ```
 
-进行开发以及运行下文的训练示例，请使用源码安装。
+开发或运行下文的训练示例时，请使用源码安装。
 
 
 ## 工作原理
@@ -85,8 +85,8 @@ Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模
 
 ## 使用 Reef
 
-Reef 支持两种学习对象：模型**权重**与 agent 的 **harness**。scenario 更新哪一种，由
-部署所用的 recipe 决定。
+Reef 可以学习两类东西：模型**权重**和 agent 的 **harness**。scenario 更新哪一种，
+取决于部署所用的 recipe。
 
 ### 1 · 启动服务
 
@@ -210,10 +210,10 @@ Reef 按 recipe 配置将符合条件的上报合并成批。开启版本检查�
 
 ## Cookbook recipes
 
-选择 recipe 主要看两点：负载能提供什么反馈，以及需要更新哪个 artifact。下列实现位于
+选择 recipe 主要看两点：你的场景能提供什么反馈，以及需要更新哪个 artifact。下列实现位于
 本仓库的 `recipes/` 目录，通过带点号的类路径指定，不随 Reef wheel 发布。
 
-| 负载 | recipe 模块 | 更新对象 | 文档 |
+| 适用场景 | recipe 模块 | 更新对象 | 文档 |
 |---|---|---|---|
 | 由测试或校验器打分的任务流 | <code>recipes.sao.recipe:SAORecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [示例](recipes/sao/examples/sao/README.md) |
 | 具备可用的下一状态信号、但无显式上报的 agent 流量 | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | 模型权重 | [指南](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [示例](recipes/openclawrl/examples/openclawrl/README.md) |
@@ -224,7 +224,7 @@ Reef 按 recipe 配置将符合条件的上报合并成批。开启版本检查�
 
 ## Reef 有何不同
 
-Reef 构建的是让 AI 持续成长所需的基础设施：
+Reef 为会持续成长的 AI 提供基础设施：
 
 | 能力 | 推理引擎（vLLM、SGLang…） | RL 训练框架（slime、veRL、AReaL…） | **Reef** |
 |---|:---:|:---:|:---:|
@@ -237,7 +237,7 @@ Reef 构建的是让 AI 持续成长所需的基础设施：
 
 ## 技术文档
 
-[文档](https://reefinfra.ai/docs/)按以下顺序编排：
+[文档](https://reefinfra.ai/docs/)按以下顺序组织：
 
 - [快速上手](https://reefinfra.ai/docs/getting-started/quickstart/)：安装 Reef，接入客户端，查看版本历史
 - [HTTP API](https://reefinfra.ai/docs/reference/http-api/)：接口调用与反馈上报
@@ -250,20 +250,20 @@ Reef 构建的是让 AI 持续成长所需的基础设施：
 
 ## 社区与贡献
 
-也在做能够自我进化的 agent？
+欢迎参与 Reef 的讨论和开发：
 
 - 加入 [Discord](https://discord.gg/5y8e5f937k)，分享 recipe、交流实现细节、讨论新功能。
-- 在 [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) 提问、分享想法、结识同好。
+- 在 [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) 提问、分享想法、与社区交流。
 - 参与开发请从[贡献指南](CONTRIBUTING.md)开始。
 - 设计方案请通过 [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) 提出。
 - 发现疑似漏洞请按[安全策略](SECURITY.md)私下反馈。
 
-如果 Reef 对你有帮助，欢迎点个 ⭐，让更多人发现并参与这个项目。
+如果 Reef 对你有帮助，欢迎点个 Star ⭐，让更多人发现并参与进来。
 
 
 ## 致谢
 
-Reef 的多个关键部分依赖以下项目，特此致谢：
+以下项目支撑了 Reef 的关键部分，在此感谢：
 
 - [SGLang](https://github.com/sgl-project/sglang) — 高性能推理
 - [slime](https://github.com/THUDM/slime) — 模型权重训练
