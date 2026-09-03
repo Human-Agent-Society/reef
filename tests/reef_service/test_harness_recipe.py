@@ -599,6 +599,46 @@ def _report_once(scenario, name: str, suffix: str) -> None:
     )
 
 
+@pytest.mark.parametrize("checkpoint_every", [1, 2])
+def test_successful_publish_discards_its_render_source_but_keeps_the_committed_tree(
+    tmp_path: Path,
+    checkpoint_every: int,
+) -> None:
+    """Cordis owns its temporary render, while the repository owns its copy."""
+
+    def propose(nodes, samples, model):
+        del nodes, samples, model
+        return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+
+    built = dataclasses.replace(recipe(tmp_path, propose), checkpoint_strategy=EveryNVersions(checkpoint_every))
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    dispatcher = Dispatcher(
+        built,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=tmp_path / "agent-record",
+    )
+
+    try:
+        scenario = dispatcher.get_or_create_scenario("render-cleanup")
+        assert scenario is not None
+        _report_once(scenario, "render-cleanup", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None and result.artifact is not None
+        source = result.artifact.local_path
+        assert source is not None and source.is_dir()
+
+        scenario.commit(result)
+
+        assert not source.exists()
+        committed = scenario.repository.resolve(scenario.current_artifact_ref())
+        assert committed.local_path is not None
+        assert "marker rules" in (committed.local_path / "pi-agent" / "AGENTS.md").read_text()
+    finally:
+        dispatcher.close()
+
+
 def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path) -> None:
     """The decisive #476 run against the real commit protocol: a proposal
     smuggling an inline key lands as a rejected mutation, the stored commit
