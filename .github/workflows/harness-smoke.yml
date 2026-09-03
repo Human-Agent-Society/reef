@@ -1,9 +1,9 @@
 name: harness-smoke
 
-# Runs the real pinned pi, codex, dsh, and hermes binaries, and the harbor
-# package the terminus runner needs, through render, run_episode, and the
-# trajectory reader against a stub model server (tests/smoke/): the guard
-# against a release changing a format the hermetic fakes only imitate.
+# Runs the real pinned pi, codex, dsh, and hermes binaries through render,
+# run_episode, and the trajectory reader against a stub model server
+# (tests/smoke/): the guard against a release changing a format the hermetic
+# fakes only imitate.
 # Non-blocking: not in the required check set until stable.
 
 on:
