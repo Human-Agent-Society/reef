@@ -460,10 +460,18 @@ class RequestService:
         artifact, gate = scenario.artifact_snapshot(release_id)
         tree = scenario.surface.files
         if tree is None:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no files")
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} serves no files: the deployment's recipe "
+                "carries no harness surface (record-only or weight-training recipes have "
+                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+            )
         files = tree.read_files(artifact)
         if files is None:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no files")
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} serves no files: no harness composition has "
+                "been published yet. The scenario's initial artifact carries no files "
+                "until the trainer publishes its first step (see docs/user-guide/evolve-your-harness)."
+            )
         return {
             "release_id": artifact.ref.release_id,
             "parent_release_id": artifact.ref.parent_release_id,
@@ -555,7 +563,11 @@ class RequestService:
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
         if scenario.surface.files is None:
-            raise ArtifactNotFound(f"scenario {parsed.scenario!r} serves no files")
+            raise ArtifactNotFound(
+                f"scenario {parsed.scenario!r} serves no files: the deployment's recipe "
+                "carries no harness surface (record-only or weight-training recipes have "
+                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+            )
         return scenario
 
     def _accept(

@@ -173,7 +173,7 @@ services:
 
   - name: prm-sglang
     command: >-
-      python -m sglang.launch_server
+      "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${prm.model_path} --tp ${prm.tp}
       --host 0.0.0.0 --port=${prm.port}
     ready: curl -sf http://127.0.0.1:${prm.port}/health
@@ -182,7 +182,7 @@ services:
 
   - name: user-llm-sglang
     command: >-
-      python -m sglang.launch_server
+      "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${user_llm.model_path} --tp 1
       --served-model-name=${user_llm.served_name}
       --host 0.0.0.0 --port=${user_llm.port}
@@ -192,7 +192,7 @@ services:
 
   - name: slime-driver
     command: >-
-      python -m reef.train.slime_backend.reef_adapters.driver
+      "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
       --reef-checkpoint-max-storage-fraction=${training.checkpoint_retention.max_storage_fraction}
       --reef-checkpoint-min-free-space-fraction=${training.checkpoint_retention.min_free_space_fraction}
       --reef-checkpoint-policy=${training.checkpoint_retention.policy}
@@ -219,7 +219,7 @@ services:
     depends_on: [ray-head]
 
   - name: reef
-    command: python -m reef.service
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
     env:
       RAY_ADDRESS: 127.0.0.1:${training.ray_port}

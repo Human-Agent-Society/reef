@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import signal
+import sys
 from pathlib import Path
 
 import pytest
@@ -186,7 +187,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     service = next(item for item in config["services"] if item["name"] == "reef")
     args = deploy.service_settings_from_config(config)
 
-    assert service["command"] == "python -m reef.service"
+    assert service["command"] == [sys.executable, "-m", "reef.service"]
     assert "REEF_TOKEN" not in service.get("env", {})
     assert args.tokens == ()
     assert args.recipe == recipe

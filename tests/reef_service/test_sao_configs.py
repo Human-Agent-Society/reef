@@ -340,7 +340,7 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _configured_inference_backend_factory, _recipe_owned_settings
-    from reef.service.deploy.config import load_config
+    from reef.service.deploy.config import load_config, validate_services
     from reef.service.deploy.settings import service_settings_from_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
@@ -349,15 +349,20 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     settings = service_settings_from_config(config)
     if settings.inference_backend_factory is not None:
         assert callable(_configured_inference_backend_factory(settings.inference_backend_factory))
-    services = config.get("services")
-    assert isinstance(services, list) and services
+    services = validate_services(config, config_path)
     names = [service.get("name") for service in services]
     assert all(isinstance(name, str) and name for name in names)
     assert len(names) == len(set(names))
 
     started: set[str] = set()
     for service in services:
-        assert isinstance(service.get("command"), str) and service["command"].strip()
+        command = service.get("command")
+        assert (isinstance(command, str) and command.strip()) or (
+            isinstance(command, list)
+            and command
+            and all(isinstance(argument, str) for argument in command)
+            and command[0].strip()
+        )
         dependencies = service.get("depends_on") or []
         assert set(dependencies) <= started, f"{service['name']} must follow its dependencies in service order"
         started.add(service["name"])

@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,13 @@ _WATCHDOG_INTERVAL = 5
 
 def _log(msg):
     print(f"[reef] {msg}", file=sys.stderr)
+
+
+def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:
+    """Materialize a service command without changing its executable semantics."""
+    if isinstance(command, str):
+        return shlex.split(interpolate_config(config, command))
+    return [interpolate_config(config, argument) for argument in command]
 
 
 class InvalidOverrideError(ValueError):
@@ -249,9 +256,9 @@ class _Stack:
             _log(f"{name}: already running (pid {self._procs[name].pid})")
             return
         self._check_deps(svc)
-        command = interpolate_config(self.config, svc["command"])
+        command = _command_argv(self.config, svc["command"])
         env = self._service_env(svc)
-        _log(f"starting {name}: {command}")
+        _log(f"starting {name}: {shlex.join(command)}")
         # The handle outlives this scope (closed in stop()); a context manager
         # would close it under the running service.
         log_fp = open(self._log_file(name), "a")  # noqa: SIM115
@@ -261,7 +268,7 @@ class _Stack:
         tee = _TeeStream(log_fp, sys.stdout)
         self._tees[name] = tee
         proc = subprocess.Popen(
-            shlex.split(command),
+            command,
             env=env,
             cwd=svc.get("cwd"),
             stdout=tee.write_fd,
