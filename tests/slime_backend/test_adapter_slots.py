@@ -104,6 +104,7 @@ def test_persisted_snapshots_survive_a_restart(tmp_path: Path) -> None:
     _train_step(model, optimizer, scheduler)
     slots.capture("math")
     path = slots.persist("math")
+    slots.wait_for_persist()
     assert path == tmp_path / scenario_key("math") / "rank_00000.pt" and path.is_file()
     expected = _adapter_values(model)
 
@@ -131,6 +132,7 @@ def test_persist_after_restore_writes_the_slot_without_recapture(tmp_path: Path)
     assert slots.restore("math") is True
 
     slots.persist("math")
+    slots.wait_for_persist()
 
     fresh_model, _, fresh_scheduler, fresh_slots = _build(tmp_path)
     assert fresh_slots.restore("math") is True
@@ -139,11 +141,46 @@ def test_persist_after_restore_writes_the_slot_without_recapture(tmp_path: Path)
     assert fresh_scheduler.num_steps == 1
 
 
+def test_a_slot_movement_waits_for_the_pending_snapshot_write(tmp_path: Path) -> None:
+    model, optimizer, scheduler, slots = _build(tmp_path)
+    slots.restore("math")
+    _train_step(model, optimizer, scheduler)
+    slots.capture("math")
+    trained = _adapter_values(model)
+
+    slots.persist("math")
+    slots.restore("code")
+
+    path = slots.snapshot_path("math")
+    assert path.is_file(), "the file is durable before its state leaves the slot"
+    assert not path.with_name(path.name + ".tmp").exists()
+    fresh_model, _, _, fresh = _build(tmp_path)
+    assert fresh.restore("math") is True
+    for got, want in zip(_adapter_values(fresh_model), trained, strict=True):
+        assert torch.equal(got, want)
+
+
+def test_a_failed_snapshot_write_is_reported_and_not_dropped(tmp_path: Path, monkeypatch) -> None:
+    _, _, _, slots = _build(tmp_path)
+    slots.restore("a")
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(torch, "save", fail_save)
+    slots.persist("a")
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        slots.wait_for_persist()
+    assert not slots.snapshot_path("a").exists()
+
+
 def test_snapshot_layout_mismatch_fails_closed(tmp_path: Path) -> None:
     _, _, _, slots = _build(tmp_path)
     slots.restore("a")
     slots.capture("a")
     slots.persist("a")
+    slots.wait_for_persist()
     loaded = torch.load(slots.snapshot_path("a"), weights_only=False)
     loaded["adapter"] = {name: torch.zeros(1) for name in loaded["adapter"]}
     torch.save(loaded, slots.snapshot_path("a"))
