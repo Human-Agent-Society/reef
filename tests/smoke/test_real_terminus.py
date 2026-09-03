@@ -1,14 +1,13 @@
 """The terminus adapter against a real Terminal-Bench task, end to end.
 
-Opt-in: this one runs a Docker container and spends real model calls, so it is
-gated on both a dataset and a model rather than a stub. Everything cheaper —
-that harbor validates the agent spec, imports the class, and binds the tree —
-lives in ``tests/reef_service/test_terminus_agent.py`` and runs in CI.
+Opt-in: this runs a Docker container and spends real model calls, so it is
+gated on a task and a model rather than a stub. Everything cheaper — that the
+episode reaches the runner with its tree (``test_terminus_episode.py``) and
+that Harbor accepts what the runner builds (``test_terminus_agent.py``) —
+runs in CI.
 
-    REEF_REAL_TERMINUS_DATASET=recipes/basic \\
-    REEF_REAL_TERMINUS_TASK=harbor \\
+    REEF_REAL_TERMINUS_TASK=recipes/basic/harbor \\
     REEF_REAL_TERMINUS_MODEL=openai/gpt-4o \\
-    REEF_REAL_TERMINUS_BASE_URL=https://api.openai.com/v1 \\
     OPENAI_API_KEY=... \\
     python -m pytest tests/smoke/test_real_terminus.py
 """
@@ -24,23 +23,20 @@ from reef.harness.adapters import get_adapter
 from reef.harness.render import render_composition
 from reef.harness.trajectory import read_terminus_atif
 
-DATASET = os.environ.get("REEF_REAL_TERMINUS_DATASET", "")
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
-TASK = os.environ.get("REEF_REAL_TERMINUS_TASK", "harbor")
+TASK = os.environ.get("REEF_REAL_TERMINUS_TASK", "")
 BASE_URL = os.environ.get("REEF_REAL_TERMINUS_BASE_URL", "https://api.openai.com/v1")
 
 pytestmark = pytest.mark.skipif(
-    not (DATASET and MODEL and Path(DATASET).is_dir()),
-    reason="REEF_REAL_TERMINUS_DATASET and REEF_REAL_TERMINUS_MODEL must name a real dataset and model",
+    not (TASK and MODEL),
+    reason="REEF_REAL_TERMINUS_TASK and REEF_REAL_TERMINUS_MODEL must name a real task and model",
 )
 
-RULES_MARKER = "Reef terminus smoke marker."
 
-
-def test_real_terminus_renders_runs_and_reports_a_verifier_reward(tmp_path: Path, monkeypatch) -> None:
+def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path, monkeypatch) -> None:
     descriptor = get_adapter("terminus")
     nodes = [
-        ("rules", {"text": RULES_MARKER}),
+        ("rules", {"text": "Work quickly and stop as soon as the task is done."}),
         ("config", {"data": {"max_turns": 8, "model_name": MODEL, "api_base": BASE_URL}}),
     ]
     root = tmp_path / "root"
@@ -49,28 +45,23 @@ def test_real_terminus_renders_runs_and_reports_a_verifier_reward(tmp_path: Path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
 
-    sessions, trials = root / "terminus" / "sessions", root / "terminus" / "trials"
+    sessions = root / "terminus" / "sessions"
     monkeypatch.setenv("REEF_TERMINUS_DIR", str(root))
     monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(sessions))
-    monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(trials))
-    monkeypatch.setenv("REEF_TERMINUS_DATASET", DATASET)
+    monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(root / "terminus" / "trials"))
 
-    from reef.harness.terminus.runner import run
+    from reef.harness.terminus.runner import run, trial_slug
 
     exit_code = run(TASK)
 
-    # The runner wrote exactly one trial where the adapter's reader looks, and
-    # the reader turns it into a verifier event plus the agent's ATIF steps.
-    written = sorted(sessions.glob("*.json"))
-    assert written == [sessions / f"{TASK}.json"]
+    slug = trial_slug(TASK)
+    assert sorted(sessions.glob("*.json")) == [sessions / f"{slug}.json"]
     events = read_terminus_atif(sessions)
     assert events and events[0]["type"] == "verifier"
-    assert events[0]["task"] == TASK
     # The verifier has to have run. Accepting an empty reward here would let
     # this pass on an episode whose container never built.
     assert not events[0]["error"], events[0]["error"]
     assert events[0]["rewards"], "the verifier scored nothing"
     assert exit_code == 0
-    # recipes/basic/harbor is deterministic: 17 * 23 into answer.txt.
-    if TASK == "harbor" and DATASET.endswith("basic"):
-        assert events[0]["reward"] == 1.0
+    # The agent's own turns came back, not just the score.
+    assert any(event["type"] == "step" for event in events)

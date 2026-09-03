@@ -2,8 +2,8 @@
 
 Terminus 2 is a harbor agent class rather than a CLI, so this package is the
 adapter's own runner. It reads the tree Reef rendered into ``REEF_TERMINUS_DIR``,
-binds it to :class:`~reef.harness.terminus.agent.ReefTerminus`, runs the task
-harbor names, and writes the ATIF trajectory and the verifier's reward under
+hands it to Harbor's own ``terminus-2`` agent as native configuration,
+runs the task, and writes the ATIF trajectory and the verifier's reward under
 ``REEF_TERMINUS_SESSION_DIR`` for the episode's trajectory reader.
 
 harbor is an optional dependency (``pip install reef-infra[terminus]``) and is
@@ -16,14 +16,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
-from reef.harness.terminus.tree import (
-    ContextPolicy,
-    TerminusTreeError,
-    context_policy,
-    instruction_text,
-    load_tree,
-    terminus_kwargs,
-)
+from reef.harness.terminus.tree import TerminusTreeError, instruction_paths, load_tree, skill_roots, terminus_kwargs
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,11 +33,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 __all__ = [
-    "ContextPolicy",
     "TerminusTreeError",
-    "context_policy",
-    "instruction_text",
+    "instruction_paths",
     "load_tree",
     "main",
+    "skill_roots",
     "terminus_kwargs",
 ]

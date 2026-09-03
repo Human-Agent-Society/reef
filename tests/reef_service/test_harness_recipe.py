@@ -20,7 +20,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episode import EpisodeResult
-from reef.harness.executor import LocalExecutor, SandboxExecutor
+from reef.harness.executor import LocalExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
@@ -1934,31 +1934,3 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
             scenario.commit(held)
     finally:
         dispatcher.close()
-
-
-@pytest.mark.unit
-def test_a_self_isolating_adapter_refuses_the_sandbox_executor(tmp_path: Path) -> None:
-    # terminus runs episodes in harbor's task container, which cannot nest in
-    # bubblewrap. Boot must say so rather than hand it a jail it cannot use.
-    with pytest.raises(ReefError, match=r"cannot run under evolution\.executor: sandbox"):
-        CordisBackend(
-            descriptor=get_adapter("terminus"),
-            propose=resolve_proposer(lambda nodes, samples, models: None),
-            score_episode=resolve_episode_scorer(evaluate),
-            tasks=("task one",),
-            models=MODEL,
-            executor=SandboxExecutor(),
-        )
-
-
-@pytest.mark.unit
-def test_a_self_isolating_adapter_boots_on_the_local_executor(tmp_path: Path) -> None:
-    built = CordisBackend(
-        descriptor=get_adapter("terminus"),
-        propose=resolve_proposer(lambda nodes, samples, models: None),
-        score_episode=resolve_episode_scorer(evaluate),
-        tasks=("task one",),
-        models=MODEL,
-        executor=LocalExecutor(),
-    )
-    assert built is not None

@@ -1,15 +1,20 @@
-# Terminal-Bench's Terminus 2, driven through a Reef-owned harbor runner.
+# Terminal-Bench's Terminus 2, driven through a Reef-owned runner.
 #
-# Unlike the CLI adapters, Terminus 2 is not a binary that takes a prompt: it
-# is a harbor agent class that harbor runs against a task container. The
-# ``reef-terminus`` console script is that runner. It reads the rendered tree
-# from REEF_TERMINUS_DIR, subclasses harbor's Terminus2 to bind each node kind
-# to one agent seam, runs the task, and writes the ATIF trajectory and the
-# verifier's reward under REEF_TERMINUS_SESSION_DIR.
+# Terminus 2 is not a binary that takes a prompt: it is a Harbor agent class
+# that Harbor runs against a task container. The ``reef-terminus`` console
+# script is that runner. It reads the rendered tree from REEF_TERMINUS_DIR,
+# hands it to Harbor's own terminus-2 agent as native configuration, runs the
+# task, and writes the verifier's reward and the ATIF trajectory under
+# REEF_TERMINUS_SESSION_DIR.
 #
-# Isolation is harbor's task container, not Reef's jail: Docker cannot nest in
-# bubblewrap, so the runner refuses ``evolution.executor: sandbox`` at boot
-# rather than running unisolated under a config that promised otherwise.
+# The prompt is the task: a Harbor task directory or a registry id, which is
+# what reef-eval resolves. An episode therefore needs no dataset location in
+# its environment, which run_episode would not have carried anyway - it hands
+# an episode only the descriptor's own env, and {root}/{prompt} are the only
+# substitutions.
+#
+# Isolation is Harbor's task container, not Reef's jail: Docker cannot nest in
+# bubblewrap, so a sandbox-executor deployment refuses to boot instead.
 name: terminus
 binary: reef-terminus
 argv:
@@ -27,14 +32,14 @@ files:
       path: "terminus/config.json"
       defaults: {}
   rules: "terminus/AGENTS.md"
-  # Terminus 2 has no slash-command surface, so an agent_command is a skill the
-  # instruction names as user-invocable. Same resolution the dsh adapter uses,
-  # under a second skill root the runner joins after the first.
+  # Terminus 2 has no slash-command surface, so an agent_command is a skill in
+  # a second root. Harbor loads both roots and keeps its progressive skill
+  # loading, so a command is discovered rather than pasted into the prompt.
   agent_command: "terminus-commands/{name}/SKILL.md"
   skill: "terminus/skills/{name}/SKILL.md"
-  # Loaded in the runner's own process, which is what this node kind means:
-  # assemble(state, request, files) rebuilds the message list before every
-  # model call the Terminus 2 main loop makes.
+  # Kept as the shared schema's render target; the quirk rejects this node
+  # because evolved Python would run in the runner's process, outside the
+  # container that isolates the agent's own commands.
   code_extension: "terminus/context/{name}.py"
 trajectory:
   format: terminus-atif-json
@@ -44,8 +49,7 @@ cleanup_whitelist:
   # Harbor writes its trial tree here: logs, the container's outputs, and the
   # ATIF trajectory the runner reads back.
   - "terminus/trials/**"
-  - "terminus/context/__pycache__/**"
-# Docker does not nest in bubblewrap: harbor's task container is the
+# Docker does not nest in bubblewrap: Harbor's task container is the
 # boundary, so a sandbox-executor deployment refuses to boot instead.
 self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks

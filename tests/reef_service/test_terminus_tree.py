@@ -1,7 +1,7 @@
-"""The terminus runner's tree mapping: node kinds to Terminus 2 seams.
+"""The terminus runner's tree mapping: node kinds to Harbor's native inputs.
 
 Stdlib only, like the module under test: these run wherever the suite runs,
-with no harbor and no Docker, so the mapping a gated tree change depends on is
+with no Harbor and no Docker, so the mapping a gated tree change depends on is
 checked without the benchmark.
 """
 
@@ -14,33 +14,29 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.render import render_composition
-from reef.harness.terminus import (
-    TerminusTreeError,
-    context_policy,
-    instruction_text,
-    load_tree,
-    runner,
-    terminus_kwargs,
-)
+from reef.harness.terminus import TerminusTreeError, instruction_paths, load_tree, runner, skill_roots, terminus_kwargs
 from reef.harness.trajectory import read_terminus_atif
-
-ASSEMBLE = """
-def assemble(state, request, files):
-    state["turns"] = state.get("turns", 0) + 1
-    return [{"role": "user", "content": f"turn {state['turns']}"}]
-"""
 
 
 def _tree(**nodes: str) -> dict[str, str]:
     return dict(nodes)
 
 
+def _render(tmp_path: Path, nodes: list) -> dict[str, str]:
+    files = render_composition(nodes, get_adapter("terminus"))
+    for path, text in files.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return files
+
+
 @pytest.mark.unit
 def test_an_empty_tree_is_stock_terminus() -> None:
     # The equivalence the baseline rests on: no node, no override.
     assert terminus_kwargs({}) == {}
-    assert instruction_text({}) == ""
-    assert context_policy({}) is None
+    assert instruction_paths("/root", {}) == []
+    assert skill_roots("/root", {}) == []
 
 
 @pytest.mark.unit
@@ -58,105 +54,104 @@ def test_a_config_that_is_not_an_object_is_a_tree_defect() -> None:
 
 
 @pytest.mark.unit
-def test_rules_skills_and_commands_join_one_instruction_in_that_order() -> None:
+def test_rules_become_an_extra_instruction_path() -> None:
+    tree = _tree(**{"terminus/AGENTS.md": "Be brief.\n"})
+    assert instruction_paths("/root", tree) == [Path("/root/terminus/AGENTS.md")]
+    # Whitespace is not a rules node; Harbor would append an empty file.
+    assert instruction_paths("/root", _tree(**{"terminus/AGENTS.md": "  \n"})) == []
+
+
+@pytest.mark.unit
+def test_skills_and_commands_become_two_skill_roots() -> None:
     tree = _tree(
         **{
-            "terminus/AGENTS.md": "Be brief.\n",
             "terminus/skills/notes/SKILL.md": "Take notes.",
             "terminus-commands/summarize/SKILL.md": "Summarize.",
         }
     )
-    text = instruction_text(tree)
-    assert text.index("Be brief.") < text.index("Take notes.") < text.index("Summarize.")
-    # Terminus has no command surface, so a command says what it is instead.
-    assert "User-invocable. Summarize." in text
+    assert skill_roots("/root", tree) == [Path("/root/terminus/skills"), Path("/root/terminus-commands")]
 
 
 @pytest.mark.unit
-def test_the_context_policy_carries_state_across_calls() -> None:
-    policy = context_policy(_tree(**{"terminus/context/assemble.py": ASSEMBLE}))
-    assert policy is not None
-    assert policy.assemble({"messages": []}) == [{"role": "user", "content": "turn 1"}]
-    assert policy.assemble({"messages": []}) == [{"role": "user", "content": "turn 2"}]
+def test_an_absent_skill_root_is_omitted_because_harbor_rejects_an_empty_one() -> None:
+    tree = _tree(**{"terminus/skills/notes/SKILL.md": "Take notes."})
+    assert skill_roots("/root", tree) == [Path("/root/terminus/skills")]
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(
-    "returned",
-    ["return None", "return []", 'return "text"', "return [{'content': 'no role'}]"],
-)
-def test_a_policy_that_returns_no_usable_messages_leaves_stock_assembly_alone(returned: str) -> None:
-    policy = context_policy(_tree(**{"terminus/context/assemble.py": f"def assemble(s, r, f):\n    {returned}\n"}))
-    assert policy is not None
-    assert policy.assemble({"messages": []}) is None
+def test_the_agent_spec_names_harbors_own_agent_and_carries_the_tree(tmp_path: Path) -> None:
+    files = _render(
+        tmp_path,
+        [
+            ("config", {"data": {"model_name": "openai/gpt-4o", "max_turns": 12}}),
+            ("skill", {"name": "notes", "text": "# Notes\n\nTake notes."}),
+        ],
+    )
+    spec = runner.agent_spec(str(tmp_path), files)
+    # Harbor's terminus-2, not a Reef subclass: no Reef code runs in the agent.
+    assert spec["name"] == "terminus-2"
+    assert spec["model_name"] == "openai/gpt-4o"
+    assert spec["kwargs"] == {"max_turns": 12}
+    assert spec["skills"] == [str(tmp_path / "terminus/skills")]
 
 
 @pytest.mark.unit
-def test_a_module_without_assemble_is_refused_at_load() -> None:
-    with pytest.raises(TerminusTreeError, match="must define a callable assemble"):
-        context_policy(_tree(**{"terminus/context/x.py": "value = 1\n"}))
+def test_a_tree_without_a_model_name_cannot_run() -> None:
+    with pytest.raises(TerminusTreeError, match="carries no model_name"):
+        runner.agent_spec("/root", {})
 
 
 @pytest.mark.unit
-def test_a_module_that_raises_at_import_is_refused_at_load() -> None:
-    with pytest.raises(TerminusTreeError, match="raised while loading"):
-        context_policy(_tree(**{"terminus/context/x.py": "raise ValueError('boom')\n"}))
+@pytest.mark.parametrize("task", [".", "..", "", ".hidden", "we*ird?"])
+def test_a_task_that_cannot_name_a_trial_file_is_refused(task: str) -> None:
+    # The task arrives in the episode prompt, and a promoted task can come from
+    # recorded traffic, so it never becomes a path component unchecked.
+    with pytest.raises(TerminusTreeError):
+        runner.trial_slug(task)
 
 
 @pytest.mark.unit
-def test_load_tree_reads_a_rendered_tree_back_the_way_render_keyed_it(tmp_path: Path) -> None:
-    descriptor = get_adapter("terminus")
-    files = render_composition([("rules", {"text": "Be brief."})], descriptor)
-    for path, text in files.items():
-        target = tmp_path / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    assert load_tree(tmp_path) == files
+def test_a_task_path_keeps_only_its_last_segment_for_the_trial_file() -> None:
+    # The task may legitimately be a task directory, so a path is not an
+    # attack; only its last segment ever becomes a filename.
+    assert runner.trial_slug("/data/terminal-bench/hello-world") == "hello-world"
+    assert runner.trial_slug("hello-world") == "hello-world"
+    assert runner.trial_slug("data\\tb\\hello-world") == "hello-world"
 
 
 @pytest.mark.unit
-def test_load_tree_refuses_a_root_that_is_not_a_directory(tmp_path: Path) -> None:
-    with pytest.raises(TerminusTreeError, match="is not a directory"):
-        load_tree(tmp_path / "missing")
+@pytest.mark.parametrize("task", ["hello-world", "/data/tb/hello-world", "../../pwned", "/etc/passwd"])
+def test_the_trial_file_always_lands_inside_the_session_directory(tmp_path: Path, task: str) -> None:
+    sessions = tmp_path / "sessions"
+    written = runner.write_trial(runner.trial_record(task, {"acc": 1.0}, tmp_path), sessions)
+    assert written.resolve().parent == sessions.resolve()
 
 
-def _trajectory(steps):
+def _trajectory(steps: list) -> str:
     return json.dumps({"schema_version": "ATIF-v1.4", "steps": steps})
 
 
 @pytest.mark.unit
-def test_atif_steps_reads_continuations_in_order(tmp_path: Path) -> None:
-    trial = tmp_path / "trial"
-    trial.mkdir()
-    # Terminus 2 opens a new continuation file after each summarization pass.
-    (trial / "trajectory.json").write_text(_trajectory([{"n": 1}]))
-    (trial / "trajectory.cont-1.json").write_text(_trajectory([{"n": 2}]))
-    assert runner.atif_steps(trial) == [{"n": 1}, {"n": 2}]
+def test_atif_steps_orders_continuations_numerically(tmp_path: Path) -> None:
+    # Terminus 2 opens a new continuation file after each summarization pass;
+    # name order puts cont-1 before the base file and cont-10 before cont-2.
+    for index, step in ((0, 1), (2, 3), (10, 11)):
+        name = "trajectory.json" if index == 0 else f"trajectory.cont-{index}.json"
+        (tmp_path / name).write_text(_trajectory([{"n": step}]))
+    assert runner.atif_steps(tmp_path) == [{"n": 1}, {"n": 3}, {"n": 11}]
 
 
 @pytest.mark.unit
 def test_a_torn_trajectory_costs_its_steps_not_the_trial(tmp_path: Path) -> None:
-    trial = tmp_path / "trial"
-    trial.mkdir()
-    (trial / "trajectory.json").write_text(_trajectory([{"n": 1}]))
-    (trial / "trajectory.cont-1.json").write_text("{ truncated")
-    assert runner.atif_steps(trial) == [{"n": 1}]
+    (tmp_path / "trajectory.json").write_text(_trajectory([{"n": 1}]))
+    (tmp_path / "trajectory.cont-1.json").write_text("{ truncated")
+    assert runner.atif_steps(tmp_path) == [{"n": 1}]
 
 
 @pytest.mark.unit
 def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
     record = runner.trial_record("hello-world", {"accuracy": 1.0}, tmp_path)
-    assert record["task"] == "hello-world"
-    assert record["rewards"] == {"accuracy": 1.0}
-    assert record["reward"] == 1.0
-    assert record["failed"] is False
-
-
-@pytest.mark.unit
-def test_a_trial_the_verifier_never_scored_is_recorded_as_failed(tmp_path: Path) -> None:
-    record = runner.trial_record("hello-world", None, tmp_path)
-    assert record["failed"] is True
-    assert record["rewards"] == {} and record["reward"] is None
+    assert record["reward"] == 1.0 and record["failed"] is False
 
 
 @pytest.mark.unit
@@ -164,8 +159,7 @@ def test_an_episode_that_never_ran_records_why(tmp_path: Path) -> None:
     # A container that failed to build scores nothing. Without the reason, the
     # trial reads as an agent that failed rather than a run that never happened.
     record = runner.trial_record("hello-world", {}, tmp_path, "docker compose build failed")
-    assert record["failed"] is True
-    assert record["error"] == "docker compose build failed"
+    assert record["failed"] is True and record["error"] == "docker compose build failed"
 
 
 @pytest.mark.unit
@@ -182,79 +176,24 @@ def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_the_agent_spec_names_the_class_and_carries_the_tree_location(tmp_path: Path) -> None:
-    tree = _tree(**{"terminus/config.json": json.dumps({"model_name": "gpt-4o"})})
-    spec = runner.agent_spec(tree, "/episode/terminus")
-    assert spec == {
-        "name": "reef.harness.terminus.agent:ReefTerminus",
-        "model_name": "gpt-4o",
-        "kwargs": {"reef_dir": "/episode/terminus"},
-    }
-
-
-@pytest.mark.unit
-def test_a_tree_without_a_model_name_cannot_run() -> None:
-    with pytest.raises(TerminusTreeError, match="carries no model_name"):
-        runner.agent_spec({}, "/episode/terminus")
-
-
-@pytest.mark.unit
-def test_task_path_resolves_a_task_inside_the_dataset(tmp_path: Path, monkeypatch) -> None:
-    (tmp_path / "hello-world").mkdir()
-    monkeypatch.setenv("REEF_TERMINUS_DATASET", str(tmp_path))
-    assert runner.task_path("hello-world") == str(tmp_path / "hello-world")
-    with pytest.raises(TerminusTreeError, match="holds no task"):
-        runner.task_path("absent")
-
-
-@pytest.mark.unit
-def test_atif_steps_orders_continuations_numerically(tmp_path: Path) -> None:
-    trial = tmp_path / "trial"
-    trial.mkdir()
-    for index, step in ((0, 1), (2, 3), (10, 11)):
-        name = "trajectory.json" if index == 0 else f"trajectory.cont-{index}.json"
-        (trial / name).write_text(_trajectory([{"n": step}]))
-    assert runner.atif_steps(trial) == [{"n": 1}, {"n": 3}, {"n": 11}]
-
-
-@pytest.mark.unit
-def test_skill_frontmatter_does_not_reach_the_instruction() -> None:
-    # The quirk writes the header so the file is a well-formed skill on disk;
-    # Terminus 2 reads this text as instruction, so the delimiters would be
-    # literal noise in the prompt.
-    rendered = render_composition(
-        [("skill", {"name": "notes", "text": "# Notes\n\nTake notes."})], get_adapter("terminus")
-    )
-    assert rendered["terminus/skills/notes/SKILL.md"].startswith("---\n")
-    text = instruction_text(rendered)
-    assert text == "# Notes\n\nTake notes."
-    assert "---" not in text and "description:" not in text
-
-
-@pytest.mark.unit
-def test_a_skill_that_already_had_frontmatter_keeps_only_its_body() -> None:
-    tree = _tree(**{"terminus/skills/n/SKILL.md": "---\nname: n\ndescription: d\n---\nBody here.\n"})
-    assert instruction_text(tree) == "Body here."
-
-
-@pytest.mark.unit
 def test_load_tree_reads_both_roots_and_skips_the_run_s_own_output(tmp_path: Path) -> None:
     # terminus-commands is a sibling of terminus, and the episode root also
     # holds the task workspace and, once running, sessions and trials.
-    files = render_composition(
+    files = _render(
+        tmp_path,
         [("rules", {"text": "Be brief."}), ("agent_command", {"name": "summarize", "text": "Summarize."})],
-        get_adapter("terminus"),
     )
-    for path, text in files.items():
-        target = tmp_path / path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    for noise in ("workspace/answer.txt", "terminus/sessions/harbor.json", "terminus/trials/t/trajectory.json"):
+    for noise in ("workspace/answer.txt", "terminus/sessions/x.json", "terminus/trials/t/trajectory.json"):
         target = tmp_path / noise
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("{}", encoding="utf-8")
 
     loaded = load_tree(tmp_path)
     assert loaded == files
-    assert "terminus-commands/summarize/SKILL.md" in loaded
-    assert instruction_text(loaded).endswith("User-invocable. Summarize.")
+    assert skill_roots(tmp_path, loaded) == [tmp_path / "terminus-commands"]
+
+
+@pytest.mark.unit
+def test_load_tree_refuses_a_root_that_is_not_a_directory(tmp_path: Path) -> None:
+    with pytest.raises(TerminusTreeError, match="is not a directory"):
+        load_tree(tmp_path / "missing")

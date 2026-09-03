@@ -37,25 +37,27 @@ a CLI, driven by a runner Reef owns.
 
 The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
 a Harbor agent class, so the adapter ships its own runner,
-``reef-terminus``: it reads the tree from ``REEF_TERMINUS_DIR``, binds it to
-a Terminus 2 subclass, runs one Terminal-Bench task, and writes the ATIF
-trajectory and the verifier's reward under ``REEF_TERMINUS_SESSION_DIR`` for
-the ``terminus-atif-json`` reader. It reaches Harbor through reef-eval, the
-same primitive the examples under ``recipes/`` use. That extra
-(``reef-infra[terminus]``) is imported only when the runner runs, so the
-adapter registry and the render path need neither Harbor nor Docker.
+``reef-terminus``: it reads the tree from ``REEF_TERMINUS_DIR``, hands it to
+Harbor's own ``terminus-2`` agent as native configuration, runs the task the
+prompt names, and writes the verifier's reward and the ATIF trajectory under
+``REEF_TERMINUS_SESSION_DIR`` for the ``terminus-atif-json`` reader. It
+reaches Harbor through reef-eval, the same primitive the examples under
+``recipes/`` use. Nothing of Reef's runs inside the agent. The prompt is a
+Harbor task directory or a registry id, so an episode needs no dataset
+location in its environment, which ``run_episode`` would not carry anyway.
 
-Each node kind binds to one seam: ``config`` to Terminus 2 constructor
-arguments, refused at render if a key is not one; ``rules``, ``skill`` and
-``agent_command`` to the instruction, commands under a second skill root and
-named user-invocable as on ``dsh``; and ``code_extension`` to the context
-seam, one module defining ``assemble(state, request, files)`` that rebuilds
-the message list before every model call, so an evolved policy can compact
-history or carry notes between turns. A policy that raises degrades to stock
-assembly. On an empty tree every seam is a no-op and the agent is stock
-Terminus 2, the equivalence the measured baseline rests on. Isolation is
-Harbor's task container: Docker does not nest in bubblewrap, so this adapter
-refuses ``evolution.executor: sandbox``.
+``config`` becomes Terminus 2 constructor arguments, refused at render if a
+key is not one; ``rules`` becomes an ``extra_instruction_paths`` entry; and
+``skill`` and ``agent_command`` become two ``AgentConfig.skills`` roots, so
+Harbor keeps its progressive skill loading rather than pasting every body
+into the prompt. ``code_extension`` is rejected: an evolved module would run
+in the runner's process, outside the container that isolates the agent's own
+commands, and it is outside Meta-Harness's search space in any case. On an
+empty tree every mapping is a no-op and the agent is stock Terminus 2, the
+equivalence the measured baseline rests on. Isolation is Harbor's task
+container: Docker does not nest in bubblewrap, so ``run_episode`` refuses
+this adapter under ``evolution.executor: sandbox``. The extra needs Python
+3.12, above Reef's own floor.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its

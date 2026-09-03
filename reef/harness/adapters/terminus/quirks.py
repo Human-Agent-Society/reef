@@ -12,11 +12,13 @@ skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
 renders under the second root and the runner names those skills as
 user-invocable when it joins them.
 
-``code_extension`` is the context seam: one module defining
-``assemble(state, request, files)``, loaded in the runner's own process and
-called before every model call the main loop makes. It is limited to one
-module because the seam is a single call, and two modules would leave the
-order between them undefined.
+``code_extension`` is rejected. Harbor's container isolates the commands the
+model writes, not Reef's own process, so an evolved module would run in the
+runner with the runner's privileges - the same hazard the codex adapter
+refuses, and worse here because this adapter disables Reef's jail. It is also
+outside Meta-Harness's search space, which mutates rules, skills, and
+commands only, so nothing that depends on this adapter needs it. Issue #210
+carries what a real boundary would require.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ _CONTEXT = "terminus/context/"
 _SKILL_ROOTS = ("terminus/skills/", "terminus-commands/")
 
 #: Terminus 2 constructor arguments a tree may set. Verified against harbor
-#: 0.22.0; a harbor bump should re-check the signature.
+#: 0.20.0, which reef-eval 0.1.1 resolves; a bump should re-check the signature.
 _ALLOWED_KNOBS = {
     "enable_summarize",
     "interleaved_thinking",
@@ -77,9 +79,11 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         raise RenderError("terminus primary config must be an object")
     _validate_config(config)
 
-    modules = sorted(path for path in files if path.startswith(_CONTEXT) and path.endswith(".py"))
-    if len(modules) > 1:
-        raise RenderError(f"terminus admits one context module, the assemble seam; got {', '.join(modules)}")
+    if any(path.startswith(_CONTEXT) for path in files):
+        raise RenderError(
+            "terminus code_extension is not supported safely because evolved modules would run in the "
+            "runner's process, outside the container that isolates the agent's own commands"
+        )
 
     for path, text in list(files.items()):
         if path.startswith(_SKILL_ROOTS) and path.endswith("/SKILL.md"):

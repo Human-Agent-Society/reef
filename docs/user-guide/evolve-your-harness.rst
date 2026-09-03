@@ -51,10 +51,11 @@ the text around a vendor binary; and ``terminus``, Terminal-Bench's Terminus
 2, run through a Reef-owned Harbor runner. Only ``native`` renders
 ``native_tool``.
 
-Codex supports ``config``, ``rules``, ``agent_command``, and ``skill``. It
-rejects ``code_extension`` because Codex lifecycle hooks run outside its
-command sandbox; Reef will not activate arbitrary evolved JavaScript without a
-separate isolation boundary.
+Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
+``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
+its command sandbox, and a Terminus module would run in Reef's own runner
+rather than the task container. Reef will not activate arbitrary evolved code
+without a separate isolation boundary.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

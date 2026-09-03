@@ -137,17 +137,10 @@ def test_codex_requires_the_responses_dialect() -> None:
 
 
 def _terminus_nodes():
-    # Terminus has no JS extension surface: its code_extension is the Python
-    # context seam, and its config target holds Terminus 2 constructor knobs.
+    # terminus rejects code_extension, and its config target holds Terminus 2
+    # constructor arguments rather than a pi-shaped settings object.
     nodes = [node for node in NODES if node[0] not in ("config", "code_extension")]
-    return [
-        *nodes,
-        (
-            "code_extension",
-            {"name": "assemble", "code": 'def assemble(state, request, files):\n    return request["messages"]\n'},
-        ),
-        ("config", {"data": {"max_turns": 40}}),
-    ]
+    return [*nodes, ("config", {"data": {"max_turns": 40}})]
 
 
 def test_terminus_render_matches_the_golden_tree() -> None:
@@ -172,13 +165,14 @@ def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> N
         render_composition([("config", {"data": {"max_turns": turns}})], get_adapter("terminus"))
 
 
-def test_terminus_admits_one_context_module_because_the_seam_is_one_call() -> None:
-    nodes = [
-        ("code_extension", {"name": "assemble", "code": "def assemble(state, request, files): return None\n"}),
-        ("code_extension", {"name": "other", "code": "def assemble(state, request, files): return None\n"}),
-    ]
-    with pytest.raises(RenderError, match="admits one context module"):
-        render_composition(nodes, get_adapter("terminus"))
+def test_terminus_rejects_code_extensions_that_would_run_outside_the_container() -> None:
+    # Harbor isolates the commands the model writes, not Reef's own process,
+    # so an evolved module would outrank the agent it configures.
+    with pytest.raises(RenderError, match="outside the container"):
+        render_composition(
+            [("code_extension", {"name": "assemble", "code": "def assemble(s, r, f): return None\n"})],
+            get_adapter("terminus"),
+        )
 
 
 def test_terminus_binding_renders_the_litellm_provider() -> None:

@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 terminus = [
-    "reef-eval[harbor]>=0.1.1",
+    "reef-eval[harbor]>=0.1.1; python_version >= '3.12'",
 ]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
