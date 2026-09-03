@@ -658,9 +658,8 @@ class CordisBackend(TrainingBackend):
             self._loader.root.update(entries)
             artifact = Artifact.local(_write_rendered_files(candidate.candidate_files))
             # Under review, or when a reviewed kind is touched, the release waits for a promote.
-            if self._publish == "review" or self._review_kinds & self._mutation_kinds(candidate):
-                metrics["pending"] = True
-            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact)
+            pending = self._publish == "review" or bool(self._review_kinds & self._mutation_kinds(candidate))
+            return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update(entries)
