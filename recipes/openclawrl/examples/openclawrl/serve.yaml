@@ -1,9 +1,11 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
 # Five processes: ray-head + prm-sglang + user-llm-sglang + slime-driver + reef.
 # The whole method is the cookbook `openclawrl` recipe: its processor
-# correlates sessions from recorded traffic by trace matching and judges
-# next states with the PRM on a private worker — agents talk to reef
-# directly, no grader proxy and no session headers.
+# correlates sessions from the harness's conversation-unique
+# x-reef-tag-session value, with trace matching as a fallback, and judges next
+# states with the PRM on a private worker. Clients use reef as their inference
+# endpoint; the example shim only injects Reef routing/correlation headers,
+# and there is no grader proxy.
 #
 # Ports sit in the 2xxxx range: --network host shares the namespace with
 # anything else on the host (e.g. another reef stack on 8900/30000), and
