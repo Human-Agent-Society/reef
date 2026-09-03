@@ -13,6 +13,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    adapter_checksum_verification_due,
     apply_megatron_lora,
     build_sglang_lora_config,
     collect_lora_train_metrics,
@@ -161,6 +162,7 @@ def test_sglang_adapter_config_matches_bridge_default_targets() -> None:
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [
+        ({"check_lora_weight_equal_interval": 0}, "at least 1"),
         ({"megatron_lora_rank": -1}, "non-negative"),
         ({"megatron_lora_dropout": 1.0}, r"\[0, 1\)"),
         ({"megatron_to_hf_mode": "raw"}, "bridge"),
@@ -172,6 +174,24 @@ def test_sglang_adapter_config_matches_bridge_default_targets() -> None:
 def test_validate_megatron_lora_rejects_incompatible_settings(overrides, message) -> None:
     with pytest.raises(ValueError, match=message):
         validate_megatron_lora_args(_args(**overrides))
+
+
+def test_adapter_checksum_verification_samples_publications() -> None:
+    args = _args(check_lora_weight_equal=True, check_lora_weight_equal_interval=4)
+
+    verified = [sequence for sequence in range(1, 11) if adapter_checksum_verification_due(args, sequence)]
+
+    assert verified == [1, 5, 9], "the first publication and every interval-th one after it"
+
+
+def test_adapter_checksum_verification_honors_the_boolean_guard() -> None:
+    every = _args(check_lora_weight_equal=True, check_lora_weight_equal_interval=1)
+    disabled = _args(check_lora_weight_equal=False, check_lora_weight_equal_interval=1)
+    unset = _args(check_lora_weight_equal=True)
+
+    assert all(adapter_checksum_verification_due(every, sequence) for sequence in range(1, 5))
+    assert not any(adapter_checksum_verification_due(disabled, sequence) for sequence in range(1, 5))
+    assert all(adapter_checksum_verification_due(unset, sequence) for sequence in range(1, 5))
 
 
 def test_apply_megatron_lora_freezes_base_and_reports_adapter_update() -> None:
@@ -492,6 +512,8 @@ def test_disjoint_updater_publishes_lora_through_distributed_receiver(monkeypatc
     updater._lora_config = {"r": 1}
     updater.runtime_load_id = "deployment:3"
     updater._base_checksums = None
+    # ``update_weights`` stamps the publication sequence before delegating here.
+    updater.weight_update_sequence = 1
     updater.tie_word_embeddings = False
     updater.active_scenario = "math"
 

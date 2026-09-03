@@ -21,6 +21,7 @@ from tqdm import tqdm
 
 from reef.train.slime_backend.reef_adapters.megatron.hf_export import MegatronToHfWeightIterator
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    adapter_checksum_verification_due,
     build_sglang_lora_config,
     is_lora_weight_name,
     lora_engine_identity,
@@ -90,6 +91,8 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             raise RuntimeError("adapter publication requires a LoRA-enabled actor")
         adapter_tensors = self.export_lora_adapter_tensors(self.weights_getter())
         expected_checksums = None
+        # Restart republication runs once per scenario, not once per
+        # training step, so it always verifies rather than sampling.
         if getattr(self.args, "check_lora_weight_equal", False):
             expected_checksums = tensor_checksums(adapter_tensors)
             verify_replica_adapter_checksums(expected_checksums)
@@ -147,7 +150,7 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             checksum_error: BaseException | None = None
             expected_checksums = None
             try:
-                if getattr(self.args, "check_lora_weight_equal", False):
+                if adapter_checksum_verification_due(self.args, self.weight_update_sequence):
                     expected_checksums = tensor_checksums(adapter_tensors)
                     verify_replica_adapter_checksums(expected_checksums)
             except BaseException as exc:
