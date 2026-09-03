@@ -31,3 +31,19 @@ Markers
 
 ``unit``, ``integration``, and ``acceptance``. Run one with ``pytest -m
 <marker>``.
+
+Coverage
+--------
+
+CI runs the suite under coverage, and ``[tool.coverage.report] fail_under`` in
+``pyproject.toml`` is a gate: the run exits non-zero when total coverage falls
+below the floor. Reproduce it the way CI does:
+
+.. code:: bash
+
+   pytest tests --cov=reef --cov-report=term
+
+``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
+package, so a partial run reports far less than CI does; measure against the
+full suite before reading a number as a regression. ``[tool.coverage.run]``
+omits the four Megatron modules that only execute inside a live CUDA worker.

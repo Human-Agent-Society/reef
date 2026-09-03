@@ -17,6 +17,7 @@ unexpectedly.
 
    -c, --config | the config file. Defaults to ``reef.yaml``, or ``$REEF_CONFIG``.
    --help | the command list
+   -V, --version | the installed reef version. Takes no command: ``reef --version``.
 
 Overriding config values
 ------------------------
