@@ -43,6 +43,8 @@ ENTRY_POINT_GROUP = "reef.harness_adapters"
 
 #: Node kinds rendered to one path per named node; templates need ``{name}``.
 NAMED_NODE_KINDS = ("agent_command", "skill", "code_extension")
+#: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
+OPTIONAL_NODE_KINDS = ("native_tool",)
 
 
 class DescriptorError(ReefError):
@@ -256,6 +258,13 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
 def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
     node_paths = {"rules": _require_str(files, "rules", f"{where} files")}
     for kind in NAMED_NODE_KINDS:
+        template = _require_str(files, kind, f"{where} files")
+        if "{name}" not in template:
+            raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
+        node_paths[kind] = template
+    for kind in OPTIONAL_NODE_KINDS:
+        if kind not in files:
+            continue
         template = _require_str(files, kind, f"{where} files")
         if "{name}" not in template:
             raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")

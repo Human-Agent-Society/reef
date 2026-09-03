@@ -187,6 +187,24 @@ def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
 
 
+NATIVE_TOOL = (
+    "native_tool",
+    {
+        "name": "shout",
+        "description": "Upper-case a string.",
+        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        "code": "def run(args, workdir):\n    return str(args.get('text', '')).upper()\n",
+    },
+)
+
+
+def test_native_render_matches_the_golden_tree() -> None:
+    # The native harness loads Python extensions, so its golden carries a Python body.
+    nodes = [node for node in NODES if node[0] != "code_extension"]
+    extension = ("code_extension", {"name": "tracer", "code": "def tracer():\n    pass\n"})
+    assert render_composition([*nodes, extension, NATIVE_TOOL], get_adapter("native")) == golden_tree("native")
+
+
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [

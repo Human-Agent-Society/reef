@@ -1,11 +1,12 @@
 """Harness composition node kinds: the plugin vocabulary of the Entry tree.
 
 A harness composition is a flat compose Entry tree whose entries name one of
-five node kinds. Each kind's plugin body is its admission gate: it validates
-the entry config at load, so a proposal carrying an invalid node lands as a
-FAILED fiber and never reaches the ledger. The kinds cover what both surveyed
-harnesses compose from files alone - one JSON config tree, markdown resource
-directories, and code-valued extension files:
+the node kinds below. Each kind's plugin body is its admission gate: it
+validates the entry config at load, so a proposal carrying an invalid node
+lands as a FAILED fiber and never reaches the ledger. Five kinds cover what
+both surveyed harnesses compose from files alone - one JSON config tree,
+markdown resource directories, and code-valued extension files - and the
+native harness adds kinds only it renders:
 
 - ``config``: a JSON object merged into one of the adapter's declared config
   targets (``settings.json``/``models.json`` for pi, ``opencode.json``).
@@ -16,6 +17,8 @@ directories, and code-valued extension files:
 - ``skill``: a named Agent Skill, rendered as ``skills/<name>/SKILL.md``.
 - ``code_extension``: a named code file the harness loads in-process (pi
   ``extensions/``, opencode ``plugin/``).
+- ``native_tool``: a named tool of the native harness, a JSON schema plus
+  code defining ``run(args, workdir)`` (``native/tools/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.render`` reads it back out per adapter.
@@ -165,11 +168,22 @@ def code_extension_node(ctx: Any, config: Any) -> None:
     _reject_secret_shaped_text(_require_text(options, "code"), "code_extension node 'code'")
 
 
+def native_tool_node(ctx: Any, config: Any) -> None:
+    """A named tool the native harness loads: a description, a JSON schema, and code defining ``run(args, workdir)``."""
+    options = _require_mapping(config)
+    _require_name(options)
+    _require_text(options, "description")
+    if not isinstance(options.get("parameters", {}), Mapping):
+        raise ValueError("native_tool node 'parameters' must be an object")
+    _reject_secret_shaped_text(_require_text(options, "code"), "native_tool node 'code'")
+
+
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "config": config_node,
     "rules": rules_node,
     "agent_command": agent_command_node,
     "skill": skill_node,
     "code_extension": code_extension_node,
+    "native_tool": native_tool_node,
 }
 """Entry ``name`` to node plugin; the resolver of the composition loader."""

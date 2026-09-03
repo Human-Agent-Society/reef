@@ -258,3 +258,13 @@ read_claude_session = ClaudeSessionReader()
 read_deepseek_session = DeepseekSessionReader()
 read_hermes_session = HermesSessionReader()
 read_opencode_storage = OpencodeStorageReader()
+
+
+@register_trajectory_reader
+class NativeSessionReader(TrajectoryReader):
+    """Read the native harness session tree: every ``*.jsonl`` under ``path``, in order, like a pi session."""
+
+    format = "native-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return PiSessionReader()(path)

@@ -168,7 +168,7 @@ zero.
    evolution.evaluate | an ``EpisodeScorer``, likewise
    evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
-   evolution.adapter | pi | ``opencode``, ``claude``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), or an entry-point adapter
+   evolution.adapter | pi | ``opencode``, ``claude``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes), or an entry-point adapter
    evolution.binary | overrides the adapter's binary name
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own

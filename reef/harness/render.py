@@ -57,6 +57,20 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("text", "")))
         elif kind == "code_extension":
             emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("code", "")))
+        elif kind == "native_tool":
+            template = descriptor.node_paths.get(kind)
+            if template is None:
+                raise RenderError(f"adapter {descriptor.name!r} does not render native_tool nodes")
+            # One importable module: the declaration as constants, then the code that defines run(args, workdir).
+            header = "\n".join(
+                f"{key} = {value!r}"
+                for key, value in (
+                    ("NAME", options.get("name")),
+                    ("DESCRIPTION", options.get("description", "")),
+                    ("PARAMETERS", dict(options.get("parameters", {}) or {})),
+                )
+            )
+            emit(template.format(name=options.get("name")), f"{header}\n\n{options.get('code', '')}")
         else:
             raise RenderError(f"unknown node kind {kind!r}")
 
