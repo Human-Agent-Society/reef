@@ -28,6 +28,7 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    "tomli-w",
 ]
 
 [project.optional-dependencies]
@@ -68,7 +69,9 @@ dev = [
     "mypy",
     "pre-commit",
     "pytest",
-    "ruff==0.16.5",
+    # CI measures coverage against the [tool.coverage.report] floor below.
+    "pytest-cov",
+    "ruff==0.14.7",
 ]
 
 [dependency-groups]

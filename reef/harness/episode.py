@@ -21,6 +21,7 @@ finding.
 from __future__ import annotations
 
 import shutil
+import stat
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -46,6 +47,34 @@ class EpisodeResult:
     stderr: str
     trajectory: tuple[dict[str, Any], ...]
     residue: tuple[str, ...]
+
+
+def _remove_episode_root(root: Path) -> None:
+    """Remove a root, repairing ordinary permission damage once."""
+
+    if not root.exists() and not root.is_symlink():
+        return
+
+    def repair(path: Path) -> None:
+        if path.is_symlink():
+            return
+        if path.is_dir():
+            path.chmod(path.stat().st_mode | stat.S_IRWXU)
+            for child in path.iterdir():
+                repair(child)
+        else:
+            path.chmod(path.stat().st_mode | stat.S_IRUSR | stat.S_IWUSR)
+
+    try:
+        shutil.rmtree(root)
+    except OSError:
+        if not root.exists() and not root.is_symlink():
+            return
+        try:
+            repair(root)
+            shutil.rmtree(root)
+        except OSError as exc:
+            raise EpisodeError(f"cannot remove episode root {root}: {exc}") from exc
 
 
 def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
@@ -99,6 +128,12 @@ def run_episode(
             written.add(str(relative_path))
         workspace = root / "workspace"
         workspace.mkdir()
+        writable_paths = tuple(root / PurePosixPath(relative) for relative in descriptor.writable_paths)
+        try:
+            for path in writable_paths:
+                path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise EpisodeError(f"cannot prepare writable episode state: {exc}") from exc
         env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
         # Point HOME at the root unless the descriptor relocates it itself:
         # config discovery that ignores the relocation vars still lands inside
@@ -106,7 +141,15 @@ def run_episode(
         env.setdefault("HOME", str(root))
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
-            outcome = executor.launch(argv, root=root, workspace=workspace, env=env, timeout=timeout)
+            outcome = executor.launch(
+                argv,
+                root=root,
+                workspace=workspace,
+                env=env,
+                timeout=timeout,
+                writable_paths=writable_paths,
+                readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),
+            )
         except EpisodeLaunchError as exc:
             raise EpisodeError(str(exc)) from exc
         except EpisodeTimeout as exc:
@@ -129,4 +172,4 @@ def run_episode(
             residue=residue,
         )
     finally:
-        shutil.rmtree(root, ignore_errors=True)
+        _remove_episode_root(root)

@@ -50,7 +50,7 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: python -m pip install mypy aiohttp pyyaml huggingface_hub
+      - run: python -m pip install mypy aiohttp pyyaml huggingface_hub tomli-w
       - run: python -m mypy
 
   test:
@@ -73,7 +73,7 @@ jobs:
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub numpy ray httpx
+      - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub tomli-w numpy ray httpx
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -161,7 +161,7 @@ jobs:
               for requirement in requirements
               if requirement.marker is None
           }
-          assert core == {"aiohttp", "huggingface-hub", "pyyaml", "reef-client"}, core
+          assert core == {"aiohttp", "huggingface-hub", "pyyaml", "reef-client", "tomli-w"}, core
           slime = {
               canonicalize_name(requirement.name)
               for requirement in requirements

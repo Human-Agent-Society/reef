@@ -4,11 +4,11 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles five, one per third-party coding-agent CLI;
+adapter does. Reef bundles six, one per third-party coding-agent CLI;
 ``native``, its own agent, whose loop lives in this tree and whose tools are
 ``native_tool`` nodes, so a mutation can add, rewrite, or remove a tool; and
-``terminus``, Terminal-Bench's Terminus 2, which is a harbor agent class
-rather than a CLI and so is driven by a runner Reef owns.
+``terminus``, Terminal-Bench's Terminus 2, a Harbor agent class rather than
+a CLI, driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -20,6 +20,8 @@ rather than a CLI and so is driven by a runner Reef owns.
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``claude``   | ``primary`` → ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
++--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
@@ -30,38 +32,30 @@ rather than a CLI and so is driven by a runner Reef owns.
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                           | reef-eval via ``reef-infra[terminus]``       |
+|              |                                                           | reef-eval via ``reef-infra[terminus]``    |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
 The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
 a Harbor agent class, so the adapter ships its own runner,
-``reef-terminus``, which reads the tree from ``REEF_TERMINUS_DIR``, binds it
-to a Terminus 2 subclass, runs one Terminal-Bench task, and writes the ATIF
+``reef-terminus``: it reads the tree from ``REEF_TERMINUS_DIR``, binds it to
+a Terminus 2 subclass, runs one Terminal-Bench task, and writes the ATIF
 trajectory and the verifier's reward under ``REEF_TERMINUS_SESSION_DIR`` for
 the ``terminus-atif-json`` reader. It reaches Harbor through reef-eval, the
-same primitive the examples under ``recipes/`` use, so Reef has one way in
-rather than two. That is an optional extra (``pip install
-reef-infra[terminus]``) imported only when the runner runs, so the adapter
-registry and the render path need neither Harbor nor Docker.
+same primitive the examples under ``recipes/`` use. That extra
+(``reef-infra[terminus]``) is imported only when the runner runs, so the
+adapter registry and the render path need neither Harbor nor Docker.
 
-Each node kind binds to one agent seam. ``config`` becomes Terminus 2
-constructor arguments, and a key that is not one is refused at render.
-``rules``, ``skill`` and ``agent_command`` join the instruction; Terminus 2
-has no slash-command surface, so a command renders under a second skill root
-and is named as user-invocable, the resolution the ``dsh`` adapter also
-uses. ``code_extension`` is the context seam: one module defining
-``assemble(state, request, files)``, loaded in the runner's process and
-called before every model call the main loop makes, so an evolved policy can
-rewrite history, compact it, or carry notes between turns. It is limited to
-one module because the seam is a single call. A policy that raises is logged
-and skipped, so a defective candidate degrades to stock assembly and still
-earns a score.
-
-On an empty tree every seam is a no-op and the agent is stock Terminus 2.
-That equivalence is what makes the stock benchmark score the baseline a
-gated change is measured against. Isolation is harbor's task container, not
-Reef's jail: Docker cannot nest in bubblewrap, so this adapter does not run
-under ``evolution.executor: sandbox``.
+Each node kind binds to one seam: ``config`` to Terminus 2 constructor
+arguments, refused at render if a key is not one; ``rules``, ``skill`` and
+``agent_command`` to the instruction, commands under a second skill root and
+named user-invocable as on ``dsh``; and ``code_extension`` to the context
+seam, one module defining ``assemble(state, request, files)`` that rebuilds
+the message list before every model call, so an evolved policy can compact
+history or carry notes between turns. A policy that raises degrades to stock
+assembly. On an empty tree every seam is a no-op and the agent is stock
+Terminus 2, the equivalence the measured baseline rests on. Isolation is
+Harbor's task container: Docker does not nest in bubblewrap, so this adapter
+refuses ``evolution.executor: sandbox``.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
@@ -149,7 +143,8 @@ agent.
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
-   model_binding | per API dialect (``openai``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 
