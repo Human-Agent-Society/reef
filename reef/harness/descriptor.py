@@ -14,9 +14,15 @@ everything the shared engines need to drive one harness binary:
 - ``cleanup_whitelist``: root-relative patterns for files the harness
   legitimately creates (session storage, boot mutations); anything else
   left behind is reported as residue.
+- ``writable_paths``: root-relative state directories that a hosted sandbox
+  makes writable while keeping the rendered files inside them read-only.
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``model_binding_proxy`` (optional): keep the served-model credential in
+  Reef and give the harness a temporary loopback endpoint instead. For these
+  adapters, fields owned by ``model_binding`` are reserved from evolved
+  config nodes so evaluation cannot mask a provider redirect in the artifact.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -32,7 +38,7 @@ import importlib
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -96,10 +102,12 @@ class AdapterDescriptor:
     trajectory_format: str
     trajectory_path: str
     cleanup_whitelist: tuple[str, ...] = ()
+    writable_paths: tuple[str, ...] = ()
     finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
     install: InstallSpec | None = None
+    model_binding_proxy: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
-    #: keyed by API dialect (``openai``, ``anthropic``): ``{base_url}``,
+    #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
     #: the matching set when it runs evaluation episodes, so the served tree
     #: never carries a provider binding.
@@ -117,6 +125,15 @@ def _str_list(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise DescriptorError(f"{where} must be a list of non-empty strings")
     return tuple(value)
+
+
+def _relative_paths(value: Any, where: str) -> tuple[str, ...]:
+    paths = _str_list(value, where)
+    for path in paths:
+        pure = PurePosixPath(path)
+        if pure.is_absolute() or ".." in pure.parts or not pure.parts or pure.parts[0] == "workspace":
+            raise DescriptorError(f"{where} entries must stay below the episode root and outside workspace")
+    return paths
 
 
 def load_descriptor(path: Path) -> AdapterDescriptor:
@@ -143,6 +160,10 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     ):
         raise DescriptorError(f"{where} 'env' must map strings to strings")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
+    writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
+    model_binding_proxy = data.get("model_binding_proxy", False)
+    if not isinstance(model_binding_proxy, bool):
+        raise DescriptorError(f"{where} 'model_binding_proxy' must be a boolean")
     finalize, quirk_whitelist = _load_quirks(data.get("quirks"), where)
     return AdapterDescriptor(
         name=name,
@@ -154,8 +175,10 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         trajectory_format=_require_str(trajectory, "format", f"{where} trajectory"),
         trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
         cleanup_whitelist=whitelist + quirk_whitelist,
+        writable_paths=writable_paths,
         finalize_render=finalize,
         install=_parse_install(data.get("install"), where),
+        model_binding_proxy=model_binding_proxy,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
     )
 
@@ -189,7 +212,9 @@ def _parse_model_binding(
     if isinstance(raw, list):
         raw = {"openai": raw}
     if not isinstance(raw, Mapping) or not raw:
-        raise DescriptorError(f"{where} 'model_binding' must map an api (openai, anthropic) to config node templates")
+        raise DescriptorError(
+            f"{where} 'model_binding' must map an api (openai, responses, anthropic) to config node templates"
+        )
     parsed: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for api, templates in raw.items():
         label = f"{where} model_binding.{api}"

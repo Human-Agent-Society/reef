@@ -1,0 +1,103 @@
+# OpenAI Codex CLI, driven through its non-interactive exec mode.
+#
+# CODEX_HOME relocates user configuration, rules, hooks, prompts, and session
+# rollouts into the episode root. HOME is already relocated by run_episode;
+# Codex therefore discovers rendered user skills below .agents/skills without
+# reading the operator's real home. The CLI keeps model-generated commands in
+# a workspace-write sandbox and never waits for an approval during a benchmark
+# episode.
+name: codex
+binary: codex
+install:
+  kind: npm
+  package: "@openai/codex"
+  version: "0.152.1"
+  binary_path: "node_modules/.bin/codex"
+argv:
+  - exec
+  - --json
+  - --strict-config
+  - --sandbox
+  - workspace-write
+  - --skip-git-repo-check
+  - "{prompt}"
+env:
+  CODEX_HOME: "{root}/codex"
+files:
+  config:
+    primary:
+      path: "codex/config.toml"
+      defaults:
+        approval_policy: never
+        web_search: disabled
+        check_for_update_on_startup: false
+        analytics:
+          enabled: false
+        feedback:
+          enabled: false
+        features:
+          apps: false
+          enable_request_compression: false
+          hooks: false
+          plugins: false
+          shell_snapshot: false
+          skill_mcp_dependency_install: false
+        otel:
+          exporter: none
+          log_user_prompt: false
+          metrics_exporter: none
+          trace_exporter: none
+        sandbox_workspace_write:
+          network_access: false
+  rules: "codex/AGENTS.md"
+  # Custom prompts remain Codex's named command surface. They are deprecated
+  # upstream in favor of skills, but still provide the closest translation of
+  # Reef's distinct agent_command node without changing the shared schema.
+  agent_command: "codex/prompts/{name}.md"
+  # run_episode relocates HOME to {root}; Codex's user skill root follows it.
+  skill: ".agents/skills/{name}/SKILL.md"
+  # Kept as the shared schema's render target; the quirk rejects this node
+  # until hook processes can be isolated separately from Codex itself.
+  code_extension: "codex/extensions/{name}.mjs"
+trajectory:
+  format: codex-session-jsonl
+  path: "codex/sessions"
+# Codex persists session databases and bundled system skills beside its
+# config. The sandbox opens this directory for those writes, then rebinds
+# every rendered input below it read-only.
+writable_paths:
+  - "codex"
+cleanup_whitelist:
+  - "codex/sessions/**"
+  # Codex 0.152.1 initializes its isolated user home on first boot. These are
+  # versioned local databases, copied system skills, coordination files, and
+  # temporary discovery state observed by the real-binary smoke test.
+  - "codex/.sandbox_migration"
+  - "codex/.tmp/**"
+  - "codex/goals_1.sqlite*"
+  - "codex/installation_id"
+  - "codex/logs_2.sqlite*"
+  - "codex/memories_1.sqlite*"
+  - "codex/queue_1.sqlite*"
+  - "codex/skills/.system/**"
+  - "codex/state_5.sqlite*"
+  - "codex/thread-writer-locks/**"
+  - "codex/thread_history_1.sqlite*"
+quirks: reef.harness.adapters.codex.quirks
+# Codex can read its own config through a model-generated shell command. Keep
+# the real bearer in Reef's process: evaluation renders a temporary loopback
+# endpoint with a short-lived capability whose proxy injects upstream auth.
+model_binding_proxy: true
+model_binding:
+  responses:
+    - target: primary
+      data:
+        model: "{model}"
+        model_provider: reef
+        model_providers:
+          reef:
+            name: Reef
+            base_url: "{base_url}/v1"
+            wire_api: responses
+            supports_websockets: false
+            experimental_bearer_token: "{api_key}"

@@ -28,6 +28,7 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    "tomli-w",
 ]
 
 [project.optional-dependencies]

@@ -86,7 +86,7 @@ class ServiceSettings:
     upstream_url: str | None = None
     upstream_api_key: str | None = None
     upstream_model: str | None = None
-    #: The provider's API dialect, ``openai`` (default) or ``anthropic``.
+    #: The provider's API dialect: ``openai`` (default), ``responses``, or ``anthropic``.
     upstream_api: str = "openai"
     inference_timeout_s: float = 300.0
     train_timeout_s: float | None = None

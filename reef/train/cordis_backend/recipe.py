@@ -98,7 +98,7 @@ class CordisRecipe(Recipe):
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
-    ``reef.upstream_api`` for an Anthropic-style provider). It reaches
+    ``reef.upstream_api`` when it uses Responses or an Anthropic-style provider). It reaches
     ``propose`` as ``models.served`` and is rendered into each evaluation
     episode through the adapter's ``model_binding`` template, so the seed
     carries no provider nodes and neither does the published tree; a client
@@ -112,7 +112,7 @@ class CordisRecipe(Recipe):
               url: https://api.openai.com
               model: gpt-4o
               api_key_env: OPENAI_API_KEY   # the key stays out of the file
-              api: openai                   # default; or anthropic
+              api: openai                   # default; or responses / anthropic
 
     A seed names the baseline nodes the first mutation is measured against::
 

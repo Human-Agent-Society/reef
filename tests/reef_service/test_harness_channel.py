@@ -1015,10 +1015,10 @@ def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path)
         await client.start_server()
         try:
             response = await client.get(
-                "/reef/harness/install", params={"adapter": "codex"}, headers={"x-reef-scenario": "delivery"}
+                "/reef/harness/install", params={"adapter": "acme"}, headers={"x-reef-scenario": "delivery"}
             )
             assert response.status == 404
-            assert "codex" in await response.text()
+            assert "acme" in await response.text()
             # A missing adapter parameter is a caller error, not a lookup miss.
             response = await client.get("/reef/harness/install", headers={"x-reef-scenario": "delivery"})
             assert response.status == 400

@@ -10,7 +10,8 @@ development run and a hosted one, so that step is the seam:
   hermetic tests.
 * :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
   fresh non-root namespace, a read-only base filesystem with only the episode
-  root exposed (its workspace writable, the rest read-only), no host
+  root exposed (its workspace and declared runtime state writable, rendered
+  inputs read-only), no host
   environment or credentials, resource limits, network disabled unless an
   egress allowlist is configured, and death with the parent.
 
@@ -77,6 +78,8 @@ class EpisodeExecutor(Protocol):
         workspace: Path,
         env: Mapping[str, str],
         timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome: ...
 
 
@@ -89,6 +92,7 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
             list(popen_argv),
             cwd=cwd,
             env=dict(env),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -131,6 +135,8 @@ class LocalExecutor:
         workspace: Path,
         env: Mapping[str, str],
         timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
         return _run(argv, cwd=workspace, env={**_inherited_env(), **env}, timeout=timeout)
 
@@ -169,7 +175,16 @@ class SandboxExecutor:
                 "evolution.executor: local for development"
             )
 
-    def _bwrap_argv(self, argv: Sequence[str], *, root: Path, workspace: Path, env: Mapping[str, str]) -> list[str]:
+    def _bwrap_argv(
+        self,
+        argv: Sequence[str],
+        *,
+        root: Path,
+        workspace: Path,
+        env: Mapping[str, str],
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
+    ) -> list[str]:
         cmd = [
             "bwrap",
             "--unshare-user",
@@ -192,8 +207,15 @@ class SandboxExecutor:
         for base in self.base_paths:
             if Path(base).exists():
                 cmd += ["--ro-bind", base, base]
-        # The episode root is read-only except its workspace.
+        # Mount the root read-only, then open only declared runtime-state
+        # directories. Rendered inputs inside those directories are rebound
+        # read-only so a run cannot mutate the admitted composition.
         cmd += ["--ro-bind", str(root), str(root)]
+        for path in writable_paths:
+            cmd += ["--bind", str(path), str(path)]
+        for path in readonly_paths:
+            if any(path == writable or writable in path.parents for writable in writable_paths):
+                cmd += ["--ro-bind", str(path), str(path)]
         cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
         for key, value in {**_inherited_env(), **env}.items():
@@ -209,9 +231,18 @@ class SandboxExecutor:
         workspace: Path,
         env: Mapping[str, str],
         timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
         self.preflight()
-        full = self._bwrap_argv(argv, root=root, workspace=workspace, env=env)
+        full = self._bwrap_argv(
+            argv,
+            root=root,
+            workspace=workspace,
+            env=env,
+            writable_paths=writable_paths,
+            readonly_paths=readonly_paths,
+        )
         # bwrap clears the environment inside the jail; the outer process only
         # needs PATH to find bwrap itself. Resource limits are set on the child
         # before exec, so they apply through bwrap to the jailed process tree.
@@ -219,6 +250,7 @@ class SandboxExecutor:
             process = subprocess.Popen(
                 full,
                 env={"PATH": os.environ.get("PATH", "")},
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
