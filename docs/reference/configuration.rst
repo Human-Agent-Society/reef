@@ -73,7 +73,7 @@ The ``reef`` section
    reef.upstream_url | the OpenAI-compatible provider, with no ``/v1`` suffix
    reef.upstream_api_key | its credential. Reef is the only party that sees it.
    reef.upstream_model | the model to request upstream
-   reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic``
+   reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic endpoint
    reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
    reef.inference_timeout_s | 300.0 | per-request timeout
    reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
