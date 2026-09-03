@@ -7,7 +7,10 @@ from collections.abc import Sequence
 from typing import Any
 
 from reef.train.slime_backend.loss_families import LOSS_FAMILIES
-from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
+from reef.train.slime_backend.reef_adapters.megatron.lora import (
+    DEFAULT_ADAPTER_CHECKSUM_INTERVAL,
+    validate_megatron_lora_args,
+)
 
 REEF_MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.model_provider.provide_actor_model"
@@ -32,6 +35,16 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Adapter slots the SGLang engine keeps loaded on the shared base model (>= 1).",
     )
     parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--check-lora-weight-equal-interval",
+        type=int,
+        default=DEFAULT_ADAPTER_CHECKSUM_INTERVAL,
+        help=(
+            "Publications between adapter checksum verifications; 1 verifies every publication. "
+            "Each verification hashes the adapter on the host and re-hashes it inside SGLang "
+            "while generation is paused."
+        ),
+    )
     parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--critic-steps-per-actor",

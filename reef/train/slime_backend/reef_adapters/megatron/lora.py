@@ -21,6 +21,11 @@ _MEGATRON_TO_HF_TARGETS = {
 }
 _DEFAULT_MEGATRON_TARGETS = tuple(_MEGATRON_TO_HF_TARGETS)
 
+#: Publications between adapter checksum verifications. Unlike the frozen
+#: base, this guard covers the bytes one publication moves, so it samples
+#: tightly: a skipped publication is one whose transport went unchecked.
+DEFAULT_ADAPTER_CHECKSUM_INTERVAL = 4
+
 
 def validate_megatron_lora_args(args: Namespace) -> None:
     """Normalize and validate Slime's optional Megatron LoRA configuration."""
@@ -57,6 +62,29 @@ def validate_megatron_lora_args(args: Namespace) -> None:
     slots = getattr(args, "max_loaded_loras", None)
     if slots is not None and int(slots) < 1:
         raise ValueError("--max-loaded-loras must be at least 1")
+    interval = getattr(args, "check_lora_weight_equal_interval", None)
+    if interval is not None and int(interval) < 1:
+        raise ValueError("--check-lora-weight-equal-interval must be at least 1")
+
+
+def adapter_checksum_verification_due(args: Namespace, publication_sequence: int) -> bool:
+    """Whether publication ``publication_sequence`` checksums its adapter tensors.
+
+    The guard hashes every adapter tensor on the host, compares the digest
+    across data-parallel replicas, and hands the per-tensor checksums to
+    SGLang so the engine can verify what it received. All of that runs with
+    generation paused. It covers the bytes this publication moves, so unlike
+    the frozen-base guard it cannot be recovered by a later check: sampling
+    it trades a bounded number of unverified publications for the cost.
+    Publication 1 always verifies.
+    """
+
+    if not getattr(args, "check_lora_weight_equal", False):
+        return False
+    interval = int(getattr(args, "check_lora_weight_equal_interval", 1))
+    if interval <= 1:
+        return True
+    return (publication_sequence - 1) % interval == 0
 
 
 def lora_engine_slots(args: Namespace) -> int:
