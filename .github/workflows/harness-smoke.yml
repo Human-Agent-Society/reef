@@ -126,10 +126,9 @@ jobs:
         env:
           REEF_REAL_HERMES_BINARY: ${{ runner.temp }}/hermes/venv/bin/hermes
 
-  # The same guard for Terminus 2, whose real dependency is a Python package
-  # rather than a pinned binary: that harbor still validates the agent spec,
-  # imports the class, and binds the tree. No Docker and no model, so a full
-  # episode stays the opt-in tests/smoke/test_real_terminus.py.
+  # The same guard for Terminus 2 (tests/smoke/test_real_terminus.py), 
+  # whose real dependency is a Python packag rather than a pinned binary: 
+  # that harbor still validates the agent spec, imports the class, and binds the tree.
   real-terminus:
     runs-on: ubuntu-latest
     timeout-minutes: 15
