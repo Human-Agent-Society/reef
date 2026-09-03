@@ -11,7 +11,7 @@ and rollback — is handled by reef's native artifact stack
 
 Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to
 a client program; this package evolves the *harness composition itself* by
-driving a real coding-agent binary (pi, opencode) per episode.
+driving a real coding-agent binary per episode.
 """
 
 from reef.harness.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor

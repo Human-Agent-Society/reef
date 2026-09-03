@@ -4,18 +4,18 @@ A harness composition is a flat compose Entry tree whose entries name one of
 five node kinds. Each kind's plugin body is its admission gate: it validates
 the entry config at load, so a proposal carrying an invalid node lands as a
 FAILED fiber and never reaches the ledger. The kinds cover what both surveyed
-harnesses compose from files alone - one JSON config tree, markdown resource
-directories, and code-valued extension files:
+harnesses compose from files alone - one structured config tree, markdown
+resource directories, and code-valued extension files:
 
 - ``config``: a JSON object merged into one of the adapter's declared config
-  targets (``settings.json``/``models.json`` for pi, ``opencode.json``).
+  targets (the adapter may serialize it as JSON, YAML, or TOML).
 - ``rules``: context text concatenated into the adapter's rules file
   (``AGENTS.md`` on both harnesses).
-- ``agent_command``: a named prompt template (pi ``prompts/``, opencode
-  ``command/``).
+- ``agent_command``: a named prompt template in the agent's native command
+  directory.
 - ``skill``: a named Agent Skill, rendered as ``skills/<name>/SKILL.md``.
-- ``code_extension``: a named code file the harness loads in-process (pi
-  ``extensions/``, opencode ``plugin/``).
+- ``code_extension``: a named code file loaded by the harness or invoked by
+  its native lifecycle hooks.
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.render`` reads it back out per adapter.
