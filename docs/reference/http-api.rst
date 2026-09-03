@@ -37,6 +37,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/rollback``    | republish an earlier release as the head          |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/promote``     | serve a release held for review                   |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                           | the served harness tree                           |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
