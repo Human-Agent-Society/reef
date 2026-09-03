@@ -9,6 +9,7 @@ generated script under ``sh`` with the vendor tools shimmed on PATH."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import os
@@ -1179,12 +1180,25 @@ def test_git_install_fields_constrain_their_charset(tmp_path, field: str, value:
         load_descriptor(target)
 
 
-def _git_install_fixture(tmp_path: Path, *, binary_version: str | None) -> tuple[Path, Path, Path, dict, Path]:
-    """A rendered hermes script with git and python3 shims that log their calls and fake the venv."""
+#: The ref the bundled hermes descriptor pins, as the install script records it.
+HERMES_PIN = "https://github.com/NousResearch/hermes-agent@v2026.8.31"
+
+
+def _git_install_fixture(
+    tmp_path: Path, *, binary_version: str | None, pin: str | None = HERMES_PIN, ref: str | None = None
+) -> tuple[Path, Path, Path, dict, Path]:
+    """A rendered hermes script with git and python3 shims that log their calls and fake the venv.
+
+    ``pin`` is the ref recorded beside an already-installed binary (``None``
+    plants none); ``ref`` re-pins the descriptor, standing in for a pin bump.
+    """
+    descriptor = get_adapter("hermes")
+    if ref is not None:
+        descriptor = dataclasses.replace(descriptor, install=dataclasses.replace(descriptor.install, ref=ref))
     script = tmp_path / "install.sh"
     script.write_text(
         render_install_script(
-            descriptor=get_adapter("hermes"),
+            descriptor=descriptor,
             files={"hermes/SOUL.md": "hello\n"},
             release_id="v-test",
             content_id="content-test",
@@ -1195,12 +1209,22 @@ def _git_install_fixture(tmp_path: Path, *, binary_version: str | None) -> tuple
         _write_executable(
             prefix / "venv/bin/hermes", f"#!/bin/sh\necho 'Hermes Agent v{binary_version} (2026.8.31)'\n"
         )
+        if pin is not None:
+            (prefix / ".reef-install-pin").write_text(f"{pin}\n")
     shim = tmp_path / "shim"
     log = tmp_path / "vendor.log"
     # POSIX sh (dash on CI): the clone target is the last argument, found by iterating.
     _write_executable(
         shim / "git",
-        f'#!/bin/sh\nprintf \'git %s\\n\' "$*" >> "{log}"\nfor arg in "$@"; do last="$arg"; done\nmkdir -p "$last/.git"\n',
+        f'#!/bin/sh\nprintf \'git %s\\n\' "$*" >> "{log}"\n'
+        'prev=""\nfor arg in "$@"; do\n'
+        '    [ "$prev" = "--branch" ] && ref="$arg"\n'
+        '    prev="$arg"\n    last="$arg"\ndone\n'
+        'if [ -d "$last" ] && [ -n "$(ls -A "$last")" ]; then\n'
+        "    echo \"fatal: destination path '$last' already exists and is not an empty directory.\" >&2\n"
+        "    exit 128\n"
+        "fi\n"
+        'mkdir -p "$last/.git"\nprintf \'%s\\n\' "$ref" > "$last/REF"\n',
     )
     # python3 -m venv DIR makes DIR/bin/python, whose -m pip install then drops the binary the pin expects.
     _write_executable(
@@ -1241,3 +1265,45 @@ def test_git_install_kind_skips_the_clone_when_the_version_label_matches(tmp_pat
     # The version answered, so the vendor step never ran (the reef-client step still calls python3).
     assert "git clone" not in (log.read_text() if log.exists() else "")
     assert "hermes 0.21.0 already installed" in result.stdout
+
+
+@pytest.mark.unit
+def test_git_install_kind_reinstalls_when_only_the_ref_moved(tmp_path) -> None:
+    """A date-tagged ref bump the package version does not follow still reinstalls.
+
+    hermes pins ``v2026.8.31`` but reports 0.21.0, so gating on the version
+    label alone would leave every existing install on the old checkout.
+    """
+    script, dest, prefix, env, _ = _git_install_fixture(tmp_path, binary_version="0.21.0", ref="v2026.9.2")
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "already installed" not in result.stdout
+    assert (prefix / "src/REF").read_text() == "v2026.9.2\n"
+    assert (prefix / ".reef-install-pin").read_text() == "https://github.com/NousResearch/hermes-agent@v2026.9.2\n"
+
+
+@pytest.mark.unit
+def test_git_install_kind_reinstalls_over_a_checkout_a_failed_install_left_behind(tmp_path) -> None:
+    """git clone refuses a non-empty target, so the rerun clears it first.
+
+    Without that the first failure (or any pin bump) wedges every later run
+    on "destination path already exists" before a single file is written.
+    """
+    script, dest, prefix, env, _ = _git_install_fixture(tmp_path, binary_version=None)
+    (prefix / "src").mkdir(parents=True)
+    (prefix / "src/leftover").write_text("half a clone\n")
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "already exists" not in result.stderr
+    assert not (prefix / "src/leftover").exists()
+    assert (dest / "hermes/SOUL.md").read_text() == "hello\n"
+
+
+@pytest.mark.unit
+def test_git_install_kind_reinstalls_when_the_binary_carries_no_recorded_pin(tmp_path) -> None:
+    """A binary of unknown provenance is not evidence the pinned ref is checked out."""
+    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version="0.21.0", pin=None)
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "already installed" not in result.stdout
+    assert "git clone" in log.read_text()
