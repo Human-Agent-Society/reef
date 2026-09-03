@@ -280,17 +280,16 @@ class CordisBackend(TrainingBackend):
         self._score_episode = score_episode
         self._tasks = tasks
         self._models = models
-        # The served binding renders into episodes only. It is resolved once
-        # here so an adapter without a matching model_binding refuses boot,
-        # not the first step.
-        templates = descriptor.model_binding.get(models.served.api)
-        if not templates:
+        # The served binding renders into episodes only, and a proxied adapter
+        # cannot resolve one until evaluation opens the proxy. The dialect is
+        # checked here so an adapter without a matching model_binding refuses
+        # boot, not the first step.
+        if not descriptor.model_binding.get(models.served.api):
             known = ", ".join(sorted(descriptor.model_binding)) or "none"
             raise ModelBindingError(
                 f"adapter {descriptor.name!r} declares no model_binding for the {models.served.api!r} api "
                 f"(declared: {known}); episodes cannot reach a model"
             )
-        self._binding_nodes = () if descriptor.model_binding_proxy else models.served.compose_nodes(descriptor)
         # Checked once at boot: an out-of-tree Proposer subclass whose
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
