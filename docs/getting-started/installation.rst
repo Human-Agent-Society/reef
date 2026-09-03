@@ -1,6 +1,14 @@
 Installation
 ============
 
+Installation depends on what you want Reef to evolve:
+
+- **A harness, against a hosted model.** Install the package on your
+  laptop; no GPU involved. See `Laptop, no GPU`_.
+- **Model weights, and optionally a harness.** Set up docker image that
+  contains GPU management stack. See `GPU image, for weight training`_.
+- **Neither — you only call a Reef deployment.** See `Client only`_.
+
 Laptop, no GPU
 --------------
 
@@ -24,16 +32,6 @@ Or, to work on Reef itself:
 under LFS. The checkout includes the core ``recipe`` example, the paper-backed
 methods under ``recipes/``, and the harness evolution demo under
 ``tutorials/harness_evolve/``.
-
-Client only
------------
-
-A client that only talks to a Reef deployment does not need the repository or
-the full install. Install the stdlib-only wire client instead:
-
-.. code:: bash
-
-   pip install reef-client
 
 GPU image, for weight training
 ------------------------------
@@ -63,3 +61,13 @@ Keep ``--no-deps``: the CUDA-specific packages are already in the image, and
 resolving them again replaces working builds. The ``slime`` extra installs only
 the Python-side dependencies; the ``runtime`` group pins the training runtime
 itself.
+
+Client only
+-----------
+
+For a harness that just needs to talk to a Reef deployment, install the
+stdlib-only wire client:
+
+.. code:: bash
+
+   pip install reef-client
