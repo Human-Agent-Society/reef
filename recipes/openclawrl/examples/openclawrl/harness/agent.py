@@ -3,17 +3,17 @@
 reef-eval invokes this once per stream position. It owns the whole session:
 
 * a **header shim** thread (``reef_client.serve``) fronting reef with the
-  stream's scenario attached — hermes cannot set ``x-reef-scenario``
-  itself. It binds ``0.0.0.0`` so the in-container hermes reaches it on
-  the same host the deployment already allowlists for reef;
+  stream's scenario and session tag attached — hermes cannot set the Reef
+  headers itself. It binds ``0.0.0.0`` so the in-container hermes reaches it
+  on the same host the deployment already allowlists for reef;
 * the **reef scenario id**, minted at position 0 and carried in
   ``$REEF_EVAL_STATE_DIR`` — one stream, one scenario, one weight chain; a
   fresh variant starts fresh;
 * **hermes itself**, run inside the task container (the environment image
   installs it) with its home on the state mount, so optional agent memory
   rides reef-eval's one cross-position channel. The config is written on first
-  use; compression stays off because history rewrites would break the
-  processor's trace matching (and homework sessions are short);
+  use; compression stays off to match the recorded experiment, while the
+  session tag means correlation does not require an extending transcript;
 * the **conversation loop** with the judge sidecar: student message from
   ``$JUDGE_URL/state`` → one ``hermes -z`` turn (``--resume latest`` after
   the first) → the reply to ``/reply`` — until the student is done or
@@ -184,11 +184,11 @@ class HermesStreamAgent(BaseAgent):
         # (dummy) Authorization header, and the stream's scenario id is
         # authoritative — nothing the agent sends may replace either.
         #
-        # The session tag is what makes this method trainable here at all.
-        # Hermes keeps its transcript locally and restarts each turn from
-        # ``[system, user]``, so no request ever extends the previous one and
-        # reef's header-free correlation binds only inside a turn — never
-        # across the student reply that carries the whole reward signal.
+        # The session tag carries cross-turn feedback in this example. The
+        # first request of each resumed Hermes turn starts from ``[system,
+        # user]`` instead of extending the preceding turn's final request, so
+        # reef's header-free correlation can bind tool steps inside a turn but
+        # never the student reply that carries the whole reward signal.
         headers = {
             "x-reef-scenario": scenario,
             "x-reef-tag-session": session,

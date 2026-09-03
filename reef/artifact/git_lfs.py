@@ -364,6 +364,7 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         artifact: Artifact,
         *,
         expected_parent: ArtifactRef,
+        advance_head: bool = True,
     ) -> ArtifactRef:
         if artifact.local_path is None or not artifact.local_path.is_dir():
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
@@ -381,6 +382,10 @@ class GitLFSRepositoryBackend(RepositoryBackend):
                 metadata=artifact.metadata,
             )
             commit = self._workspace.commit("publish artifact")
+            if not advance_head:
+                # A pending release lives under the releases namespace; the branch and refs/reef/head stay put.
+                self._workspace.push(f"+{commit}:refs/reef/releases/{commit}")
+                return self._manifest.artifact_ref(commit)
             try:
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",

@@ -98,9 +98,9 @@ def snapshot_metadata_for(
         "base_artifact": encode_artifact_ref(base_artifact),
         "operation": operation,
     }
-    if operation not in ("training", "rollback"):
+    if operation not in ("training", "rollback", "promote"):
         raise ValueError("scenario snapshot operation must be 'training' or 'rollback'")
-    if operation == "rollback":
+    if operation in ("rollback", "promote"):
         if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
             raise ValueError("rollback scenario snapshot requires rollback_target_release_id")
         metadata["rollback_target_release_id"] = rollback_target_release_id
@@ -159,9 +159,9 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
         metrics = MappingProxyType(deepcopy(dict(metrics)))
     operation = value.get("operation")
     rollback_target_release_id = value.get("rollback_target_release_id")
-    if operation is not None and operation not in ("training", "rollback"):
+    if operation is not None and operation not in ("training", "rollback", "promote"):
         raise ValueError("scenario snapshot operation must be 'training' or 'rollback'")
-    if operation == "rollback":
+    if operation in ("rollback", "promote"):
         if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
             raise ValueError("rollback scenario snapshot requires rollback_target_release_id")
         if training_job_id is not None:

@@ -3,16 +3,19 @@ hermetic: episodes run a fake pi binary through the real adapter path."""
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 import reef.train.cordis_backend as reef_cordis_backend
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -24,6 +27,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.service.app import create_app
 from reef.train.cordis_backend import (
     CordisBackend,
     CordisRecipe,
@@ -1743,3 +1747,190 @@ def test_recipe_parses_search_quality_config(tmp_path: Path, monkeypatch) -> Non
         CordisRecipe.from_environment({}, config=config(min_win_margin=1, selection="always"))
     with pytest.raises(RecipeConfigError, match="max_rejected_history must be an integer"):
         CordisRecipe.from_environment({}, config=config(max_rejected_history=-1))
+
+
+def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_path: Path) -> None:
+    """Under review a gate win is minted into the catalog but not served; promote
+    republishes it as the new head through the rollback path."""
+    proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        publish="review",
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    try:
+        scenario = dispatcher.get_or_create_scenario("review")
+        assert scenario is not None
+        head_before = scenario.current_artifact_ref()
+        _report_once(scenario, "review", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None and result.pending is True
+        scenario.commit(result)
+
+        record = scenario.commit_log.records()[-1]
+        assert record.operation == "training" and record.pending is True and record.checkpoint is True
+        assert scenario.current_artifact_ref() == head_before
+        row = scenario.releases()[0]
+        assert row["release_id"] == record.artifact_ref.release_id
+        assert row["pending"] is True and row["restorable"] is True
+        tree = scenario.surface.files
+        assert tree is not None
+        pending_files = tree.read_files(scenario.artifact_for_version(row["release_id"]))
+        assert pending_files is not None and any("marker" in text for text in pending_files.values())
+        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        assert not served_files or not any("marker" in text for text in served_files.values())
+
+        promoted = dispatcher.promote("review", row["release_id"])
+        assert promoted.release_id != row["release_id"]
+        assert scenario.current_artifact_ref() == promoted
+        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        assert served_files is not None and any("marker" in text for text in served_files.values())
+        last = scenario.commit_log.records()[-1]
+        assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
+        assert scenario.releases()[0]["pending"] is False
+    finally:
+        dispatcher.close()
+
+
+def test_review_kinds_hold_only_wins_that_touch_a_listed_kind(tmp_path: Path) -> None:
+    def build(**options):
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(
+                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+            ),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            **options,
+        )
+
+    held = build(review_kinds=("rules",))
+    assert run_backend_step(held, batch(), held.initial_state()).pending is True
+    free = build(review_kinds=("skill",))
+    assert run_backend_step(free, batch(), free.initial_state()).pending is False
+    reviewed = build(publish="review")
+    assert run_backend_step(reviewed, batch(), reviewed.initial_state()).pending is True
+    with pytest.raises(ValueError, match="publish must be 'auto' or 'review'"):
+        build(publish="staged")
+
+
+def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_publish.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_publish:propose",
+                "evaluate": "demo_publish:evaluate",
+                "tasks": ["t"],
+                "binary": str(make_binary(tmp_path)),
+                **evolution,
+            }
+        }
+
+    on = CordisRecipe.from_environment({}, config=config(publish="review", review_kinds=["code_extension"]))
+    assert on.publish == "review" and on.review_kinds == ("code_extension",)
+    off = CordisRecipe.from_environment({}, config=config())
+    assert off.publish == "auto" and off.review_kinds == ()
+    with pytest.raises(RecipeConfigError, match="publish must be 'auto' or 'review'"):
+        CordisRecipe.from_environment({}, config=config(publish="staged"))
+    with pytest.raises(RecipeConfigError, match="review_kinds must be a list"):
+        CordisRecipe.from_environment({}, config=config(review_kinds="rules"))
+
+
+def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
+    proposals = iter((Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}),))
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        publish="review",
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+
+    async def run() -> None:
+        scenario = dispatcher.get_or_create_scenario("review-http")
+        assert scenario is not None
+        _report_once(scenario, "review-http", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None
+        scenario.commit(result)
+        pending_id = scenario.releases()[0]["release_id"]
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            listed = await client.get("/reef/scenarios/review-http/releases")
+            assert listed.status == 200
+            assert (await listed.json())["releases"][0]["pending"] is True
+            promoted = await client.post("/reef/scenarios/review-http/promote", json={"release_id": pending_id})
+            assert promoted.status == 200
+            assert (await promoted.json())["release_id"] != pending_id
+            missing = await client.post("/reef/scenarios/review-http/promote", json={"release_id": "missing"})
+            assert missing.status == 404
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_pending_requires_durable_bytes() -> None:
+    """Only a step with bytes to promote later can ask to be held back, so a
+    live-weights or no-artifact step is refused where it is built."""
+    assert TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending=True).pending is True
+    assert TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path="/ckpt", pending=True).pending is True
+    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
+        TrainStepResult({}, {}, runtime_load_id="w1", pending=True)
+    with pytest.raises(ValueError, match="pending step must carry durable bytes"):
+        TrainStepResult({}, {}, pending=True)
+    with pytest.raises(ValueError, match="pending must be a boolean"):
+        TrainStepResult({}, {}, artifact=Artifact.local(Path(".")), pending="yes")
+
+
+def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) -> None:
+    """Checkpoint policy runs after the result is built, so a durable-weights
+    step can still land on the live path; holding it back there is not
+    expressible and must fail loudly rather than serve the tree anyway."""
+    built = CordisRecipe(
+        resolve_proposer(lambda nodes, samples, model: None),
+        resolve_episode_scorer(evaluate),
+        ("task one",),
+        binary=str(make_binary(tmp_path)),
+        seed=(SEED_MODELS, SEED_SETTINGS),
+        runtime=runtime(),
+        checkpoint_strategy=EveryNVersions(1000),
+    )
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    try:
+        scenario = dispatcher.get_or_create_scenario("live-pending")
+        assert scenario is not None
+        held = TrainStepResult({}, {}, runtime_load_id="w1", checkpoint_path=str(tmp_path / "ckpt"), pending=True)
+        with pytest.raises(ReefError, match="pending release requires a durable checkpoint"):
+            scenario.commit(held)
+    finally:
+        dispatcher.close()

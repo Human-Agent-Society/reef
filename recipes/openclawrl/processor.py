@@ -3,7 +3,7 @@
 A computed-feedback recipe on the shared engine
 (:class:`~reef.train.processors.computed.ComputedFeedbackProcessor` owns the record
 lifecycle, the judging worker, and the batch cycle). This file is the
-method: ``ingest`` trace-matches main turns into sessions and hands each
+method: ``ingest`` correlates main turns into sessions and hands each
 completed turn over for judgment, ``judge`` is upstream's combine
 dispatch, ``make_sample`` validates the tensors, ``make_batch`` shapes
 the batch. One turn, one judgment, one sample — rewards pass through raw

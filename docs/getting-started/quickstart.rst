@@ -1,19 +1,39 @@
 Quickstart
 ==========
 
-Reef adds four things to an ordinary inference endpoint: a scenario, a receipt,
-a report, and a release chain.
+A typical Reef workflow includes the following steps:
 
-Two more terms matter once you want it to learn: the **recipe** and the
-**artifact**, shown below.
+1. **Request.** Harness sends a request with a *scenario*.
+2. **Response.** Reef forwards the response from the model to the harness, with
+   a *receipt* attached to it.
+3. **Report.** An entity provides a *report* containing feedback for the
+   response associated with the *receipt* to Reef.
+4. **Learn.** Reef runs the training / learning process against the reports in
+   batches according to its *recipe*.
+5. **Evolve.** Reef potentially creates a new version of the *artifact*, which
+   may become immediately effective (e.g. model evolution) or requires a pull
+   from the harness to take effect (e.g. harness evolution).
+6. **Update.** Harness can view the history of served artifacts (*release
+   chain*) and potentially pull a new harness tree.
 
-.. flow::
+This workflow touches a few key concepts:
 
-   Request :: serve under a scenario and return a receipt
-   Report :: feedback that quotes receipts
-   Recipe* :: the method that turns reports into the next artifact
-   Artifact* :: what gets versioned: weights or a harness tree
-   Release chain :: the history of served artifacts
+- **scenario** - A specific type of workload. For example, a code reviewer, or a
+  math problem solver. Reef manages the training of each scenario separately,
+  i.e. records, training state and release chain.
+- **receipt** - The id of a recorded inference exchange. It identifies the
+  request, the response, and the release that produced it.
+- **report** - A feedback quoting one or more receipts.
+- **recipe** - How Reef use the report to evolve new versions of artifacts. A
+  deployment serves one recipe, and every scenario on it evolves under that
+  recipe.
+- **artifact** - The content a release selects: model weights, or a harness
+  tree of rules, prompts, skills, and config. Versioned.
+- **release** - One accepted publication in a scenario. The chain of them is
+  the scenario's history.
+
+We will explore these concepts in greater depth later. For now, it's time to
+get our hands dirty and experience these steps ourselves.
 
 Run the loop
 ------------
@@ -135,87 +155,8 @@ copy ``recipes/basic/external-provider.yaml``, set
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
-The one that runs on a laptop is ``harness_evolve``, and it takes a second file:
-a **preset** naming your ``propose`` and ``evaluate`` callables and the tasks to
-evaluate on. ``tutorials/harness_evolve/run.sh`` wires the
-whole loop together. Run it, then read `Evolve your harness
+The one that runs on a laptop is ``harness_evolve``, and it takes a second
+file: a **preset** naming your ``propose`` and ``evaluate`` callables and the
+tasks to evaluate on. ``tutorials/harness_evolve/run.sh`` wires the whole loop
+together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
-
-
-
-Scenario
---------
-
-A scenario is one workload: its records, its training state, its release chain.
-Scenarios never share data or updates.
-
-The first request carrying a new ``x-reef-scenario`` creates it and binds it to
-the deployment's recipe, permanently. Later requests just name it.
-
-.. code:: bash
-
-   curl -sS -H "Authorization: Bearer reef-local" http://127.0.0.1:8900/reef/scenarios
-
-One deployment serves one recipe, so a request never names a method.
-
-Receipt
--------
-
-Every recorded exchange gets an id, and that id is the receipt. It identifies
-the request, the response, and the release that produced it.
-
-The receipt arrives in the ``x-reef-agent-record-id`` response header or in the
-terminal SSE metadata for a stream. `HTTP API
-<../reference/http-api.rst#inference>`__ lists the exact field for each dialect.
-A stream carries it only after the record is stored.
-
-Report
-------
-
-A report is feedback that quotes receipts. It carries ``score``, ``feedback``,
-``references``, and ``metadata``; `HTTP API <../reference/http-api.rst#report>`__ gives the
-types and the rules.
-
-Whatever already decides whether your agent did well stays in your harness.
-That may be a test suite, a verifier, or a human. Reports are consumed at most
-once, so a retry or late arrival is never counted twice.
-
-Release chain
--------------
-
-Every accepted update creates a release with a parent, so a scenario's history
-is a chain rather than a mutable pointer. A receipt names the release that
-served it.
-
-.. flow::
-   :loop: each accepted update extends the chain
-
-   r0 :: the starting artifact
-   r1 :: first accepted update
-   r2* :: current release serving requests
-
-Durable releases are Git-backed and can be pinned or rolled back. Between
-checkpoints, runtime load IDs live in engine memory; their bytes are not
-restorable after a restart. `Architecture
-<architecture.rst#the-release-chain>`__ has the details.
-
-Recipe and artifact
--------------------
-
-The **artifact** is the thing that gets versioned: model weights, or a harness
-tree of rules, prompts, skills, and config.
-
-The **recipe** is the method that produces the next one. It decides which
-records are eligible, how they become a batch, what signal that batch carries,
-and whether a candidate is good enough to publish. `Write a recipe
-<../developer-guide/write-a-recipe.rst>`__ covers each of those decisions.
-
-.. flow::
-
-   Records :: requests, responses, and reports for the scenario
-   Batch :: eligible records selected by the recipe
-   Candidate :: a new unpublished artifact
-   Version :: the published artifact now serving
-
-Pick a cookbook recipe from `Choosing a recipe <../user-guide/recipes.rst>`__, or write one in
-`Write a recipe <../developer-guide/write-a-recipe.rst>`__.

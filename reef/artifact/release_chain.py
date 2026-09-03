@@ -68,11 +68,13 @@ class ArtifactReleaseChain:
         *,
         expected_parent: ArtifactRef | None = None,
         metadata: Mapping[str, object] | None = None,
+        advance_heads: bool = True,
     ) -> ArtifactRef:
         return self._repository.publish(
             artifact,
             expected_parent=self.checkpoint if expected_parent is None else expected_parent,
             metadata=metadata,
+            advance_heads=advance_heads,
         )
 
     def discard(self, artifact: Artifact) -> None:

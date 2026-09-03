@@ -1,13 +1,10 @@
 Introduction
 ============
 
-Reef is a continual learning infrastructure. It serves an inference endpoint in
-front of the model your agent already calls, records what it served, accepts
-feedback about it, and uses that feedback to publish a better version of the
-model weights or of the agent's harness. The model and harness together form
-the agent.
-
-Nothing about the agent has to change except the base URL it sends requests to.
+Reef is a continual learning infrastructure. It sits between your agent's
+harness and the model that harness calls. It records each request, its
+response, and the feedback about the response. Reef then use these signal to
+produce a better version of the model weights or of the agent's harness.
 
 .. diagram::
    :caption: Reef serves the model, loads new weights into the engine, and sends a new harness tree to the agent.
@@ -31,11 +28,14 @@ Nothing about the agent has to change except the base URL it sends requests to.
 Why Reef
 --------
 
-Agents accumulate feedback that nothing consumes: a tests-passed signal, a
-thumbs-down, a rubric score. Turning that into a better agent normally means an
-offline pipeline: export logs, build a dataset, train, evaluate, redeploy.
+AI agents constantly accumulate valuable feedback, from passing tests to user
+thumbs-downs and rubric scores. Traditionally, turning these signals into a
+smarter agent requires a cumbersome offline pipeline: exporting logs, building
+datasets, retraining, evaluating, and redeploying.
 
-Reef closes that loop in the serving lifecycle for continual learning.
+Reef eliminates this friction. By integrating continual learning directly into
+the serving lifecycle, Reef drastically reduces the complexity of maintaining
+offline pipelines.
 
 .. flow::
    :loop: the next request is served by the new version
@@ -48,61 +48,34 @@ Reef closes that loop in the serving lifecycle for continual learning.
 Existing inference engines and RL frameworks cover parts of that loop, but not
 the whole thing:
 
-+-------------------------------------+------------------------+----------------------------+----------+
-| Ability                             | Inference engine       | RL training framework      | **Reef** |
-|                                     | (vLLM, SGLang, …)      | (slime, veRL, AReaL, …)    |          |
-+=====================================+========================+============================+==========+
-| Serves live traffic                 | ✓                      | ✗                          | ✓        |
-+-------------------------------------+------------------------+----------------------------+----------+
-| Trains weights                      | ✗                      | ✓                          | ✓        |
-+-------------------------------------+------------------------+----------------------------+----------+
-| Versions what it served             | ✗                      | ✗                          | ✓        |
-+-------------------------------------+------------------------+----------------------------+----------+
-| Stays live through updates          | ✗                      | ✗                          | ✓        |
-+-------------------------------------+------------------------+----------------------------+----------+
-| Evolves beyond weights              | ✗                      | ✗                          | ✓        |
-| (skills, harness)                   |                        |                            |          |
-+-------------------------------------+------------------------+----------------------------+----------+
++----------------------------+-------------+---------------+----------+
+| Ability                    | Inference   | RL training   | **Reef** |
+|                            | engine      | framework     |          |
+|                            | (vLLM,      | (slime, veRL, |          |
+|                            | SGLang, …)  | AReaL, …)     |          |
++============================+=============+===============+==========+
+| Serves live traffic        | ✓           | ✗             | ✓        |
++----------------------------+-------------+---------------+----------+
+| Trains weights             | ✗           | ✓             | ✓        |
++----------------------------+-------------+---------------+----------+
+| Versions what it served    | ✗           | ✗             | ✓        |
++----------------------------+-------------+---------------+----------+
+| Stays live through updates | ✗           | ✗             | ✓        |
++----------------------------+-------------+---------------+----------+
+| Evolves beyond weights     | ✗           | ✗             | ✓        |
+| (skills, harness)          |             |               |          |
++----------------------------+-------------+---------------+----------+
 
-What Reef can evolve
+What Reef evolves
 --------------------
 
-Model weights and the harness tree are the two *artifacts* Reef versions. Each
-updates one of the agent's two components. The recipe you configure picks one
-(composite version is a feature in the roadmap).
+Reef is capable of evolve both the model weights and the `harness tree
+<../reference/glossary.rst#harness-tree>`__, controlled by a `recipe
+<../reference/glossary.rst#recipe>`__.
 
-**Model weights.** Reef runs the training step and hot-swaps the result into the
-serving engine. See `Evolve your model <../user-guide/evolve-your-model.rst>`__.
-
-**The harness tree** is the versioned representation of the harness's mutable
-rules, prompts, skills, config, and extension code. Reef proposes an edit, runs
-the current and proposed versions on your tasks, and keeps the winner. See `Evolve your harness
-<../user-guide/evolve-your-harness.rst>`__.
-
-What a call looks like
-----------------------
-
-A deployment names one recipe in its config. Every scenario it creates uses
-that recipe; recipe identity is not part of scenario state:
-
-.. code:: yaml
-
-   reef:
-     recipe: recipe          # default recipe; stores records only;
-     upstream_url: https://api.openai.com  # redirect to the OpenAI API
-
-`Quickstart <quickstart.rst#run-the-loop>`__ starts one on a laptop. Reef's
-inference endpoint is OpenAI- and Anthropic-compatible, so a request to a served
-deployment is the one you would send to the provider, plus an
-``x-reef-scenario`` header:
-
-.. code:: bash
-
-   curl -sS -i http://127.0.0.1:8900/v1/chat/completions \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "x-reef-scenario: hello-reef" \
-     -H "Content-Type: application/json" \
-     -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
-
-The response carries ``x-reef-agent-record-id``: the **receipt** naming the
-stored exchange.
+- **Model weights.** Reef runs the training step and hot-swaps the result
+  into the serving engine. See `Evolve your model
+  <../user-guide/evolve-your-model.rst>`__.
+- **The harness tree.** Reef proposes an edit, runs the current and proposed
+  versions on your tasks, and keeps the winner. See `Evolve your harness
+  <../user-guide/evolve-your-harness.rst>`__.

@@ -66,11 +66,29 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             }
         )
 
+    async def promote_scenario(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+        release_id = payload.get("release_id")
+        if not isinstance(release_id, str) or not release_id.strip():
+            raise ValueError("release_id must be a non-empty string")
+        published = request_service.dispatcher.promote(scenario, release_id.strip())
+        return web.json_response(
+            {
+                "scenario": scenario,
+                "release_id": published.release_id,
+                "content_id": published.content_id,
+            }
+        )
+
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)
+    app.router.add_post("/reef/scenarios/{scenario}/promote", promote_scenario)
 
 
 __all__ = ["register_scenario_routes"]

@@ -188,12 +188,16 @@ class Dispatcher:
                 "required_request_types": sorted(rt.value for rt in processor.required_request_types),
             }
 
-    def rollback(self, scenario: str, release_id: str) -> ArtifactRef:
+    def promote(self, scenario: str, release_id: str) -> ArtifactRef:
+        """Serve a pending release: the rollback path under its own record operation."""
+        return self.rollback(scenario, release_id, operation="promote")
+
+    def rollback(self, scenario: str, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         with self._registry.lock_for(scenario):
             current = self._registry.require(scenario)
             source = current.current_artifact_ref()
             context = self._experiment_context(current)
-            published = current.rollback(release_id)
+            published = current.rollback(release_id, operation=operation)
             if published == source:
                 return published
             event = RollbackExperimentEvent(
