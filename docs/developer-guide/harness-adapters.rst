@@ -160,7 +160,11 @@ the log holds everything the model saw), ``assistant/message`` (``content``,
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
 ``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
 or ``LOAD_ERROR``). Arguments are validated against the tool's declared
-schema before ``run`` sees them. A failed model call logs ``request/error``
+schema before ``run`` sees them. A result over 20,000 characters is spilled:
+the whole text is written to ``.reef/spill/<step>-<call_id>.txt`` under the
+workspace, the model reads the head, one marker line naming that file and the
+omitted count, and the last 2,000 characters, and ``tool/result`` carries the
+file in ``meta.spill``. A failed model call logs ``request/error``
 (``attempt`` and the ``MODEL_ERROR`` failure) before the ``request_error``
 seam runs. A hook whose decision differs from the layer
 below it logs ``hook/decision`` (``seam``, ``step``, ``hook``, ``owned``, and

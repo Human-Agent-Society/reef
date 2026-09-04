@@ -87,7 +87,7 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         assert math.current_artifact_ref().runtime_load_id == "w1"
         assert code.current_artifact_ref().runtime_load_id == "w3"
 
-        status = dispatcher.training_status
+        status = dispatcher.build_training_status()
         assert set(status["scenarios"]) == {"math", "code"}
         assert status["scenarios"]["math"]["adapter_runtime_load_id"] == "w1"
         assert status["scenarios"]["code"]["adapter_runtime_load_id"] == "w3"

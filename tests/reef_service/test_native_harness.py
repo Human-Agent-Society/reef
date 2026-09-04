@@ -17,7 +17,16 @@ import pytest
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episode import run_episode
 from reef.harness.model_binding import ModelBinding
-from reef.harness.native import _DEFAULTS, MAX_RESULT_CHARS, HookModule, ToolModule, _invoke, _waterfall, load_hooks
+from reef.harness.native import (
+    _DEFAULTS,
+    MAX_RESULT_CHARS,
+    SPILL_TAIL_CHARS,
+    HookModule,
+    ToolModule,
+    _invoke,
+    _waterfall,
+    load_hooks,
+)
 from reef.harness.native.seed import SEED_NODES, SEED_TOOLS
 from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
@@ -345,6 +354,13 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
     assert ok["meta"]["truncated"] is False
     long = _invoke(tools, "shout", '{"text": "long"}', tmp_path)
     assert len(long["content"]) == MAX_RESULT_CHARS and long["meta"]["truncated"] is True
+    # With a spill path the whole result lands on disk and the model reads head, marker, and tail within the cap.
+    spilled = _invoke(tools, "shout", '{"text": "long"}', tmp_path, spill=tmp_path / ".reef" / "spill" / "1-c1.txt")
+    assert (tmp_path / ".reef" / "spill" / "1-c1.txt").read_text() == "x" * (MAX_RESULT_CHARS + 5)
+    assert spilled["meta"]["truncated"] is True and spilled["meta"]["spill"] == ".reef/spill/1-c1.txt"
+    assert len(spilled["content"]) <= MAX_RESULT_CHARS
+    assert "[5 characters omitted; the full result is in .reef/spill/1-c1.txt]" in spilled["content"]
+    assert spilled["content"].startswith("x" * 100) and spilled["content"].endswith("x" * SPILL_TAIL_CHARS)
 
 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
@@ -479,6 +495,39 @@ def test_seed_loop_guard_reminds_the_model_at_the_third_repeat(tmp_path: Path) -
     assert reminder.startswith("You have called read_file with the same arguments 3 times in a row.")
     assert model.requests[3]["messages"][-1] == {"role": "user", "content": reminder}
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+
+
+class _DumpModel(_FakeModel):
+    """Asks for one long tool result, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if not [m for m in body["messages"] if m.get("role") == "tool"]:
+            return _reply(tool_calls=[_call("dump", {}, "c1")])
+        return _reply(content="READY")
+
+
+def test_a_long_tool_result_is_spilled_under_the_workspace(tmp_path: Path) -> None:
+    dump = (
+        "native_tool",
+        {
+            "name": "dump",
+            "description": "Return a long text.",
+            "code": "def run(args, workdir):\n    return 'y' * 25000\n",
+        },
+    )
+    model = _DumpModel()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), dump])
+    finally:
+        model.shutdown()
+        model.server_close()
+    assert result.exit_code == 0
+    logged = _events(result.trajectory, "tool/result")[0]["data"]
+    assert logged["meta"]["spill"] == ".reef/spill/1-c1.txt" and logged["meta"]["truncated"] is True
+    assert len(logged["content"]) <= MAX_RESULT_CHARS
+    assert "[5000 characters omitted; the full result is in .reef/spill/1-c1.txt]" in logged["content"]
+    # The clipped content is what the model read on its next request.
+    assert model.requests[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": logged["content"]}
 
 
 def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_model) -> None:

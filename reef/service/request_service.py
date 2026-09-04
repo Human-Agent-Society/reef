@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -59,31 +59,15 @@ def _inference_aborted(response: Mapping[str, Any]) -> bool:
     )
 
 
-class RequestPayloadNormalizer:
-    """Normalize only typed Reef payloads while preserving native bodies."""
-
-    def __init__(self) -> None:
-        self._normalizers: dict[
-            RequestType,
-            Callable[[Mapping[str, Any]], tuple[Mapping[str, Any], tuple[str, ...]]],
-        ] = {
-            RequestType.REPORT: self._normalize_report,
-        }
-
-    def normalize(
-        self,
-        request_type: RequestType,
-        payload: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
-        normalizer = self._normalizers.get(request_type)
-        if normalizer is None:
-            return dict(payload), ()
-        return normalizer(payload)
-
-    @staticmethod
-    def _normalize_report(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], tuple[str, ...]]:
-        report = ReportPayload.from_dict(payload)
-        return report.to_dict(), report.references
+def normalize_request_payload(
+    request_type: RequestType,
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], tuple[str, ...]]:
+    """Normalize a typed Reef payload; a native provider body passes through."""
+    if request_type is not RequestType.REPORT:
+        return dict(payload), ()
+    report = ReportPayload.from_dict(payload)
+    return report.to_dict(), report.references
 
 
 @dataclass(frozen=True)
@@ -139,7 +123,6 @@ class InferenceRetryTimeout(ReefError):
 class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
-        self._payload_normalizer = RequestPayloadNormalizer()
         self._retry_policy = retry_policy or InferenceRetryPolicy()
 
     @property
@@ -578,7 +561,7 @@ class RequestService:
         agent_record_id: str | None = None,
         artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
-        normalized_payload, references = self._payload_normalizer.normalize(parsed.request_type, payload)
+        normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
         normalized_payload = _with_tags(normalized_payload, parsed)
         item = AgentRecord.create(
             scenario=parsed.scenario,
@@ -638,7 +621,7 @@ __all__ = [
     "InferenceRetryTimeout",
     "PendingInference",
     "PreparedInference",
-    "RequestPayloadNormalizer",
     "RequestService",
     "client_inference_response",
+    "normalize_request_payload",
 ]
