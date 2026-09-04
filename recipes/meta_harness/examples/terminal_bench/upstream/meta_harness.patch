@@ -1,5 +1,5 @@
 --- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/meta_harness.py	2026-09-02 18:36:04
-+++ /tmp/mh-fork/reference_examples/terminal_bench_2/meta_harness.py	2026-09-04 03:23:31
++++ /tmp/mh-fork/reference_examples/terminal_bench_2/meta_harness.py	2026-09-04 03:48:15
 @@ -19,7 +19,7 @@
  from datetime import datetime
  from pathlib import Path
@@ -9,9 +9,22 @@
  from dotenv import load_dotenv
  
  # ── ANSI colors ──────────────────────────────────────────────
-@@ -91,12 +91,12 @@
+@@ -89,14 +89,24 @@
+     ("kira-baseline", "agents.baseline_kira:AgentHarness"),
+     ("terminus2-baseline", "agents.baseline_terminus2:AgentHarness"),
  ]
- BASELINE_AGENT_NAME = BASELINES[0][0]  # primary baseline for frontier comparison
+-BASELINE_AGENT_NAME = BASELINES[0][0]  # primary baseline for frontier comparison
++# Which baseline the frontier is measured against, and which the proposer is
++# told to start from. Upstream's primary is KIRA, whose native function calling
++# is unsupported with reasoning_effort on some providers; a run that must match
++# another arm's executor agent selects the vanilla Terminus 2 baseline instead.
++_BASELINE_INDEX = {name: index for index, (name, _) in enumerate(BASELINES)}
++BASELINE_AGENT_NAME = BASELINES[
++    _BASELINE_INDEX.get(os.environ.get("META_HARNESS_BASELINE", ""), 0)
++][0]
++BASELINE_PARENT_FILE = (
++    "agents/baseline_terminus2.py" if BASELINE_AGENT_NAME == "terminus2-baseline" else "agents/baseline_kira.py"
++)
  
 -EVAL_TASK_SET = "full"
 -N_EVAL_TASKS = 89  # full official TB2 dataset used in the paper runs
@@ -25,7 +38,7 @@
  DEFAULT_SEARCH_TRIALS = 2
  DEFAULT_CONCURRENCY = 50
  HARBOR_TIMEOUT_SECONDS = int(os.environ.get("HARBOR_TIMEOUT_SECONDS", 8 * 60 * 60))
-@@ -125,7 +125,7 @@
+@@ -125,7 +135,7 @@
      env = os.environ.copy()
      env["HARBOR_MODEL"] = MODEL
      # Ensure dotenv-loaded keys survive through uv run subprocess
@@ -34,14 +47,15 @@
          val = os.environ.get(key)
          if val:
              env[key] = val
-@@ -431,11 +431,11 @@
+@@ -431,11 +441,11 @@
  def propose_claude(task_prompt, iteration, timeout=2400):
      """Call Claude Code to propose new agent candidates. Returns True if pending_eval.json exists."""
      os.environ.pop("CLAUDECODE", None)
 -    # Strip API key so claude CLI uses subscription auth, not API (avoids rate limits)
-+    # Strip API key so the CLI uses subscription auth, not API (avoids rate limits)
-     saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+-    saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
 -    result = claude_wrapper.run(
++    # Strip API key so the CLI uses subscription auth, not API (avoids rate limits)
++    saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
 +    result = proposer_wrapper.run(
          prompt=task_prompt,
 -        model="opus",
@@ -49,6 +63,15 @@
          allowed_tools=PROPOSER_ALLOWED_TOOLS,
          skills=[str(EVOLVE_DIR / ".claude/skills/meta-harness-terminal-bench-2")],
          cwd=str(EVOLVE_DIR),
+@@ -532,7 +542,7 @@
+     return (
+         f"Run iteration {iteration} of the scaffold evolution loop (KIRA track). "
+         f"Model: {MODEL} (Opus). "
+-        f"Start from agents/baseline_kira.py as the parent.\n\n"
++        f"Start from {BASELINE_PARENT_FILE} as the parent.\n\n"
+         f"## Eval split: {N_EVAL_TASKS} official TB2 tasks x {n_trials} trials\n\n"
+         f"This reference example uses the full TB2 dataset from the paper runs. "
+         f"Focus on scaffold changes that help the agent solve complex, long-horizon tasks.\n\n"
 --- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-02 18:36:04
 +++ /tmp/mh-fork/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-04 03:23:31
 @@ -27,8 +27,8 @@
@@ -72,7 +95,7 @@
          echo "Unknown task_set '$TASK_SET'. Use: hard | full" >&2; exit 1 ;;
  esac
 --- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/pyproject.toml	2026-09-02 18:36:04
-+++ pyproject.toml	2026-09-04 03:35:17
++++ /tmp/mh-fork/reference_examples/terminal_bench_2/pyproject.toml	2026-09-04 03:35:17
 @@ -3,7 +3,7 @@
  version = "0.1.0"
  requires-python = ">=3.12,<3.13"
