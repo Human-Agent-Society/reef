@@ -154,6 +154,9 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .home h1::after { display: inline-block; width: .17em; height: .17em; margin-left: .09em; content: ""; border-radius: 50%; background: var(--coral); }
 .lead { max-width: 700px; margin: 30px 0 0; color: var(--text); font-size: 20px; line-height: 1.62; }
 .home-actions { margin-top: 38px; display: flex; flex-wrap: wrap; gap: 10px; }
+.home-doc-links { margin-top: 24px; display: flex; flex-wrap: wrap; column-gap: 20px; row-gap: 4px; }
+.home-doc-links a { padding: 8px 0; color: var(--brand-strong); font-size: 14px; font-weight: 500; text-decoration: underline; text-underline-offset: 4px; }
+.home-doc-links a:hover { color: var(--foreground); }
 .primary-action, .secondary-action { min-height: 46px; padding: 11px 19px; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; font-size: 14px; font-weight: 500; transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease; }
 .primary-action { color: var(--background); background: var(--brand-strong); box-shadow: 0 8px 22px color-mix(in srgb, var(--brand) 24%, transparent); }
 .primary-action:hover { box-shadow: 0 12px 30px color-mix(in srgb, var(--brand) 32%, transparent); transform: translateY(-1px); }

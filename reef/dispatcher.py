@@ -305,9 +305,7 @@ class Dispatcher:
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
-        records = () if current.commit_log is None else current.commit_log.records()
-        run_segment = max((record.step for record in records if record.operation == "rollback"), default=0)
-        run_step = sum(record.operation == "training" and record.step > run_segment for record in records)
+        run_segment, run_step = (0, 0) if current.commit_log is None else current.commit_log.training_run_position()
         return TrainingExperimentContext(
             scenario=current.name,
             recipe=self._recipe.name,

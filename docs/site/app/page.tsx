@@ -1,12 +1,22 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, Boxes, PlugZap } from "lucide-react";
+import { siteConfig } from "@/lib/site";
 
 export const metadata: Metadata = {
-  title: { absolute: "Reef — Continual learning infrastructure" },
+  title: { absolute: siteConfig.title },
+  description: siteConfig.description,
   alternates: { canonical: "/" },
-  openGraph: { title: "Reef — Continual learning infrastructure", url: "/" },
+  openGraph: { title: siteConfig.title, description: siteConfig.description, url: "/" },
 };
+
+const documentationLinks = [
+  { title: "Quickstart", href: "/docs/getting-started/quickstart" },
+  { title: "Installation", href: "/docs/getting-started/installation" },
+  { title: "Recipes", href: "/docs/user-guide/recipes" },
+  { title: "Harness Evolution", href: "/docs/user-guide/evolve-your-harness" },
+  { title: "API Reference", href: "/docs/reference/http-api" },
+];
 
 const surfaces = [
   {
@@ -96,13 +106,16 @@ export default function Home() {
         <div>
           <p className="pill">Continual learning infrastructure</p>
           <h1>Agents that improve from every run</h1>
-          <p className="lead">
-            Reef serves an inference endpoint in front of the model your agent already calls. It records what it served, accepts feedback about it, and publishes a better version of the weights or the harness.
-          </p>
+          <p className="lead">{siteConfig.description}</p>
           <div className="home-actions">
-            <Link className="primary-action" href="/docs/getting-started/intro">Get started</Link>
-            <a className="secondary-action" href="https://github.com/Human-Agent-Society/reef">View on GitHub</a>
+            <Link className="primary-action" href="/docs/getting-started/quickstart">Quickstart</Link>
+            <a className="secondary-action" href={siteConfig.repository}>View on GitHub</a>
           </div>
+          <nav className="home-doc-links" aria-label="Documentation shortcuts">
+            {documentationLinks.map((link) => (
+              <Link key={link.href} href={link.href}>{link.title}</Link>
+            ))}
+          </nav>
         </div>
         <aside className="loop-card">
           <p>The Reef loop</p>
