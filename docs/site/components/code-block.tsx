@@ -4,14 +4,41 @@ import { Check, Copy } from "lucide-react";
 import { useRef, useState } from "react";
 import type { ReactNode } from "react";
 
-// A copy button in the top-right of every code block. The rendered <pre> is
-// wrapped so the button positions against it; the text copied is the block's
-// own textContent, which the shiki path stores with real newlines. On a
-// phone the button is always visible (no hover), so it sits out of the way in
-// the padding and grows to a 44px touch target on coarse pointers.
+const LABELS: Record<string, string> = {
+  bash: "Shell",
+  sh: "Shell",
+  shell: "Shell",
+  console: "Shell",
+  python: "Python",
+  py: "Python",
+  yaml: "YAML",
+  yml: "YAML",
+  json: "JSON",
+  toml: "TOML",
+  text: "Text",
+  ts: "TypeScript",
+  typescript: "TypeScript",
+  js: "JavaScript",
+  javascript: "JavaScript",
+  http: "HTTP",
+  ini: "INI",
+  diff: "Diff",
+  rst: "reStructuredText",
+};
+
+function languageOf(className?: string) {
+  const name = className?.split(" ").find((token) => token.startsWith("language-"))?.slice("language-".length);
+  return name ? (LABELS[name] ?? name) : "";
+}
+
+// Every code block gets a head bar: the language on the left, the copy button
+// on the right, always visible, so a phone needs no hover and the button never
+// covers the first line of code. The text copied is the block's own
+// textContent, which the shiki path stores with real newlines.
 export function CodeBlock({ className, children }: { className?: string; children: ReactNode }) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
+  const language = languageOf(className);
 
   async function copy() {
     const text = ref.current?.textContent ?? "";
@@ -26,18 +53,16 @@ export function CodeBlock({ className, children }: { className?: string; childre
 
   return (
     <div className="code-block">
+      <div className="code-head">
+        <span>{language}</span>
+        <button type="button" className="code-copy" onClick={copy} aria-label={copied ? "Copied" : "Copy code"} title={copied ? "Copied" : "Copy"}>
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          <span>{copied ? "Copied" : "Copy"}</span>
+        </button>
+      </div>
       <pre ref={ref} className={className}>
         {children}
       </pre>
-      <button
-        type="button"
-        className="code-copy"
-        onClick={copy}
-        aria-label={copied ? "Copied" : "Copy code"}
-        title={copied ? "Copied" : "Copy"}
-      >
-        {copied ? <Check size={15} /> : <Copy size={15} />}
-      </button>
     </div>
   );
 }

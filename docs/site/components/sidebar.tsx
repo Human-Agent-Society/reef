@@ -8,29 +8,30 @@ function isCurrent(pathname: string, href: string) {
   return pathname === href || pathname === `${href}/`;
 }
 
-// The sidebar is scoped to the header tab the reader is on: it lists the pages
-// of the group that owns the current page, and nothing else. Moving between
-// groups is the header's job.
+// The whole tree, every group with its pages, so a reader sees where a page
+// sits among the rest and reaches any page in one click. The header tabs
+// jump between groups; the sidebar scrolls on its own.
 export function Sidebar({ navigation }: { navigation: NavGroup[] }) {
   const pathname = usePathname();
-  const group = navigation.find((candidate) => candidate.items.some((item) => isCurrent(pathname, item.href))) ?? navigation[0];
 
   return (
     <aside className="docs-sidebar">
       <nav aria-label="Documentation navigation">
-        <div className="sidebar-group">
-          <p className="sidebar-group-title">{group.title}</p>
-          <div className="sidebar-group-items">
-            {group.items.map((item) => {
-              const active = isCurrent(pathname, item.href);
-              return (
-                <Link key={item.href} href={item.href} className={active ? "active" : undefined} aria-current={active ? "page" : undefined}>
-                  {item.title}
-                </Link>
-              );
-            })}
+        {navigation.map((group) => (
+          <div key={group.title} className="sidebar-group">
+            <p className="sidebar-group-title">{group.title}</p>
+            <div className="sidebar-group-items">
+              {group.items.map((item) => {
+                const active = isCurrent(pathname, item.href);
+                return (
+                  <Link key={item.href} href={item.href} className={active ? "active" : undefined} aria-current={active ? "page" : undefined}>
+                    {item.title}
+                  </Link>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ))}
       </nav>
     </aside>
   );

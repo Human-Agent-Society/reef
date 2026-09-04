@@ -1,30 +1,32 @@
 "use client";
 
-import { Moon, Sun, SunMoon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef } from "react";
+import { Monitor, Moon, Sun } from "lucide-react";
+import { useEffect, useSyncExternalStore } from "react";
 import { MODES, Mode, THEME_KEY, apply, storedMode } from "@/lib/theme";
 
-// Click order matches the founder's personal-site toggle: an explicit dark,
-// then light, then back to following the OS. On a light-OS machine the first
-// click must visibly change the page; auto -> light would not.
-const LABELS: Record<Mode, string> = {
-  auto: "Color theme: system. Switch to dark.",
-  dark: "Color theme: dark. Switch to light.",
-  light: "Color theme: light. Switch to system.",
-};
+// Three modes side by side, the current one filled, so a reader sees all
+// three and picks one in one click. The order is the settled cycle: system,
+// then dark, then light.
+const OPTIONS: { mode: Mode; label: string; Icon: typeof Monitor }[] = [
+  { mode: "auto", label: "System color theme", Icon: Monitor },
+  { mode: "dark", label: "Dark color theme", Icon: Moon },
+  { mode: "light", label: "Light color theme", Icon: Sun },
+];
+
+const CHANGE = "reef-theme-change";
+
+function subscribe(onChange: () => void) {
+  window.addEventListener(CHANGE, onChange);
+  window.addEventListener("storage", onChange);
+  return () => {
+    window.removeEventListener(CHANGE, onChange);
+    window.removeEventListener("storage", onChange);
+  };
+}
 
 export function ThemeToggle() {
-  const button = useRef<HTMLButtonElement>(null);
-
-  function label(mode: Mode) {
-    const el = button.current;
-    if (!el) return;
-    el.setAttribute("aria-label", LABELS[mode]);
-    el.title = LABELS[mode];
-  }
-
-  // The server renders the system-mode label; sync to storage before paint.
-  useLayoutEffect(() => label(storedMode()), []);
+  // The server renders system mode; the stored choice replaces it on hydration.
+  const mode = useSyncExternalStore(subscribe, storedMode, () => "auto" as Mode);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -35,8 +37,7 @@ export function ThemeToggle() {
     return () => media.removeEventListener("change", followSystem);
   }, []);
 
-  function cycleTheme() {
-    const next = MODES[(MODES.indexOf(storedMode()) + 1) % MODES.length];
+  function choose(next: Mode) {
     try {
       if (next === "auto") {
         localStorage.removeItem(THEME_KEY);
@@ -47,21 +48,35 @@ export function ThemeToggle() {
       /* private browsing: the theme still applies for this page view */
     }
     apply(next);
-    label(next);
+    window.dispatchEvent(new Event(CHANGE));
+  }
+
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+    event.preventDefault();
+    const step = event.key === "ArrowRight" ? 1 : -1;
+    const next = MODES[(MODES.indexOf(mode) + step + MODES.length) % MODES.length];
+    choose(next);
+    (event.currentTarget.querySelector(`[data-mode="${next}"]`) as HTMLElement | null)?.focus();
   }
 
   return (
-    <button
-      ref={button}
-      className="icon-button theme-toggle"
-      type="button"
-      onClick={cycleTheme}
-      aria-label={LABELS.auto}
-      title={LABELS.auto}
-    >
-      <SunMoon className="system-icon" size={18} />
-      <Moon className="moon-icon" size={18} />
-      <Sun className="sun-icon" size={18} />
-    </button>
+    <div className="theme-switch" role="radiogroup" aria-label="Color theme" onKeyDown={onKeyDown}>
+      {OPTIONS.map(({ mode: option, label, Icon }) => (
+        <button
+          key={option}
+          type="button"
+          role="radio"
+          data-mode={option}
+          aria-checked={mode === option}
+          aria-label={label}
+          title={label}
+          tabIndex={mode === option ? 0 : -1}
+          onClick={() => choose(option)}
+        >
+          <Icon size={15} aria-hidden="true" />
+        </button>
+      ))}
+    </div>
   );
 }

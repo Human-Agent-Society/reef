@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowLeft, ArrowRight, ChevronRight, PencilLine } from "lucide-react";
+import { ArrowLeft, ArrowRight, PencilLine } from "lucide-react";
 import type { Doc, NavGroup, NavItem } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
 import { ReStructuredText } from "./markdown";
@@ -17,17 +17,17 @@ function PagerLink({ item, direction }: { item: NavItem; direction: "previous" |
 }
 
 export function DocsPage({ doc, navigation, previous, next }: { doc: Doc; navigation: NavGroup[]; previous?: NavItem; next?: NavItem }) {
-  const section = navigation.find((group) => group.items.some((item) => item.slug === doc.slug))?.title ?? "Documentation";
+  const group = navigation.find((candidate) => candidate.items.some((item) => item.slug === doc.slug));
 
   return (
     <div className="docs-layout">
       <Sidebar navigation={navigation} />
       <main id="main-content" className="docs-main" tabIndex={-1}>
-        <div className="doc-context" aria-label="Breadcrumb">
-          <Link href="/docs">Docs</Link>
-          <ChevronRight size={13} aria-hidden="true" />
-          <span className="doc-section">{section}</span>
-        </div>
+        {group && (
+          <p className="doc-eyebrow" aria-label="Section">
+            <Link href={group.items[0].href}>{group.title}</Link>
+          </p>
+        )}
         <article className="markdown-body">
           <ReStructuredText content={doc.content} sourcePath={doc.sourcePath} />
         </article>
