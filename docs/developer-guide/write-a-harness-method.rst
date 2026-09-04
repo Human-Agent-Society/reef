@@ -249,4 +249,6 @@ the step's ``screened_tasks`` metric; one tagged client holds at most
 most ``evolution.max_promoted_tasks``. A code-bearing mutation
 (``code_extension``, ``native_tool``, ``native_hook``) proposed from client
 text belongs behind ``evolution.review_kinds``, so a person reads it before
-it publishes.
+it publishes. A ``native_graph`` carries no code, so a loop change can
+publish on the gate alone; list the kind in ``review_kinds`` when a person
+should read every loop change.

@@ -50,7 +50,7 @@ ENTRY_POINT_GROUP = "reef.harness_adapters"
 #: Node kinds rendered to one path per named node; templates need ``{name}``.
 NAMED_NODE_KINDS = ("agent_command", "skill", "code_extension")
 #: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
-OPTIONAL_NODE_KINDS = ("native_tool", "native_hook")
+OPTIONAL_NODE_KINDS = ("native_tool", "native_hook", "native_graph")
 
 
 class DescriptorError(ReefError):

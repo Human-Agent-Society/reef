@@ -18,7 +18,6 @@ import copy
 import importlib.util
 import json
 import os
-import re
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -356,7 +355,9 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
 
 
 def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
-    """One turn: per step, pre_step, the request (request_error on failure), each call behind pre_execute, then post_execute."""
+    """One turn: the tree's graph (or the seed graph) walked stage by stage; each model stage is one step."""
+    from reef.harness.native import graph as graphs  # late: graph.py imports this module
+
     binding = binding_from(root / "models.json")
     session = Session(session_dir / "session.jsonl")
     header = {
@@ -370,8 +371,9 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         try:
             tools = load_tools(root / "tools")
             hooks = load_hooks(root / "hooks")
-        except LoadError as exc:
-            session.write("session", {**header, "tools": [], "hooks": {}})
+            graph = graphs.load_graph(root)
+        except (LoadError, graphs.GraphError, ValueError) as exc:
+            session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
         session.write(
@@ -381,91 +383,12 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 "tools": sorted(tools),
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                 "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
+                "graph": graph.source,
             },
         )
         session.write("turn/start", {"turn": 1})
-        system = system_prompt(root)
-        declarations = [tool.declaration() for tool in tools.values()]
-        messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
-
-        def say(step: int, event: str, content: str) -> None:
-            session.write(
-                "user/message", {"step": step, "source": {"kind": "hook", "event": event}, "content": content}
-            )
-            messages.append({"role": "user", "content": content})
-
-        for step in range(1, MAX_STEPS + 1):
-            entry = _decide(
-                session, hooks["pre_step"], "pre_step", step, {"step": step, "task": prompt, "messages": messages}
-            )
-            if entry.get("kind") == "reject":
-                reason = {"kind": "rejected", "step": step, "message": str(entry.get("reason") or "")}
-                session.write("turn/end", {"turn": 1, "reason": reason})
-                return 0
-            session.write("step/start", {"turn": 1, "step": step})
-            if step == 1:
-                session.write("request/header", {"model": binding.model, "system": system, "tools": declarations})
-            for content in _texts(entry.get("messages")):
-                say(step, "pre_step", content)
-            body: dict[str, Any] = {"messages": messages}
-            if declarations:
-                body["tools"] = declarations
-            message = _request(session, binding, hooks["request_error"], body, step)
-            if message is None:
-                return 1
-            calls = list(message.get("tool_calls") or [])
-            messages.append(message)
-            session.write(
-                "assistant/message",
-                {
-                    "step": step,
-                    "content": message.get("content"),
-                    "tool_calls": calls,
-                    "finish": "tool-calls" if calls else "stop",
-                },
-            )
-            if not calls:
-                session.write("step/end", {"turn": 1, "step": step})
-                session.write("turn/end", {"turn": 1, "reason": {"kind": "completed"}})
-                return 0
-            contexts: list[str] = []
-            for call in calls:
-                function = call.get("function") or {}
-                name = str(function.get("name", ""))
-                raw = function.get("arguments") or "{}"
-                call_id = str(call.get("id") or name)
-                session.write("tool/call", {"step": step, "call_id": call_id, "name": name, "arguments": raw})
-                spill = workdir / SPILL_DIR / f"{step}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
-
-                def gate(tool: ToolModule, arguments: dict[str, Any], step=step, call_id=call_id) -> dict[str, Any]:
-                    payload = {
-                        "step": step,
-                        "call_id": call_id,
-                        "name": tool.name,
-                        "arguments": arguments,
-                        "capabilities": list(tool.capabilities),
-                    }
-                    return _decide(session, hooks["pre_execute"], "pre_execute", step, payload)
-
-                result = _invoke(tools, name, raw, workdir, spill=spill, gate=gate)
-                payload = {
-                    "step": step,
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": result.get("arguments"),
-                    "result": result,
-                }
-                verdict = _decide(session, hooks["post_execute"], "post_execute", step, payload)
-                result = _judged(result, verdict)
-                session.write("tool/result", {"step": step, "call_id": call_id, "name": name, **result})
-                messages.append({"role": "tool", "tool_call_id": call_id, "content": result["content"]})
-                contexts.extend(_texts(verdict.get("contexts")))
-            # Contexts land after the batch's results, in call order, so the model reads them as one note.
-            for content in contexts:
-                say(step, "post_execute", content)
-            session.write("step/end", {"turn": 1, "step": step})
-        session.write("turn/end", {"turn": 1, "reason": {"kind": "max-steps", "steps": MAX_STEPS}})
-        return 0
+        loop = _Loop(session, root)
+        return graphs.run_graph(graphs.Run(loop, prompt, binding, tools, hooks, workdir), graph)
     finally:
         session.close()
 
@@ -557,6 +480,24 @@ def _invoke(
         "arguments": arguments,
         "meta": {"duration_ms": int((time.monotonic() - started) * 1000), **clipped},
     }
+
+
+class _Loop:
+    """What the stage handlers reach of this module: the session, the root, and the loop's own helpers."""
+
+    SPILL_DIR = SPILL_DIR
+
+    def __init__(self, session: Session, root: Path) -> None:
+        self.session = session
+        self.root = root
+
+    system_prompt = staticmethod(system_prompt)
+    _decide = staticmethod(_decide)
+    _request = staticmethod(_request)
+    _invoke = staticmethod(_invoke)
+    _judged = staticmethod(_judged)
+    _texts = staticmethod(_texts)
+    _abort = staticmethod(_abort)
 
 
 def main(argv: list[str] | None = None) -> int:

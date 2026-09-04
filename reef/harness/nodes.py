@@ -21,6 +21,8 @@ native harness adds kinds only it renders:
   code defining ``run(args, workdir)`` (``native/tools/``).
 - ``native_hook``: a named listener at one event of the native loop, code
   defining ``listen(payload, next)`` (``native/hooks/``).
+- ``native_graph``: the native loop's control flow as data, stages from a
+  closed vocabulary joined by edges keyed by outcome (``native/graphs/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.render`` reads it back out per adapter.
@@ -38,6 +40,20 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
+#: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
+NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "model": ((), ("tool_calls", "text")),
+    "tools": (("allow",), ("done",)),
+    "verify": (("check", "pattern", "message"), ("pass", "fail")),
+    "message": (("text",), ("done",)),
+    "end": (("reason",), ()),
+}
+NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
+NATIVE_END_REASONS = ("completed", "gave_up")
+#: Size caps on one graph, so admission and the interpreter's guard stay cheap.
+NATIVE_GRAPH_MAX_STEPS = 32
+NATIVE_GRAPH_MAX_STAGES = 16
+NATIVE_GRAPH_MAX_EDGES = 64
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -238,6 +254,150 @@ def native_hook_node(ctx: Any, config: Any) -> None:
     _require_python(options, "native_hook node")
 
 
+def _graph_stage(name: str, stage: Any) -> str:
+    """Validate one stage's kind and keys; the kind, so the caller can read its outcomes."""
+    if not _NAME.fullmatch(name):
+        raise ValueError(f"native_graph stage name {name!r} must match {_NAME.pattern}")
+    if not isinstance(stage, Mapping):
+        raise ValueError(f"native_graph stage {name!r} must be an object")
+    kind = stage.get("kind")
+    if kind not in NATIVE_STAGES:
+        raise ValueError(f"native_graph stage {name!r} kind must be one of {', '.join(NATIVE_STAGES)}")
+    keys, _ = NATIVE_STAGES[kind]
+    extra = sorted(set(stage) - {"kind", *keys})
+    if extra:
+        raise ValueError(f"native_graph stage {name!r} ({kind}) does not take {', '.join(extra)}")
+    if kind == "tools":
+        allow = stage.get("allow", [])
+        if not isinstance(allow, Sequence) or isinstance(allow, str) or len(set(allow)) < len(allow):
+            raise ValueError(f"native_graph stage {name!r} 'allow' must be a list of distinct tool names")
+        if any(not isinstance(item, str) or not item for item in allow):
+            raise ValueError(f"native_graph stage {name!r} 'allow' must be a list of distinct tool names")
+    elif kind == "verify":
+        check = stage.get("check")
+        if check not in NATIVE_VERIFY_CHECKS:
+            raise ValueError(f"native_graph stage {name!r} 'check' must be one of {', '.join(NATIVE_VERIFY_CHECKS)}")
+        if (check == "last_line_matches") != ("pattern" in stage):
+            raise ValueError(
+                f"native_graph stage {name!r} takes 'pattern' exactly when its check is last_line_matches"
+            )
+        if "pattern" in stage:
+            pattern = stage["pattern"]
+            if not isinstance(pattern, str) or not pattern:
+                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression: {exc}") from exc
+        if "message" in stage:
+            _reject_secret_shaped_text(_require_text(stage, "message"), f"native_graph stage {name!r} 'message'")
+    elif kind == "message":
+        _reject_secret_shaped_text(_require_text(stage, "text"), f"native_graph stage {name!r} 'text'")
+    elif kind == "end" and stage.get("reason", "completed") not in NATIVE_END_REASONS:
+        raise ValueError(f"native_graph stage {name!r} 'reason' must be one of {', '.join(NATIVE_END_REASONS)}")
+    return kind
+
+
+def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
+    seen, queue = {start}, [start]
+    while queue:
+        for target in edges.get(queue.pop(), set()):
+            if target not in seen:
+                seen.add(target)
+                queue.append(target)
+    return seen
+
+
+def _has_cycle(nodes: set[str], edges: Mapping[str, set[str]]) -> bool:
+    """Whether the edges among ``nodes`` close a cycle (depth first, three colors)."""
+    state: dict[str, int] = {}
+
+    def visit(name: str) -> bool:
+        state[name] = 1
+        for target in edges.get(name, ()):
+            if target not in nodes:
+                continue
+            if state.get(target) == 1 or (state.get(target) is None and visit(target)):
+                return True
+        state[name] = 2
+        return False
+
+    return any(state.get(name) is None and visit(name) for name in nodes)
+
+
+def validate_native_graph(config: Any) -> Mapping[str, Any]:
+    """The admission rules of a native_graph, shared by the tree boundary and the loop's loader.
+
+    A graph passes when every stage is a known kind with only its own keys,
+    every outcome of every stage has exactly one edge, every stage is
+    reachable from ``start``, some end stage is reachable from every stage,
+    and every cycle passes through a model stage, so the finite step budget
+    ends every run."""
+    options = _require_mapping(config)
+    _require_name(options)
+    extra = sorted(set(options) - {"name", "start", "max_steps", "stages", "edges"})
+    if extra:
+        raise ValueError(f"native_graph node does not take {', '.join(extra)}")
+    max_steps = options.get("max_steps", NATIVE_GRAPH_MAX_STEPS)
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= NATIVE_GRAPH_MAX_STEPS:
+        raise ValueError(f"native_graph node 'max_steps' must be an integer from 1 to {NATIVE_GRAPH_MAX_STEPS}")
+    stages = options.get("stages")
+    if not isinstance(stages, Mapping) or not 1 <= len(stages) <= NATIVE_GRAPH_MAX_STAGES:
+        raise ValueError(f"native_graph node 'stages' must be an object of 1 to {NATIVE_GRAPH_MAX_STAGES} stages")
+    kinds = {str(name): _graph_stage(str(name), stage) for name, stage in stages.items()}
+    start = options.get("start")
+    if start not in kinds:
+        raise ValueError("native_graph node 'start' must name a stage")
+    edges = options.get("edges")
+    if not isinstance(edges, Sequence) or isinstance(edges, str) or len(edges) > NATIVE_GRAPH_MAX_EDGES:
+        raise ValueError(f"native_graph node 'edges' must be a list of at most {NATIVE_GRAPH_MAX_EDGES} edges")
+    seen: set[tuple[str, str]] = set()
+    targets: dict[str, set[str]] = {name: set() for name in kinds}
+    for edge in edges:
+        if not isinstance(edge, Mapping) or set(edge) != {"from", "when", "to"}:
+            raise ValueError("native_graph edges must be objects with from, when and to")
+        source, when, target = edge["from"], edge["when"], edge["to"]
+        if source not in kinds or target not in kinds:
+            raise ValueError(f"native_graph edge {source!r} -> {target!r} must name stages")
+        if when not in NATIVE_STAGES[kinds[source]][1]:
+            raise ValueError(
+                f"native_graph edge from {source!r} names outcome {when!r}, not one of its {kinds[source]} stage"
+            )
+        if (source, when) in seen:
+            raise ValueError(f"native_graph stage {source!r} has two edges for outcome {when!r}")
+        seen.add((source, when))
+        targets[source].add(target)
+    for name, kind in kinds.items():
+        for outcome in NATIVE_STAGES[kind][1]:
+            if (name, outcome) not in seen:
+                raise ValueError(f"native_graph stage {name!r} has no edge for outcome {outcome!r}")
+    unreachable = sorted(set(kinds) - _reachable(start, targets))
+    if unreachable:
+        raise ValueError(f"native_graph stages {', '.join(unreachable)} are not reachable from {start!r}")
+    ends = {name for name, kind in kinds.items() if kind == "end"}
+    if not ends:
+        raise ValueError("native_graph node needs an end stage")
+    reverse: dict[str, set[str]] = {name: set() for name in kinds}
+    for source, names in targets.items():
+        for target in names:
+            reverse[target].add(source)
+    reaches_end: set[str] = set()
+    for end in ends:
+        reaches_end |= _reachable(end, reverse)
+    dead = sorted(set(kinds) - reaches_end)
+    if dead:
+        raise ValueError(f"native_graph stages {', '.join(dead)} cannot reach an end stage")
+    unbudgeted = {name for name, kind in kinds.items() if kind not in ("model", "end")}
+    if _has_cycle(unbudgeted, targets):
+        raise ValueError("native_graph has a cycle without a model stage, so nothing would end it")
+    return options
+
+
+def native_graph_node(ctx: Any, config: Any) -> None:
+    """The native loop's control flow as data: stages from a closed vocabulary and edges keyed by outcome."""
+    validate_native_graph(config)
+
+
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "config": config_node,
     "rules": rules_node,
@@ -246,5 +406,6 @@ NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "code_extension": code_extension_node,
     "native_tool": native_tool_node,
     "native_hook": native_hook_node,
+    "native_graph": native_graph_node,
 }
 """Entry ``name`` to node plugin; the resolver of the composition loader."""

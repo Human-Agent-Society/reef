@@ -37,6 +37,7 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
     """Render ``(kind, config)`` nodes to root-relative file texts."""
     configs = {name: _deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()}
     rules: list[str] = []
+    graphs: list[Mapping[str, Any]] = []
     files: dict[str, str] = {}
 
     def emit(path: str, text: str) -> None:
@@ -75,8 +76,27 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
                 )
             header = "\n".join(f"{key} = {value!r}" for key, value in fields)
             emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
+        elif kind == "native_graph":
+            template = descriptor.node_paths.get(kind)
+            if template is None:
+                raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
+            # Sorted keys, so a proposal's diff against the previous graph is a few lines.
+            emit(template.format(name=options.get("name")), json.dumps(options, indent=2, sort_keys=True) + "\n")
+            graphs.append(options)
         else:
             raise RenderError(f"unknown node kind {kind!r}")
+
+    # A graph's allow list names tools the same tree carries; the check needs every node, so it lands here.
+    tool_names = {
+        str(config.get("name")) for kind, config in nodes if kind == "native_tool" and isinstance(config, Mapping)
+    }
+    for graph in graphs:
+        for stage_name, stage in (graph.get("stages") or {}).items():
+            missing = sorted(set(stage.get("allow") or ()) - tool_names) if isinstance(stage, Mapping) else []
+            if missing:
+                raise RenderError(
+                    f"native_graph stage {stage_name!r} allows tools the tree lacks: {', '.join(missing)}"
+                )
 
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
