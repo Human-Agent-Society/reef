@@ -261,6 +261,40 @@ Reef 为会持续成长的 AI 提供基础设施：
 如果 Reef 对你有帮助，欢迎点个 Star ⭐，让更多人发现并参与进来。
 
 
+## 团队
+
+Reef 汇聚了一群探索 agent 如何从经验中学习、持续进化的人。以下成员共同将这一想法
+变成可用的基础设施。
+
+这份名单并未列尽所有团队成员，以下按姓氏字母顺序排列：
+
+[Wenhao Chai](https://github.com/wenhaochai),
+[Shuangrui Ding](https://github.com/Mark12Ding),
+[Hao He](https://github.com/hehaodele),
+[Haoze He](https://github.com/HectorHHZ),
+[Chonhe Jiang](https://github.com/Chonghe-Jiang),
+[Nan Jiang](https://github.com/nanjiangwill),
+[Xuan Jiang](https://github.com/Xuan-1998),
+[Xiaochen Li](https://github.com/SeuperHakkerJa),
+[Paul Liang](https://github.com/pliang279),
+[Bo Liu](https://github.com/Benjamin-eecs),
+[Boyuan Long](https://github.com/BoyuanLong),
+[Qiuyang Mang](https://github.com/joyemang33),
+[Zhenting Qi](https://github.com/zhentingqi),
+[Ao Qu](https://github.com/quao627),
+[Mingruo Qu](https://github.com/workhardforcoding),
+[Zhaokai Wang](https://github.com/wzk1015),
+[Xuezhi Yan](https://github.com/yanxz),
+[Hanfei Yu](https://github.com/hanfeiyu),
+[Haofei Yu](https://github.com/lwaekfjlk),
+[Simon Yu](https://github.com/simonucl),
+[Han Zheng](https://github.com/MikeZheng777),
+[Kaichen Zhou](https://github.com/kaichen-z),
+[Zijian Zhou](https://github.com/BobbyZhouZijian),
+[Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
+[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+
+
 ## Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
