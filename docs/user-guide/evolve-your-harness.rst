@@ -241,8 +241,12 @@ From a Reef checkout:
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
-them there to point at your own. The provider key is the one value it does
-not hold.
+them there to point at your own. The model name appears twice, as
+``model.path`` for the proposer and the evolve episodes and as
+``upstream_model`` for served traffic, and ``run.py`` repeats it as
+``MODEL``; a name the endpoint does not serve fails the proposer's call, and
+the step records ``skipped: no proposal``. The provider key is the one value
+``serve.yaml`` does not hold.
 
 `1_evolve_your_harness.ipynb
 <../../tutorials/harness_evolve/1_evolve_your_harness.ipynb>`__ is the same

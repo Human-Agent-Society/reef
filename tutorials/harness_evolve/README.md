@@ -45,7 +45,7 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ./run.sh native   # on reef's native harness (serve-native.yaml)
 ```
 
-serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The one value it does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
+serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
 ## Notebook
 

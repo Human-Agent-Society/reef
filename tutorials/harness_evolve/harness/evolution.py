@@ -13,6 +13,7 @@ import stays lazy (inside ``propose``) and the client needs no reef install.
 """
 
 import json
+import logging
 import re
 
 #: Expected final answers, keyed by the stable prefix each task starts with
@@ -59,7 +60,9 @@ def propose(nodes, samples, models):
         # A stalled endpoint holds the training thread for the whole timeout
         # before the step degrades to a skip; keep it short.
         reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=60.0, max_tokens=2048)
-    except Exception:
+    except Exception as exc:
+        # The step records only "no proposal"; the reason (a 404 for a model name, a timeout) is here.
+        logging.getLogger(__name__).warning("propose: served model call failed: %s", exc)
         return None
     proposal = _parse_proposal(reply)
     if proposal is None:
