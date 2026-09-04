@@ -16,14 +16,10 @@ English | [中文](README.zh.md)
 
 <div align="left">
 
-Reef is infrastructure that serves an entire continual learning backend. Reef
-exposes standardized http endpoints so that you can download agents just like
-how you download `codex` or `opencode` using `curl`, and so that your agent can
-send its model requests to Reef's inference endpoint instead of the provider's.
+Reef is the first open-source infrastructure for continual self-improving agents.
+It connects agent inference, feedback, learning, and versioned delivery. Use it
+to train model weights with Slime and SGLang, or improve an agent's harness, including its prompts, rules, and skills.
 
-The only difference is that, Reef constantly evaluates your agent behavior
-and improves the served harness and model weights in the backend. You keep getting
-better and better results without having to do anything.
 
 </div>
 
@@ -33,6 +29,37 @@ better and better results without having to do anything.
 [Join Discord](https://discord.gg/5y8e5f937k)**
 
 </div>
+
+
+## When to use Reef
+
+Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
+
+| Your goal | Learning path | What you need |
+|---|---|---|
+| Keep getting stronger model designed for you | Model weight training | A trainable model, a supported GPU stack, and feedback your recipe can use |
+| Get your harness to self-improve | Harness optimization | A model endpoint, representative tasks, and an evaluator; no local training GPUs |
+| Scientific discoveries | Test-time training | An execution environment, a correctness checker, and a measurable objective |
+
+
+## How it works
+
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/loop-animation-dark.svg">
+  <img src="docs/assets/loop-animation-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
+</picture>
+</div>
+
+Reef processes each learning cycle in four steps. The table also shows which
+modules implement each step.
+
+| Step | What happens | Where it lives |
+|---|---|---|
+| **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
+| **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`records.py`](reef/records.py) — stored interactions and feedback<br>[`train/processors/`](reef/train/processors) — feedback matching and eligibility |
+| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — batches and update jobs |
+| **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
 ## Installation
@@ -67,32 +94,12 @@ python3 -c "import reef; print(reef.__version__)"
 Use the source checkout for development and for the training examples below.
 
 
-## How it works
-
-<div align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/loop-animation-dark.svg">
-  <img src="docs/assets/loop-animation-light.svg" alt="Reef serves requests, records feedback, produces updates, and commits accepted updates to a version history." width="76%">
-</picture>
-</div>
-
-Reef processes each learning cycle in four steps. The table also shows which
-modules implement each step.
-
-| Step | What happens | Where it lives |
-|---|---|---|
-| **1&nbsp;·&nbsp;Serve** | Serve agent requests and record interactions. | [`service/`](reef/service) — agent requests and interaction records<br>[`runtime/`](reef/runtime) — inference and artifact updates |
-| **2&nbsp;·&nbsp;Observe** | Match feedback to recorded interactions. | [`records.py`](reef/records.py) — stored interactions and feedback<br>[`train/processors/`](reef/train/processors) — feedback matching and eligibility |
-| **3&nbsp;·&nbsp;Grow** | Produce an update from eligible records. | [`recipe/`](reef/recipe) — recipe integration<br>[`train/`](reef/train) — batches and update jobs |
-| **4&nbsp;·&nbsp;Commit** | Evaluate and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
-
-
 ## Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-### 1 · Serve
+### 1 · Start a weight-training deployment
 
 The following example starts the SAO (arXiv:2607.07508) example deployment. Run it
 from a Reef checkout in an environment that satisfies the GPU requirements in
@@ -139,7 +146,7 @@ reef = httpx.Client(
     timeout=300,
 )
 
-# Inference using Open-AI compatible format
+# Send a provider-compatible inference request
 response = reef.post(
     "/v1/chat/completions",
     json={
@@ -148,6 +155,7 @@ response = reef.post(
     },
 )
 
+response.raise_for_status()
 receipt = response.headers["x-reef-agent-record-id"]
 answer = response.json()["choices"][0]["message"]["content"]
 
@@ -161,7 +169,7 @@ reef.post(
 ```
 
 `feedback` carries the richer signal, plain text or a structured object,
-for recipes that read more than a scalar. The endpoint will validate the 
+for recipes that read more than a scalar. The endpoint will validate the
 **report schema** ([`reef/core/reports/`](reef/core/reports)).
 
 
@@ -179,7 +187,7 @@ reported interactions, evaluates the current and candidate harnesses on the
 configured tasks, and publishes the candidate only when it wins that
 comparison. Harness scenarios do not share data or versions.
 
-#### Install Reef harness that grows with you
+#### Install a versioned harness
 
 You can install Reef harness like how you install most coding agents.
 The following is an example. A new scenario will be automatically created
@@ -224,34 +232,79 @@ The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-h
 describes the proposal, evaluation, and publication process.
 
 
-## Cookbook recipes
+## Recipes and examples
 
-Choose a recipe based on the feedback available from the workload and the
-artifact that should be updated. These implementations live in this
-repository's `recipes/` cookbook; they are selected by dotted class reference
-and do not ship in the Reef wheel.
+Choose a recipe based on your workload's feedback and the artifact you want to
+update. The implementations live in this repository's `recipes/` cookbook,
+are selected by dotted class reference, and do not ship in the Reef wheel.
 
-| Workload | Recipe module | Updated artifact | Documentation |
+| Workload | Recipe guide | Updated artifact | Examples and results |
 |---|---|---|---|
-| A stream of tasks scored by tests or a verifier | <code>recipes.sao.recipe:SAORecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/sao/) · [Example](recipes/sao/examples/sao/README.md) |
-| Agent traffic with useful next-state signals and no explicit reports | <code>recipes.openclawrl.recipe:OpenClawRLRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) · [Example](recipes/openclawrl/examples/openclawrl/README.md) |
-| Repeated, scored attempts at one problem | <code>recipes.tttd.recipe:TTTDRecipe</code> | Model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/tttd/README.md) |
-| Scored code search with a trainable guidance model and a frozen executor | <code>recipes.tttd.recipe:TTTDRecipe</code> | Guidance-model weights | [Guide](https://reefinfra.ai/docs/user-guide/recipes/tttd/) · [Example](recipes/tttd/examples/guidance_ttt/README.md) |
-| Agent feedback used to evolve its skill pool | <code>recipes.skillclaw.recipe:SkillClawRecipe</code> | Skill pool (harness tree); no GPU required | [Guide](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) · [Example](recipes/skillclaw/README.md) |
+| A stream of tasks scored by tests or a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | Model weights | [Example](recipes/sao/examples/sao/README.md) · [Results](recipes/sao/examples/sao/README.md#results) |
+| Agent traffic with useful next-state signals and no explicit reports | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | Model weights | [Example](recipes/openclawrl/examples/openclawrl/README.md) |
+| Repeated, scored attempts at one problem | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | Model weights | [Example](recipes/tttd/examples/tttd/README.md) · [Results](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |
+| Scored code search with a trainable guidance model and a frozen executor | [Guidance-TTT / TTTD](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | Guidance-model weights | [Example](recipes/tttd/examples/guidance_ttt/README.md) · [Results](recipes/tttd/examples/guidance_ttt/results/README.md) |
+| Agent feedback used to evolve its skill pool | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Harness skills; no training GPUs | [Example](recipes/skillclaw/README.md) |
+| Scores and transcripts used to improve prompts and instructions | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness; fixed model weights | [Example and results](recipes/gepa/examples/aime/README.md) |
+
+For a small walkthrough of feedback, candidate edits, and publication, start with
+[the coding harness tutorial](tutorials/harness_evolve/README.md). Each result
+page documents its task, evaluation setup, measurements, and limitations.
 
 
-## How is Reef different?
+## Architecture
 
-Reef builds the infra for AI that grows:
+```mermaid
+sequenceDiagram
+    accTitle: How Reef serves, records, trains, evaluates, and publishes
+    autonumber
+    participant H as Harness
+    participant S as Scenario
+    participant I as Inference
+    participant T as Trainer
+    participant G as Training*
+    participant E as Artifact evaluation
 
-| Ability | Inference engine (vLLM, SGLang, …) | RL training framework (slime, veRL, AReaL, …) | **Reef** |
-|---|:---:|:---:|:---:|
-| Serves live traffic | ✅ | ❌ | ✅ |
-| Trains weights | ❌ | ✅ | ✅ |
-| Version management | ❌ | ❌ | ✅ |
-| Stays live through updates | ❌ | ❌ | ✅ |
-| Evolves beyond weights (skills, harness) | ❌ | ❌ | ✅ |
+    opt Harness recipe: pull the served tree
+      H->>S: GET /reef/harness for scenario
+      S-->>H: Harness tree and release
+      Note over H: Agent runs on that tree
+    end
+    Note over H,I: Serve and record each request
+    H->>S: Inference request for scenario
+    S->>S: Freeze current release
+    S->>I: Provider-native request
+    I-->>S: Provider response
+    S->>S: Validate frozen release and store record
+    S-->>H: Response and receipt
+    H->>S: Feedback quotes the receipt
+    S->>T: Eligible record
+    opt Processor has a batch
+      Note over S,E: Produce, evaluate, and select a candidate
+      T->>G: Prepared step
+      G-->>T: Candidate artifact ready
+      T->>E: evaluate(candidate)
+      E-->>T: Evaluation result
+      T->>E: decide(candidate, result)
+      E-->>T: Select or reject
+      alt Candidate selected
+        T->>S: Commit new release
+      else Candidate rejected
+        Note over S,I: Previous release keeps serving
+      end
+    end
+```
 
+The inference runtime is always required. The training runtime is needed only for
+recipes that update model weights. Harness recipes run their step in Reef’s own
+process, with no training GPU.
+
+Artifact evaluation measures each candidate artifact and decides whether to
+select or reject it before publication. The default weight-recipe selector is
+`AlwaysSelect`; configure a custom evaluator to apply your quality criteria.
+
+See the [architecture guide](https://reefinfra.ai/docs/getting-started/architecture/)
+for the request path, scenarios, and release lifecycle.
 
 ## Learn more
 
