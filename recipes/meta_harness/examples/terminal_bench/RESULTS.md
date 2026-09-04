@@ -130,6 +130,48 @@ raise concurrency or accept the tail deliberately.
 
 No task in the official set requests a GPU, so e2b is sufficient throughout.
 
+## Reef pays twice for every iteration after the first
+
+Cordis evaluates in pairs. For each task and repeat it builds one pairing of
+`candidate_files` and `current_files` and runs both, so the incumbent is
+re-measured alongside the candidate on every iteration -- 120 episodes here,
+not 60. The interleaving is deliberate: drift lands on both sides of a pair
+instead of one whole side.
+
+Meta-Harness's frontier does not want that measurement. The incumbent keeps
+the score it was admitted on, so the selector reads
+
+```python
+incumbent_scores = incumbent.scores or current_scores
+```
+
+and once `incumbent.scores` is set, the freshly measured `current_scores` is
+discarded. The live run shows it exactly: each iteration's `incumbent_mean` is
+the previous iteration's `candidate_mean` to the digit.
+
+| Iteration | candidate | incumbent | = previous candidate |
+| --- | --- | --- | --- |
+| 1 | 0.2333 | 0.2167 | seeds the frontier, used |
+| 2 | 0.3500 | 0.2333 | yes -- measurement discarded |
+| 3 | 0.3000 | 0.3500 | yes -- measurement discarded |
+
+Iteration 1 is real work: `served.scores` starts empty, so that pairing is
+what gives the seed its 0.2167. From iteration 2 on, 60 target-model episodes
+per iteration are executed, billed, and thrown away. Across a 5-iteration run
+that is 240 of 600 episodes, about 40% of the target spend, against upstream
+which evaluates only the new candidate.
+
+**This does not affect the matching claim.** Both implementations decide on
+the same stored high-water score, which is why the arms agree. It is a cost
+divergence, not a behavioural one.
+
+It is worth a decision rather than a quiet fix, because the two designs
+disagree on purpose: pairing buys drift cancellation, and a frontier that
+never refreshes its incumbent cannot spend it. Skipping the incumbent leg when
+`incumbent.scores` is already set would halve the cost of every run, at the
+price of making Cordis's pairing a no-op for this method. That belongs to
+whoever owns the selector, not to a reproduction run.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
