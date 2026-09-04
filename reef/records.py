@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -37,6 +38,8 @@ class RecordStore:
     database keeps standalone/test construction lightweight; production callers
     should always pass a path.
     """
+
+    _SQLITE_ID_CHUNK_SIZE = 900
 
     def __init__(self, database: str | Path | None = None) -> None:
         self._database = ":memory:" if database is None else str(database)
@@ -76,7 +79,12 @@ class RecordStore:
             """
             )
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS consumed_agent_record (agent_record_id TEXT PRIMARY KEY)"
+                """
+                CREATE TABLE IF NOT EXISTS consumed_agent_record (
+                    agent_record_id TEXT PRIMARY KEY,
+                    content_sha256 TEXT NOT NULL
+                )
+                """
             )
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS agent_record_scenario_sequence ON agent_record (scenario, sequence)"
@@ -171,6 +179,11 @@ class RecordStore:
         """
         return {name: value for name, value in zip(cls._ENCODED_FIELDS, encoded, strict=True) if name != "created_at"}
 
+    @classmethod
+    def _content_sha256(cls, encoded: tuple[str, str, str, float, str, str, str | None]) -> str:
+        canonical = cls._json(cls._content(encoded)).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
     def append(self, item: AgentRecord) -> AgentRecord:
         return self.append_result(item).item
 
@@ -178,10 +191,12 @@ class RecordStore:
         encoded = self._encode(item)
         with self._lock, self._connection:
             consumed = self._connection.execute(
-                "SELECT 1 FROM consumed_agent_record WHERE agent_record_id = ?",
+                "SELECT content_sha256 FROM consumed_agent_record WHERE agent_record_id = ?",
                 (item.agent_record_id,),
             ).fetchone()
             if consumed is not None:
+                if consumed["content_sha256"] != self._content_sha256(encoded):
+                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
                 return AppendResult(item, False)
             if item.request_type is RequestType.REPORT and item.references:
                 placeholders = ",".join("?" for _ in item.references)
@@ -191,8 +206,8 @@ class RecordStore:
                 ).fetchone()
                 if consumed is not None:
                     self._connection.execute(
-                        "INSERT INTO consumed_agent_record VALUES (?)",
-                        (item.agent_record_id,),
+                        "INSERT INTO consumed_agent_record (agent_record_id, content_sha256) VALUES (?, ?)",
+                        (item.agent_record_id, self._content_sha256(encoded)),
                     )
                     return AppendResult(item, False)
             cursor = self._connection.execute(
@@ -329,16 +344,26 @@ class RecordStore:
                     """,
                     (scenario, receipt_id, compacted_ids_json, metadata_json, time.time()),
                 )
-            self._connection.executemany(
-                "INSERT OR IGNORE INTO consumed_agent_record VALUES (?)",
-                ((agent_record_id,) for agent_record_id in agent_record_ids),
-            )
             if agent_record_ids:
-                placeholders = ",".join("?" for _ in agent_record_ids)
-                self._connection.execute(
-                    f"DELETE FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
-                    (scenario, *sorted(agent_record_ids)),
-                )
+                sorted_ids = sorted(agent_record_ids)
+                for start in range(0, len(sorted_ids), self._SQLITE_ID_CHUNK_SIZE):
+                    chunk = sorted_ids[start : start + self._SQLITE_ID_CHUNK_SIZE]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = self._connection.execute(
+                        f"SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
+                        (scenario, *chunk),
+                    ).fetchall()
+                    self._connection.executemany(
+                        """
+                        INSERT OR IGNORE INTO consumed_agent_record (agent_record_id, content_sha256)
+                        VALUES (?, ?)
+                        """,
+                        ((row["agent_record_id"], self._content_sha256(self._row_content(row))) for row in rows),
+                    )
+                    self._connection.execute(
+                        f"DELETE FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
+                        (scenario, *chunk),
+                    )
         for agent_record_id in agent_record_ids:
             self._live_records.pop(agent_record_id, None)
 
