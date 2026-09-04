@@ -47,6 +47,30 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The one value it does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
+## Keep a deployment running
+
+From the repository root, after the source installation and with `pi` on PATH:
+
+```bash
+export REEF_UPSTREAM_URL="https://api.openai.com"  # no /v1 suffix
+export REEF_UPSTREAM_MODEL="your-model-name"
+export REEF_UPSTREAM_API_KEY="your-openai-api-key"
+python tutorials/harness_evolve/serve.py
+```
+
+Use your provider's API key, or omit it for a local endpoint without authentication.
+`serve.py` prepares the recipe from `serve.yaml` and keeps Reef running until
+interrupted. It sets the provider model in both the recipe and the service.
+Defaults: port `8901`, Reef access token `reef-local`, state under
+`work/deployment/`. Override these with `REEF_PORT`, `REEF_TOKEN`, and
+`REEF_HARNESS_WORK_DIR`. With no endpoint or model overrides, it uses the
+`serve.yaml` defaults. The original YAML and the `run.sh` demo's state stay intact.
+
+Install a harness from this service and submit feedback as shown in the
+[root README](../../README.md#harness-evolving-deployment). Adapt `serve.yaml`'s
+tasks and `harness/evolution.py`'s proposer and grader for your workload before
+starting the deployment.
+
 ## Notebook
 
 `1_evolve_your_harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.

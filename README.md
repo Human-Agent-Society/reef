@@ -181,99 +181,37 @@ current version without restarting Reef.
 
 ### Harness-evolving deployment
 
-The `harness_evolve` recipe updates a harness tree that may contain rules,
-skills, configuration, prompts, and extensions. It builds a candidate from
-reported interactions, evaluates the current and candidate harnesses on the
-configured tasks, and publishes the candidate only when it wins that
-comparison. Harness scenarios do not share data or versions.
-
-#### Start the deployment
-
-You can start here after the source installation above. This deployment uses
-an OpenAI-compatible model endpoint and needs no training GPUs. It runs on
-port `8901`, independently of the weight-training deployment on `8900`.
-
-Use the tutorial's [deployment config](tutorials/harness_evolve/serve.yaml).
-Set `reef.upstream_url` to your provider's base URL (without `/v1`), and set
-both `reef.upstream_model` and `model.path` to its model name. The example
-uses `http://127.0.0.1:8000` and `qwen3-8b`. Its proposer and evaluator live
-in the tutorial's `harness` package, and evaluation runs the `pi` agent.
-
-`REEF_UPSTREAM_API_KEY` is your model provider's API key: use your OpenAI API
-key when connecting to OpenAI, or the corresponding key for another provider.
-Leave it unset for a local endpoint without authentication. `REEF_TOKEN` is
-the separate token your agent uses to access Reef.
-
-From the repository root, in your activated Python environment:
+Improve harness skills using a model API, with no training GPUs. From your
+Reef checkout and activated Python environment:
 
 ```bash
-uv pip install -e tutorials/harness_evolve
 npm install -g @earendil-works/pi-coding-agent@0.84.2
-
-cd tutorials/harness_evolve
-mkdir -p work/recipes
-python3 materialize_recipe.py serve.yaml
-export REEF_RECIPE_CONFIG_DIR="$PWD/work/recipes"
-export REEF_TOKEN="reef-local"
-# For OpenAI, use your OpenAI API key; otherwise use your provider's key.
-# Omit this for a local endpoint without authentication.
-# export REEF_UPSTREAM_API_KEY="your-api-key"
-
-reef serve -c "$PWD/serve.yaml" \
-  --reef.port "8901" \
-  --reef.token "$REEF_TOKEN"
+export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
+export REEF_UPSTREAM_MODEL="your-model-name"
+export REEF_UPSTREAM_API_KEY="your-openai-api-key"
+python tutorials/harness_evolve/serve.py
 ```
 
-Leave this process running. In another terminal, set `REEF_TOKEN=reef-local`
-and check `curl -f http://127.0.0.1:8901/healthz` before installing the harness.
-The example keeps its records and artifacts under `tutorials/harness_evolve/work/`.
-Its three coding tasks demonstrate evaluation; adapt the tasks, proposer, and
-evaluator to your workload using the
-[harness evolution tutorial](tutorials/harness_evolve/README.md).
+For another provider, use its URL, model name, and API key. For a local endpoint
+without authentication, omit the key. The script starts Reef on `8901` with
+`reef-local` as its access token and prepares the tutorial's recipe automatically.
 
-#### Install a versioned harness
-
-You can install Reef harness like how you install most coding agents.
-The following is an example. A new scenario will be automatically created
-and bundled with the downloaded harness.
+In another terminal, install the harness and run a task:
 
 ```bash
+export REEF_TOKEN="reef-local"
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
   'http://localhost:8901/reef/harness/install?adapter=pi' | bash
-
-reef-pi -p "fix the bug"
-```
-
-You can also retrieve an evolved harness by supplying its scenario in the header.
-For example, if you have a scenario `harness-evolve-code-repair`, you can install its harness via the following.
-
-```bash
-curl -fsS -H 'x-reef-scenario: harness-evolve-code-repair' \
-  -H "Authorization: Bearer $REEF_TOKEN" \
-  'http://localhost:8901/reef/harness/install?adapter=pi' | bash
-```
-
-#### Report a task result
-
-`reef-pi` stores the receipts from a run, so its `report` command only needs
-the result you want to associate with the preceding interaction:
-
-```bash
 reef-pi -p "fix the failing test in auth.py"
 
-# ... run your tests, grade the result ...
-
+# After running your tests, report the actual result:
 reef-pi report --score 0 --feedback "missed the empty-token case"
-# reef-pi: reported 1 receipt(s) to harness-evolve-code-repair
 ```
 
-Reef batches eligible reports according to the recipe configuration. When
-version checking is enabled, the adapter checks for a newer published version
-the next time it starts. Interactive sessions offer **Update with …** and
-**Skip** before accepting input; choosing update runs the installer directly.
-Headless sessions print the instruction instead.
-The [harness evolution guide](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
-describes the proposal, evaluation, and publication process.
+Failed reports trigger a candidate skill update. Reef evaluates it against the
+current harness on the tutorial's three coding tasks and publishes it only if
+it wins. See the [tutorial](tutorials/harness_evolve/README.md) to customize the
+tasks and evaluation.
 
 
 ## Recipes and examples
