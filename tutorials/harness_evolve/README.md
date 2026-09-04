@@ -7,11 +7,13 @@ The pinned paper reproduction built on this mechanism lives at `recipes/skillcla
 
 ```text
 harness_evolve/
+  deployment.yaml the minimal long-running pi deployment used by the root README;
+                  run it directly with reef serve -c
   serve.yaml     the stack (reef service) plus the harness_evolve recipe
-                 sections: tasks, seed composition, dotted method references
+                 sections used by the self-contained ./run.sh pi demo
   serve-native.yaml
-                 the same stack on reef's native harness: the loop's own
-                 tools and hook are the seed, so the proposer can change them
+                 the ./run.sh native variant: the loop's own tools and hook
+                 are the seed, so the proposer can change them
   harness/       the method package serve.yaml's dotted refs name
     evolution.py the method: propose (self proposer over failures, skill
                  nodes only) and evaluate (exact last-line answer grading)

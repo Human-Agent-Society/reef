@@ -1,5 +1,8 @@
 # Run from the repository root:
 # reef serve -c tutorials/harness_evolve/deployment.yaml
+# This is the long-running pi deployment used by the root README. The separate
+# serve.yaml and serve-native.yaml files remain inputs to the short-lived
+# ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 model:
   path: &model your-model-name  # Set once; shared by serving and evaluation.
