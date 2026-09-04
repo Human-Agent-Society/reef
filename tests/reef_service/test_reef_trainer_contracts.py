@@ -197,7 +197,8 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     ]
     assert result.state is not None
     events.append(f"commit:math:{result.state['version']}")
-    prepared = trainer.commit()
+    prepared = trainer.prepare_commit(result)
+    trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
     assert events == [
         "initialize:math",
@@ -294,8 +295,10 @@ def test_trainer_reads_only_new_records() -> None:
         training_backend=ExampleBackend("math", events),
     )
 
-    trainer.run_once()
-    prepared = trainer.commit()
+    first = trainer.run_once()
+    assert first is not None
+    prepared = trainer.prepare_commit(first)
+    trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
     records.append(report)
     trainer.run_once()
