@@ -37,7 +37,8 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setOpen(true);
+        // One dialog at a time: the shortcut waits while the drawer is open.
+        if (!document.querySelector('[role="dialog"]:not(.search-dialog)')) setOpen(true);
       }
       if (event.key === "Escape") closeSearch();
     }

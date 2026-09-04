@@ -518,6 +518,7 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
   .icon-button { width: 44px; height: 44px; }
   .theme-switch button { width: 40px; height: 40px; }
   .repo-link { min-height: 40px; }
+  .search-trigger { min-height: 40px; }
   .code-copy { height: 40px; }
   .search-input-row button { width: 44px; height: 44px; }
   .logo { min-height: 44px; }
