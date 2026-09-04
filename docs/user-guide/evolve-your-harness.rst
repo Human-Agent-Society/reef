@@ -287,6 +287,24 @@ the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
+The native adapter's binary is ``reef-native``, which ships with reef, so
+the install route serves no script for it. Pull the tree with the client,
+name your Reef URL in its ``native/models.json``, and run the wrapper module
+with the same five settings the script bakes into ``reef-pi``:
+
+.. code:: bash
+
+   python3 -c 'from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token="reef-local").harness_pull("harness-evolve-demo", "./reef-harness")'
+   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "reef-local", "model": "qwen3-8b"}\n' > reef-harness/native/models.json
+   export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
+   export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
+   python3 -m reef.harness.harness_wrapper -p "fix the failing test in auth.py"
+   python3 -m reef.harness.harness_wrapper report --score 0 --feedback "missed the empty-token case"
+
+The wrapper points the loop at its capture proxy through a temp copy of
+the tree, keeps the loop's session log under ``native/sessions`` beside
+the installed tree, and ``report`` works as for any adapter.
+
 Write a method
 --------------
 
