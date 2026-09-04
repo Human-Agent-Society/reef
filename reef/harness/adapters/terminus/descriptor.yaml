@@ -54,6 +54,10 @@ cleanup_whitelist:
   - "terminus/trials/**"
 # Docker does not nest in bubblewrap: Harbor's task container is the
 # boundary, so a sandbox-executor deployment refuses to boot instead.
+# The sandbox provider's credential: the runner creates task containers, and
+# an episode inherits nothing from the host unless the adapter names it.
+inherit_env:
+  - E2B_API_KEY
 self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks
 # Terminus 2 reaches the model through litellm, so the binding is the provider
