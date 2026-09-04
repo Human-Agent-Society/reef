@@ -291,7 +291,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Shuangrui Ding](https://github.com/Mark12Ding),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
-[Chonhe Jiang](https://github.com/Chonghe-Jiang),
+[Chonghe Jiang](https://github.com/Chonghe-Jiang),
 [Nan Jiang](https://github.com/nanjiangwill),
 [Xuan Jiang](https://github.com/Xuan-1998),
 [Xiaochen Li](https://github.com/SeuperHakkerJa),
