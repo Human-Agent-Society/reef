@@ -10,7 +10,7 @@ One pass:
              one gated evolve step - the model proposes a mutation over its
              own failures, real episodes score it, a win publishes
     pull   - GET /reef/harness returns the winning composition; the evolved
-             skill, tool, and hook files are printed
+             skill, tool, hook, and graph files are printed
 
 Start this through ./run.sh: it writes work/tasks.json and starts the Reef
 these constants point at, on pi (serve.yaml) or on reef's native harness
@@ -46,7 +46,8 @@ def main():
         body, receipt = client.inference_with_record(
             SCENARIO,
             "/v1/chat/completions",
-            {"model": MODEL, "messages": [{"role": "user", "content": task}]},
+            # A cap on the reply: a local single slot server stalls behind one unbounded generation.
+            {"model": MODEL, "messages": [{"role": "user", "content": task}], "max_tokens": 2048},
         )
         prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
         score = evolution.grade_text(task, body["choices"][0]["message"]["content"])
@@ -76,6 +77,10 @@ def main():
             if error := client.get("/reef/status").get("error"):
                 raise SystemExit(f"evolve step failed: {error}; check work/reef.log") from exc
             time.sleep(2.0)
+        except (TimeoutError, OSError):
+            # The evolve step runs inside the service, so a long gate (a graph that loops on verify,
+            # a slow local model) leaves a poll unanswered; keep polling until the deadline.
+            time.sleep(2.0)
     if manifest is None:
         print(f"no skill mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
@@ -85,7 +90,7 @@ def main():
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
     print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
-        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/")):
+        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/")):
             print(f"--- {path} ---")
             print(text)
 

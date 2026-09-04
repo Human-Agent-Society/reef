@@ -11,6 +11,7 @@ both variants.
 """
 
 import json
+import logging
 
 from harness.evolution import _ENTRY_NAME, grade_text
 
@@ -25,16 +26,22 @@ SHAPES = (
     '{"id": "<name>", "name": "native_hook", "config": {"name": "<same name>", '
     '"event": "<pre_step | pre_execute | request_error | post_execute>", '
     '"code": "<python defining listen(payload, next) -> decision>"}}',
-    '{"id": "main", "name": "native_graph", "config": {"name": "main", "start": "<stage>", "max_steps": 12, '
-    '"stages": {"<stage>": {"kind": "model | tools | verify | message | end", ...}}, '
-    '"edges": [{"from": "<stage>", "when": "<outcome>", "to": "<stage>"}]}}',
+    # The graph shape is a worked example, not a placeholder: a 7B model copies a concrete stage and its
+    # edges, but invents check names and drops edges when shown only "<stage>" and "<outcome>".
+    '{"id": "main", "name": "native_graph", "config": {"name": "main", "start": "think", "max_steps": 12, '
+    '"stages": {"think": {"kind": "model"}, "act": {"kind": "tools"}, '
+    '"check": {"kind": "verify", "check": "last_line_integer", "message": "Reply with the final answer as a plain '
+    'integer alone on the last line."}, "done": {"kind": "end", "reason": "completed"}}, '
+    '"edges": [{"from": "think", "when": "tool_calls", "to": "act"}, {"from": "think", "when": "text", "to": "check"}, '
+    '{"from": "act", "when": "done", "to": "think"}, {"from": "check", "when": "pass", "to": "done"}, '
+    '{"from": "check", "when": "fail", "to": "think"}]}}',
 )
 #: What each graph stage does and the outcomes its edges must cover; the loop's own vocabulary.
 STAGES = (
     "model: one request to the model; outcomes tool_calls, text",
     "tools: run the model's pending tool calls (optional allow: [tool names]); outcome done",
-    "verify: check the last assistant text (check: last_line_integer | last_line_matches with pattern | nonempty; "
-    "optional message appended on failure); outcomes pass, fail",
+    "verify: check the last assistant text; check is exactly one of last_line_integer, last_line_matches (with a "
+    "pattern) or nonempty; optional message appended on failure; outcomes pass and fail both need an edge",
     "message: append text as a user message; outcome done",
     "end: finish (reason: completed | gave_up); no outcomes",
 )
@@ -72,8 +79,10 @@ def propose(nodes, samples, models):
     try:
         # A stalled endpoint holds the training thread for the whole timeout
         # before the step degrades to a skip; keep it short.
-        reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=120.0)
-    except Exception:
+        reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=120.0, max_tokens=2048)
+    except Exception as exc:
+        # The step records only "no proposal"; the reason (a 404 for a model name, a timeout) is here.
+        logging.getLogger(__name__).warning("propose: served model call failed: %s", exc)
         return None
     proposal = _parse_proposal(reply)
     if proposal is None:

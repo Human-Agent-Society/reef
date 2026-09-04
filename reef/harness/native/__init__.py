@@ -35,6 +35,8 @@ MAX_RESULT_CHARS = 20_000
 #: marker naming the file, and this many characters of tail.
 SPILL_DIR = ".reef/spill"
 SPILL_TAIL_CHARS = 2_000
+#: Tokens one model call may generate; a local single slot server stalls every other caller behind an unbounded one.
+MAX_COMPLETION_TOKENS = 4096
 #: Provider attempts one step may spend and the longest wait between them, whatever a request_error hook asks.
 MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
@@ -486,6 +488,7 @@ class _Loop:
     """What the stage handlers reach of this module: the session, the root, and the loop's own helpers."""
 
     SPILL_DIR = SPILL_DIR
+    MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
     def __init__(self, session: Session, root: Path) -> None:
         self.session = session
