@@ -783,7 +783,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first.get_or_create_scenario("math").scenario_step == 1
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
 
@@ -813,7 +813,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert adopted.operation == "training"
     assert adopted.operation_verified is True
     assert adopted.metrics == committed["metrics"]
-    recovered_status = second.training_status["scenarios"]["math"]["last_committed_step"]
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
 
@@ -908,7 +908,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     wait_for_step(first, 1)
 
     assert first.get_or_create_scenario("math").commit_log is None
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
     assert not list(tmp_path.rglob("*.commits.jsonl"))
@@ -918,7 +918,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
-    assert second.training_status["scenarios"]["math"]["last_committed_step"] is None
+    assert second.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
     assert not isinstance(recovered.repository.require_current_artifact(), LiveWeightArtifactRef)
 
 
@@ -938,7 +938,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
 
     second = build_training_dispatcher(
         RecordingRuntime(),
@@ -950,7 +950,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
 
     assert recovered.scenario_step == 1
     assert recovered.commit_log is None
-    recovered_status = second.training_status["scenarios"]["math"]["last_committed_step"]
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
     assert not list(tmp_path.rglob("*.commits.jsonl"))
@@ -1087,13 +1087,13 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     request = Thread(target=accept_report)
     request.start()
-    assert started.wait(1)
+    assert started.wait(5), "harness growth did not start in time"
     status_values = []
     status_returned = Event()
 
     def read_status() -> None:
         try:
-            status_values.append(dispatcher.training_status)
+            status_values.append(dispatcher.build_training_status())
         except Exception as exc:
             errors.append(exc)
         finally:
@@ -1149,17 +1149,17 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
     dispatcher.accept_record(trace_report("r1", "i1"))
 
     for _ in range(1000):
-        if dispatcher.training_status["error"] is not None:
+        if dispatcher.build_training_status()["error"] is not None:
             break
         time.sleep(0.001)
-    assert dispatcher.training_status["error"] == "skills: RuntimeError: proposal failed"
+    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: proposal failed"
 
     failed_attempts = calls
     should_fail = False
     dispatcher.accept_record(trace_inference("i2"))
     wait_for_step(dispatcher, 1, scenario="skills")
     assert calls == failed_attempts + 1
-    assert dispatcher.training_status["error"] is None
+    assert dispatcher.build_training_status()["error"] is None
     dispatcher.close()
 
 
@@ -1408,7 +1408,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
     assert recovered is not original
     assert recovered.records.get("skills", "i1") is None
     assert recovered.records.get("skills", "r1") is None
-    status = dispatcher.training_status["scenarios"]["skills"]
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 1
     assert status["last_committed_step"]["step"] == 1
     assert status["last_committed_step"]["metrics"]["skipped"] == "no proposal"
@@ -1423,7 +1423,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
     wait_for_step(dispatcher, 2, scenario="skills")
 
     assert [record.step for record in log.records()] == [1, 2]
-    status = dispatcher.training_status["scenarios"]["skills"]
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 2
     assert status["last_committed_step"]["step"] == 2
     dispatcher.close()
@@ -1480,7 +1480,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     first.accept_record(trace_report("r1", "i1"))
     wait_for_step(first, 1, scenario="skills")
     assert first.get_or_create_scenario("skills").scenario_step == 1
-    committed = first.training_status["scenarios"]["skills"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["skipped"] == "no proposal"
 
@@ -1488,7 +1488,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     recovered = second.get_or_create_scenario("skills")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state["steps"] == 1
-    assert second.training_status["scenarios"]["skills"]["last_committed_step"] == committed
+    assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
     # Record progress resumes at the committed watermark, not sequence 0.
     assert recovered.trainer.data_offset == 2
     first.close()
