@@ -257,6 +257,38 @@ implementations make the same decision from the same scores, which the replay
 proves exactly. It cannot show that either implementation's decisions are
 right, because the measurement feeding them is too coarse.
 
+## What the seed actually scores, and why run A's improvement was not one
+
+The same seed agent -- the empty tree, stock Terminus 2 -- measured twice:
+
+| | seed | episodes that never ran |
+| --- | --- | --- |
+| Run A | 0.2167 (13/60) | 37% |
+| Run B | 0.3833 (23/60) | 9% |
+
+An episode that never got a sandbox scores 0 and enters the mean as a failed
+task. Dividing the passes by the episodes that actually ran gives ~0.34 for
+run A and ~0.42 for run B: about one standard error apart, which is what two
+honest measurements of one agent look like here. The seed is near **0.40**.
+Both figures above understate it, run A badly.
+
+That reverses run A's headline. It was reported as seed 0.217 rising to a
+0.350 frontier, a 13-point gain. Against a true seed near 0.40, iteration 2's
+candidate at 0.350 was not an improvement; it was selected because the
+incumbent it was compared against had been depressed by an outage. The five
+tasks recorded there as "unlocked" by that candidate are the same artefact --
+the seed failed them on infrastructure, not capability, and two of them
+(`fix-ocaml-gc`, `sparql-university`) pass cleanly for the seed in both run B
+and upstream's baseline.
+
+Run A is not a usable search result. Its value is as the case that produced
+the failure accounting, the outage guard and the retry.
+
+These corrections are estimates, not re-measurements: the per-run failure
+share is counted across each iteration's full 120 episodes, candidate and
+incumbent together, so a specific zero cannot be attributed to a specific
+episode.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
