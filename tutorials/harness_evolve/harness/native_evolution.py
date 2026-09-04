@@ -43,6 +43,11 @@ STAGES = (
     "verify: check the last assistant text; check is exactly one of last_line_integer, last_line_matches (with a "
     "pattern) or nonempty; optional message appended on failure; outcomes pass and fail both need an edge",
     "message: append text as a user message; outcome done",
+    "branch: route on the run so far; cases is a list of {when, value, outcome} with when one of "
+    "steps_used_at_least (integer), tool_errors_at_least (integer) or last_text_matches (a regular expression); "
+    "the first case that holds names the outcome, else the outcome else; every case outcome and else need an edge",
+    "compact: when the messages pass fire_ratio of the context window, one model call summarizes the older "
+    "span and keep_ratio of the window stays verbatim (0 < keep_ratio < fire_ratio <= 1); outcome done",
     "end: finish (reason: completed | gave_up); no outcomes",
 )
 

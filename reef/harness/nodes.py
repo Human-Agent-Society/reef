@@ -46,14 +46,19 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "tools": (("allow",), ("done",)),
     "verify": (("check", "pattern", "message"), ("pass", "fail")),
     "message": (("text",), ("done",)),
+    "branch": (("cases",), ("else",)),
+    "compact": (("fire_ratio", "keep_ratio"), ("done",)),
     "end": (("reason",), ()),
 }
 NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
+#: What a branch case may test: the run's own counters, or the last assistant text against a pattern.
+NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "last_text_matches")
 NATIVE_END_REASONS = ("completed", "gave_up")
 #: Size caps on one graph, so admission and the interpreter's guard stay cheap.
 NATIVE_GRAPH_MAX_STEPS = 32
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
+NATIVE_GRAPH_MAX_CASES = 8
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -293,9 +298,65 @@ def _graph_stage(name: str, stage: Any) -> str:
             _reject_secret_shaped_text(_require_text(stage, "message"), f"native_graph stage {name!r} 'message'")
     elif kind == "message":
         _reject_secret_shaped_text(_require_text(stage, "text"), f"native_graph stage {name!r} 'text'")
+    elif kind == "branch":
+        _branch_cases(name, stage.get("cases"))
+    elif kind == "compact":
+        _compact_ratios(name, stage)
     elif kind == "end" and stage.get("reason", "completed") not in NATIVE_END_REASONS:
         raise ValueError(f"native_graph stage {name!r} 'reason' must be one of {', '.join(NATIVE_END_REASONS)}")
     return kind
+
+
+def _branch_cases(name: str, cases: Any) -> None:
+    """A branch's cases: a closed predicate each, a value of that predicate's type, and a distinct outcome."""
+    if not isinstance(cases, Sequence) or isinstance(cases, str) or not 1 <= len(cases) <= NATIVE_GRAPH_MAX_CASES:
+        raise ValueError(f"native_graph stage {name!r} 'cases' must be a list of 1 to {NATIVE_GRAPH_MAX_CASES} cases")
+    outcomes: set[str] = set()
+    for case in cases:
+        if not isinstance(case, Mapping) or set(case) != {"when", "value", "outcome"}:
+            raise ValueError(f"native_graph stage {name!r} cases must be objects with when, value and outcome")
+        when, value, outcome = case["when"], case["value"], case["outcome"]
+        if when not in NATIVE_BRANCH_PREDICATES:
+            raise ValueError(
+                f"native_graph stage {name!r} case 'when' must be one of {', '.join(NATIVE_BRANCH_PREDICATES)}"
+            )
+        if when == "last_text_matches":
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"native_graph stage {name!r} case 'value' must be a regular expression")
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(
+                    f"native_graph stage {name!r} case 'value' must be a regular expression: {exc}"
+                ) from exc
+        elif isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= NATIVE_GRAPH_MAX_STEPS:
+            raise ValueError(
+                f"native_graph stage {name!r} case 'value' must be an integer from 0 to {NATIVE_GRAPH_MAX_STEPS}"
+            )
+        if not isinstance(outcome, str) or not _NAME.fullmatch(outcome) or outcome == "else":
+            raise ValueError(f"native_graph stage {name!r} case 'outcome' must be a name other than else")
+        if outcome in outcomes:
+            raise ValueError(f"native_graph stage {name!r} names outcome {outcome!r} twice")
+        outcomes.add(outcome)
+
+
+def _compact_ratios(name: str, stage: Mapping[str, Any]) -> None:
+    """A compact's two ratios of the context window: it fires above one and keeps the other as the tail."""
+    ratios: dict[str, float] = {}
+    for key in ("fire_ratio", "keep_ratio"):
+        value = stage.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 1:
+            raise ValueError(f"native_graph stage {name!r} '{key}' must be a number above 0 and at most 1")
+        ratios[key] = float(value)
+    if ratios["keep_ratio"] >= ratios["fire_ratio"]:
+        raise ValueError(f"native_graph stage {name!r} 'keep_ratio' must be below 'fire_ratio'")
+
+
+def _stage_outcomes(kind: str, stage: Mapping[str, Any]) -> tuple[str, ...]:
+    """The outcomes a stage's edges must cover: fixed per kind, plus one per case for a branch."""
+    if kind == "branch":
+        return (*(str(case["outcome"]) for case in stage["cases"]), "else")
+    return NATIVE_STAGES[kind][1]
 
 
 def _reachable(start: str, edges: Mapping[str, set[str]]) -> set[str]:
@@ -329,10 +390,10 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     """The admission rules of a native_graph, shared by the tree boundary and the loop's loader.
 
     A graph passes when every stage is a known kind with only its own keys,
-    every outcome of every stage has exactly one edge, every stage is
-    reachable from ``start``, some end stage is reachable from every stage,
-    and every cycle passes through a model stage, so the finite step budget
-    ends every run."""
+    every outcome of every stage (a branch's cases and its ``else``) has
+    exactly one edge, every stage is reachable from ``start``, some end stage
+    is reachable from every stage, and every cycle passes through a model
+    stage, so the finite step budget ends every run."""
     options = _require_mapping(config)
     _require_name(options)
     extra = sorted(set(options) - {"name", "start", "max_steps", "stages", "edges"})
@@ -345,6 +406,7 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     if not isinstance(stages, Mapping) or not 1 <= len(stages) <= NATIVE_GRAPH_MAX_STAGES:
         raise ValueError(f"native_graph node 'stages' must be an object of 1 to {NATIVE_GRAPH_MAX_STAGES} stages")
     kinds = {str(name): _graph_stage(str(name), stage) for name, stage in stages.items()}
+    outcomes = {name: _stage_outcomes(kind, stages[name]) for name, kind in kinds.items()}
     start = options.get("start")
     if start not in kinds:
         raise ValueError("native_graph node 'start' must name a stage")
@@ -359,7 +421,7 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
         source, when, target = edge["from"], edge["when"], edge["to"]
         if source not in kinds or target not in kinds:
             raise ValueError(f"native_graph edge {source!r} -> {target!r} must name stages")
-        if when not in NATIVE_STAGES[kinds[source]][1]:
+        if when not in outcomes[source]:
             raise ValueError(
                 f"native_graph edge from {source!r} names outcome {when!r}, not one of its {kinds[source]} stage"
             )
@@ -367,8 +429,8 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
             raise ValueError(f"native_graph stage {source!r} has two edges for outcome {when!r}")
         seen.add((source, when))
         targets[source].add(target)
-    for name, kind in kinds.items():
-        for outcome in NATIVE_STAGES[kind][1]:
+    for name in kinds:
+        for outcome in outcomes[name]:
             if (name, outcome) not in seen:
                 raise ValueError(f"native_graph stage {name!r} has no edge for outcome {outcome!r}")
     unreachable = sorted(set(kinds) - _reachable(start, targets))
