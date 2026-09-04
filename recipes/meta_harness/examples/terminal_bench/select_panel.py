@@ -24,6 +24,8 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from .tasks import read_tasks
+
 
 def per_task_scores(scores: Sequence[float], tasks: Sequence[str]) -> dict[str, list[float]]:
     """Split a flat score vector back into per-task results."""
@@ -46,11 +48,11 @@ def partition(results: dict[str, list[float]]) -> tuple[list[str], list[str], li
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="select-panel", description=__doc__)
     parser.add_argument("--population", required=True, help="population.json written by run.py")
-    parser.add_argument("--tasks-file", required=True, help="comma-separated task ids, in the order they were run")
+    parser.add_argument("--tasks-file", required=True, help="task ids, in the order they were run")
     parser.add_argument("--out", help="write the panel here as a comma-separated list")
     arguments = parser.parse_args(argv)
 
-    tasks = [task.strip() for task in Path(arguments.tasks_file).read_text().strip().split(",") if task.strip()]
+    tasks = list(read_tasks(arguments.tasks_file))
     population = json.loads(Path(arguments.population).read_text(encoding="utf-8"))
     seeds = [candidate for candidate in population.get("candidates", []) if candidate.get("parent_id") is None]
     if not seeds or not seeds[0].get("scores"):

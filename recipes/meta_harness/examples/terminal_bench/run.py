@@ -40,6 +40,7 @@ from recipes.meta_harness.method import MetaHarnessProposer, MetaHarnessSelector
 from recipes.meta_harness.population import PopulationStore
 
 from .budget import ObservedCostLedger, SpendCapReached
+from .tasks import parse_tasks, read_tasks
 
 #: The seed is the empty tree, which the terminus adapter renders as stock
 #: Terminus 2. That is upstream's `baseline_terminus2`, so both arms start
@@ -77,7 +78,7 @@ def build(arguments: argparse.Namespace, ledger: ObservedCostLedger) -> tuple[Me
     output = Path(arguments.output_dir)
     store = PopulationStore(output / "population.json")
     descriptor = get_adapter("terminus")
-    tasks = tuple(task.strip() for task in arguments.tasks.split(",") if task.strip())
+    tasks = read_tasks(arguments.tasks_file) if arguments.tasks_file else parse_tasks(arguments.tasks or "")
     if not tasks:
         raise SystemExit("--tasks must name at least one Terminal-Bench task")
 
@@ -120,7 +121,9 @@ def build(arguments: argparse.Namespace, ledger: ObservedCostLedger) -> tuple[Me
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tb2-reef-arm", description=__doc__)
-    parser.add_argument("--tasks", required=True, help="comma-separated Harbor task ids")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--tasks", help="comma-separated Harbor task ids")
+    source.add_argument("--tasks-file", help="file of Harbor task ids, one per line or comma-separated")
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--mode", default="full_history")

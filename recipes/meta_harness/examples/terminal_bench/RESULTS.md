@@ -97,6 +97,17 @@ iteration 1 selected on 0.233 against 0.217, one episode, which is noise.
 Iteration 2's margin is a different matter — five distinct tasks unlocked,
 two of them on both trials.
 
+## The full 89-task set is available
+
+Earlier runs used upstream's 30-task hard subset because the official set was
+not enumerated here. It is now: `harbor dataset download 'terminal-bench@2.0'`
+returns all 89 in a few seconds, and `tasks-89.txt` records them. Upstream's
+hard subset is a strict subset, so 59 tasks have never been evaluated in
+either arm.
+
+Both entry points now take `--tasks-file`, which reads commas or newlines and
+ignores `#` comments, so the shipped list can be passed directly.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
