@@ -41,7 +41,7 @@ Seven kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``native_tool``    | a named tool the native harness loads (schema and code)  |
 +--------------------+----------------------------------------------------------+
-| ``native_hook``    | a named listener at one seam of the native loop (code)   |
+| ``native_hook``    | a named listener at one event of the native loop (code)  |
 +--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
@@ -49,7 +49,7 @@ decided by an adapter, which maps every kind to a concrete file for one agent.
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
-are ``native_tool`` nodes and whose loop seams listen to ``native_hook``
+are ``native_tool`` nodes and whose loop events listen to ``native_hook``
 nodes, so the agent can evolve the tools it runs and how its loop behaves, not
 only the text around a vendor binary; and ``terminus``, Terminal-Bench's
 Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
