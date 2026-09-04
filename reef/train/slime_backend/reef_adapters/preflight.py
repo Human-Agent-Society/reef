@@ -65,7 +65,7 @@ def configure_sglang_runtime(args) -> None:
     the prefix's encoding rather than in a suffix of the sequence. What makes
     that impossible is releasing the KV cache: a colocated training step
     releases it before every publication, and SGLang's own release path
-    flushes the tree before pausing that allocation, so no entry outlives the
+    flushes the tree when releasing that allocation, so no entry outlives the
     weights that built it. Colocated engines therefore keep cross-request
     prefix reuse, which is where an agent workload's long shared prefixes pay
     off.
@@ -94,7 +94,8 @@ def configure_sglang_runtime(args) -> None:
     # leave the GPU regardless.
     retracts = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
     args.weight_update_pause_mode = "retract" if retracts else "in_place"
-    args.sglang_disable_radix_cache = not retracts or (lora and not _adapter_scoped_prefix_cache_supported())
+    requires_private_cache = not retracts or (lora and not _adapter_scoped_prefix_cache_supported())
+    args.sglang_disable_radix_cache = requires_private_cache
     # Reef consumes /generate as a token-native SSE source. Disjoint chunks
     # keep text, ids, log-probs, and scheduler metadata linear in rollout
     # length and give the capture path one unambiguous wire contract.
@@ -110,8 +111,8 @@ def configure_sglang_runtime(args) -> None:
         _require_lora_tensor_schema()
         _require_lora_distributed_schema()
 
-    if colocate and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
+    if retracts and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
+        raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
 
     config_path = getattr(args, "sglang_config", None)
     if config_path is None:
@@ -120,18 +121,18 @@ def configure_sglang_runtime(args) -> None:
     from slime.backends.sglang_utils.sglang_config import SglangConfig
 
     config = SglangConfig.from_yaml(config_path)
-    if colocate and config.has_pd_disaggregation:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
-    if retracts:
-        # A group that retracts may choose either setting: its cache is
-        # cleared before each publication, so nothing outlives its weights.
+    if retracts and config.has_pd_disaggregation:
+        raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
+    if not requires_private_cache:
+        # Overrides may enable sharing only when both publication and
+        # adapter isolation permit it.
         return
     for model in config.models:
         for group in model.server_groups:
             overrides = {key.replace("-", "_"): value for key, value in group.overrides.items()}
             if overrides.get("disable_radix_cache", True) is not True:
                 raise ValueError(
-                    "Reef weight updates that preserve in-flight KV require disable_radix_cache=true "
+                    "Reef serving without safe prefix sharing requires disable_radix_cache=true "
                     f"for SGLang model {model.name!r} group {group.worker_type!r}"
                 )
 

@@ -225,6 +225,21 @@ Read by the weight-training stack. See `Evolve your model
 Slime fills architecture flags such as layer counts and hidden sizes from
 ``reef.model_path``. Do not put them in the config.
 
+Prefix reuse during weight training
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Colocated engines share cached prefixes between publications. Regular disjoint
+engines can opt in by adding ``--disjoint-prefix-sharing`` to
+``training.slime_flags``. Each publication then retracts in-flight requests,
+clears the cache, and re-prefills those requests under the published weights.
+Disjoint engines otherwise preserve in-flight KV and disable prefix sharing.
+Prefill/decode (PD) disaggregation cannot use this option.
+
+For LoRA, sharing also requires SGLang to isolate cache entries by adapter. If
+that capability is unavailable, Reef disables sharing and rejects SGLang YAML
+overrides that re-enable it. A group may always opt out with
+``disable-radix-cache: true`` in its SGLang overrides.
+
 The ``evaluation`` section
 --------------------------
 

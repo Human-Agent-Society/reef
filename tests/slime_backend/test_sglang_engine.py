@@ -5,6 +5,7 @@ import importlib.util
 import os
 import sys
 import types
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
@@ -559,7 +560,9 @@ sglang:
 
 
 @pytest.mark.unit
-def test_colocated_reef_config_rejects_pd_disaggregation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("colocate", [True, False])
+@pytest.mark.parametrize("via_yaml", [True, False])
+def test_retracting_reef_config_rejects_pd_disaggregation(tmp_path: Path, colocate: bool, via_yaml: bool) -> None:
     config = tmp_path / "sglang.yaml"
     config.write_text(
         """\
@@ -574,13 +577,41 @@ sglang:
         encoding="utf-8",
     )
     args = types.SimpleNamespace(
-        colocate=True,
+        colocate=colocate,
+        disjoint_prefix_sharing=not colocate,
         megatron_lora_rank=0,
-        prefill_num_servers=0,
-        sglang_config=str(config),
+        prefill_num_servers=0 if via_yaml else 1,
+        sglang_config=str(config) if via_yaml else None,
     )
 
     with pytest.raises(ValueError, match="regular SGLang engine"):
+        configure_sglang_runtime(args)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocate", [True, False])
+@pytest.mark.parametrize("adapter_scoped", [True, False])
+@pytest.mark.parametrize("disabled", [True, False])
+def test_lora_yaml_cannot_override_required_cache_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, colocate: bool, adapter_scoped: bool, disabled: bool
+) -> None:
+    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
+    monkeypatch.setattr(preflight, "_require_lora_tensor_schema", lambda: None)
+    monkeypatch.setattr(preflight, "_require_lora_distributed_schema", lambda: None)
+    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
+    config = tmp_path / "sglang.yaml"
+    config.write_text(
+        "sglang:\n  - name: actor\n    server_groups:\n      - worker_type: regular\n"
+        f"        num_gpus: 1\n        overrides:\n          disable-radix-cache: {str(disabled).lower()}\n",
+        encoding="utf-8",
+    )
+    args = types.SimpleNamespace(
+        colocate=colocate, disjoint_prefix_sharing=not colocate, megatron_lora_rank=8, sglang_config=str(config)
+    )
+    if not adapter_scoped and not disabled:
+        with pytest.raises(ValueError, match="disable_radix_cache=true"):
+            configure_sglang_runtime(args)
+    else:
         configure_sglang_runtime(args)
 
 
@@ -803,6 +834,7 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
     scheduler = Scheduler()
     suspended = [object(), object()]
     scheduler.waiting_queue = suspended
+    scheduler.grammar_manager = types.SimpleNamespace(grammar_queue=[])
     scheduler.gpu_busy = False
 
     scheduler.pause_generation(types.SimpleNamespace(mode="in_place"))
@@ -837,6 +869,8 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     class Scheduler:
         def __init__(self):
             self.calls = []
+            self.waiting_queue = []
+            self.grammar_manager = types.SimpleNamespace(grammar_queue=[])
 
         def pause_generation(self, recv_req):
             return None
@@ -859,3 +893,66 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     assert scheduler.calls[-1] == (False, True)
     assert scheduler.is_fully_idle(for_health_check=True) is False
     assert scheduler.calls[-1] == (True, False)
+
+
+@pytest.mark.unit
+def test_retract_flush_preserves_pending_grammar_and_gpu_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
+    future: Future[str] = Future()
+    request = types.SimpleNamespace(grammar=future)
+    grammar_queue = [request]
+
+    class Scheduler:
+        def __init__(self):
+            self.waiting_queue = []
+            self.grammar_manager = types.SimpleNamespace(grammar_queue=grammar_queue)
+            self.gpu_busy = False
+            self.idle_error = False
+            self.cache = {"old-prefix": "old-kv"}
+
+        def pause_generation(self, recv_req):
+            return None
+
+        def continue_generation(self, recv_req):
+            return None
+
+        def is_fully_idle(self, for_health_check=False, ignore_waiting=False):
+            if self.idle_error:
+                raise RuntimeError("idle check failed")
+            return (
+                not self.gpu_busy
+                and (ignore_waiting or not self.waiting_queue)
+                and (for_health_check or not self.grammar_manager.grammar_queue)
+            )
+
+        def flush_cache(self):
+            if not self.is_fully_idle():
+                return False
+            self.cache.clear()
+            return True
+
+    scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
+    install_colocated_retract_offload()
+    scheduler = Scheduler()
+    scheduler.pause_generation(types.SimpleNamespace(mode="in_place"))
+    assert scheduler.flush_cache() is False
+    scheduler.pause_generation(types.SimpleNamespace(mode="retract"))
+    scheduler.gpu_busy = True
+    assert scheduler.flush_cache() is False
+    assert scheduler.cache
+    scheduler.gpu_busy = False
+    assert scheduler.flush_cache() is True
+    assert not scheduler.cache
+    assert scheduler.grammar_manager.grammar_queue is grammar_queue
+    assert not future.done()
+
+    scheduler.idle_error = True
+    with pytest.raises(RuntimeError, match="idle check failed"):
+        scheduler.is_fully_idle()
+    assert scheduler.grammar_manager.grammar_queue is grammar_queue
+    scheduler.idle_error = False
+    scheduler.continue_generation(types.SimpleNamespace())
+    assert scheduler.is_fully_idle() is False
+    future.set_result("compiled grammar")
+    assert scheduler.grammar_manager.grammar_queue.pop().grammar.result() == "compiled grammar"

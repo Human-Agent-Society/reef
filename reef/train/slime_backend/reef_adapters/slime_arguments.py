@@ -36,7 +36,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Share prefix-cache entries across requests on a disjoint deployment. "
+            "Share prefix-cache entries across requests on a regular disjoint engine (not PD). "
             "Publication then retracts in-flight requests and clears the cache instead of "
             "preserving their KV, which is what keeps an entry from outliving its weights."
         ),

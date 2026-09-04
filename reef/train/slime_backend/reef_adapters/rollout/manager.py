@@ -141,10 +141,18 @@ class ReefRolloutManagerImpl:
         """
         mode = getattr(self.args, "weight_update_pause_mode", "retract")
         engines = self.updatable_rollout_engines
-        result = ray.get([engine.pause_generation.remote(mode) for engine in engines])
-        if mode == "retract":
-            ray.get([engine.flush_cache.remote() for engine in engines])
-        self._generation_paused_for_update = True
+        try:
+            result = ray.get([engine.pause_generation.remote(mode) for engine in engines])
+            self._generation_paused_for_update = True
+            if mode == "retract":
+                ray.get([engine.flush_cache.remote() for engine in engines])
+        except BaseException:
+            # A partial pause or failed flush leaves an unusable publication
+            # barrier. Retire the engines even for callers outside the bridge's
+            # publication path; recovery will create and pause fresh engines.
+            with suppress(Exception):
+                self.terminate_updatable_engines()
+            raise
         return result
 
     def continue_generation_after_update(self):

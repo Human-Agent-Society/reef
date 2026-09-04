@@ -263,6 +263,43 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failed_phase", ["pause", "flush"])
+def test_failed_pause_barrier_retires_engines(monkeypatch: pytest.MonkeyPatch, failed_phase: str) -> None:
+    raw_rollout, module = _load_manager_module(monkeypatch)
+
+    class _Remote:
+        def __init__(self, phase):
+            self.phase = phase
+
+        def remote(self, *args, **kwargs):
+            return self.phase
+
+    def resolve(handles, **kwargs):
+        if failed_phase in handles:
+            raise TimeoutError(failed_phase)
+        return handles
+
+    monkeypatch.setattr(module.ray, "get", resolve)
+
+    engines = [
+        types.SimpleNamespace(
+            pause_generation=_Remote("pause"), flush_cache=_Remote("flush"), shutdown=_Remote("shutdown")
+        )
+        for _ in range(2)
+    ]
+    group = _ServerGroup(engines, num_new_engines=0)
+    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager.args = types.SimpleNamespace(weight_update_pause_mode="retract")
+    manager.servers = {"actor": raw_rollout.RolloutServer(server_groups=[group])}
+    manager._health_monitors = []
+    manager._generation_paused_for_update = False
+    with pytest.raises(TimeoutError, match=failed_phase):
+        manager.pause_generation_for_update()
+    assert group.all_engines == [None, None]
+    assert manager._generation_paused_for_update is (failed_phase == "flush")
+
+
+@pytest.mark.unit
 def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

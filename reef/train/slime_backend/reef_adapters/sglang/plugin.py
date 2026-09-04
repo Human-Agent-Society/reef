@@ -213,11 +213,13 @@ def install_colocated_retract_offload() -> None:
     used by weight updates from consuming that already-released state.
 
     Reef closes admission before this pause, so no new durable request can
-    bind the old head.  While the engine is paused, treat the waiting queue as
-    CPU-resident suspended work for destructive GPU-memory operations.  All
-    other scheduler queues and outstanding batches still have to satisfy
-    SGLang's original idle predicate.  On resume, SGLang re-prefills these
-    requests under the newly committed weights.
+    bind the old head. While the engine is paused, waiting requests and requests
+    awaiting grammar compilation are CPU-resident work without GPU KV. Grammar
+    polling stops during a pause, so requiring that queue to drain would prevent
+    every subsequent flush. Preserve both queues while checking all outstanding
+    GPU work with SGLang's original predicate. Its grammar-cache reset clears
+    compiled cache entries, not queued requests or their compilation futures.
+    On resume, those requests continue through normal grammar polling and prefill.
     """
     from sglang.srt.managers.scheduler import Scheduler
 
@@ -251,19 +253,19 @@ def install_colocated_retract_offload() -> None:
             return original_is_fully_idle(*bound.args, **bound.kwargs)
         if supports_ignore_waiting:
             bound.arguments["ignore_waiting"] = True
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
         waiting = self.waiting_queue
-        if not waiting:
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
         # Scheduler control messages run serially on this process. Temporarily
-        # hide only the CPU-side suspended queue while the upstream predicate
-        # proves that no GPU batch, overlap result, grammar task, or
-        # disaggregation transfer remains active.
-        self.waiting_queue = []
+        # hide only CPU-side queues while the upstream predicate proves no GPU
+        # batch, overlap result, or disaggregation transfer remains active.
+        if not supports_ignore_waiting:
+            self.waiting_queue = []
+        grammar_queue = self.grammar_manager.grammar_queue
+        self.grammar_manager.grammar_queue = []
         try:
             return original_is_fully_idle(*bound.args, **bound.kwargs)
         finally:
             self.waiting_queue = waiting
+            self.grammar_manager.grammar_queue = grammar_queue
 
     Scheduler.pause_generation = pause_generation_with_mode
     Scheduler.continue_generation = continue_generation_with_mode
