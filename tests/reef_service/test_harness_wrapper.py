@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import textwrap
 import urllib.error
 from pathlib import Path
@@ -672,4 +673,200 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
         assert len(reports) == 1 and receipt_id in reports[0]["references"]
         assert not captures_file.exists()
 
+    server.shutdown()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adapter", ["pi", "opencode", "claude", "codex", "dsh", "hermes", "native"])
+def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(tmp_path, adapter) -> None:
+    """The descriptor names where the binding renders Reef's address; the wrapper reads it back from the
+    installed tree and the temp copy equals a fresh render at the proxy, byte for byte, with the tree untouched."""
+    from pathlib import PurePosixPath
+
+    from reef.harness.adapters import get_adapter
+    from reef.harness.harness_wrapper import _create_temp_composition, _extract_reef_url
+    from reef.harness.model_binding import ModelBinding
+    from reef.harness.render import render_composition
+
+    descriptor = get_adapter(adapter)
+    api = next(iter(descriptor.model_binding))
+    reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
+    files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
+    root = tmp_path / "tree"
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    _, subdir = descriptor.compose_relocation()
+    compose = root / subdir
+
+    assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
+    temp = Path(_create_temp_composition(adapter, str(compose), 41234))
+    proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
+    expected = render_composition([("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)], descriptor)
+    for relative, text in expected.items():
+        assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text
+    # The installed tree keeps Reef's address: only the temp copy was rewritten.
+    for relative, text in files.items():
+        assert (root / relative).read_text(encoding="utf-8") == text
+    shutil.rmtree(temp)
+
+
+# -- the binding lookup follows the descriptor's key path, not the first URL in the file ------
+
+
+def _pi_tree(tmp_path: Path, models: dict) -> str:
+    compose = tmp_path / "pi-tree" / "pi-agent"
+    compose.mkdir(parents=True)
+    (compose / "models.json").write_text(json.dumps(models, indent=2, sort_keys=True) + "\n")
+    return str(compose)
+
+
+def _opencode_tree(tmp_path: Path, config: dict) -> str:
+    compose = tmp_path / "oc-tree" / "opencode"
+    compose.mkdir(parents=True)
+    (compose / "opencode.json").write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+    return str(compose)
+
+
+@pytest.mark.unit
+def test_wrapper_ignores_urls_that_are_not_the_binding(tmp_path) -> None:
+    """opencode's own $schema key and an mcp server url sort before the provider; neither is Reef and neither is rewritten."""
+    from reef.harness.harness_wrapper import _create_temp_composition, _extract_reef_url
+
+    compose = _opencode_tree(
+        tmp_path,
+        {
+            "$schema": "https://opencode.ai/config.json",
+            "mcp": {"docs": {"type": "remote", "url": "https://mcp.example.com/sse"}},
+            "provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:8900/v1", "apiKey": "dummy"}}},
+        },
+    )
+    assert _extract_reef_url("opencode", Path(compose)) == "http://127.0.0.1:8900"
+    temp = Path(_create_temp_composition("opencode", compose, 41234))
+    written = json.loads((temp / "opencode.json").read_text())
+    assert written["$schema"] == "https://opencode.ai/config.json"
+    assert written["mcp"]["docs"]["url"] == "https://mcp.example.com/sse"
+    assert written["provider"]["reef"]["options"]["baseURL"] == "http://127.0.0.1:41234/v1"
+    shutil.rmtree(temp)
+
+
+@pytest.mark.unit
+def test_wrapper_picks_the_reef_provider_among_several_by_the_parent_key(tmp_path) -> None:
+    """A second pi provider that sorts first keeps its own endpoint; the entry under the template's parent key is Reef."""
+    from reef.harness.harness_wrapper import WrapperError, _create_temp_composition, _extract_reef_url
+
+    providers = {
+        "anthropic": {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "x"},
+        "reef": {"api": "openai-completions", "baseUrl": "http://127.0.0.1:8900/v1", "apiKey": "dummy"},
+    }
+    compose = _pi_tree(tmp_path, {"providers": providers})
+    assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900"
+    temp = Path(_create_temp_composition("pi", compose, 41234))
+    written = json.loads((temp / "models.json").read_text())["providers"]
+    assert written["anthropic"]["baseUrl"] == "https://api.anthropic.com"
+    assert written["reef"]["baseUrl"] == "http://127.0.0.1:41234/v1"
+    shutil.rmtree(temp)
+    # Two providers and neither named as the template names it: the wrapper says so instead of guessing.
+    compose = _pi_tree(
+        tmp_path / "two", {"providers": {"a": {"baseUrl": "http://a/v1"}, "b": {"baseUrl": "http://b/v1"}}}
+    )
+    with pytest.raises(WrapperError, match="2 entries hold a URL at providers/reef/baseUrl"):
+        _extract_reef_url("pi", Path(compose))
+
+
+@pytest.mark.unit
+def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) -> None:
+    """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it."""
+    from reef.harness.harness_wrapper import _create_temp_composition, _extract_reef_url
+
+    compose = _pi_tree(tmp_path, {"providers": {"reef": {"baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}}})
+    assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900"
+    temp = Path(_create_temp_composition("pi", compose, 41234))
+    assert (
+        json.loads((temp / "models.json").read_text())["providers"]["reef"]["baseUrl"] == "http://127.0.0.1:41234/v1"
+    )
+    shutil.rmtree(temp)
+    compose = _pi_tree(tmp_path / "prefix", {"providers": {"reef": {"baseUrl": "http://gw.example/reef/v1"}}})
+    assert _extract_reef_url("pi", Path(compose)) == "http://gw.example/reef"
+
+
+@pytest.mark.unit
+def test_wrapper_refuses_a_binding_file_that_leaves_the_composition(tmp_path, monkeypatch) -> None:
+    from dataclasses import replace
+
+    from reef.harness.adapters import get_adapter
+    from reef.harness.harness_wrapper import WrapperError, _extract_reef_url
+
+    base = get_adapter("native")
+    for path, message in (
+        ("native/../outside.json", "escapes the tree"),
+        ("elsewhere/models.json", "outside the composition"),
+    ):
+        targets = dict(base.config_targets)
+        targets["models"] = replace(targets["models"], path=path)
+        monkeypatch.setattr(
+            "reef.harness.harness_wrapper.get_adapter", lambda name, d=replace(base, config_targets=targets): d
+        )
+        with pytest.raises(WrapperError, match=message):
+            _extract_reef_url("native", tmp_path)
+
+
+@pytest.mark.unit
+def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> None:
+    """The proxy matches the request path with its query; the Anthropic SDK posts /v1/messages?beta=true."""
+    import http.server
+    import threading
+
+    receipt_id = "claude-receipt-1"
+
+    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("x-reef-agent-record-id", receipt_id)
+            self.end_headers()
+            self.wfile.write(json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
+    reef_port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    (compose / "settings.json").write_text(
+        json.dumps({"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{reef_port}", "ANTHROPIC_AUTH_TOKEN": "d"}})
+        + "\n"
+    )
+    binary = tmp_path / "fake-claude"
+    binary.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json, os, urllib.request
+            from pathlib import Path
+            settings = json.loads((Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").read_text())
+            base = settings["env"]["ANTHROPIC_BASE_URL"]
+            req = urllib.request.Request(
+                f"{base}/v1/messages?beta=true",
+                data=json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            urllib.request.urlopen(req, timeout=5).read()
+            """
+        )
+    )
+    binary.chmod(0o755)
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    with patch.dict(os.environ, env):
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "claude-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"])
+        (captures_file,) = tmp_path.glob("*.pending.json")
+        data = json.loads(captures_file.read_text())
+        assert [t["receipt"] for t in data["turns"]] == [receipt_id]
     server.shutdown()

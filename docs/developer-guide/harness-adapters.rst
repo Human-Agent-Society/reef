@@ -8,7 +8,7 @@ adapter does. Reef bundles six, one per third-party coding-agent CLI;
 ``native``, its own agent, whose loop lives in this tree, whose tools are
 ``native_tool`` nodes, and whose loop events listen to ``native_hook`` nodes,
 so a mutation can add, rewrite, or remove a tool, or change what the loop
-does at a event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
+does at an event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
 agent class rather than a CLI, driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
@@ -194,7 +194,7 @@ agent.
    argv | the argument list for one headless prompt; ``{prompt}`` is substituted
    files | where each node kind renders, like ``skills/{name}/SKILL.md``
    trajectory | the format and path of the session log Reef reads back
-   env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
+   env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only

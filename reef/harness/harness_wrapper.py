@@ -23,7 +23,8 @@ Env vars (baked into the wrapper at install time):
   ``REEF_HARNESS_BINARY``    absolute path to the agent binary
   ``REEF_HARNESS_COMPOSE``   absolute path to the composition directory
   ``REEF_HARNESS_SCENARIO``  the reef scenario name
-  ``REEF_HARNESS_ADAPTER``   adapter name (pi, opencode, native)
+  ``REEF_HARNESS_ADAPTER``   adapter name (any descriptor whose env relocates its composition
+                             with a {root}/<dir> entry; terminus has none and gets no wrapper)
   ``REEF_HARNESS_ENV_VAR``   the env var that relocates the composition
 
 Optional:
@@ -37,6 +38,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -46,11 +48,16 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Mapping
+from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef_client.serve import CaptureStore, ServeConfig, build_handler
+
+from reef.harness.adapters import get_adapter
+from reef.harness.descriptor import AdapterDescriptor
 
 
 def _captures_dir() -> Path:
@@ -145,34 +152,92 @@ def _claim_captures(scenario: str) -> tuple[Path, Path] | None:
     return None
 
 
+class WrapperError(Exception):
+    """The tree cannot be run through the proxy; the message says why and what to change."""
+
+
+@dataclass(frozen=True)
+class _Binding:
+    """One place the adapter's model binding writes ``{base_url}``: the target file, the key path, the template."""
+
+    target: str
+    path: tuple[str, ...]
+    template: str
+
+    @property
+    def suffix(self) -> str:
+        return self.template.split("{base_url}", 1)[1]
+
+
+def _bindings(descriptor: AdapterDescriptor) -> list[_Binding]:
+    found: dict[tuple[str, tuple[str, ...]], _Binding] = {}
+    for templates in descriptor.model_binding.values():
+        for node in templates:
+            target = str(node.get("target", "primary"))
+            stack: list[tuple[tuple[str, ...], Any]] = [((), node.get("data", {}))]
+            while stack:
+                path, value = stack.pop()
+                if isinstance(value, Mapping):
+                    stack.extend((path + (str(key),), item) for key, item in value.items())
+                elif isinstance(value, str) and "{base_url}" in value:
+                    found.setdefault((target, path), _Binding(target, path, value))
+    return list(found.values())
+
+
+def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Binding) -> Path:
+    """The binding's target file under the composition directory; a target that escapes it is refused."""
+    _, subdir = descriptor.compose_relocation()
+    path = PurePosixPath(descriptor.config_targets[binding.target].path)
+    if path.is_absolute() or ".." in path.parts:
+        raise WrapperError(f"binding file {str(path)!r} escapes the tree")
+    if subdir != "." and subdir not in {str(parent) for parent in path.parents}:
+        raise WrapperError(f"binding file {str(path)!r} is outside the composition directory {subdir!r}")
+    return compose_dir / (path.relative_to(subdir) if subdir != "." else path)
+
+
+#: A config key and the URL it holds, in JSON, YAML, TOML or dotenv spelling.
+_KEYED_URL = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\"?\s*[:=]\s*[\"']?(?P<url>https?://[^\s\"'`<>\\,;]+)")
+
+
+def _has_key(text: str, key: str) -> bool:
+    return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(key)}(?![A-Za-z0-9_-])", text) is not None
+
+
+def _locate(text: str, binding: _Binding) -> re.Match[str] | None:
+    """The one URL under the binding's key path.
+
+    Candidates share the leaf key; when several do, the nearest parent keys
+    in the text before each candidate settle it, so a second provider in
+    the same file cannot be taken for Reef. The outermost key is the
+    container every entry sits in, so it never settles anything."""
+    matches = [m for m in _KEYED_URL.finditer(text) if m.group("key") == binding.path[-1]]
+    if len(matches) <= 1:
+        return matches[0] if matches else None
+    starts = [0, *(m.end() for m in matches[:-1])]
+    candidates = list(zip(starts, matches, strict=True))
+    for parent in reversed(binding.path[1:-1]):
+        narrowed = [(start, m) for start, m in candidates if _has_key(text[start : m.start()], parent)]
+        if len(narrowed) == 1:
+            return narrowed[0][1]
+        if narrowed:
+            candidates = narrowed
+    keys = "/".join(binding.path)
+    raise WrapperError(f"{len(candidates)} entries hold a URL at {keys}; keep one Reef entry there")
+
+
 def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
-    """Extract the upstream Reef base URL from the composition's config."""
-    if adapter == "pi":
-        models_path = compose_dir / "models.json"
-        if not models_path.exists():
-            return None
-        models = json.loads(models_path.read_text(encoding="utf-8"))
-        for provider in models.get("providers", {}).values():
-            url = provider.get("baseUrl")
-            if url:
-                return url.rstrip("/")
-    elif adapter == "opencode":
-        config_path = compose_dir / "opencode.json"
-        if not config_path.exists():
-            return None
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        for provider in config.get("provider", {}).values():
-            url = provider.get("options", {}).get("baseURL")
-            if url:
-                return url.rstrip("/")
-    elif adapter == "native":
-        # The rendered model binding: one object, base_url without /v1 (the loop's request paths add it).
-        models_path = compose_dir / "models.json"
-        if not models_path.exists():
-            return None
-        url = json.loads(models_path.read_text(encoding="utf-8")).get("base_url")
-        if url:
-            return str(url).rstrip("/")
+    """Reef's base URL, read from where the adapter's binding writes it, without the template's own suffix."""
+    descriptor = get_adapter(adapter)
+    for binding in _bindings(descriptor):
+        file = _binding_file(descriptor, compose_dir, binding)
+        if not file.is_file():
+            continue
+        match = _locate(file.read_text(encoding="utf-8"), binding)
+        if match is None:
+            continue
+        url = match.group("url").rstrip("/")
+        suffix = binding.suffix.rstrip("/")
+        return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
 
 
@@ -180,48 +245,48 @@ def _strip_v1(url: str) -> str:
     return url[:-3] if url.endswith("/v1") else url
 
 
+def _materialize(temp: Path, compose: Path, relative: PurePosixPath) -> Path:
+    """The path for ``relative`` under the temp copy, with every symlinked ancestor replaced by a real directory.
+
+    A rewrite must never follow a directory symlink into the installed tree,
+    so each ancestor becomes a directory of symlinks to its siblings."""
+    here, there = temp, compose
+    for part in relative.parts[:-1]:
+        here, there = here / part, there / part
+        if here.is_symlink():
+            here.unlink()
+            here.mkdir()
+            for item in there.iterdir():
+                os.symlink(item, here / item.name)
+    return here / relative.parts[-1]
+
+
 def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port: int) -> None:
-    """Copy the config file into the temp dir with the proxy URL substituted."""
-    proxy_url = f"http://127.0.0.1:{proxy_port}/v1"
-    if adapter == "pi":
-        src = compose_dir / "models.json"
-        if not src.exists():
-            return
-        dst = temp_dir / "models.json"
+    """Copy each binding file into the temp copy with the binding's URL, and only it, pointed at the proxy.
+
+    The rewritten value is the proxy plus the template's own suffix (``/v1``
+    where the adapter expects it), whatever the tree spelled, so the agent's
+    request paths land where the proxy captures them."""
+    descriptor = get_adapter(adapter)
+    proxy = f"http://127.0.0.1:{proxy_port}"
+    for binding in _bindings(descriptor):
+        src = _binding_file(descriptor, compose_dir, binding)
+        if not src.is_file():
+            continue
+        text = src.read_text(encoding="utf-8")
+        match = _locate(text, binding)
+        if match is None:
+            continue
+        span = match.span("url")
+        text = text[: span[0]] + proxy + binding.suffix + text[span[1] :]
+        dst = _materialize(temp_dir, compose_dir, PurePosixPath(src.relative_to(compose_dir).as_posix()))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
-        models = json.loads(src.read_text(encoding="utf-8"))
-        for provider in models.get("providers", {}).values():
-            if "baseUrl" in provider:
-                provider["baseUrl"] = proxy_url
-        dst.write_text(json.dumps(models, indent=2) + "\n", encoding="utf-8")
-    elif adapter == "opencode":
-        src = compose_dir / "opencode.json"
-        if not src.exists():
-            return
-        dst = temp_dir / "opencode.json"
-        if dst.is_symlink() or dst.exists():
-            dst.unlink()
-        config = json.loads(src.read_text(encoding="utf-8"))
-        for provider in config.get("provider", {}).values():
-            options = provider.get("options", {})
-            if "baseURL" in options:
-                options["baseURL"] = proxy_url
-        dst.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    elif adapter == "native":
-        src = compose_dir / "models.json"
-        if not src.exists():
-            return
-        dst = temp_dir / "models.json"
-        if dst.is_symlink() or dst.exists():
-            dst.unlink()
-        models = json.loads(src.read_text(encoding="utf-8"))
-        models["base_url"] = _strip_v1(proxy_url)
-        dst.write_text(json.dumps(models, indent=2) + "\n", encoding="utf-8")
+        dst.write_text(text, encoding="utf-8")
 
 
 def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) -> str:
-    """Symlink the composition into a temp dir, overriding the config file."""
+    """Symlink the composition into a temp dir, overriding the binding files."""
     compose = Path(compose_dir)
     temp_dir = tempfile.mkdtemp(prefix="reef-harness-")
     temp = Path(temp_dir)
@@ -263,9 +328,12 @@ def _installed_release(compose_dir: str) -> str | None:
 
 
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
-    reef_url = _extract_reef_url(adapter, Path(compose_dir))
+    try:
+        reef_url = _extract_reef_url(adapter, Path(compose_dir))
+    except WrapperError as exc:
+        sys.exit(f"reef-{adapter}: {exc}")
     if reef_url is None:
-        sys.exit(f"reef-{adapter}: no provider baseUrl found in composition")
+        sys.exit(f"reef-{adapter}: no Reef URL in the tree's model binding files")
     upstream = _strip_v1(reef_url)
 
     store = CaptureStore()
@@ -283,7 +351,10 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         upstream=upstream,
         listen_port=0,
         override_headers=override,
-        capture_paths=("/v1/chat/completions",),
+        # The inference paths Reef serves; a receipt rides on each. The proxy matches the path with its
+        # query, and the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
+        # Reef has no Responses route yet, so a codex tree bound to Reef sends its calls to a path nothing answers.
+        capture_paths=("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true"),
     )
     server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config, store))
     proxy_port = server.server_address[1]

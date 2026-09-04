@@ -125,6 +125,24 @@ class AdapterDescriptor:
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
 
+    def compose_relocation(self) -> tuple[str, str]:
+        """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
+
+        That entry relocates the binary's whole composition at the episode
+        root, and it is the only env entry a client-side wrapper needs."""
+        primary = PurePosixPath(self.config_targets["primary"].path)
+        for parent in primary.parents:
+            if parent == PurePosixPath("."):
+                break
+            marker = f"{{root}}/{parent}"
+            for key, value in self.env.items():
+                if value == marker:
+                    return key, str(parent)
+        raise DescriptorError(
+            f"adapter {self.name!r} has no env var relocating a directory above {str(primary)!r} "
+            "(expected an entry with a {root}/<dir> value)"
+        )
+
 
 def _require_str(data: Mapping[str, Any], key: str, where: str) -> str:
     value = data.get(key)
