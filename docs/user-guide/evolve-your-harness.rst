@@ -48,15 +48,18 @@ The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
-Agent)) and ``native``, its own agent: a loop inside the reef tree whose tools
+Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
 are ``native_tool`` nodes and whose loop seams listen to ``native_hook``
 nodes, so the agent can evolve the tools it runs and how its loop behaves, not
-only the text around a vendor binary. Only ``native`` renders those two kinds.
+only the text around a vendor binary; and ``terminus``, Terminal-Bench's
+Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
+those two kinds.
 
-Codex supports ``config``, ``rules``, ``agent_command``, and ``skill``. It
-rejects ``code_extension`` because Codex lifecycle hooks run outside its
-command sandbox; Reef will not activate arbitrary evolved JavaScript without a
-separate isolation boundary.
+Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
+``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
+its command sandbox, and a Terminus module would run in Reef's own runner
+rather than the task container. Reef will not activate arbitrary evolved code
+without a separate isolation boundary.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

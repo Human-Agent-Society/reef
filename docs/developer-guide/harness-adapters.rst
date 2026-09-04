@@ -4,11 +4,12 @@ Harness adapters
 An adapter maps a harness tree into the files expected by a third-party
 coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
-adapter does. Reef bundles six, one per third-party coding-agent CLI, and
-one for its own agent, ``native``, whose loop lives in this tree, whose tools
-are ``native_tool`` nodes, and whose loop seams listen to ``native_hook``
-nodes, so a mutation can add, rewrite, or remove a tool, or change what the
-loop does at a seam.
+adapter does. Reef bundles six, one per third-party coding-agent CLI;
+``native``, its own agent, whose loop lives in this tree, whose tools are
+``native_tool`` nodes, and whose loop seams listen to ``native_hook`` nodes,
+so a mutation can add, rewrite, or remove a tool, or change what the loop
+does at a seam; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
+agent class rather than a CLI, driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -31,24 +32,33 @@ loop does at a seam.
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
+|              |                                                           | reef-eval via ``reef-infra[terminus]``    |
++--------------+-----------------------------------------------------------+-------------------------------------------+
 
-The ``codex`` adapter runs ``codex exec --json`` with its Codex state root
-relocated by ``CODEX_HOME`` (``run_episode`` separately relocates ``HOME``).
-Reef's JSON ``config`` nodes render as Codex TOML; rules render to
-``AGENTS.md``; skills use the shared user skill root under
-``$HOME/.agents/skills``; and ``agent_command`` uses Codex's legacy
-custom-prompt directory, which remains supported but is deprecated upstream
-in favor of skills. Codex ``code_extension`` nodes are rejected for now:
-native hooks run outside Codex's command sandbox, so activating arbitrary
-evolved JavaScript would cross Reef's isolation boundary.
+The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
+a Harbor agent class, so the adapter ships its own runner,
+``reef-terminus``: it reads the tree from ``REEF_TERMINUS_DIR``, hands it to
+Harbor's own ``terminus-2`` agent as native configuration, runs the task the
+prompt names, and writes the verifier's reward and the ATIF trajectory under
+``REEF_TERMINUS_SESSION_DIR`` for the ``terminus-atif-json`` reader. It
+reaches Harbor through reef-eval, the same primitive the examples under
+``recipes/`` use. Nothing of Reef's runs inside the agent. The prompt is a
+Harbor task directory or a registry id, so an episode needs no dataset
+location in its environment, which ``run_episode`` would not carry anyway.
 
-The model binding uses Codex's Responses wire API, so set
-``reef.upstream_api: responses``; the default Chat Completions dialect fails
-at recipe construction.
-
-Codex config evolution is limited to model-behavior fields; Reef pins or
-rejects settings that can load host paths, launch integrations, add egress,
-or redirect the model provider or endpoint.
+``config`` becomes Terminus 2 constructor arguments, refused at render if a
+key is not one; ``rules`` becomes an ``extra_instruction_paths`` entry; and
+``skill`` and ``agent_command`` become two ``AgentConfig.skills`` roots, so
+Harbor keeps its progressive skill loading rather than pasting every body
+into the prompt. ``code_extension`` is rejected: an evolved module would run
+in the runner's process, outside the container that isolates the agent's own
+commands, and it is outside Meta-Harness's search space in any case. On an
+empty tree every mapping is a no-op and the agent is stock Terminus 2, the
+equivalence the measured baseline rests on. Isolation is Harbor's task
+container: Docker does not nest in bubblewrap, so ``run_episode`` refuses
+this adapter under ``evolution.executor: sandbox``. The extra needs Python
+3.12, above Reef's own floor.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
