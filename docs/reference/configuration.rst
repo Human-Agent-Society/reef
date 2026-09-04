@@ -1,4 +1,187 @@
 Configuration
+=============
+
+A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
+every process in its ``services`` list in dependency order, and hands the
+``reef`` section to the HTTP service.
+
+.. code:: yaml
+
+   reef:
+     host: 0.0.0.0
+     port: 8900
+     recipe: recipe
+     token: ${REEF_TOKEN}
+     upstream_url: ${REEF_UPSTREAM_URL}
+     upstream_api_key: ${REEF_UPSTREAM_API_KEY}
+
+   services:
+     - name: reef
+       command: ["${REEF_PYTHON}", "-m", "reef.service"]
+       ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+
+Values interpolate from the environment with ``${VAR}`` and from the config
+itself with ``${dotted.path}``. Any value can be overridden on the command line:
+a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
+``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
+log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
+
+``REEF_PYTHON`` defaults to the interpreter that launched ``reef serve`` and
+can be overridden in the environment. Use it when a service must share Reef's
+Python environment. A literal ``python`` keeps its normal meaning and is
+resolved from that service's ``PATH``; Reef never rewrites command names.
+
+Start from a cookbook stack
+---------------------------
+
+The source checkout's runnable stacks live under the ``recipes/`` cookbook
+and ``tutorials/``: the learn-nothing ones use the core ``recipe``
+implementation in ``recipes/basic/``, each weight-training method owns its
+examples, and harness evolution ships as a tutorial.
+
++-------------------------------------------------------------+----------------------------------------------------------+
+| File                                                        | What it starts                                           |
++=============================================================+==========================================================+
+| ``recipes/basic/external-provider.yaml``                    | no GPU, no local model: one Reef process proxying an     |
+|                                                             | HTTP provider                                            |
++-------------------------------------------------------------+----------------------------------------------------------+
+| ``recipes/basic/local-sglang.yaml``                         | local inference: an SGLang server plus Reef, no training |
++-------------------------------------------------------------+----------------------------------------------------------+
+| ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: Ray head, Slime driver, Reef, and the   |
+|                                                             | method's own services                                    |
++-------------------------------------------------------------+----------------------------------------------------------+
+| ``tutorials/harness_evolve/serve.yaml``                     | harness evolution: one Reef process, no GPU; ``run.sh``  |
+|                                                             | materializes its recipe preset and starts the stack      |
++-------------------------------------------------------------+----------------------------------------------------------+
+
+Each weight-training example ships its stack as ``serve.yaml``.
+``recipes/sao/examples/sao/serve.yaml`` is the smallest, two GPUs for one
+actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
+LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
+a PRM engine and a student model.
+
+The ``reef`` section
+--------------------
+
+.. config::
+
+   reef.recipe | the recipe this deployment serves. Required.
+   reef.host | 0.0.0.0 | bind address
+   reef.port | 8900 | bind port
+   reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
+   reef.model_path | a local HF model directory or a repo id, downloaded on start
+   reef.upstream_url | the OpenAI-compatible provider, with no ``/v1`` suffix
+   reef.upstream_api_key | its credential. Reef is the only party that sees it.
+   reef.upstream_model | the model to request upstream
+   reef.upstream_api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
+   reef.inference_url | the address the training backend reports | the local engine; set only to front the engines with something else
+   reef.inference_timeout_s | 300.0 | per-request timeout
+   reef.allow_implicit_scenario_creation | true | when false, an unknown scenario is HTTP 404
+   reef.checkpoint_every_n_versions | 1 | how often a version becomes durable
+
+Storage paths default under ``.reef/``, which the basic and sao stacks keep;
+the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere
+persistent.
+
+.. config::
+
+   reef.artifact_repository | .reef/artifacts.git | the Git-backed release chain
+   reef.artifact_work_dir | .reef/artifact-work | materialization scratch
+   reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
+   reef.agent_record_dir | .reef/agent-record | the record store
+
+.. warning::
+
+   On ephemeral storage, a restart loses the record store, the commit logs, and
+   every version.
+
+Recipe settings such as ``batch_size`` sit beside these in the same section,
+along with any others the recipe declares with ``config_field``. When
+``reef.recipe`` is a dotted weight-training class, keys the service does not
+recognize are handed to the recipe, and the recipe rejects any key it does
+not declare. With the core ``recipe`` or a named preset, the recipe reads its
+configuration from the preset, and unrecognized keys here are silently
+ignored.
+
+Recipe configuration
+--------------------
+
+A recipe is selected three ways:
+
+- **The core record-only recipe:** ``recipe: recipe``
+- **A dotted class:** ``recipe: "my_pkg.my_method:MyMethodRecipe"``
+- **A named preset:** ``recipe: my-preset``, resolved to ``my-preset.yaml``
+  under ``REEF_RECIPE_CONFIG_DIR``
+
+There is no recipe-implementation registry. A bare name other than ``recipe``
+is always a preset name; it never imports a learning method implicitly.
+
+``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
+**no default**: a bare recipe name resolves to a preset only when it is set.
+
+A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
+in a preset. A preset carries its own ``implementation``, ``model``, and
+``data`` sections, plus an optional ``runtime`` section when the recipe
+builds its own runtime instead of using the deployment's upstream proxy.
+Harness-evolution presets also carry an ``evolution`` section:
+
+.. code:: yaml
+
+   implementation: reef.train.cordis_backend.recipe:CordisRecipe
+   model:
+     path: qwen3-8b
+   data:
+     batch_size: 1
+     max_score: 0.0
+   evolution:
+     adapter: pi
+     propose: methods.mine:propose
+     evaluate: methods.mine:evaluate
+     tasks: ["..."]
+
+The preset's ``implementation`` is ``recipe`` or a dotted recipe class. Weight-training
+recipes are selected directly by dotted class in the deployment config, so the
+service can assemble their Ray training runtime; their fields are flat
+``reef.<name>`` keys. Presets suit recipes whose runtime can be built from the
+preset or the deployment's upstream proxy. There, ``data`` holds batching
+fields and a recipe-specific section holds the rest.
+
+Harness evolution keys
+~~~~~~~~~~~~~~~~~~~~~~
+
+``batch_size`` and ``max_score`` go under ``data:``; the rest goes under
+``evolution:``. `Evolve your harness
+<../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
+
+.. config::
+
+   data.batch_size | 1 | traces per mutation attempt
+   data.max_score | 0.0 | upper bound of the score window that batches
+   data.batch_policy | reports | ``records`` batches recorded traffic alone, every ``batch_size`` requests, with unscored samples
+
+The window has no lower bound, so the default keeps only traces at or below
+zero.
+
+.. config::
+
+   evolution.propose | a ``Proposer``, a plain callable, or a dotted ``module:attribute``
+   evolution.evaluate | an ``EpisodeScorer``, likewise
+   evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
+   evolution.tasks | non-empty list of episode prompts, scored once per tree per step
+   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes and whose loop seams listen to ``native_hook`` nodes), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
+   evolution.binary | overrides the adapter's binary name
+   evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
+   evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
+   evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
+   evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
+   evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
+   evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
+   evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
+   evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
+   evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
+   evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
+   evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
+   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
