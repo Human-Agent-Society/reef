@@ -1,6 +1,8 @@
---- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/meta_harness.py	2026-09-02 18:36:04
-+++ /tmp/mh-fork/reference_examples/terminal_bench_2/meta_harness.py	2026-09-04 03:48:15
-@@ -19,7 +19,7 @@
+diff --git a/reference_examples/terminal_bench_2/meta_harness.py b/reference_examples/terminal_bench_2/meta_harness.py
+index 1ccae3e..9bfd929 100644
+--- a/reference_examples/terminal_bench_2/meta_harness.py
++++ b/reference_examples/terminal_bench_2/meta_harness.py
+@@ -19,7 +19,7 @@ import time
  from datetime import datetime
  from pathlib import Path
  
@@ -9,11 +11,14 @@
  from dotenv import load_dotenv
  
  # ── ANSI colors ──────────────────────────────────────────────
-@@ -89,14 +89,24 @@
+@@ -89,14 +89,30 @@ BASELINES = [
      ("kira-baseline", "agents.baseline_kira:AgentHarness"),
      ("terminus2-baseline", "agents.baseline_terminus2:AgentHarness"),
  ]
 -BASELINE_AGENT_NAME = BASELINES[0][0]  # primary baseline for frontier comparison
+-
+-EVAL_TASK_SET = "full"
+-N_EVAL_TASKS = 89  # full official TB2 dataset used in the paper runs
 +# Which baseline the frontier is measured against, and which the proposer is
 +# told to start from. Upstream's primary is KIRA, whose native function calling
 +# is unsupported with reasoning_effort on some providers; a run that must match
@@ -25,9 +30,13 @@
 +BASELINE_PARENT_FILE = (
 +    "agents/baseline_terminus2.py" if BASELINE_AGENT_NAME == "terminus2-baseline" else "agents/baseline_kira.py"
 +)
- 
--EVAL_TASK_SET = "full"
--N_EVAL_TASKS = 89  # full official TB2 dataset used in the paper runs
++# Phase 0 prices every entry in BASELINES. When this run exists to match
++# another arm's executor, the baselines that arm does not use are spend
++# without a comparison to spend it on, so allow the set to be narrowed to
++# the selected one.
++if os.environ.get("META_HARNESS_ONLY_BASELINE") == "1":
++    BASELINES = [entry for entry in BASELINES if entry[0] == BASELINE_AGENT_NAME]
++
 +EVAL_TASK_SET = os.environ.get("META_HARNESS_TASK_SET", "full")
 +N_EVAL_TASKS = int(os.environ.get("META_HARNESS_N_TASKS", "89"))
  
@@ -38,7 +47,7 @@
  DEFAULT_SEARCH_TRIALS = 2
  DEFAULT_CONCURRENCY = 50
  HARBOR_TIMEOUT_SECONDS = int(os.environ.get("HARBOR_TIMEOUT_SECONDS", 8 * 60 * 60))
-@@ -125,7 +135,7 @@
+@@ -125,7 +141,7 @@ def run_cmd(cmd, timeout=HARBOR_TIMEOUT_SECONDS, cwd=None):
      env = os.environ.copy()
      env["HARBOR_MODEL"] = MODEL
      # Ensure dotenv-loaded keys survive through uv run subprocess
@@ -47,15 +56,115 @@
          val = os.environ.get(key)
          if val:
              env[key] = val
-@@ -431,11 +441,11 @@
+@@ -155,6 +171,91 @@ def validate_agent_class(import_path):
+     return agent_class
+ 
+ 
++MAX_COST_USD = float(os.environ.get("META_HARNESS_MAX_COST_USD", "0") or 0)
++_SPEND = {"usd": 0.0, "jobs": {}}
++
++
++class SpendCapReached(RuntimeError):
++    """Raised when observed spend passes META_HARNESS_MAX_COST_USD."""
++
++
++def _spend_path():
++    return JOBS_DIR / "observed-cost.json"
++
++
++def charge_job(job_dir):
++    """Add one finished job's observed cost to the ledger and enforce the cap.
++
++    Harbor writes per-trial cost into each result.json, so the ledger is
++    observed spend rather than an estimate. A job is charged once, by name, so
++    a re-read of the same directory cannot double count.
++    """
++    name = job_dir.name
++    if name in _SPEND["jobs"]:
++        return _SPEND["usd"]
++    try:
++        per_task = parse_trial_metrics(job_dir)
++    except Exception:
++        return _SPEND["usd"]
++    cost = sum(
++        trial["cost_usd"]
++        for trials in per_task.values()
++        for trial in trials
++        if trial.get("cost_usd") is not None
++    )
++    _SPEND["jobs"][name] = round(cost, 6)
++    _SPEND["usd"] = round(_SPEND["usd"] + cost, 6)
++    try:
++        _spend_path().write_text(json.dumps(_SPEND, indent=2, sort_keys=True))
++    except OSError:
++        pass
++    if MAX_COST_USD and _SPEND["usd"] > MAX_COST_USD:
++        raise SpendCapReached(
++            f"observed spend ${_SPEND['usd']:.4f} passed the "
++            f"${MAX_COST_USD:.2f} cap after job {name}"
++        )
++    return _SPEND["usd"]
++
++
++MAX_TRIAL_FAILURE_RATE = float(os.environ.get("META_HARNESS_MAX_TRIAL_FAILURE_RATE", "0.5") or 0.5)
++
++
++class OutageDetected(RuntimeError):
++    """Raised when a job's trials mostly failed to run at all."""
++
++
++def check_job_health(job_dir):
++    """Refuse a job whose trials mostly never ran.
++
++    A trial that raises before producing a reward measured nothing. Harbor
++    still reports a mean over whatever did complete, so an outage arrives
++    looking like a weak candidate: one iteration here scored 0.033 from three
++    completed trials and 57 RateLimitExceptions, and was recorded as "no
++    improvement" against the frontier. The shared e2b account can fill at any
++    moment, so this has to be checked rather than assumed.
++    """
++    result = job_dir / "result.json"
++    if not result.is_file():
++        return
++    try:
++        stats = json.loads(result.read_text())["stats"]
++    except (OSError, ValueError, KeyError):
++        return
++    ran = errors = 0
++    for eval_stats in stats.get("evals", {}).values():
++        ran += eval_stats.get("n_trials", 0)
++        errors += eval_stats.get("n_errors", 0)
++    total = ran + errors
++    if not total:
++        return
++    rate = errors / total
++    if rate > MAX_TRIAL_FAILURE_RATE:
++        raise OutageDetected(
++            f"{errors} of {total} trials in {job_dir.name} never ran ({rate:.0%}). "
++            f"The mean over the {ran} that did is not a measurement of this agent."
++        )
++
++
+ def harbor_run(import_path, job_name, n_trials=2, n_concurrent=10):
+     """Run Harbor on the paper TB2 config using the selected environment.
+ 
+@@ -204,6 +305,8 @@ def harbor_run(import_path, job_name, n_trials=2, n_concurrent=10):
+         print(f"  {_yellow('harbor timed out')} job={job_name}")
+         return job_dir, None
+ 
++    charge_job(job_dir)
++    check_job_health(job_dir)
+     return job_dir, True  # signal success; callers use parse_job_results directly
+ 
+ 
+@@ -431,11 +534,11 @@ def update_evolution_summary(
  def propose_claude(task_prompt, iteration, timeout=2400):
      """Call Claude Code to propose new agent candidates. Returns True if pending_eval.json exists."""
      os.environ.pop("CLAUDECODE", None)
 -    # Strip API key so claude CLI uses subscription auth, not API (avoids rate limits)
--    saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
--    result = claude_wrapper.run(
 +    # Strip API key so the CLI uses subscription auth, not API (avoids rate limits)
-+    saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+     saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+-    result = claude_wrapper.run(
 +    result = proposer_wrapper.run(
          prompt=task_prompt,
 -        model="opus",
@@ -63,7 +172,7 @@
          allowed_tools=PROPOSER_ALLOWED_TOOLS,
          skills=[str(EVOLVE_DIR / ".claude/skills/meta-harness-terminal-bench-2")],
          cwd=str(EVOLVE_DIR),
-@@ -532,7 +542,7 @@
+@@ -532,7 +635,7 @@ def render_task_prompt(iteration, n_trials):
      return (
          f"Run iteration {iteration} of the scaffold evolution loop (KIRA track). "
          f"Model: {MODEL} (Opus). "
@@ -72,9 +181,55 @@
          f"## Eval split: {N_EVAL_TASKS} official TB2 tasks x {n_trials} trials\n\n"
          f"This reference example uses the full TB2 dataset from the paper runs. "
          f"Focus on scaffold changes that help the agent solve complex, long-horizon tasks.\n\n"
---- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-02 18:36:04
-+++ /tmp/mh-fork/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-04 03:23:31
-@@ -27,8 +27,8 @@
+@@ -956,7 +1059,20 @@ def main():
+ 
+     signal.signal(signal.SIGINT, _handle_signal)
+     signal.signal(signal.SIGTERM, _handle_signal)
+-    run_evolve(args)
++    try:
++        run_evolve(args)
++    except OutageDetected as exc:
++        # Stop rather than spend the remaining iterations comparing against a
++        # number that measures the environment instead of the agent.
++        print(f"\n{_red('outage detected')} {exc}")
++        print("rerun when the environment has capacity; jobs already paid for are on disk")
++        return 4
++    except SpendCapReached as exc:
++        # Stop on the cap the way a finished run stops: the jobs already paid
++        # for stay on disk and the ledger names what was spent.
++        print(f"\n{_red('spend cap reached')} {exc}")
++        print(f"observed spend: ${_SPEND['usd']:.4f} across {len(_SPEND['jobs'])} jobs")
++        return 3
+     return 0
+ 
+ 
+diff --git a/reference_examples/terminal_bench_2/pyproject.toml b/reference_examples/terminal_bench_2/pyproject.toml
+index 99489c0..b935494 100644
+--- a/reference_examples/terminal_bench_2/pyproject.toml
++++ b/reference_examples/terminal_bench_2/pyproject.toml
+@@ -3,7 +3,7 @@ name = "terminal-bench-2"
+ version = "0.1.0"
+ requires-python = ">=3.12,<3.13"
+ dependencies = [
+-  "harbor[modal,runloop]==0.18.0",
++  "harbor[modal,runloop,e2b]==0.20.0",
+   "litellm==1.84.10",
+   "tenacity==9.1.4",
+   "python-dotenv==1.2.2",
+@@ -14,4 +14,7 @@ dependencies = [
+ package = false
+ 
+ [tool.uv.sources]
+-terminal-bench = { git = "https://github.com/harbor-framework/terminal-bench.git", rev = "1a6ffa9674b571da0ed040c470cb40c4d85f9b9b" }
++# The pinned commit is from rewritten history and is no longer fetchable, so
++# the run uses the release artifact that commit declared. Same version, same
++# code; only the source is different. The earlier reproduction hit this too.
++# terminal-bench = { git = "...", rev = "1a6ffa96..." }
+diff --git a/reference_examples/terminal_bench_2/scripts/run_eval.sh b/reference_examples/terminal_bench_2/scripts/run_eval.sh
+index 54b5115..cd8a1b5 100755
+--- a/reference_examples/terminal_bench_2/scripts/run_eval.sh
++++ b/reference_examples/terminal_bench_2/scripts/run_eval.sh
+@@ -27,8 +27,8 @@ HARBOR_TIMEOUT_SECONDS="${HARBOR_TIMEOUT_SECONDS:-28800}"
  HARBOR_ENVIRONMENT="${HARBOR_ENVIRONMENT:-runloop}"
  
  case "$HARBOR_ENVIRONMENT" in
@@ -85,7 +240,7 @@
  esac
  
  uv run python "$REPO_DIR/meta_harness.py" --validate-agent "$AGENT_IMPORT_PATH"
-@@ -52,6 +52,8 @@
+@@ -52,6 +52,8 @@ case "$TASK_SET" in
          for t in "${HARD_TASKS[@]}"; do TASK_FLAGS+=(-i "$t"); done ;;
      full)
          ;;  # no task flags: harbor runs the full dataset
@@ -94,23 +249,19 @@
      *)
          echo "Unknown task_set '$TASK_SET'. Use: hard | full" >&2; exit 1 ;;
  esac
---- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/pyproject.toml	2026-09-02 18:36:04
-+++ /tmp/mh-fork/reference_examples/terminal_bench_2/pyproject.toml	2026-09-04 03:35:17
-@@ -3,7 +3,7 @@
- version = "0.1.0"
- requires-python = ">=3.12,<3.13"
- dependencies = [
--  "harbor[modal,runloop]==0.18.0",
-+  "harbor[modal,runloop,e2b]==0.20.0",
-   "litellm==1.84.10",
-   "tenacity==9.1.4",
-   "python-dotenv==1.2.2",
-@@ -14,4 +14,7 @@
- package = false
- 
- [tool.uv.sources]
--terminal-bench = { git = "https://github.com/harbor-framework/terminal-bench.git", rev = "1a6ffa9674b571da0ed040c470cb40c4d85f9b9b" }
-+# The pinned commit is from rewritten history and is no longer fetchable, so
-+# the run uses the release artifact that commit declared. Same version, same
-+# code; only the source is different. The earlier reproduction hit this too.
-+# terminal-bench = { git = "...", rev = "1a6ffa96..." }
+@@ -82,7 +84,14 @@ CMD=(
+     -e "$HARBOR_ENVIRONMENT"
+     -n "$N_CONCURRENT"
+     --n-attempts "$RUNS"
+-    --ak temperature=0.7
++    # The e2b account is shared, so another team saturating it makes an episode
++    # fail to start. That is not a result: without a retry it scores zero and
++    # an outage enters the mean.
++    --max-retries "${HARBOR_MAX_RETRIES:-3}"
++    --retry-include RateLimitException
++    # No --ak temperature: gpt-5.6-luna rejects function tools when temperature
++    # is not 1, and the Reef arm sends no temperature either, so omitting it
++    # both fixes the BadRequestError and keeps the two arms on one setting.
+ )
+ if [[ ${#TASK_FLAGS[@]} -gt 0 ]]; then
+     CMD+=("${TASK_FLAGS[@]}")

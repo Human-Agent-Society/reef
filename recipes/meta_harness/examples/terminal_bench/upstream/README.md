@@ -31,3 +31,23 @@ Codex finishes its work and then blocks on `Reading additional input from
 stdin...`, so a session never returns and the iteration times out with its
 files already written. `codex_wrapper` passes `stdin=DEVNULL`. Reef's own
 executor carries the same fix for the same reason.
+
+## Guards added for a shared, oversubscribed account
+
+The e2b account these runs use is shared, and this project's slice is 32 of
+its 100 sandboxes. Other teams routinely hold more than the remainder, so a
+job can find no capacity at all. Three changes in `meta_harness.patch` exist
+for that:
+
+| Change | Why |
+| --- | --- |
+| `charge_job` / `SpendCapReached` | Upstream reports cost but never stops. A run left overnight had no ceiling. |
+| `check_job_health` / `OutageDetected` | A trial that raises before producing a reward measured nothing, but Harbor still means over whatever completed. One iteration scored 0.033 from 3 completed trials and 57 `RateLimitException`s, and was recorded as "no improvement" against the frontier. |
+| `META_HARNESS_ONLY_BASELINE` | Phase 0 prices every baseline. When the run exists to match another arm's executor, the baselines that arm does not use are spend without a comparison to spend it on. |
+
+`run_eval.sh` also drops `--ak temperature=0.7` and adds `--max-retries` with
+`--retry-include RateLimitException`. The temperature is not a tuning choice:
+`gpt-5.6-luna` rejects function tools unless temperature is 1, and the Reef arm
+sends no temperature, so omitting it fixes the request and matches the arms at
+once. The retry helps with a brief spike and does not survive a sustained one --
+three attempts were exhausted against a full account.
