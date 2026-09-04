@@ -63,14 +63,20 @@ class EpisodeScorer:
     def __call__(self, task: str, result: Any) -> float:
         del task  # the reward is per-episode; the task is already on the record
         self._episode += 1
+        identity = f"episode-{self._episode}"
         for event in getattr(result, "trajectory", ()) or ():
             if event.get("type") != "verifier":
                 continue
             cost = event.get("cost_usd")
-            if isinstance(cost, (int, float)):
-                self._ledger.record_trial(f"episode-{self._episode}", float(cost))
+            self._ledger.record_trial(identity, float(cost) if isinstance(cost, (int, float)) else 0.0)
             reward = event.get("reward")
             return 0.0 if reward is None else float(reward)
+        # No verifier event: the episode produced nothing to score. Cordis
+        # requires a float here, so it cannot be marked as unrun through the
+        # score. Account it at zero cost anyway -- an episode missing from the
+        # ledger entirely is one the run cannot later tell it attempted, and a
+        # run once recorded 577 trials for 600 episodes this way.
+        self._ledger.record_trial(identity, 0.0)
         return 0.0
 
 

@@ -55,3 +55,27 @@ def test_a_cap_below_recorded_spend_is_refused_at_open(tmp_path: Path) -> None:
 def test_an_unusable_cap_is_refused(tmp_path: Path, cap: float) -> None:
     with pytest.raises(ValueError, match="finite and positive"):
         ObservedCostLedger(tmp_path / "spend.json", cap)
+
+
+class _Result:
+    def __init__(self, trajectory) -> None:
+        self.trajectory = trajectory
+
+
+@pytest.mark.unit
+def test_every_episode_is_accounted_even_with_no_verifier_event(tmp_path: Path) -> None:
+    # An episode missing from the ledger is one the run cannot later tell it
+    # attempted; a run recorded 577 trials for 600 episodes that way.
+    from recipes.meta_harness.examples.terminal_bench.run import EpisodeScorer
+
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    scorer = EpisodeScorer(ledger)
+
+    assert scorer("t", _Result([{"type": "verifier", "reward": 1.0, "cost_usd": 0.02}])) == 1.0
+    assert scorer("t", _Result([{"type": "step"}])) == 0.0
+    assert scorer("t", _Result([])) == 0.0
+    assert scorer("t", _Result([{"type": "verifier", "reward": None, "cost_usd": None}])) == 0.0
+
+    accounted, free = ledger.trial_tally()
+    assert accounted == 4
+    assert free == 3
