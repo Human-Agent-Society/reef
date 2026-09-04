@@ -87,6 +87,15 @@ official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
 run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
 
+[Meta-Harness](meta_harness/README.md) adds full-history population search on
+the same harness-evolution mechanism. Every candidate is a complete Reef
+composition with committed lineage and validation scores; retained
+non-winners remain available as future parents, while only a strict mean-score
+improvement publishes. The method is adapter- and task-agnostic: Reef's normal
+descriptor, episode scorer, executor, timeout, residue, and artifact paths do
+all target-specific work. Its JSON archive is a post-commit mirror only, and a
+restart rebuilds it from Reef's committed algorithm state.
+
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
 sealed night (one decision per skill group plus the no-skill bucket) mapped
