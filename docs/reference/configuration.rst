@@ -50,7 +50,7 @@ examples, and harness evolution ships as a tutorial.
 | ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: Ray head, Slime driver, Reef, and the   |
 |                                                             | method's own services                                    |
 +-------------------------------------------------------------+----------------------------------------------------------+
-| ``tutorials/harness_evolve/serve.yaml``                     | harness evolution: one Reef process, no GPU; ``run.sh``  |
+| ``tutorials/evolve-your-harness/configs/serve.yaml``        | harness evolution: one Reef process, no GPU; ``run.sh``  |
 |                                                             | materializes its recipe preset and starts the stack      |
 +-------------------------------------------------------------+----------------------------------------------------------+
 

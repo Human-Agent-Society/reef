@@ -6,29 +6,34 @@ The pinned paper reproduction built on this mechanism lives at `recipes/skillcla
 ## Directory layout
 
 ```text
-harness_evolve/
-  deployment.yaml the minimal long-running pi deployment used by the root README;
-                  run it directly with reef serve -c
-  serve.yaml     the stack (reef service) plus the harness_evolve recipe
+evolve-your-harness/
+  README.md      this file: what the tutorial shows, how to run it, what it saw
+  evolve-your-harness.ipynb
+                 the same pass cell by cell, with the service managed as a
+                 subprocess from the notebook
+  run.sh         copies the recipe config out of the serve file, starts
+                 reef serve, waits for /healthz, runs run.py
+  run.py         the loop, written out: record -> report -> evolve -> pull
+  configs/
+    serve.yaml   the stack (reef service) plus the harness_evolve recipe
                  sections used by the self-contained ./run.sh pi demo
-  serve-native.yaml
+    serve-native.yaml
                  the ./run.sh native variant: the loop's own tools, hook
                  and graph are the seed, so the proposer can change them
-  harness/       the method package serve.yaml's dotted refs name
+    deployment.yaml
+                 the minimal long-running pi deployment used by the root
+                 README; run it directly with reef serve -c
+  harness/       the method package the serve files' dotted refs name
     evolution.py the method: propose (self proposer over failures, skill
                  nodes only) and evaluate (exact last-line answer grading)
     native_evolution.py
                  the native variant: propose over skills, tools, hooks and
                  the loop graph, evaluate over the native trajectory; the
                  grader is shared
-  run.py         the loop, written out: record -> report -> evolve -> pull
-  run.sh         copies the recipe config out of serve.yaml, starts
-                 reef serve, waits for /healthz, runs run.py
-  1_evolve_your_harness.ipynb
-                 the same pass cell by cell, with the service managed as a
-                 subprocess from the notebook
+    materialize_recipe.py
+                 copies a serve file's recipe sections where the recipe
+                 registry reads them; run.sh calls it
   pyproject.toml makes harness/ an installable package
-  README.md      this file
 ```
 
 ## Setup (once)
@@ -52,13 +57,13 @@ serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 s
 
 ## Keep a deployment running
 
-Set `model.path` in [deployment.yaml](deployment.yaml) to your provider's model
+Set `model.path` in [deployment.yaml](configs/deployment.yaml) to your provider's model
 name. From the repository root, after the source installation and with `pi` on PATH:
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # no /v1 suffix
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-reef serve -c tutorials/harness_evolve/deployment.yaml
+reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
 
 Use your provider's API key, or omit it for a local endpoint without authentication.
@@ -77,7 +82,7 @@ starting the deployment.
 
 ## Notebook
 
-`1_evolve_your_harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
+`evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
 Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible in `work/agent-record/*.commits.jsonl`. The committed outputs are a full local pass with no GPU: ollama `qwen2.5:7b` on a Mac mini scored 1.0 / 0.0 / 1.0 on the recorded pass, the self proposer updated `answer-style`, and the gate published on 1 win, 0 losses, 2 ties.
 

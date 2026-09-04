@@ -15,7 +15,7 @@ import yaml
 
 RECIPE_SECTIONS = ("implementation", "model", "evolution", "data")
 
-serve = Path(sys.argv[1] if len(sys.argv) > 1 else "serve.yaml")
+serve = Path(sys.argv[1] if len(sys.argv) > 1 else "configs/serve.yaml")
 config = yaml.safe_load(serve.read_text())
 recipe = {key: config[key] for key in RECIPE_SECTIONS}
 

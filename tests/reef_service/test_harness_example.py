@@ -1,4 +1,4 @@
-"""Guarantees of the tutorials/harness_evolve cookbook example, hermetic: the
+"""Guarantees of the tutorials/evolve-your-harness cookbook example, hermetic: the
 model binding is stubbed, episodes never run, and the boot test drives the
 same serve.yaml materialization run.sh performs."""
 
@@ -23,7 +23,7 @@ from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "harness_evolve"
+EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 
 #: The composition the proposer sees: the starter skill, as (kind, config)
 #: pairs exactly like the backend passes. No provider node: the model binding
@@ -154,7 +154,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     config loader, materialize the recipe sections as a named config, and
     boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "serve.yaml")
+    config = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     # serve.yaml names the real binary; this run has no pi on PATH.
     recipe_sections["evolution"] = {**recipe_sections["evolution"], "binary": str(tmp_path / "fake-pi")}
@@ -286,7 +286,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     """The run.sh native contract, hermetic: the native serve file materializes
     like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "serve-native.yaml")
+    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
@@ -298,7 +298,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     )
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
-    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "serve.yaml")["evolution"]["tasks"])
+    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",

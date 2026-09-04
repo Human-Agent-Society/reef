@@ -185,14 +185,14 @@ reef.post(
 ### Harness 进化部署
 
 使用模型 API 改进 harness 技能，无需 GPU。将
-[deployment.yaml](tutorials/harness_evolve/deployment.yaml) 中的 `model.path` 设置为你的
+[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) 中的 `model.path` 设置为你的
 模型名称，然后在 Reef 源码目录及已激活的 Python 环境中运行：
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent@0.84.2
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-reef serve -c tutorials/harness_evolve/deployment.yaml
+reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
 
 如使用其他模型提供商，请填写对应的基础 URL、模型名称和 API key。此配置在 `8901`
@@ -212,7 +212,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 失败报告会触发候选技能更新。Reef 会在教程的三个编程任务上对候选技能和当前 harness
 进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
-[教程](tutorials/harness_evolve/README.md)。
+[教程](tutorials/evolve-your-harness/README.md)。
 
 
 ## Recipes 与示例
@@ -230,7 +230,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 | 使用分数和交互记录改进提示词与指令 | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness；模型权重不变 | [示例与结果](recipes/gepa/examples/aime/README.md) |
 
 如果想快速了解反馈、候选修改和发布流程，可以从[编程 harness
-教程](tutorials/harness_evolve/README.md)开始。每个结果页面都会说明任务、评估设置、
+教程](tutorials/evolve-your-harness/README.md)开始。每个结果页面都会说明任务、评估设置、
 测量结果和局限性。
 
 

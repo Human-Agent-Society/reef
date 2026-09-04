@@ -150,7 +150,7 @@ That file is a preset, not a deployment config. It has no ``services`` and no
 ``reef`` section, so ``reef serve -c`` cannot read it. Save it as
 ``recipes/<name>.yaml`` and ``export REEF_RECIPE_CONFIG_DIR=$PWD/recipes``;
 there is no default directory. The deployment config is the file ``reef serve
--c`` reads, and ``tutorials/harness_evolve/serve.yaml`` is
+-c`` reads, and ``tutorials/evolve-your-harness/configs/serve.yaml`` is
 the one to copy:
 
 .. code:: yaml
@@ -169,7 +169,7 @@ the one to copy:
        ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
-``tutorials/harness_evolve/run.sh`` does exactly this.
+``tutorials/evolve-your-harness/run.sh`` does exactly this.
 
 Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
 package is importable, and give ``-c`` an absolute path: Reef resolves a
