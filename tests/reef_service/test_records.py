@@ -189,6 +189,29 @@ def test_compacted_record_id_rejects_a_retry_with_different_content(tmp_path) ->
 
 
 @pytest.mark.unit
+def test_discarded_report_keeps_the_stored_content_canonical() -> None:
+    records = RecordStore()
+    records.append(item("inference", "math"))
+    stored = item("report", "math", RequestType.REPORT, references=("inference",))
+    records.append(stored)
+    records.compact("math", frozenset({"inference"}))
+
+    divergent = AgentRecord.create(
+        agent_record_id="report",
+        scenario="math",
+        request_type=RequestType.REPORT,
+        payload={"value": "changed"},
+        created_at=6.0,
+        references=("inference",),
+    )
+    with pytest.raises(RecordConflict, match="report"):
+        records.append(divergent)
+
+    assert records.get("math", "report") == stored
+    assert records.append_result(stored).inserted is False
+
+
+@pytest.mark.unit
 def test_compact_is_a_noop_for_empty_id_set() -> None:
     records = RecordStore()
     records.append(item("a", "math"))
