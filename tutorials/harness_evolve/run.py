@@ -7,13 +7,14 @@ One pass:
     report - the reply is graded with the same grader the evolve gate uses
              and the score is reported against the receipt; every failure
              (score 0.0, inside the max_score window) batches and triggers
-             one gated evolve step - the model proposes a skill mutation
-             over its own failures, real episodes score it, a win publishes
+             one gated evolve step - the model proposes a mutation over its
+             own failures, real episodes score it, a win publishes
     pull   - GET /reef/harness returns the winning composition; the evolved
-             skill files are printed
+             skill, tool, and hook files are printed
 
 Start this through ./run.sh: it writes work/tasks.json and starts the Reef
-these constants point at.
+these constants point at, on pi (serve.yaml) or on reef's native harness
+(./run.sh native, serve-native.yaml). This loop is the same for both.
 """
 
 import json
@@ -82,9 +83,9 @@ def main():
     print(f"published: artifact {manifest['release_id']} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
-    print("evolved skill files:")
+    print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
-        if "/skills/" in path:
+        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/")):
             print(f"--- {path} ---")
             print(text)
 

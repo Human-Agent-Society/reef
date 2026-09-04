@@ -65,6 +65,20 @@ def _resolve_callable(value: Any, what: str) -> Any:
     raise RecipeConfigError(f"{what} must be a callable or a dotted 'module:attribute' reference")
 
 
+def _resolve_seed_entries(value: str) -> Sequence[Mapping[str, Any]]:
+    """The entry sequence a dotted ``module:attribute`` seed reference names."""
+    module_name, _, attribute = value.partition(":")
+    try:
+        resolved = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise RecipeConfigError(f"cannot import evolution.seed reference {value!r}: {exc}") from exc
+    if isinstance(resolved, str) or not isinstance(resolved, Sequence):
+        raise RecipeConfigError(f"evolution.seed reference {value!r} must name a sequence of entry option mappings")
+    if not all(isinstance(entry, Mapping) for entry in resolved):
+        raise RecipeConfigError(f"evolution.seed reference {value!r} must name a sequence of entry option mappings")
+    return resolved
+
+
 def _resolve_candidate_selector(value: Any) -> CandidateSelector:
     if isinstance(value, str) and value in _CANDIDATE_SELECTORS:
         return _CANDIDATE_SELECTORS[value]
@@ -92,8 +106,9 @@ class CordisRecipe(Recipe):
     prompts scored per step), optional ``binary`` (a path overriding the
     adapter's binary name - the seam tests drive a fake harness through),
     optional ``seed`` (a list of entry options - id, name, config -
-    loaded into the composition tree on first boot; a recovered algorithm
-    state always wins over the seed), optional ``selection`` (the
+    loaded into the composition tree on first boot, where an item may also
+    be a dotted ``module:attribute`` naming a sequence of them; a recovered
+    algorithm state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``always``;
     or a dotted reference to an object implementing ``decide``), optional
     ``episode_workers`` (how many evaluation episodes run at once, default
@@ -253,9 +268,16 @@ class CordisRecipe(Recipe):
             seed = ()
         elif not isinstance(seed, Sequence) or isinstance(seed, str):
             raise RecipeConfigError("evolution.seed must be a list of entry option mappings")
+        entries: list[Mapping[str, Any]] = []
         for entry in seed:
-            if not isinstance(entry, Mapping):
-                raise RecipeConfigError("evolution.seed entries must be entry option mappings")
+            # A dotted reference names a shipped sequence, such as the native harness's seed tools and hook.
+            if isinstance(entry, str) and ":" in entry:
+                entries.extend(_resolve_seed_entries(entry))
+            elif isinstance(entry, Mapping):
+                entries.append(entry)
+            else:
+                raise RecipeConfigError("evolution.seed entries must be entry option mappings or dotted references")
+        seed = entries
         if "acceptance" in evolution:
             raise RecipeConfigError("evolution.acceptance was removed; configure evolution.selection")
         selection = evolution.get("selection", "score_comparison")

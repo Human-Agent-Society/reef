@@ -146,7 +146,9 @@ defines no ``listen``, or names an unknown seam ends the episode with
 ``reef.harness.native.seed.SEED_HOOKS`` holds the one starting hook,
 ``loop_guard`` at ``post_execute``, which reminds the model when the same call
 repeats three, five, or eight times in a row; it is a node, so a tree can
-retune or drop it. ``SEED_NODES`` is the tools and the hooks together.
+retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
+``tutorials/harness_evolve/serve-native.yaml`` seeds them by reference to
+run the tutorial on this adapter.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A

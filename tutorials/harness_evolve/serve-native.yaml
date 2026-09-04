@@ -1,0 +1,82 @@
+# The same stack as serve.yaml on reef's native harness: `./run.sh native`.
+# The loop's tools and loop hooks are nodes, so the proposer may change
+# what the agent can do, not only what it is told.
+
+implementation: reef.train.cordis_backend.recipe:CordisRecipe
+
+model:
+  path: qwen3-8b
+
+evolution:
+  adapter: native
+  # The native variant of the method beside this file (harness/): the same
+  # grader, a proposer whose vocabulary is skills, tools and hooks.
+  propose: harness.native_evolution:propose
+  evaluate: harness.native_evolution:evaluate
+  # No binary: the native loop is reef's own. run.sh puts a reef-native
+  # launcher for this checkout on PATH; an installed reef ships the script.
+  tasks:
+    - >-
+      [sieve] Write and mentally run a prime sieve: how many primes are
+      below 100000? Reply with the count as a plain integer alone on the
+      last line.
+    - >-
+      [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly
+      (memoize, do not approximate). Reply with the value as a plain
+      integer alone on the last line.
+    - |-
+      [csv] Compute the median of the value column in this csv:
+      id,value
+      1,12
+      2,47
+      3,3
+      4,88
+      5,21
+      6,56
+      7,9
+      8,74
+      9,30
+      Reply with the median as a plain integer alone on the last line.
+  # The first-boot composition: the loop's shipped tools (read_file,
+  # write_file, run_bash) and its loop guard hook, seeded by reference so
+  # the proposer may retune or replace them, plus the starter skill. It
+  # carries no provider: Reef renders its own model binding into each
+  # evaluation episode.
+  seed:
+    - reef.harness.native.seed:SEED_NODES
+    - id: answer-style
+      name: skill
+      config:
+        name: answer-style
+        text: |
+          # answer-style
+
+          Starter skill. The evolution loop replaces this placeholder with
+          concrete guidance learned from failing tasks.
+
+data:
+  # One evolve step per report; only failing traffic (score <= 0.0)
+  # batches - the SkillClaw move: learn from failures.
+  batch_size: 1
+  max_score: 0.0
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  recipe: harness_evolve
+  token: reef-local
+  # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
+  upstream_url: http://127.0.0.1:8000
+  upstream_api_key: ${REEF_UPSTREAM_API_KEY}
+  upstream_model: qwen3-8b
+  agent_record_dir: work/agent-record
+  artifact_repository: work/artifacts.git
+  artifact_work_dir: work/artifact-work
+  artifact_cache_dir: work/artifact-cache
+
+run_dir: work/stack
+
+services:
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz

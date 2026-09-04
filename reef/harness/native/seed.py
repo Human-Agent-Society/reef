@@ -75,19 +75,16 @@ def listen(payload, next):
 
 
 def _tool(name: str, description: str, parameters: dict[str, Any], code: str) -> dict[str, Any]:
+    # The entry id is the node name, so a proposer that sees only (kind, config) pairs can address it.
     return {
-        "id": f"tool-{name.replace('_', '-')}",
+        "id": name,
         "name": "native_tool",
         "config": {"name": name, "description": description, "parameters": parameters, "code": code},
     }
 
 
 def _hook(name: str, seam: str, code: str) -> dict[str, Any]:
-    return {
-        "id": f"hook-{name.replace('_', '-')}",
-        "name": "native_hook",
-        "config": {"name": name, "seam": seam, "code": code},
-    }
+    return {"id": name, "name": "native_hook", "config": {"name": name, "seam": seam, "code": code}}
 
 
 SEED_TOOLS: tuple[dict[str, Any], ...] = (

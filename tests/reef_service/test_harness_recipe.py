@@ -1487,6 +1487,35 @@ def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
         CordisRecipe.from_environment({}, config=config(max_promoted_per_source=True))
 
 
+def test_recipe_seed_expands_a_dotted_reference_in_place(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_seed.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(seed):
+        evolution = {
+            "adapter": "native",
+            "propose": "demo_seed:propose",
+            "evaluate": "demo_seed:evaluate",
+            "tasks": ["t"],
+            "binary": str(make_binary(tmp_path)),
+            "seed": seed,
+        }
+        return {"evolution": evolution}
+
+    starter = {"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# a\n"}}
+    recipe = CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:SEED_TOOLS", starter]))
+    assert [entry["id"] for entry in recipe.seed] == ["read_file", "write_file", "run_bash", "answer-style"]
+    with pytest.raises(RecipeConfigError, match=r"cannot import evolution\.seed reference"):
+        CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:NO_SUCH"]))
+    with pytest.raises(RecipeConfigError, match="must name a sequence of entry option mappings"):
+        CordisRecipe.from_environment({}, config=config(["json:dumps"]))
+    with pytest.raises(RecipeConfigError, match="entry option mappings or dotted references"):
+        CordisRecipe.from_environment({}, config=config([42]))
+
+
 def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: Path) -> None:
     """The method decides which prompts to promote; Reef still dedupes, drops
     a secret-shaped one, and applies the cap to what it returns."""
