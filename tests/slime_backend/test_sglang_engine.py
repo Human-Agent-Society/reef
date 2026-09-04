@@ -431,6 +431,27 @@ def test_reef_config_selects_pause_mode_and_scopes_shared_prefix_cache(
 
 
 @pytest.mark.unit
+def test_disjoint_shares_prefixes_only_by_opting_into_retraction() -> None:
+    """Sharing entries and retracting in-flight KV are one decision."""
+    default = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
+    configure_sglang_runtime(default)
+
+    assert default.sglang_disable_radix_cache is True
+    assert default.weight_update_pause_mode == "in_place"
+
+    sharing = types.SimpleNamespace(
+        colocate=False,
+        megatron_lora_rank=0,
+        disjoint_prefix_sharing=True,
+        sglang_config=None,
+    )
+    configure_sglang_runtime(sharing)
+
+    assert sharing.sglang_disable_radix_cache is False
+    assert sharing.weight_update_pause_mode == "retract", "the cache can only be cleared once no request holds KV"
+
+
+@pytest.mark.unit
 def test_colocated_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

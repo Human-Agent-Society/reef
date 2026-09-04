@@ -68,9 +68,14 @@ def configure_sglang_runtime(args) -> None:
     flushes the tree before pausing that allocation, so no entry outlives the
     weights that built it. Colocated engines therefore keep cross-request
     prefix reuse, which is where an agent workload's long shared prefixes pay
-    off. A disjoint engine deliberately keeps its KV across the update and has
-    nothing that invalidates shared entries, so reuse stays off there until
-    entries can carry a version.
+    off.
+
+    A disjoint engine keeps its KV across the update by default and so shares
+    nothing. ``--disjoint-prefix-sharing`` trades that: publication retracts
+    in-flight requests and clears the cache before the weights change, so
+    again no entry outlives the weights that built it. The cost is
+    re-prefilling whatever was in flight at each publication; the gain is
+    reuse for every request in between.
 
     One engine also holds several scenarios' adapters, and the same prefix has
     different KV under each. That isolation belongs to SGLang, which folds the
@@ -82,12 +87,18 @@ def configure_sglang_runtime(args) -> None:
     """
     colocate = bool(getattr(args, "colocate", False))
     lora = int(getattr(args, "megatron_lora_rank", 0) or 0) > 0
-    args.sglang_disable_radix_cache = not colocate or (lora and not _adapter_scoped_prefix_cache_supported())
+    # Sharing prefixes and retracting on publication are one decision, not
+    # two: an entry may only be reused while nothing can carry it across a
+    # publication, and clearing the cache is only possible once no request
+    # holds KV. Colocated engines retract already, because their KV has to
+    # leave the GPU regardless.
+    retracts = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
+    args.weight_update_pause_mode = "retract" if retracts else "in_place"
+    args.sglang_disable_radix_cache = not retracts or (lora and not _adapter_scoped_prefix_cache_supported())
     # Reef consumes /generate as a token-native SSE source. Disjoint chunks
     # keep text, ids, log-probs, and scheduler metadata linear in rollout
     # length and give the capture path one unambiguous wire contract.
     args.sglang_incremental_streaming_output = True
-    args.weight_update_pause_mode = "retract" if colocate else "in_place"
     os.environ[REEF_SGLANG_PLUGIN_ENV] = "1"
     configured_plugins = os.environ.get("SGLANG_PLUGINS")
     plugins = (
@@ -111,16 +122,16 @@ def configure_sglang_runtime(args) -> None:
     config = SglangConfig.from_yaml(config_path)
     if colocate and config.has_pd_disaggregation:
         raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
-    if colocate:
-        # A colocated group may choose either setting: its KV cache, and with
-        # it every shared entry, is released before each publication.
+    if retracts:
+        # A group that retracts may choose either setting: its cache is
+        # cleared before each publication, so nothing outlives its weights.
         return
     for model in config.models:
         for group in model.server_groups:
             overrides = {key.replace("-", "_"): value for key, value in group.overrides.items()}
             if overrides.get("disable_radix_cache", True) is not True:
                 raise ValueError(
-                    "disjoint Reef weight updates require disable_radix_cache=true "
+                    "Reef weight updates that preserve in-flight KV require disable_radix_cache=true "
                     f"for SGLang model {model.name!r} group {group.worker_type!r}"
                 )
 
