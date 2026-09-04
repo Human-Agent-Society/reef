@@ -459,7 +459,8 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert result.artifact is None
     assert result.runtime_load_id is None
     assert trainer.state == {}
-    prepared = trainer.commit()
+    prepared = trainer.prepare_commit(result)
+    trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
     assert trainer.state == {"steps": 1}
 
@@ -677,9 +678,11 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
     first_batch = first.reserve_training_batch()
     assert first_batch is not None
-    assert first.execute_reserved_step(0).result is not None
+    first_result = first.execute_reserved_step(0).result
+    assert first_result is not None
     assert first.pending_batch.samples[0].source_agent_record_id == "i1"
-    prepared = first.commit()
+    prepared = first.prepare_commit(first_result)
+    first.commit(prepared)
     first.apply_compaction(prepared.compacted_ids)
     assert first.state == {"steps": 1}
     assert first.data_offset == prepared.high_water_offset == 2
@@ -699,9 +702,11 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     assert second.state == {"steps": 1}
     second_batch = second.reserve_training_batch()
     assert second_batch is not None
-    assert second.execute_reserved_step(1).result is not None
+    second_result = second.execute_reserved_step(1).result
+    assert second_result is not None
     assert second.pending_batch.samples[0].source_agent_record_id == "i2"
-    prepared = second.commit()
+    prepared = second.prepare_commit(second_result)
+    second.commit(prepared)
     second.apply_compaction(prepared.compacted_ids)
     assert second.reserve_training_batch() is None
 
@@ -725,8 +730,10 @@ def test_commit_compacts_consumed_payloads_physically(tmp_path) -> None:
         )
         batch = first.reserve_training_batch()
         assert batch is not None
-        assert first.execute_reserved_step(0).result is not None
-        prepared = first.commit()
+        first_result = first.execute_reserved_step(0).result
+        assert first_result is not None
+        prepared = first.prepare_commit(first_result)
+        first.commit(prepared)
         first.apply_compaction(prepared.compacted_ids)
 
         assert first_store.get("math", first_inference.agent_record_id) is None
@@ -747,9 +754,11 @@ def test_commit_compacts_consumed_payloads_physically(tmp_path) -> None:
         assert second.state == {"steps": 1}
         batch = second.reserve_training_batch()
         assert batch is not None
-        assert second.execute_reserved_step(1).result is not None
+        second_result = second.execute_reserved_step(1).result
+        assert second_result is not None
         assert second.pending_batch.samples[0].source_agent_record_id == second_inference.agent_record_id
-        prepared = second.commit()
+        prepared = second.prepare_commit(second_result)
+        second.commit(prepared)
         second.apply_compaction(prepared.compacted_ids)
         assert second_store.count("math") == 0
 

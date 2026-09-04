@@ -185,12 +185,17 @@ class ScenarioCommitProtocol:
             artifacts = self._artifacts
             checkpoint = artifacts.checkpoint
             next_step = self._step + 1
+            prepared = self._trainer.prepare_commit(None)
+            recorded = self._recorded_operation_retry(prepared, operation, release_id, next_step)
+            if recorded is not None:
+                self._reconcile_recorded_artifact(recorded)
+                self._settle_trainer_commit(prepared, recorded, next_step)
+                return recorded.artifact_ref
             source = artifacts.resolve(target_ref)
             surface = self._binding.surface
             self._binding.artifact_validator.validate(source)
             if surface.loader is not None:
                 surface.loader.load(source, self._binding.runtime)
-            prepared = self._trainer.commit()
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 snapshot_metadata = snapshot_metadata_for(
@@ -215,7 +220,7 @@ class ScenarioCommitProtocol:
                 )
                 if isinstance(surface.loader, ArtifactActivator):
                     surface.loader.activate(artifacts.resolve(published_ref), self._binding.runtime, source=source)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
                     checkpoint=True,
@@ -223,16 +228,23 @@ class ScenarioCommitProtocol:
                     operation=operation,
                     rollback_target_release_id=release_id,
                 )
-                self._finish_trainer_commit(prepared)
             except Exception:
                 artifacts.discard(staged)
                 raise
-            self.advance_to(next_step)
+            self._settle_trainer_commit(prepared, record, next_step)
             return published_ref
 
     def commit(self, result: TrainStepResult) -> Any:
         """Commit a pending training result as one atomic version record."""
         with self._lock:
+            next_step = self._step + 1
+            prepared = self._trainer.prepare_commit(result)
+            recorded = self._recorded_training_retry(prepared, result, next_step)
+            if recorded is not None:
+                self._reconcile_recorded_artifact(recorded)
+                self._settle_trainer_commit(prepared, recorded, next_step)
+                return result.state
+
             publication = result.publication
             if isinstance(publication, DurableWeightsPublication):
                 # Checkpoint policy lives here, so a backend that exported
@@ -249,15 +261,20 @@ class ScenarioCommitProtocol:
                     publication = LiveWeightPublication(publication.runtime_load_id)
 
             if isinstance(publication, LiveWeightPublication):
-                return self._commit_live_weights(result, publication)
+                return self._commit_live_weights(result, publication, prepared)
             if isinstance(publication, NoArtifactPublication):
-                return self._commit_without_artifact(result)
-            return self._commit_saved_artifact(result, publication)
+                return self._commit_without_artifact(result, prepared)
+            return self._commit_saved_artifact(result, publication, prepared)
 
     def _should_checkpoint(self, result: TrainStepResult) -> bool:
         return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)
 
-    def _commit_live_weights(self, result: TrainStepResult, publication: LiveWeightPublication) -> Any:
+    def _commit_live_weights(
+        self,
+        result: TrainStepResult,
+        publication: LiveWeightPublication,
+        prepared: PreparedCommit,
+    ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
         if self._should_checkpoint(result):
@@ -268,43 +285,43 @@ class ScenarioCommitProtocol:
             # Live weights have no durable bytes to promote later, so holding them back is not expressible.
             raise ReefError("a pending release requires a durable checkpoint; this step publishes live weights only")
         head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
-        prepared = self._trainer.commit()
-        self._append_commit_record(
+        record = self._append_commit_record(
             step=next_step,
             artifact_ref=live_ref,
             checkpoint=False,
             prepared=prepared,
         )
-        self._finish_trainer_commit(prepared)
         artifacts.advance(live_ref, expected=head)
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
-    def _commit_without_artifact(self, result: TrainStepResult) -> Any:
+    def _commit_without_artifact(self, result: TrainStepResult, prepared: PreparedCommit) -> Any:
         # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
-        prepared = self._trainer.commit()
-        self._append_commit_record(
+        record = self._append_commit_record(
             step=next_step,
             artifact_ref=self._artifacts.current,
             checkpoint=False,
             prepared=prepared,
         )
-        self._finish_trainer_commit(prepared)
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
-    def _commit_saved_artifact(self, result: TrainStepResult, publication: SavedArtifactPublication) -> Any:
+    def _commit_saved_artifact(
+        self,
+        result: TrainStepResult,
+        publication: SavedArtifactPublication,
+        prepared: PreparedCommit,
+    ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
         checkpoint = artifacts.checkpoint
         head = artifacts.current
         self._binding.artifact_validator.validate(publication.artifact)
-        prepared = self._trainer.commit()
         local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
-        # A pending release is minted into the catalog but never activated and moves no head.
-        pending = result.pending
         try:
+            # A pending release is minted into the catalog but never activated and moves no head.
+            pending = result.pending
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version
             # minted by publication then aliases them.
@@ -329,7 +346,7 @@ class ScenarioCommitProtocol:
                 )
                 if not pending:
                     self._activate(artifacts.resolve(published_ref), source=local_artifact)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
                     checkpoint=True,
@@ -338,18 +355,17 @@ class ScenarioCommitProtocol:
                 )
             else:
                 artifacts.advance(local_artifact.ref, expected=head)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=local_artifact.ref,
                     checkpoint=False,
                     prepared=prepared,
                 )
-            self._finish_trainer_commit(prepared)
         except Exception:
             artifacts.discard(local_artifact)
             raise
 
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
@@ -357,10 +373,83 @@ class ScenarioCommitProtocol:
         if isinstance(loader, ArtifactActivator):
             loader.activate(artifact, self._binding.runtime, source=source)
 
-    def _finish_trainer_commit(self, prepared: PreparedCommit) -> None:
-        """Run post-commit effects only after the version record is durable."""
+    def _settle_trainer_commit(self, prepared: PreparedCommit, record: CommitRecord, next_step: int) -> None:
+        """Finish recoverable effects before exposing the prepared state."""
         self._trainer.commit_applied(prepared.algorithm_state)
         self._trainer.apply_compaction(prepared.compacted_ids)
+        self._trainer.commit(prepared)
+        if record.operation == "training":
+            self._latest_training_record = record
+        self.advance_to(next_step)
+
+    def _recorded_training_retry(
+        self,
+        prepared: PreparedCommit,
+        result: TrainStepResult,
+        next_step: int,
+    ) -> CommitRecord | None:
+        if self._commit_log is None:
+            return None
+        records = self._commit_log.records()
+        if not records or records[-1].step != next_step:
+            return None
+        record = records[-1]
+        matches = (
+            record.operation == "training"
+            and record.pending == result.pending
+            and self._record_matches_prepared(record, prepared)
+        )
+        if not matches:
+            raise ReefError(f"commit log step {next_step} conflicts with the pending training result")
+        return record
+
+    def _recorded_operation_retry(
+        self,
+        prepared: PreparedCommit,
+        operation: str,
+        target_release_id: str,
+        next_step: int,
+    ) -> CommitRecord | None:
+        if self._commit_log is None:
+            return None
+        records = self._commit_log.records()
+        if not records or records[-1].step != next_step:
+            return None
+        record = records[-1]
+        if (
+            record.operation != operation
+            or record.rollback_target_release_id != target_release_id
+            or not self._record_matches_prepared(record, prepared)
+        ):
+            raise ReefError(f"commit log step {next_step} conflicts with the pending {operation}")
+        return record
+
+    @staticmethod
+    def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
+        return (
+            record.algorithm_state == prepared.algorithm_state
+            and record.high_water_sequence == prepared.high_water_sequence
+            and record.high_water_offset == prepared.high_water_offset
+            and record.compacted_ids == prepared.compacted_ids
+            and record.consumed_ids == prepared.consumed_ids
+            and record.metrics == prepared.metrics
+            and record.training_job_id == prepared.training_job_id
+        )
+
+    def _reconcile_recorded_artifact(self, record: CommitRecord) -> None:
+        current = self._artifacts.current
+        if record.pending or current == record.artifact_ref:
+            return
+        if not isinstance(record.artifact_ref, LiveWeightArtifactRef):
+            raise ReefError(
+                f"commit log step {record.step} records {record.artifact_ref.release_id}, "
+                f"but the artifact head is {current.release_id}"
+            )
+        if self._commit_log is None:
+            raise RuntimeError("a recorded retry requires a commit log")
+        records = self._commit_log.records()
+        previous = self._creation_artifact if len(records) == 1 else records[-2].artifact_ref
+        self._artifacts.advance(record.artifact_ref, expected=previous)
 
     def _append_commit_record(
         self,
@@ -391,8 +480,6 @@ class ScenarioCommitProtocol:
         )
         if self._commit_log is not None:
             self._commit_log.append(record)
-        if record.operation == "training":
-            self._latest_training_record = record
         return record
 
     def _find_release_id(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
