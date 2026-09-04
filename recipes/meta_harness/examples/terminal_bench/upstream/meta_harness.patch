@@ -1,0 +1,93 @@
+--- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/meta_harness.py	2026-09-02 18:36:04
++++ /tmp/mh-fork/reference_examples/terminal_bench_2/meta_harness.py	2026-09-04 03:23:31
+@@ -19,7 +19,7 @@
+ from datetime import datetime
+ from pathlib import Path
+ 
+-import claude_wrapper
++import codex_wrapper as proposer_wrapper
+ from dotenv import load_dotenv
+ 
+ # ── ANSI colors ──────────────────────────────────────────────
+@@ -91,12 +91,12 @@
+ ]
+ BASELINE_AGENT_NAME = BASELINES[0][0]  # primary baseline for frontier comparison
+ 
+-EVAL_TASK_SET = "full"
+-N_EVAL_TASKS = 89  # full official TB2 dataset used in the paper runs
++EVAL_TASK_SET = os.environ.get("META_HARNESS_TASK_SET", "full")
++N_EVAL_TASKS = int(os.environ.get("META_HARNESS_N_TASKS", "89"))
+ 
+ SMOKE_TEST_TASK = "extract-elf"  # simple task, reliably fast
+ 
+-MODEL = "anthropic/claude-opus-4-6"
++MODEL = os.environ.get("HARBOR_MODEL", "anthropic/claude-opus-4-6")
+ DEFAULT_SEARCH_TRIALS = 2
+ DEFAULT_CONCURRENCY = 50
+ HARBOR_TIMEOUT_SECONDS = int(os.environ.get("HARBOR_TIMEOUT_SECONDS", 8 * 60 * 60))
+@@ -125,7 +125,7 @@
+     env = os.environ.copy()
+     env["HARBOR_MODEL"] = MODEL
+     # Ensure dotenv-loaded keys survive through uv run subprocess
+-    for key in ("RUNLOOP_API_KEY", "ANTHROPIC_API_KEY"):
++    for key in ("RUNLOOP_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "E2B_API_KEY"):
+         val = os.environ.get(key)
+         if val:
+             env[key] = val
+@@ -431,11 +431,11 @@
+ def propose_claude(task_prompt, iteration, timeout=2400):
+     """Call Claude Code to propose new agent candidates. Returns True if pending_eval.json exists."""
+     os.environ.pop("CLAUDECODE", None)
+-    # Strip API key so claude CLI uses subscription auth, not API (avoids rate limits)
++    # Strip API key so the CLI uses subscription auth, not API (avoids rate limits)
+     saved_key = os.environ.pop("ANTHROPIC_API_KEY", None)
+-    result = claude_wrapper.run(
++    result = proposer_wrapper.run(
+         prompt=task_prompt,
+-        model="opus",
++        model=os.environ.get("META_HARNESS_PROPOSER_MODEL", "gpt-5.6-sol"),
+         allowed_tools=PROPOSER_ALLOWED_TOOLS,
+         skills=[str(EVOLVE_DIR / ".claude/skills/meta-harness-terminal-bench-2")],
+         cwd=str(EVOLVE_DIR),
+--- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-02 18:36:04
++++ /tmp/mh-fork/reference_examples/terminal_bench_2/scripts/run_eval.sh	2026-09-04 03:23:31
+@@ -27,8 +27,8 @@
+ HARBOR_ENVIRONMENT="${HARBOR_ENVIRONMENT:-runloop}"
+ 
+ case "$HARBOR_ENVIRONMENT" in
+-    runloop|modal) ;;
+-    *) echo "Unknown HARBOR_ENVIRONMENT '$HARBOR_ENVIRONMENT'. Use: runloop | modal" >&2; exit 1 ;;
++    runloop|modal|e2b|docker|daytona) ;;
++    *) echo "Unknown HARBOR_ENVIRONMENT '$HARBOR_ENVIRONMENT'." >&2; exit 1 ;;
+ esac
+ 
+ uv run python "$REPO_DIR/meta_harness.py" --validate-agent "$AGENT_IMPORT_PATH"
+@@ -52,6 +52,8 @@
+         for t in "${HARD_TASKS[@]}"; do TASK_FLAGS+=(-i "$t"); done ;;
+     full)
+         ;;  # no task flags: harbor runs the full dataset
++    subset)
++        for t in ${META_HARNESS_TASKS//,/ }; do TASK_FLAGS+=(-i "$t"); done ;;
+     *)
+         echo "Unknown task_set '$TASK_SET'. Use: hard | full" >&2; exit 1 ;;
+ esac
+--- /private/tmp/meta-harness-upstream/reference_examples/terminal_bench_2/pyproject.toml	2026-09-02 18:36:04
++++ pyproject.toml	2026-09-04 03:35:17
+@@ -3,7 +3,7 @@
+ version = "0.1.0"
+ requires-python = ">=3.12,<3.13"
+ dependencies = [
+-  "harbor[modal,runloop]==0.18.0",
++  "harbor[modal,runloop,e2b]==0.20.0",
+   "litellm==1.84.10",
+   "tenacity==9.1.4",
+   "python-dotenv==1.2.2",
+@@ -14,4 +14,7 @@
+ package = false
+ 
+ [tool.uv.sources]
+-terminal-bench = { git = "https://github.com/harbor-framework/terminal-bench.git", rev = "1a6ffa9674b571da0ed040c470cb40c4d85f9b9b" }
++# The pinned commit is from rewritten history and is no longer fetchable, so
++# the run uses the release artifact that commit declared. Same version, same
++# code; only the source is different. The earlier reproduction hit this too.
++# terminal-bench = { git = "...", rev = "1a6ffa96..." }
