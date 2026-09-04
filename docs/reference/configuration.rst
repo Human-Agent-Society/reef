@@ -1,5 +1,5 @@
-Configuration
-=============
+Configure Reef serving and training
+===================================
 
 A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
 every process in its ``services`` list in dependency order, and hands the
