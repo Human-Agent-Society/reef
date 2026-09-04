@@ -30,6 +30,10 @@ from reef.harness.terminus.tree import TerminusTreeError, instruction_paths, loa
 
 #: Harbor's own Terminus 2. Reef contributes configuration, not code.
 AGENT_NAME = "terminus-2"
+#: Which Harbor environment runs the task container. Harbor's own default is
+#: local Docker, which does not collect the verifier's reward on every host, so
+#: a deployment names the backend it has (e2b, modal, runloop, daytona, ...).
+ENVIRONMENT_ENV = "REEF_TERMINUS_ENVIRONMENT"
 SESSION_DIR_ENV = "REEF_TERMINUS_SESSION_DIR"
 TREE_DIR_ENV = "REEF_TERMINUS_DIR"
 TRIALS_DIR_ENV = "REEF_TERMINUS_TRIALS_DIR"
@@ -151,13 +155,11 @@ def run(task: str) -> int:
     trials = Path(os.environ.get(TRIALS_DIR_ENV) or sessions.parent / "trials")
     trials.mkdir(parents=True, exist_ok=True)
 
-    row = asyncio.run(
-        Lab(trials).run(
-            task,
-            agent_spec(root, tree),
-            extra_instruction_paths=instruction_paths(root, tree),
-        )
-    )
+    overrides: dict[str, Any] = {"extra_instruction_paths": instruction_paths(root, tree)}
+    environment = os.environ.get(ENVIRONMENT_ENV)
+    if environment:
+        overrides["environment"] = {"type": environment}
+    row = asyncio.run(Lab(trials).run(task, agent_spec(root, tree), **overrides))
     error = str((getattr(row, "tags", None) or {}).get("error") or "")
     record = trial_record(task, getattr(row, "rewards", None), trials, error)
     write_trial(record, sessions)

@@ -26,6 +26,9 @@ env:
   REEF_TERMINUS_DIR: "{root}"
   REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
   REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
+  # Harbor's default is local Docker, which does not collect the verifier's
+  # reward on every host; a deployment overrides this with the backend it has.
+  REEF_TERMINUS_ENVIRONMENT: "e2b"
 files:
   config:
     primary:
