@@ -7,6 +7,7 @@ of a half-started cluster.
 
 from __future__ import annotations
 
+import inspect
 import os
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -55,18 +56,49 @@ def configure_sglang_runtime(args) -> None:
 
     Disjoint/PD weight updates preserve each active request's private KV state.
     Colocated regular engines retract instead, because their KV allocation
-    must leave the GPU during training, and recompute it after publication. A
-    shared radix-cache entry has no runtime-load-ID identity, so Reef disables
-    cross-request prefix reuse. SGLang's native plugin hook installs Reef's
-    token metadata and colocated suspension policy inside each scheduler.
+    must leave the GPU during training, and recompute it after publication.
+
+    A shared radix-cache entry carries no runtime-load-ID identity of its own,
+    and reusing one across a publication would let a request generate under
+    new weights from a prefix the previous weights encoded — a provenance the
+    rollout's runtime-load spans cannot express, since the contamination is in
+    the prefix's encoding rather than in a suffix of the sequence. What makes
+    that impossible is releasing the KV cache: a colocated training step
+    releases it before every publication, and SGLang's own release path
+    flushes the tree before pausing that allocation, so no entry outlives the
+    weights that built it. Colocated engines therefore keep cross-request
+    prefix reuse, which is where an agent workload's long shared prefixes pay
+    off.
+
+    A disjoint engine keeps its KV across the update by default and so shares
+    nothing. ``--disjoint-prefix-sharing`` trades that: publication retracts
+    in-flight requests and clears the cache before the weights change, so
+    again no entry outlives the weights that built it. The cost is
+    re-prefilling whatever was in flight at each publication; the gain is
+    reuse for every request in between.
+
+    One engine also holds several scenarios' adapters, and the same prefix has
+    different KV under each. That isolation belongs to SGLang, which folds the
+    adapter into the entry's key; a build that does not is left with reuse
+    off rather than trusted to keep the scenarios apart.
+
+    SGLang's native plugin hook installs Reef's token metadata and colocated
+    suspension policy inside each scheduler.
     """
     colocate = bool(getattr(args, "colocate", False))
-    args.sglang_disable_radix_cache = True
+    lora = int(getattr(args, "megatron_lora_rank", 0) or 0) > 0
+    # Sharing prefixes and retracting on publication are one decision, not
+    # two: an entry may only be reused while nothing can carry it across a
+    # publication, and clearing the cache is only possible once no request
+    # holds KV. Colocated engines retract already, because their KV has to
+    # leave the GPU regardless.
+    retracts = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
+    args.weight_update_pause_mode = "retract" if retracts else "in_place"
+    args.sglang_disable_radix_cache = not retracts or (lora and not _adapter_scoped_prefix_cache_supported())
     # Reef consumes /generate as a token-native SSE source. Disjoint chunks
     # keep text, ids, log-probs, and scheduler metadata linear in rollout
     # length and give the capture path one unambiguous wire contract.
     args.sglang_incremental_streaming_output = True
-    args.weight_update_pause_mode = "retract" if colocate else "in_place"
     os.environ[REEF_SGLANG_PLUGIN_ENV] = "1"
     configured_plugins = os.environ.get("SGLANG_PLUGINS")
     plugins = (
@@ -90,14 +122,37 @@ def configure_sglang_runtime(args) -> None:
     config = SglangConfig.from_yaml(config_path)
     if colocate and config.has_pd_disaggregation:
         raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
+    if retracts:
+        # A group that retracts may choose either setting: its cache is
+        # cleared before each publication, so nothing outlives its weights.
+        return
     for model in config.models:
         for group in model.server_groups:
             overrides = {key.replace("-", "_"): value for key, value in group.overrides.items()}
             if overrides.get("disable_radix_cache", True) is not True:
                 raise ValueError(
-                    "Reef weight updates require disable_radix_cache=true "
+                    "Reef weight updates that preserve in-flight KV require disable_radix_cache=true "
                     f"for SGLang model {model.name!r} group {group.worker_type!r}"
                 )
+
+
+def _adapter_scoped_prefix_cache_supported() -> bool:
+    """Whether SGLang keys radix-cache entries per LoRA adapter.
+
+    Reef serves one adapter per scenario from one engine, so a shared prefix
+    may only be reused by a request bound to the same adapter. SGLang expresses
+    that by folding the request's adapter into the cache entry's key. An
+    engine that cannot is not asked to keep the scenarios apart: the caller
+    leaves cross-request reuse off instead.
+    """
+    try:
+        from sglang.srt.managers.schedule_batch import Req
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+    except ImportError:
+        return False
+    return (
+        "extra_key" in getattr(RadixKey, "__slots__", ()) and "lora_id" in inspect.signature(Req.__init__).parameters
+    )
 
 
 def _require_lora_distributed_schema() -> None:

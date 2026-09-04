@@ -230,6 +230,39 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
 
 
 @pytest.mark.unit
+def test_retracting_pause_clears_the_shared_cache_before_a_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing the previous weights built may survive into the next ones."""
+    raw_rollout, module = _load_manager_module(monkeypatch)
+
+    class _Recorder:
+        def __init__(self, calls: list[tuple[str, object]], name: str) -> None:
+            self.calls = calls
+            self.name = name
+
+        def remote(self, *args, **_kwargs):
+            self.calls.append((self.name, args[0] if args else None))
+            return self.name
+
+    def _paused(mode: str) -> list[tuple[str, object]]:
+        calls: list[tuple[str, object]] = []
+        engine = types.SimpleNamespace(
+            pause_generation=_Recorder(calls, "pause"),
+            flush_cache=_Recorder(calls, "flush"),
+        )
+        group = _ServerGroup([engine], num_new_engines=0)
+        manager = object.__new__(module.ReefRolloutManagerImpl)
+        manager.servers = {"actor": raw_rollout.RolloutServer(server_groups=[group])}
+        manager.args = types.SimpleNamespace(weight_update_pause_mode=mode)
+        manager.pause_generation_for_update()
+        return calls
+
+    assert _paused("retract") == [("pause", "retract"), ("flush", None)]
+    assert _paused("in_place") == [("pause", "in_place")], "an engine that keeps in-flight KV keeps its cache too"
+
+
+@pytest.mark.unit
 def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

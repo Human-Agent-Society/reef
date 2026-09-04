@@ -403,7 +403,7 @@ def test_reef_engine_rejects_conflicting_lora_override(monkeypatch: pytest.Monke
 
 
 @pytest.mark.unit
-def test_reef_config_selects_pause_mode_and_disables_shared_prefix_cache(
+def test_reef_config_selects_pause_mode_and_scopes_shared_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
@@ -425,6 +425,58 @@ def test_reef_config_selects_pause_mode_and_disables_shared_prefix_cache(
     configure_sglang_runtime(colocated)
     assert colocated.weight_update_pause_mode == "retract"
     assert colocated.sglang_incremental_streaming_output is True
+    # A colocated step releases the KV cache before every publication, so a
+    # shared entry cannot outlive the weights that built it.
+    assert colocated.sglang_disable_radix_cache is False
+
+
+@pytest.mark.unit
+def test_disjoint_shares_prefixes_only_by_opting_into_retraction() -> None:
+    """Sharing entries and retracting in-flight KV are one decision."""
+    default = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
+    configure_sglang_runtime(default)
+
+    assert default.sglang_disable_radix_cache is True
+    assert default.weight_update_pause_mode == "in_place"
+
+    sharing = types.SimpleNamespace(
+        colocate=False,
+        megatron_lora_rank=0,
+        disjoint_prefix_sharing=True,
+        sglang_config=None,
+    )
+    configure_sglang_runtime(sharing)
+
+    assert sharing.sglang_disable_radix_cache is False
+    assert sharing.weight_update_pause_mode == "retract", "the cache can only be cleared once no request holds KV"
+
+
+@pytest.mark.unit
+def test_colocated_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One engine holds several scenarios' adapters; the engine must keep them apart."""
+    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
+    monkeypatch.setattr(preflight, "_require_lora_tensor_schema", lambda: None)
+    monkeypatch.setattr(preflight, "_require_lora_distributed_schema", lambda: None)
+
+    def _args():
+        return types.SimpleNamespace(
+            colocate=True,
+            megatron_lora_rank=8,
+            prefill_num_servers=0,
+            sglang_config=None,
+        )
+
+    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: True)
+    keyed = _args()
+    preflight.configure_sglang_runtime(keyed)
+    assert keyed.sglang_disable_radix_cache is False
+
+    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: False)
+    unkeyed = _args()
+    preflight.configure_sglang_runtime(unkeyed)
+    assert unkeyed.sglang_disable_radix_cache is True, "an engine that cannot isolate adapters shares nothing"
 
 
 @pytest.mark.unit
@@ -475,7 +527,7 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
-def test_reef_config_rejects_yaml_that_reenables_shared_prefixes(tmp_path: Path) -> None:
+def test_reef_config_rejects_disjoint_yaml_that_reenables_shared_prefixes(tmp_path: Path) -> None:
     config = tmp_path / "sglang.yaml"
     config.write_text(
         """\
@@ -493,6 +545,17 @@ sglang:
 
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
         configure_sglang_runtime(args)
+
+    colocated = types.SimpleNamespace(
+        colocate=True,
+        megatron_lora_rank=0,
+        prefill_num_servers=0,
+        sglang_config=str(config),
+    )
+
+    configure_sglang_runtime(colocated)
+
+    assert colocated.sglang_disable_radix_cache is False, "a colocated group may choose either setting"
 
 
 @pytest.mark.unit
