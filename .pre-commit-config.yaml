@@ -34,6 +34,11 @@ repos:
         entry: python .github/scripts/check_python_statements.py
         language: system
         pass_filenames: false
+      - id: readme-i18n
+        name: Check README translation pairing
+        entry: python .github/scripts/check_readme_i18n.py
+        language: system
+        pass_filenames: false
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.5.0
