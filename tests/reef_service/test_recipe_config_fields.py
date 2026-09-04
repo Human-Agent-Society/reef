@@ -8,6 +8,7 @@ failures for values nothing would consume.
 from __future__ import annotations
 
 from dataclasses import KW_ONLY, dataclass
+from typing import Any
 
 import pytest
 import yaml
@@ -15,7 +16,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
+from reef.recipe.config_fields import _parse_float, recipe_config_fields, resolve_config_field_values
 from reef.records import RecordStore
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.slime_backend.backend import SlimeTrainingBackend
@@ -77,18 +78,53 @@ def test_config_field_casting_is_type_aware_for_every_annotation() -> None:
 
 
 @pytest.mark.unit
-def test_float_config_field_parses_negative_infinity_from_yaml_and_env() -> None:
-    # An accept-everything score bar is float("-inf"); the operator must be
-    # able to spell it explicitly through both config field channels. YAML's native
-    # spelling is `-.inf` (parsed as a float by safe_load), and the
-    # environment fallback arrives as the string "-inf" — both must reach the
-    # recipe as float("-inf") rather than needing a sentinel.
-    yaml_value = yaml.safe_load("temperature: -.inf")
-    assert yaml_value == {"temperature": float("-inf")}
+@pytest.mark.parametrize(
+    "non_finite",
+    [float("nan"), float("inf"), float("-inf"), "nan", "inf", "+inf", "-inf"],
+)
+def test_parse_float_rejects_non_finite_values(non_finite: Any) -> None:
+    with pytest.raises(RecipeConfigError, match=r"temperature must be finite"):
+        _parse_float(non_finite, "temperature")
 
-    assert resolve_config_field_values(ConfiguredRecipe, yaml_value, {})["temperature"] == float("-inf")
-    environ = {"REEF_CONFIGURED_TEMPERATURE": "-inf"}
-    assert resolve_config_field_values(ConfiguredRecipe, {}, environ)["temperature"] == float("-inf")
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, 1.0),
+        (2.5, 2.5),
+        (" 3.14 ", 3.14),
+        (" -0.5 ", -0.5),
+    ],
+)
+def test_parse_float_accepts_finite_numbers(value: Any, expected: float) -> None:
+    assert _parse_float(value, "temperature") == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "non_finite",
+    [float("nan"), float("inf"), float("-inf"), "nan", "inf", "-inf"],
+)
+def test_float_config_field_rejects_non_finite_from_config(non_finite: Any) -> None:
+    with pytest.raises(RecipeConfigError, match=r"temperature must be finite"):
+        resolve_config_field_values(ConfiguredRecipe, {"temperature": non_finite}, {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("yaml_input", ["temperature: .nan", "temperature: .inf", "temperature: -.inf"])
+def test_float_config_field_rejects_non_finite_from_yaml(yaml_input: str) -> None:
+    yaml_value = yaml.safe_load(yaml_input)
+    with pytest.raises(RecipeConfigError, match=r"temperature must be finite"):
+        resolve_config_field_values(ConfiguredRecipe, yaml_value, {})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("env_value", ["nan", "inf", "+inf", "-inf"])
+def test_float_config_field_rejects_non_finite_from_env(env_value: str) -> None:
+    environ = {"REEF_CONFIGURED_TEMPERATURE": env_value}
+    with pytest.raises(RecipeConfigError, match=r"REEF_CONFIGURED_TEMPERATURE must be finite"):
+        resolve_config_field_values(ConfiguredRecipe, {}, environ)
 
 
 @pytest.mark.unit

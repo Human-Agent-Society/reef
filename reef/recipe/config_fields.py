@@ -21,6 +21,7 @@ validation also covers direct construction.
 from __future__ import annotations
 
 import dataclasses
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -88,12 +89,19 @@ def parse_int(value: Any, label: str) -> int:
 
 def _parse_float(value: Any, label: str) -> float:
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise RecipeConfigError(f"{label} must be finite, got {value!r}")
+        return parsed
     if isinstance(value, str):
         try:
-            return float(value.strip())
+            parsed = float(value.strip())
         except ValueError:
             pass
+        else:
+            if not math.isfinite(parsed):
+                raise RecipeConfigError(f"{label} must be finite, got {value!r}")
+            return parsed
     raise RecipeConfigError(f"{label} must be a number, got {value!r}")
 
 
