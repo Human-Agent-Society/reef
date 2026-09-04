@@ -637,9 +637,7 @@ class Dispatcher:
                         "processor": current.trainer.processor_status(),
                         "inference_admission": inference_admission,
                     }
-                    if isinstance(runtime, TrainingRuntime) and getattr(
-                        runtime, "concurrent_training_scenarios", False
-                    ):
+                    if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
                         block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
                     scenarios[scenario_name] = block
             except Exception as exc:  # noqa: PERF203
