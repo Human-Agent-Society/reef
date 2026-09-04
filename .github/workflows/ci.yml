@@ -30,6 +30,8 @@ jobs:
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Validate community automation
         run: python .github/scripts/check_community_files.py
+      - name: Validate README translations
+        run: python .github/scripts/check_readme_i18n.py
       - name: Validate GitHub Actions workflows
         run: |
           archive=actionlint_1.7.12_linux_amd64.tar.gz

@@ -145,6 +145,22 @@ pre-commit run --all-files
 pytest tests/
 ```
 
+### Keep the root READMEs synchronized
+
+`README.md` and `README.zh.md` are one reviewed documentation pair. A change to
+either file must update the other when needed and preserve the same headings,
+lists, tables, link targets, and fenced code. After reviewing both languages,
+record their exact Git blob hashes and verify the pair:
+
+```bash
+python .github/scripts/check_readme_i18n.py --write
+python .github/scripts/check_readme_i18n.py
+```
+
+The record in `README.i18n.yaml` makes any later one-sided edit fail local
+pre-commit checks and CI. The structural check does not judge translation
+quality, so its success does not replace human review of meaning and wording.
+
 The full test suite needs the supported container environment and training
 dependencies. See the [testing guide](https://reefinfra.ai/docs/contributing/testing/) for
 focused commands and dependency details.
