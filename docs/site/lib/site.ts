@@ -1,6 +1,6 @@
 export const siteConfig = {
-  title: "Reef — Continuous post-training for AI agents",
-  description: "Open-source continual learning infrastructure by Human-Agent Society. Connect agent inference, feedback, model training, and versioned deployment.",
+  title: "Reef — Continual Self-Improvement for AI agents",
+  description: "Open-source continual learning infrastructure for Self-Improving Agents. Connect agent inference, feedback, model training, and versioned deployment.",
   repository: "https://github.com/Human-Agent-Society/reef",
   repoName: "Human-Agent-Society/reef",
   // The canonical origin for sitemap, robots, canonical links, and Open Graph.
