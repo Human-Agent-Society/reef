@@ -227,7 +227,7 @@ def test_native_hook_is_optional_per_adapter_and_bound_to_a_seam() -> None:
     with pytest.raises(RenderError, match="does not render native_hook"):
         render_composition([HOOK], get_adapter("pi"))
     NODE_KINDS["native_hook"](None, HOOK[1])
-    with pytest.raises(ValueError, match="'seam' must be one of pre_step, request_error, post_execute"):
+    with pytest.raises(ValueError, match="'seam' must be one of pre_step, pre_execute, request_error, post_execute"):
         NODE_KINDS["native_hook"](None, {**HOOK[1], "seam": "tool_router"})
     with pytest.raises(ValueError, match="'code'"):
         NODE_KINDS["native_hook"](None, {"name": "x", "seam": "pre_step"})
@@ -404,7 +404,7 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     assert sorted(tool["function"]["name"] for tool in first["tools"]) == ["read_file", "run_bash", "write_file"]
 
 
-def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
+def test_hooks_decide_at_the_first_three_seams(tmp_path: Path) -> None:
     model = _FlakyModel()
     try:
         result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *SEAM_HOOKS])
@@ -560,3 +560,126 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     # Both trees complete the scripted task, so the verdict is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
+
+
+# -- pre_execute: allow, deny, ask, and the capabilities a hook reads --------
+
+PRE_EXECUTE_HOOKS = (
+    (
+        "native_hook",
+        {
+            "name": "no_writes",
+            "seam": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if 'write' in payload['capabilities']:\n"
+                "        return {'kind': 'deny', 'reason': 'writes are off'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+    (
+        "native_hook",
+        {
+            "name": "approve_reads",
+            "seam": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if payload['name'] == 'read_file':\n"
+                "        return {'kind': 'ask', 'reason': 'read ' + payload['arguments']['path'] + '?'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+)
+
+
+def test_native_tool_capabilities_are_validated_rendered_and_declared_by_the_seed() -> None:
+    config = dict(TOOL[1], capabilities=["read", "network"])
+    NODE_KINDS["native_tool"](None, config)
+    for bad in ("read", ["read", "read"], ["fly"], [1]):
+        with pytest.raises(ValueError, match="capabilities"):
+            NODE_KINDS["native_tool"](None, dict(TOOL[1], capabilities=bad))
+    files = render_composition([("native_tool", config)], get_adapter("native"))
+    assert files["native/tools/shout.py"].rstrip().endswith("CAPABILITIES = ['read', 'network']")
+    assert {entry["config"]["name"]: entry["config"]["capabilities"] for entry in SEED_TOOLS} == {
+        "read_file": ["read"],
+        "write_file": ["write"],
+        "run_bash": ["exec", "write", "network"],
+    }
+
+
+def test_invoke_runs_only_what_the_gate_allows(tmp_path: Path) -> None:
+    tool = ToolModule("shout", "", TOOL[1]["parameters"], lambda args, workdir: args["text"].upper(), ["read"])
+    tools = {"shout": tool}
+    raw = json.dumps({"text": "hi"})
+    assert _invoke(tools, "shout", raw, tmp_path)["content"] == "HI"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow"})["content"] == "HI"
+    denied = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "deny", "reason": "quiet"})
+    assert denied["is_error"] is True and denied["error"] == {"code": "HOOK_DENIED", "message": "quiet"}
+    assert denied["content"] == "Error: quiet"
+    asked = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "ask", "reason": "may I shout?"})
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["error"]["message"].startswith("may I shout? (headless run: no one to ask")
+    # The gate runs after validation and sees the validated arguments and the declared capabilities.
+    seen = []
+
+    def gate(t, a):
+        seen.append((t.name, t.capabilities, a))
+        return {"kind": "allow"}
+
+    assert _invoke(tools, "shout", "{}", tmp_path, gate=gate)["error"]["code"] == "INVALID_ARGS"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=gate)["content"] == "HI"
+    assert seen == [("shout", ("read",), {"text": "hi"})]
+    # An allow may rewrite the call; the rewrite meets the schema like the model's own arguments.
+    rewritten = _invoke(
+        tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": "yo"}}
+    )
+    assert rewritten["content"] == "YO" and rewritten["arguments"] == {"text": "yo"}
+    bad = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": 3}})
+    assert bad["error"] == {"code": "INVALID_ARGS", "message": "rewritten by a hook: argument 'text' must be string"}
+
+
+def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_path: Path, fake_model) -> None:
+    result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
+    header = result.trajectory[0]["data"]
+    assert header["capabilities"] == {
+        "read_file": ["read"],
+        "run_bash": ["exec", "write", "network"],
+        "write_file": ["write"],
+    }
+    assert header["hooks"] == {"no_writes": "pre_execute", "approve_reads": "pre_execute"}
+    # File name order is waterfall order: approve_reads passes the write down, no_writes denies it by capability;
+    # approve_reads owns the read and asks, and a headless run has no one to answer.
+    decisions = [event["data"] for event in _events(result.trajectory, "hook/decision")]
+    assert decisions == [
+        {
+            "seam": "pre_execute",
+            "step": 1,
+            "hook": "no_writes",
+            "owned": True,
+            "decision": {"kind": "deny", "reason": "writes are off"},
+        },
+        {
+            "seam": "pre_execute",
+            "step": 2,
+            "hook": "approve_reads",
+            "owned": True,
+            "decision": {"kind": "ask", "reason": "read notes.txt?"},
+        },
+    ]
+    denied, asked = (event["data"] for event in _events(result.trajectory, "tool/result"))
+    assert denied["error"] == {"code": "HOOK_DENIED", "message": "writes are off"}
+    assert denied["content"] == "Error: writes are off" and denied["arguments"] == {
+        "path": "notes.txt",
+        "content": "hello",
+    }
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["content"].startswith("Error: read notes.txt? (headless run: no one to ask")
+    # What the model read: the denial as the tool result of its first call.
+    assert fake_model.requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Error: writes are off",
+    }
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}

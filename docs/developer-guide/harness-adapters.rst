@@ -111,8 +111,13 @@ dangerous with a tool error, so no bypass flag is used.
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
 defines ``run(args, workdir) -> str``, and after it ``NAME``,
-``DESCRIPTION``, and ``PARAMETERS`` from the node config, so the tree's
-values are what the module ends with whatever the code assigned.
+``DESCRIPTION``, ``PARAMETERS`` and ``CAPABILITIES`` from the node config, so
+the tree's values are what the module ends with whatever the code assigned.
+``capabilities`` is optional: distinct names from ``read``, ``write``,
+``exec`` and ``network`` that say what the tool does. The loop reports them
+in the session header and hands them to ``pre_execute`` hooks, and the
+sandbox will read them when it enforces policy per tool. The seed tools
+declare theirs; ``run_bash`` declares all three a shell can do.
 ``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, and ``run_bash`` tools as entries a recipe can seed and the
 loop can then evolve. An adapter that declares no ``files.native_tool`` path
@@ -122,7 +127,7 @@ compile; a module that fails to import, or defines no ``run``, ends the
 episode with reason ``error`` and code ``LOAD_ERROR`` before any model call,
 so the tree that carries it loses the gate instead of running without it.
 
-The loop has three seams, and a ``native_hook`` node listens at one of them.
+The loop has four seams, and a ``native_hook`` node listens at one of them.
 It renders to ``native/hooks/{name}.py`` the same way: ``code`` defining
 ``listen(payload, next) -> decision``, then ``NAME`` and ``SEAM`` from the
 node config. The hooks at one seam form a waterfall in file name order: each
@@ -140,6 +145,7 @@ defines no ``listen``, or names an unknown seam ends the episode with
 .. config::
 
    pre_step | before each step: ``{step, task, messages}``; returns ``{kind: "enter", messages: [text...]}`` (each text becomes a user message before the request) or ``{kind: "reject", reason}`` (the turn ends with no step)
+   pre_execute | before each tool call runs, after its arguments are validated: ``{step, call_id, name, arguments, capabilities}``; returns ``{kind: "allow", arguments?}`` (with ``arguments`` the call runs with the rewrite, validated like the model's own), ``{kind: "deny", reason}`` (the tool does not run and the model reads a ``HOOK_DENIED`` error carrying ``reason``) or ``{kind: "ask", reason}`` (a headless run has no one to ask, so the tool does not run and the model reads an ``APPROVAL_REQUIRED`` error carrying ``reason``); ``post_execute`` still sees the call, with that error as its result
    request_error | after a failed model call: ``{step, attempt, error}`` where ``error`` is ``{code: "MODEL_ERROR", message, status?}`` with ``status`` the HTTP status when the endpoint answered one; returns ``{kind: "retry", delay_ms}`` or ``{kind: "fail"}``; the loop spends at most ``MAX_REQUEST_ATTEMPTS`` (4) attempts a step and waits at most ``MAX_RETRY_DELAY_MS`` (10 s), whatever the hook asks
    post_execute | after each tool call has run: ``{step, call_id, name, arguments, result}``; returns ``{kind: "accept", content?, contexts: [text...]}`` (``content`` replaces what the model reads) or ``{kind: "block", feedback, contexts}`` (the model reads a ``HOOK_BLOCKED`` error carrying ``feedback``; the tool's side effects stand); contexts land as user messages after the step's results, in call order
 
@@ -158,7 +164,8 @@ rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
 ``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
 ``tool/result`` (``content``, ``is_error``, and on error a closed ``code``:
-``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_BLOCKED``),
+``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_DENIED``,
+``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
 ``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
 or ``LOAD_ERROR``). Arguments are validated against the tool's declared

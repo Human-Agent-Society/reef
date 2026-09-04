@@ -74,12 +74,20 @@ def listen(payload, next):
 """
 
 
-def _tool(name: str, description: str, parameters: dict[str, Any], code: str) -> dict[str, Any]:
+def _tool(
+    name: str, description: str, parameters: dict[str, Any], code: str, capabilities: list[str]
+) -> dict[str, Any]:
     # The entry id is the node name, so a proposer that sees only (kind, config) pairs can address it.
     return {
         "id": name,
         "name": "native_tool",
-        "config": {"name": name, "description": description, "parameters": parameters, "code": code},
+        "config": {
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "capabilities": capabilities,
+            "code": code,
+        },
     }
 
 
@@ -93,6 +101,7 @@ SEED_TOOLS: tuple[dict[str, Any], ...] = (
         "Read a text file in the workspace.",
         {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
         _READ_FILE,
+        ["read"],
     ),
     _tool(
         "write_file",
@@ -103,12 +112,15 @@ SEED_TOOLS: tuple[dict[str, Any], ...] = (
             "required": ["path", "content"],
         },
         _WRITE_FILE,
+        ["write"],
     ),
     _tool(
         "run_bash",
         "Run a bash command in the workspace and return its exit code and output.",
         {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
         _RUN_BASH,
+        # A shell can do anything a process can; declared in full so a hook that denies one of them denies bash.
+        ["exec", "write", "network"],
     ),
 )
 

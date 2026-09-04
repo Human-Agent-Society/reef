@@ -71,6 +71,7 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
                     ("NAME", options.get("name")),
                     ("DESCRIPTION", options.get("description", "")),
                     ("PARAMETERS", dict(options.get("parameters", {}) or {})),
+                    ("CAPABILITIES", list(options.get("capabilities", []) or [])),
                 )
             header = "\n".join(f"{key} = {value!r}" for key, value in fields)
             emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")

@@ -30,12 +30,14 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: The native loop's seams, the only places a native_hook node may listen.
-NATIVE_SEAMS = ("pre_step", "request_error", "post_execute")
+NATIVE_SEAMS = ("pre_step", "pre_execute", "request_error", "post_execute")
+#: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
+NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -211,6 +213,19 @@ def native_tool_node(ctx: Any, config: Any) -> None:
     _require_text(options, "description")
     if not isinstance(options.get("parameters", {}), Mapping):
         raise ValueError("native_tool node 'parameters' must be an object")
+    capabilities = options.get("capabilities", [])
+    if (
+        not isinstance(capabilities, Sequence)
+        or isinstance(capabilities, str)
+        or len(set(capabilities)) < len(capabilities)
+    ):
+        raise ValueError(
+            f"native_tool node 'capabilities' must be a list of distinct names from {', '.join(NATIVE_CAPABILITIES)}"
+        )
+    if any(item not in NATIVE_CAPABILITIES for item in capabilities):
+        raise ValueError(
+            f"native_tool node 'capabilities' must be a list of distinct names from {', '.join(NATIVE_CAPABILITIES)}"
+        )
     _require_python(options, "native_tool node")
 
 
