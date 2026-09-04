@@ -55,7 +55,9 @@ def test_our_own_young_sandbox_survives_because_an_episode_may_still_be_running(
 
 
 @pytest.mark.unit
-def test_any_owner_is_what_reaches_a_foreign_sandbox_and_must_be_asked_for() -> None:
+def test_no_flag_reaches_a_foreign_sandbox() -> None:
+    # The account is shared; a foreign sandbox is someone's running job, so
+    # neither ignoring age nor any other option may select it.
     foreign = _Sandbox("some-other-suite", age_minutes=600)
     assert select_doomed([foreign], OURS, NOW, older_than=14400) == []
-    assert select_doomed([foreign], OURS, NOW, older_than=14400, any_owner=True) == [foreign]
+    assert select_doomed([foreign], OURS, NOW, older_than=14400, ignore_age=True) == []

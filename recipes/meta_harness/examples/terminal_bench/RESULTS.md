@@ -190,24 +190,28 @@ frontier at 0.350 was set in the clean window and stands; the seed's 0.217 was
 measured in the 28-45% window and may be depressed, which would make the
 seed-to-frontier gain smaller than it looks.
 
-The cause was e2b's cap of 100 concurrent sandboxes. Nothing in the iteration
-log showed it, because the driver recorded only means and timings, so an
+The cause was e2b's cap of 100 concurrent sandboxes being reached. The account
+is shared with other teams and this project's slice is 32 of that 100, so the
+cap was reached by everyone's combined usage, not by this run: at 16
+concurrency neither arm could hold more than its share. There is no evidence
+of a sandbox leak on this side. Nothing in the iteration log showed the outage, because the driver recorded only means and timings, so an
 outage was indistinguishable from a search result. `run.py` now records
 `episodes` and `episode_failures` per iteration and stops the run when most
 episodes produce no score, rather than spending the remaining iterations
 measuring an outage.
 
-**The account is shared.** Sandboxes on it carry an `environment_name`, and
-during this investigation 42 belonged to an unrelated benchmark
-(`actionlint-action-pinning-lint`, `dynamodb-toolbox-...`), not to
-terminal-bench. Reaping on age alone killed 97 sandboxes here, an unknown
-number of which were not this project's. `reap_sandboxes.py` therefore filters
-on `environment_name` against the shipped task list before it considers age,
-and `--all` still will not cross that line; only an explicit `--any-owner`
-does, and that is correct solely on an account this run owns alone.
+**The account is shared, and the quota is not ours to reclaim.** Sandboxes
+carry an `environment_name`; during this investigation 42 belonged to an
+unrelated benchmark (`actionlint-action-pinning-lint`, `dynamodb-toolbox-...`).
+Reaping on age alone killed 97 here, most of them other teams' running work.
+Two arms at 16 concurrency can hold at most 32, so the great majority of any
+such listing was never this project's to begin with.
 
-How much of the quota this project was actually consuming is not established:
-the 97 were counted, not attributed.
+`reap_sandboxes.py` filters on `environment_name` against the shipped task
+list before it considers age, and there is no flag that disables that half.
+The real mitigation is not reaping at all: a run has to tolerate an account
+that other teams can saturate at any moment, which means retrying an episode
+that cannot get a sandbox rather than scoring it zero.
 
 ## Defects this found
 
