@@ -248,3 +248,21 @@ def test_the_named_environment_reaches_harbor(monkeypatch, tmp_path: Path) -> No
 def test_no_environment_leaves_harbors_default_alone(monkeypatch, tmp_path: Path) -> None:
     call = _run_with_stub_lab(monkeypatch, tmp_path, None)
     assert "environment" not in call["overrides"]
+
+
+@pytest.mark.unit
+def test_the_trial_carries_the_cost_harbor_measured(tmp_path: Path) -> None:
+    # The episode root is deleted when the episode ends, so a cost left in
+    # Harbor's trial tree is unrecoverable and a spend guard outside the
+    # episode would silently see zero.
+    trial = tmp_path / "t"
+    trial.mkdir()
+    (trial / "result.json").write_text(json.dumps({"agent_result": {"cost_usd": 0.0132}}))
+    (trial / "nested").mkdir()
+    (trial / "nested" / "result.json").write_text(json.dumps({"agent_result": {"cost_usd": 0.0068}}))
+    assert runner.trial_record("t", {"acc": 1.0}, trial)["cost_usd"] == pytest.approx(0.02)
+
+
+@pytest.mark.unit
+def test_a_trial_with_no_measured_cost_reports_zero(tmp_path: Path) -> None:
+    assert runner.trial_record("t", {}, tmp_path)["cost_usd"] == 0.0
