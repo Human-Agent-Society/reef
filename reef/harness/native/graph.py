@@ -364,7 +364,7 @@ class Run:
         queue = [first]
         while queue and outcome == "completed":
             agent = queue.pop(0)
-            outcome, text, steps = self.run_agent(agent, text)
+            outcome, text, _ = self.run_agent(agent, text)
             ran.append(agent)
             queue = [*(self.agents[agent].get("then") or ()), *queue]
         content = text or f"{ran[-1]} ended with {outcome}"

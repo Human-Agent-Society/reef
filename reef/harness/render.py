@@ -77,10 +77,10 @@ def _check_native_references(
             missing = sorted(set(agent.get(key) or ()) - names)
             if missing:
                 raise RenderError(f"native_agent {name!r} names {key} the tree lacks: {', '.join(missing)}")
-        graph = str(agent.get("graph", "seed"))
-        if graph not in graph_names:
-            raise RenderError(f"native_agent {name!r} runs a graph the tree lacks: {graph}")
-        calls[name] = [*(agent.get("then") or ()), *subagents.get(graph, [])]
+        graph_name = str(agent.get("graph", "seed"))
+        if graph_name not in graph_names:
+            raise RenderError(f"native_agent {name!r} runs a graph the tree lacks: {graph_name}")
+        calls[name] = [*(agent.get("then") or ()), *subagents.get(graph_name, [])]
     state: dict[str, int] = {}
 
     def visit(name: str) -> None:
