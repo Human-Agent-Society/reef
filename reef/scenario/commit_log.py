@@ -32,6 +32,7 @@ import os
 import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -47,6 +48,7 @@ class CommitLogError(ReefError):
     """The commit log is corrupt or a record does not match the schema."""
 
 
+@dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
     """One committed training step: the atomic release record.
 
@@ -57,64 +59,60 @@ class CommitRecord:
     a crash.
     """
 
-    def __init__(
-        self,
-        *,
-        scenario: str,
-        step: int,
-        artifact_ref: ArtifactRef,
-        checkpoint: bool,
-        algorithm_state: Mapping[str, Any] | None,
-        high_water_sequence: int,
-        high_water_offset: int,
-        compacted_ids: frozenset[str] = frozenset(),
-        consumed_ids: frozenset[str] = frozenset(),
-        recorded_at: float | None = None,
-        operation: str = "training",
-        operation_verified: bool = True,
-        pending: bool = False,
-        rollback_target_release_id: str | None = None,
-        metrics: Mapping[str, Any] | None = None,
-        training_job_id: str | None = None,
-    ) -> None:
-        if not isinstance(step, int) or isinstance(step, bool) or step < 1:
+    scenario: str
+    step: int
+    artifact_ref: ArtifactRef
+    checkpoint: bool
+    algorithm_state: Mapping[str, Any] | None
+    high_water_sequence: int
+    high_water_offset: int
+    compacted_ids: frozenset[str] = frozenset()
+    consumed_ids: frozenset[str] = frozenset()
+    recorded_at: float = field(default_factory=time.time)
+    operation: str = "training"
+    operation_verified: bool = True
+    pending: bool = False
+    rollback_target_release_id: str | None = None
+    metrics: Mapping[str, Any] | None = None
+    training_job_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
             raise CommitLogError("commit record step must be a positive integer")
-        for name, value in (("high_water_sequence", high_water_sequence), ("high_water_offset", high_water_offset)):
+        for name, value in (
+            ("high_water_sequence", self.high_water_sequence),
+            ("high_water_offset", self.high_water_offset),
+        ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitLogError(f"commit record {name} must be a non-negative integer")
-        self.scenario = scenario
-        self.step = step
-        self.artifact_ref = artifact_ref
-        self.checkpoint = checkpoint
-        self.algorithm_state = None if algorithm_state is None else dict(algorithm_state)
-        self.high_water_sequence = high_water_sequence
-        self.high_water_offset = high_water_offset
-        self.compacted_ids = frozenset(compacted_ids)
-        self.consumed_ids = frozenset(consumed_ids)
-        self.recorded_at = time.time() if recorded_at is None else recorded_at
-        if operation not in ("training", "rollback", "promote"):
+        if self.operation not in ("training", "rollback", "promote"):
             raise CommitLogError("commit record operation must be 'training', 'rollback', or 'promote'")
-        if not isinstance(operation_verified, bool):
+        if not isinstance(self.operation_verified, bool):
             raise CommitLogError("commit record operation_verified must be a boolean")
-        if operation in ("rollback", "promote"):
-            if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
-                raise CommitLogError(f"{operation} commit requires rollback_target_release_id")
-        elif rollback_target_release_id is not None:
+        if self.operation in ("rollback", "promote"):
+            if not isinstance(self.rollback_target_release_id, str) or not self.rollback_target_release_id:
+                raise CommitLogError(f"{self.operation} commit requires rollback_target_release_id")
+        elif self.rollback_target_release_id is not None:
             raise CommitLogError("training commit must not carry rollback_target_release_id")
-        if not isinstance(pending, bool) or (pending and operation != "training"):
+        if not isinstance(self.pending, bool) or (self.pending and self.operation != "training"):
             raise CommitLogError("only a training commit may be pending")
-        self.operation = operation
-        self.operation_verified = operation_verified
-        self.rollback_target_release_id = rollback_target_release_id
-        self.pending = pending
-        if metrics is not None and not isinstance(metrics, Mapping):
+        if self.metrics is not None and not isinstance(self.metrics, Mapping):
             raise CommitLogError("commit record metrics must be an object or null")
-        self.metrics = None if metrics is None else deepcopy(dict(metrics))
-        if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
+        if self.training_job_id is not None and (
+            not isinstance(self.training_job_id, str) or not self.training_job_id
+        ):
             raise CommitLogError("commit record training_job_id must be a non-empty string or null")
-        if operation != "training" and training_job_id is not None:
+        if self.operation != "training" and self.training_job_id is not None:
             raise CommitLogError("only training commits may carry training_job_id")
-        self.training_job_id = training_job_id
+        # Own every mutable value the record was handed: the log is the durable
+        # commit point, so a caller mutating its state or metrics afterwards
+        # must not change what was recorded.
+        object.__setattr__(
+            self, "algorithm_state", None if self.algorithm_state is None else dict(self.algorithm_state)
+        )
+        object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
+        object.__setattr__(self, "compacted_ids", frozenset(self.compacted_ids))
+        object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {

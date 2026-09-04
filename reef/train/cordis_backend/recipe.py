@@ -30,9 +30,16 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Promoter, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    resolve_episode_scorer,
+    resolve_promoter,
+    resolve_proposer,
+)
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer

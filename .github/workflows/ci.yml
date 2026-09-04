@@ -97,7 +97,27 @@ jobs:
       # is enough. It is the only gate that pins SAO's hard-mask semantics,
       # which share the pg_clipfrac key with PPO's clamp counter.
       # Keep Git-LFS tests independent of host-level Git configuration.
-      - run: >
+      # Coverage is measured on 3.12 only. Measuring it installs a
+      # process-wide trace function (threading.settrace), so every
+      # Thread._bootstrap_inner calls sys.settrace before running its target.
+      # CPython <= 3.11 guards sys.settrace with a `static int reentrant`
+      # (Python/ceval.c) that is process-global rather than per-thread: if that
+      # window is open on one thread when another thread bootstraps, the
+      # bootstrapping thread dies with "Cannot install a trace function while
+      # another trace function is being installed" -- before its target runs at
+      # all. That silently killed worker threads in the threaded suites on
+      # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
+      # coverage.xml is uploaded, so the other legs were paying the risk for a
+      # report nothing reads.
+      - name: Run tests
+        if: matrix.python-version != '3.12'
+        run: python -m pytest tests
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+      - name: Run tests with coverage
+        if: matrix.python-version == '3.12'
+        run: >
           python -m pytest tests
           --cov=reef --cov-report=term --cov-report=xml
         env:
