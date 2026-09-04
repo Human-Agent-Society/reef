@@ -26,7 +26,9 @@ def materialize(serve: Path, work: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser = argparse.ArgumentParser(
+        description="Copy a serve file's recipe sections where the recipe registry reads them."
+    )
     parser.add_argument("serve", nargs="?", default="configs/serve.yaml", type=Path, help="the serve file to read")
     parser.add_argument("--work", default="work", type=Path, help="the state directory run.sh and run.py share")
     args = parser.parse_args(argv)
