@@ -76,6 +76,10 @@ def main():
             if error := client.get("/reef/status").get("error"):
                 raise SystemExit(f"evolve step failed: {error}; check work/reef.log") from exc
             time.sleep(2.0)
+        except (TimeoutError, OSError):
+            # The evolve step runs inside the service, so a long gate (a graph that loops on verify,
+            # a slow local model) leaves a poll unanswered; keep polling until the deadline.
+            time.sleep(2.0)
     if manifest is None:
         print(f"no skill mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
