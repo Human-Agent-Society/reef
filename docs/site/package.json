@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "predev": "node scripts/fetch-repo-stats.mjs",
+    "prebuild": "node scripts/fetch-repo-stats.mjs",
     "build": "next build --webpack",
     "check:docs": "node scripts/check-doc-links.mjs && node scripts/check-doc-contracts.mjs",
     "start": "next start",

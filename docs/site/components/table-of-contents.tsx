@@ -1,5 +1,6 @@
 "use client";
 
+import { AlignLeft } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { TocItem } from "@/lib/docs";
 
@@ -15,7 +16,7 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
         const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
         if (visible[0]?.target.id) setActive(visible[0].target.id);
       },
-      { rootMargin: "-96px 0px -72%", threshold: [0, 1] },
+      { rootMargin: "-120px 0px -72%", threshold: [0, 1] },
     );
     headings.forEach((heading) => observer.observe(heading));
     return () => observer.disconnect();
@@ -25,7 +26,7 @@ export function TableOfContents({ items }: { items: TocItem[] }) {
 
   return (
     <aside className="toc">
-      <p>On this page</p>
+      <p className="toc-label"><AlignLeft size={15} aria-hidden="true" />On this page</p>
       <nav aria-label="Table of contents">
         {items.map((item) => (
           <a key={item.id} href={`#${item.id}`} className={`${item.level === 3 ? "nested " : ""}${active === item.id ? "active" : ""}`}>

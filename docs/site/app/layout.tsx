@@ -26,7 +26,7 @@ export const metadata: Metadata = {
   twitter: { card: "summary", title: siteConfig.title, description: siteConfig.description },
 };
 
-const themeScript = `(function(){try{var t=localStorage.getItem('reef-theme');var m=t==='light'||t==='dark'?t:'auto';var d=m==='dark'||(m==='auto'&&window.matchMedia('(prefers-color-scheme: dark)').matches);var e=document.documentElement;e.dataset.theme=d?'dark':'light';e.dataset.themeMode=m}catch(e){}})()`;
+const themeScript = `(function(){try{var t=localStorage.getItem('reef-theme');var m=t==='light'||t==='dark'?t:'auto';var d=m==='dark'||(m==='auto'&&window.matchMedia('(prefers-color-scheme: dark)').matches);var e=document.documentElement;e.dataset.theme=d?'dark':'light'}catch(e){}})()`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   const searchDocuments = getSearchDocuments();
