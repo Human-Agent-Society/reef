@@ -108,11 +108,23 @@ Ruled out as causes: Reef's empty seed tree renders `terminus/config.json` as
 with Harbor's defaults, and upstream no longer passes a temperature either.
 Upstream's retry can only raise its score, not lower it.
 
-What remains untested is that the arms reach Harbor differently: Reef drives
-`Trial` directly through reef-eval, upstream goes through `harbor run` as a
-Job. Job-level and trial-level defaults are not known to be identical. That is
-the next thing to check, and until it is checked neither "noise" nor
-"divergence" is the honest label.
+The arms do reach Harbor differently -- Reef drives `Trial` directly through
+reef-eval, upstream goes through `harbor run` as a Job -- so the difference
+was looked for there. It is not in any of these:
+
+| Checked | Finding |
+| --- | --- |
+| Seed composition | renders `terminus/config.json` as `{}`, no instruction paths, no agent kwargs |
+| Temperature | unset on both sides since `--ak temperature=0.7` was removed |
+| Timeout multipliers | `JobConfig` and `TrialConfig` declare the same defaults: `timeout_multiplier` 1.0, the other four `None`, and reef-eval passes none of them |
+| Failed episodes | both count them as zero -- upstream's parser says so explicitly, and Reef's `_evaluation_scores` maps `None` to `0.0` |
+| Retry | only upstream has it, and it can only raise a score |
+
+So no systematic cause was found. At 1.5 sigma with two measurements a side,
+sampling remains the best explanation, and the repeated-run result below --
+six of thirty tasks flipping between identical configurations -- shows there
+is easily enough per-task variance to produce it. Worth another measurement
+each before treating it as anything more.
 
 ### The same configuration, run twice
 
