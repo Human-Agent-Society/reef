@@ -37,6 +37,7 @@ class _PendingStep:
 
     batch: TrainingBatch
     result: TrainStepResult | None
+    prepared_commit: PreparedCommit | None = None
 
     @property
     def batch_id(self) -> str:
@@ -294,15 +295,14 @@ class Trainer:
                 self._pending.result = execution.result
         return execution
 
-    def commit(self) -> PreparedCommit:
-        """Commit the pending result on the trainer side, without compacting.
+    def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
+        """Prepare the pending result without exposing its state as committed.
 
-        With a pending result this acknowledges its batch, advances the
-        algorithm state, and computes what compaction would delete — but deletes
-        nothing, so the caller can make a commit record durable first and then
-        call :meth:`apply_compaction`. Without a pending result (a commit
-        driven externally, e.g. a direct weight publication) nothing changes
-        and the returned commit describes the current state.
+        Acknowledging a processor mutates its in-memory batch bookkeeping, so
+        the prepared value is cached and reused after a publication retry. The
+        trainer's algorithm state and pending reservation remain unchanged
+        until :meth:`commit` is called after the scenario's artifact and commit
+        record settle.
         """
         with self._lock:
             if self._pending is None:
@@ -312,6 +312,10 @@ class Trainer:
                     high_water_offset=self._data_offset,
                     compacted_ids=frozenset(),
                 )
+            if self._pending.result is not result:
+                raise RuntimeError("training result does not match the pending step")
+            if self._pending.prepared_commit is not None:
+                return self._pending.prepared_commit
             batch_id, result = self._pending.batch_id, self._pending.result
             if result is None:
                 raise RuntimeError("trainer pending batch has no result")
@@ -320,10 +324,8 @@ class Trainer:
             consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
-            self._state = dict(result.state)
-            self._pending = None
-            return PreparedCommit(
-                algorithm_state=self.algorithm_state_dict(),
+            prepared = PreparedCommit(
+                algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
                 compacted_ids=frozenset(compacted),
@@ -331,6 +333,18 @@ class Trainer:
                 metrics=dict(result.metrics) or None,
                 training_job_id=result.training_job_id,
             )
+            self._pending.prepared_commit = prepared
+            return prepared
+
+    def commit(self, prepared: PreparedCommit) -> None:
+        """Expose one prepared state after its scenario commit has settled."""
+        with self._lock:
+            if self._pending is None:
+                return
+            if self._pending.prepared_commit is not prepared:
+                raise RuntimeError("prepared commit does not match the pending training step")
+            self._state = dict(prepared.algorithm_state)
+            self._pending = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
         """Attach provider correlation fields to the exact pending result.

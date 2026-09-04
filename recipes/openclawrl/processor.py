@@ -25,7 +25,7 @@ import json
 import logging
 import pathlib
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from typing import Any
 
 from recipes.openclawrl.prm import (
@@ -34,7 +34,7 @@ from recipes.openclawrl.prm import (
     collect_hint_candidates,
     render_response_fallback,
 )
-from recipes.openclawrl.sessions import SessionIndex
+from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
 from recipes.openclawrl.turns import (
     TurnJob,
     TurnJudgment,
@@ -49,6 +49,13 @@ from reef.train.processors.computed import ComputedFeedbackProcessor, JudgingWor
 from reef.train.types import PolicyBatch, PolicySample, ProcessorContext, policy_row_violation
 
 logger = logging.getLogger(__name__)
+
+# How often a run may repeat the "nothing is binding" warning, and how many
+# dead-on-arrival sessions it takes to raise it at all. A conversation whose
+# last turn never got a next state is ordinary; a run where those outnumber
+# the turns that did bind is a correlation failure.
+_UNBOUND_WARN_INTERVAL_S = 300.0
+_UNBOUND_WARN_FLOOR = 8
 
 
 def _session_tag(payload: Any) -> str | None:
@@ -83,7 +90,16 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         # its config fields; ``clients`` overrides for tests.
         self._prm, self._teacher, self._renderer = clients if clients is not None else build_clients(config)
         self._max_hint_candidates = max(1, int(config.get("prm_max_hint_candidates", 3)))
-        self._index = SessionIndex(float(config.get("session_ttl_s", 900.0)))
+        self._index = SessionIndex(
+            float(config.get("session_ttl_s", 900.0)),
+            max_sessions=int(config.get("max_open_sessions", DEFAULT_MAX_SESSIONS)),
+        )
+        # Correlation reports itself through the log, not the record file
+        # below: the failure worth catching is "nothing ever bound", and a
+        # run in that state never produces the batch that would write a line.
+        self._warned_untagged = False
+        self._warned_evicted = False
+        self._last_unbound_warning = -_UNBOUND_WARN_INTERVAL_S
         # What the judge actually saw. Upstream persists this per turn to a
         # PRM record file; without it a batch mean is the only visible number
         # and every question about the judged population — the eval mix, how
@@ -253,9 +269,10 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         """Append this batch's judged population to the PRM record file.
 
         One line per batch: what the judges returned since the previous one,
-        and the reward mix that reached the trainer. A batch mean alone
-        cannot distinguish "the judges disagree" from "the judges never
-        ran", and neither can it show which next states are being judged.
+        the reward mix that reached the trainer, and how correlation is doing
+        overall. A batch mean alone cannot distinguish "the judges disagree"
+        from "the judges never ran", and neither can it show which next
+        states are being judged.
         """
         record = {
             "batch": batch_number,
@@ -263,6 +280,9 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             "samples": len(samples),
             "rewards": dict(sorted(collections.Counter(f"{s.reward:+.0f}" for s in samples).items())),
             "judged": dict(sorted(self._judged.items())),
+            # Cumulative, unlike the per-batch counters above: these answer
+            # "is correlation working" for the run as a whole.
+            "correlation": asdict(self._index.stats),
         }
         self._judged.clear()
         if self._record_path is None:
@@ -285,4 +305,48 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         Without this the index would grow for the life of the process and
         those records would stay protected from compaction forever.
         """
-        return self._index.expire(now)
+        retired = self._index.expire(now)
+        self._warn_on_correlation(now)
+        return retired
+
+    def _warn_on_correlation(self, now: float) -> None:
+        """Say out loud when correlation is producing nothing.
+
+        A turn that never binds is never judged and never trains, and it does
+        so without an error: the only symptom is a training set that stays
+        empty, which is invisible without reading this file. WARNING because
+        reef configures no logging and anything below it is discarded; rate
+        limited because this is reached once per record.
+        """
+        stats = self._index.stats
+        if stats.untagged and not self._warned_untagged:
+            self._warned_untagged = True
+            logger.warning(
+                "openclawrl: correlating by trace matching — this traffic carries no "
+                "x-reef-tag-session tag. Trace matching binds only agents that resend their "
+                "whole transcript on every request; an agent that keeps or rewrites its "
+                "history locally yields no trainable turns. Stamp x-reef-tag-session, stable "
+                "and unique per conversation, to correlate reliably."
+            )
+        if stats.evicted and not self._warned_evicted:
+            self._warned_evicted = True
+            logger.warning(
+                "openclawrl: the session table hit max_open_sessions and is evicting the least "
+                "recently active sessions (%d so far); their pending turns retire untrained. "
+                "Unmatched requests each open a session, so this usually means correlation is "
+                "failing rather than that the traffic has that many live conversations.",
+                stats.evicted,
+            )
+        if (
+            stats.dropped_unbound >= _UNBOUND_WARN_FLOOR
+            and stats.dropped_unbound > stats.bound
+            and now - self._last_unbound_warning >= _UNBOUND_WARN_INTERVAL_S
+        ):
+            self._last_unbound_warning = now
+            logger.warning(
+                "openclawrl: %d session(s) expired without ever binding a turn, against %d bound "
+                "turn(s). Unbound turns are never judged and never train — check that every "
+                "inference in a conversation carries the same x-reef-tag-session value.",
+                stats.dropped_unbound,
+                stats.bound,
+            )

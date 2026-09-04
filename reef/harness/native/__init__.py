@@ -18,6 +18,7 @@ import copy
 import importlib.util
 import json
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -31,6 +32,10 @@ from reef.harness.nodes import NATIVE_SEAMS
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12
 MAX_RESULT_CHARS = 20_000
+#: A result over the cap is spilled whole to this directory under the workspace; the model reads the head, a
+#: marker naming the file, and this many characters of tail.
+SPILL_DIR = ".reef/spill"
+SPILL_TAIL_CHARS = 2_000
 #: Provider attempts one step may spend and the longest wait between them, whatever a request_error hook asks.
 MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
@@ -414,7 +419,8 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 raw = function.get("arguments") or "{}"
                 call_id = str(call.get("id") or name)
                 session.write("tool/call", {"step": step, "call_id": call_id, "name": name, "arguments": raw})
-                result = _invoke(tools, name, raw, workdir)
+                spill = workdir / SPILL_DIR / f"{step}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
+                result = _invoke(tools, name, raw, workdir, spill=spill)
                 payload = {
                     "step": step,
                     "call_id": call_id,
@@ -437,7 +443,24 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         session.close()
 
 
-def _invoke(tools: Mapping[str, ToolModule], name: str, raw: str, workdir: Path) -> dict[str, Any]:
+def _clip(text: str, workdir: Path, spill: Path | None) -> tuple[str, dict[str, Any]]:
+    """What the model reads of a result over the cap: with ``spill``, the whole text lands there and the model gets the head, a marker naming the file, and the tail; without it, the head alone."""
+    if len(text) <= MAX_RESULT_CHARS:
+        return text, {"truncated": False}
+    if spill is None:
+        return text[:MAX_RESULT_CHARS], {"truncated": True}
+    spill.parent.mkdir(parents=True, exist_ok=True)
+    spill.write_text(text, encoding="utf-8")
+    relative = spill.relative_to(workdir).as_posix()
+    tail = text[-SPILL_TAIL_CHARS:]
+    marker = f"\n... [{len(text) - MAX_RESULT_CHARS} characters omitted; the full result is in {relative}] ...\n"
+    head = text[: max(0, MAX_RESULT_CHARS - len(marker) - len(tail))]
+    return head + marker + tail, {"truncated": True, "spill": relative}
+
+
+def _invoke(
+    tools: Mapping[str, ToolModule], name: str, raw: str, workdir: Path, *, spill: Path | None = None
+) -> dict[str, Any]:
     """One result for one call: content, is_error, and a closed error code; run only sees valid arguments."""
     try:
         arguments = json.loads(raw) if raw.strip() else {}
@@ -466,12 +489,12 @@ def _invoke(tools: Mapping[str, ToolModule], name: str, raw: str, workdir: Path)
     except Exception as exc:
         return error("TOOL_FAILED", f"{type(exc).__name__}: {exc}")
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-    truncated = len(text) > MAX_RESULT_CHARS
+    content, clipped = _clip(text, workdir, spill)
     return {
-        "content": text[:MAX_RESULT_CHARS],
+        "content": content,
         "is_error": False,
         "arguments": arguments,
-        "meta": {"duration_ms": int((time.monotonic() - started) * 1000), "truncated": truncated},
+        "meta": {"duration_ms": int((time.monotonic() - started) * 1000), **clipped},
     }
 
 
