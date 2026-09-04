@@ -505,6 +505,41 @@ def test_sglang_plugin_environment_crosses_ray_actor_boundaries(monkeypatch: pyt
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("broken", [None, "request", "radix", "request_id", "unsupported"])
+def test_adapter_prefix_probe_checks_actual_key_isolation(monkeypatch: pytest.MonkeyPatch, broken: str | None) -> None:
+    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
+    requests = types.ModuleType("sglang.srt.managers.schedule_batch")
+    radix = types.ModuleType("sglang.srt.mem_cache.radix_cache")
+    sampling = types.ModuleType("sglang.srt.sampling.sampling_params")
+
+    class Req:
+        def __init__(self, *, rid, origin_input_text, origin_input_ids, sampling_params, lora_id):
+            if broken == "unsupported":
+                raise TypeError("unsupported request API")
+            self.extra_key = None if broken == "request" else lora_id
+            if broken == "request_id":
+                self.extra_key = rid
+
+    class RadixKey:
+        def __init__(self, *, token_ids, extra_key):
+            self.token_ids = token_ids
+            self.extra_key = extra_key
+
+        def child_key(self):
+            if broken == "radix":
+                return tuple(self.token_ids)
+            return self.extra_key, tuple(self.token_ids)
+
+    requests.Req = Req  # type: ignore[attr-defined]
+    radix.RadixKey = RadixKey  # type: ignore[attr-defined]
+    sampling.SamplingParams = lambda **kwargs: types.SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    for module in (requests, radix, sampling):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+
+    assert preflight._adapter_scoped_prefix_cache_supported() is (broken is None)
+
+
+@pytest.mark.unit
 def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatch) -> None:
     installed = []
     monkeypatch.setattr(
@@ -823,9 +858,9 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
         def continue_generation(self, recv_req):
             return None
 
-        def is_fully_idle(self, for_health_check=False):
+        def is_fully_idle(self, for_health_check=False, ignore_waiting=False):
             del for_health_check
-            return not self.waiting_queue and not self.gpu_busy
+            return (ignore_waiting or not self.waiting_queue) and not self.gpu_busy
 
     scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
@@ -861,7 +896,7 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
 
 
 @pytest.mark.unit
-def test_colocated_retract_uses_native_ignore_waiting_when_available(
+def test_colocated_retract_uses_pinned_ignore_waiting_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
@@ -892,6 +927,8 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     assert scheduler.is_fully_idle(ignore_waiting=False) is True
     assert scheduler.calls[-1] == (False, True)
     assert scheduler.is_fully_idle(for_health_check=True) is False
+    assert scheduler.calls[-1] == (True, False)
+    assert scheduler.is_fully_idle(True, False) is False
     assert scheduler.calls[-1] == (True, False)
 
 

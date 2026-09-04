@@ -7,8 +7,8 @@ of a half-started cluster.
 
 from __future__ import annotations
 
-import inspect
 import os
+from array import array
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
@@ -140,20 +140,29 @@ def configure_sglang_runtime(args) -> None:
 def _adapter_scoped_prefix_cache_supported() -> bool:
     """Whether SGLang keys radix-cache entries per LoRA adapter.
 
-    Reef serves one adapter per scenario from one engine, so a shared prefix
-    may only be reused by a request bound to the same adapter. SGLang expresses
-    that by folding the request's adapter into the cache entry's key. An
-    engine that cannot is not asked to keep the scenarios apart: the caller
-    leaves cross-request reuse off instead.
+    Exercise the request and radix-key APIs with identical tokens: requests
+    using one adapter must share a key, while another adapter must not. These
+    CPU-side request objects allocate no serving KV or model weights.
     """
     try:
         from sglang.srt.managers.schedule_batch import Req
         from sglang.srt.mem_cache.radix_cache import RadixKey
-    except ImportError:
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        keys = []
+        for index, adapter in enumerate(("reef-probe-a", "reef-probe-a", "reef-probe-b")):
+            tokens = array("q", [1])
+            req = Req(
+                rid=f"reef-prefix-probe-{index}",
+                origin_input_text="",
+                origin_input_ids=tokens,
+                sampling_params=SamplingParams(max_new_tokens=1),
+                lora_id=adapter,
+            )
+            keys.append(RadixKey(token_ids=tokens, extra_key=req.extra_key).child_key())
+    except (ImportError, AttributeError, TypeError):
         return False
-    return (
-        "extra_key" in getattr(RadixKey, "__slots__", ()) and "lora_id" in inspect.signature(Req.__init__).parameters
-    )
+    return keys[0] == keys[1] and keys[0] != keys[2]
 
 
 def _require_lora_distributed_schema() -> None:
