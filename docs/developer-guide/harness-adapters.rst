@@ -178,7 +178,9 @@ tool the tree lacks fails at render. The stages:
    message | appends ``text`` as a user message; outcome ``done``
    end | ends the turn with ``reason`` ``completed`` or ``gave_up``
 
-Each model stage is one step, so ``max_steps`` bounds model calls as before;
+Each model stage is one step, so ``max_steps`` bounds model calls as before,
+and each call asks for at most 4,096 tokens, so one runaway reply cannot hold
+a single slot local server for every other caller;
 entering a model stage with the budget spent ends the turn with
 ``max-steps``. The log names the path: ``stage/enter`` (``step``, ``stage``,
 ``kind``) and ``stage/exit`` (``outcome``, ``to``, and for a verify stage

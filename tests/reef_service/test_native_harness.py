@@ -19,6 +19,7 @@ from reef.harness.episode import run_episode
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native import (
     _DEFAULTS,
+    MAX_COMPLETION_TOKENS,
     MAX_RESULT_CHARS,
     SPILL_TAIL_CHARS,
     HookModule,
@@ -432,9 +433,10 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     assert read["name"] == "read_file" and read["content"] == "hello"
     assert _events(result.trajectory, "assistant/message")[-1]["data"]["content"] == "The file says: hello"
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
-    # The first request the fake model saw is the one the log says it saw.
+    # The first request the fake model saw is the one the log says it saw, with the reply cap on it.
     first = fake_model.requests[0]
     assert first["messages"][0] == {"role": "system", "content": "Be brief."}
+    assert first["max_tokens"] == MAX_COMPLETION_TOKENS
     assert sorted(tool["function"]["name"] for tool in first["tools"]) == ["read_file", "run_bash", "write_file"]
 
 

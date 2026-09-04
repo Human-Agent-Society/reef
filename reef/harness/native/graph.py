@@ -135,7 +135,7 @@ class Run:
             )
         for content in loop._texts(entry.get("messages")):
             self.say(content, {"kind": "hook", "event": "pre_step"})
-        body: dict[str, Any] = {"messages": self.messages}
+        body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.MAX_COMPLETION_TOKENS}
         if self.declarations:
             body["tools"] = self.declarations
         message = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)

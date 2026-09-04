@@ -46,7 +46,8 @@ def main():
         body, receipt = client.inference_with_record(
             SCENARIO,
             "/v1/chat/completions",
-            {"model": MODEL, "messages": [{"role": "user", "content": task}]},
+            # A cap on the reply: a local single slot server stalls behind one unbounded generation.
+            {"model": MODEL, "messages": [{"role": "user", "content": task}], "max_tokens": 2048},
         )
         prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
         score = evolution.grade_text(task, body["choices"][0]["message"]["content"])

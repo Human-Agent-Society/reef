@@ -78,7 +78,7 @@ def propose(nodes, samples, models):
     try:
         # A stalled endpoint holds the training thread for the whole timeout
         # before the step degrades to a skip; keep it short.
-        reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=120.0)
+        reply = models.served.chat([{"role": "user", "content": prompt}], timeout_s=120.0, max_tokens=2048)
     except Exception:
         return None
     proposal = _parse_proposal(reply)
