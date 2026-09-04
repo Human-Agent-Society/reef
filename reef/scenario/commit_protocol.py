@@ -275,8 +275,8 @@ class ScenarioCommitProtocol:
             checkpoint=False,
             prepared=prepared,
         )
-        self._finish_trainer_commit(prepared)
         artifacts.advance(live_ref, expected=head)
+        self._finish_trainer_commit(prepared)
         self.advance_to(next_step)
         return result.state
 
