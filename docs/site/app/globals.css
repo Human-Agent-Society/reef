@@ -122,8 +122,8 @@ button { cursor: pointer; }
 .header-tabs a.active { color: var(--foreground); border-bottom-color: var(--brand); }
 
 /* Documentation layout: sidebar, content, table of contents */
-.docs-layout { --header-height: 105px; width: min(1440px, 100%); min-height: calc(100vh - var(--header-height)); margin: 0 auto; padding: 0 32px; display: grid; grid-template-columns: 272px minmax(0, 1fr) 232px; }
-.docs-sidebar { position: sticky; top: var(--header-height); height: calc(100vh - var(--header-height)); padding: 32px 20px 48px 0; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
+.docs-layout { --header-height: 105px; width: min(1440px, 100%); min-height: calc(100vh - var(--header-height)); margin: 0 auto; padding: 0 32px; display: grid; grid-template-columns: 260px minmax(0, 1fr) 232px; }
+.docs-sidebar { position: sticky; top: var(--header-height); height: calc(100vh - var(--header-height)); margin-left: -12px; padding: 32px 20px 48px 0; overflow-y: auto; overscroll-behavior: contain; border-right: 1px solid color-mix(in srgb, var(--border) 72%, transparent); }
 .sidebar-group { margin-bottom: 26px; }
 .sidebar-group-title { margin: 0 0 6px 12px; color: var(--foreground); font-size: 14px; font-weight: 600; line-height: 22px; }
 .sidebar-group-items { display: grid; gap: 2px; }
