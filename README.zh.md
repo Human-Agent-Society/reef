@@ -261,6 +261,37 @@ Reef 为会持续成长的 AI 提供基础设施：
 如果 Reef 对你有帮助，欢迎点个 Star ⭐，让更多人发现并参与进来。
 
 
+## 团队
+
+Reef 由以下团队成员共同构建，按姓氏字母顺序排列：
+
+[Wenhao Chai](https://github.com/wenhaochai),
+[Shuangrui Ding](https://github.com/Mark12Ding),
+Hao He,
+Haoze He,
+[Chonhe Jiang](https://github.com/Chonghe-Jiang),
+[Nan Jiang](https://github.com/nanjiangwill),
+Xuan Jiang,
+[Xiaochen Li](https://github.com/SeuperHakkerJa),
+[Paul Liang](https://github.com/pliang279),
+[Bo Liu](https://github.com/Benjamin-eecs),
+Boyuan Long,
+[Qiuyang Mang](https://github.com/joyemang33),
+[Zhenting Qi](https://github.com/zhentingqi),
+[Ao Qu](https://github.com/quao627),
+Mingruo Qu,
+Zhaokai Wang,
+Xuezhi Yan,
+[Hanfei Yu](https://github.com/hanfeiyu),
+[Haofei Yu](https://github.com/lwaekfjlk),
+[Simon Yu](https://github.com/simonucl),
+[Han Zheng](https://github.com/MikeZheng777),
+[Kaichen Zhou](https://github.com/kaichen-z),
+[Zijian Zhou](https://github.com/BobbyZhouZijian),
+[Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
+Dingyi Zhuang.
+
+
 ## 致谢
 
 以下项目支撑了 Reef 的关键部分，在此感谢：

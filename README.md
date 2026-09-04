@@ -280,6 +280,37 @@ Working on continual self-improving agent?
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
 
 
+## The Team
+
+Reef is built by the following team members, listed in alphabetical order by last name:
+
+[Wenhao Chai](https://github.com/wenhaochai),
+[Shuangrui Ding](https://github.com/Mark12Ding),
+Hao He,
+Haoze He,
+[Chonhe Jiang](https://github.com/Chonghe-Jiang),
+[Nan Jiang](https://github.com/nanjiangwill),
+Xuan Jiang,
+[Xiaochen Li](https://github.com/SeuperHakkerJa),
+[Paul Liang](https://github.com/pliang279),
+[Bo Liu](https://github.com/Benjamin-eecs),
+Boyuan Long,
+[Qiuyang Mang](https://github.com/joyemang33),
+[Zhenting Qi](https://github.com/zhentingqi),
+[Ao Qu](https://github.com/quao627),
+Mingruo Qu,
+Zhaokai Wang,
+Xuezhi Yan,
+[Hanfei Yu](https://github.com/hanfeiyu),
+[Haofei Yu](https://github.com/lwaekfjlk),
+[Simon Yu](https://github.com/simonucl),
+[Han Zheng](https://github.com/MikeZheng777),
+[Kaichen Zhou](https://github.com/kaichen-z),
+[Zijian Zhou](https://github.com/BobbyZhouZijian),
+[Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
+Dingyi Zhuang.
+
+
 ## Acknowledgements
 
 We are particularly grateful to these projects which power important parts of Reef:
