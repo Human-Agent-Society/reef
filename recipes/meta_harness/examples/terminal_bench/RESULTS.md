@@ -89,6 +89,28 @@ sigma**. Task by task, 21 of 30 agree exactly, and 8 of the 9 that differ are
 one episode moving on a two-trial task, in both directions -- the signature of
 noise, not of a systematic difference.
 
+### The same configuration, run twice
+
+Upstream's baseline was measured twice, same agent, same 30 tasks, same two
+trials. Both runs returned **0.2833**. Task by task they do not agree:
+
+```
+configure-git-webserver           1.0 -> 0.5
+fix-ocaml-gc                      1.0 -> 0.5
+llm-inference-batching-scheduler  1.0 -> 0.5
+fix-code-vulnerability            0.5 -> 1.0
+path-tracing                      0.0 -> 0.5
+write-compressor                  0.0 -> 0.5
+```
+
+Six of thirty tasks flipped, one episode each, three down and three up. The
+identical mean is those flips cancelling exactly -- coincidence, not
+stability. **Ten percent of episodes change outcome between identical runs.**
+
+Read the matching seed measurements above with that in mind: a mean that
+reproduces to four decimal places can sit on top of a fifth of the task set
+disagreeing.
+
 The consequence is larger than the table. **At 30 tasks x 2 trials the search
 selects on margins smaller than its own measurement error.** Separating a real
 5-point improvement would need roughly 8 trials per task, four times the
