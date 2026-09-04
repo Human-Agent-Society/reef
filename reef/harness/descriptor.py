@@ -19,6 +19,12 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``inherit_env`` (optional): names of host environment variables the episode
+  may inherit. Episodes are otherwise hermetic - ``_inherited_env`` keeps only
+  PATH, SYSTEMROOT and TMPDIR - which is right for a harness that needs
+  nothing from the host. An adapter that reaches a hosted sandbox needs that
+  provider's credential, and naming it here keeps the exception explicit
+  instead of widening the allowlist for every adapter.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so it cannot be nested in Reef's jail. A deployment that
   configures the sandbox executor for one of these refuses to boot rather
@@ -118,6 +124,8 @@ class AdapterDescriptor:
     #: True when the adapter isolates episodes itself (a task container) and
     #: cannot be nested inside :class:`~reef.harness.executor.SandboxExecutor`.
     self_isolating: bool = False
+    #: Host environment variable names this adapter's episodes may inherit.
+    inherit_env: tuple[str, ...] = ()
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
     #: ``{api_key}`` and ``{model}`` substitute into string values. Reef appends
@@ -173,6 +181,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'env' must map strings to strings")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
     writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
+    inherit_env = _str_list(data.get("inherit_env", []), f"{where} 'inherit_env'")
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
@@ -190,6 +199,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         writable_paths=writable_paths,
         finalize_render=finalize,
         install=_parse_install(data.get("install"), where),
+        inherit_env=inherit_env,
         self_isolating=self_isolating,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
     )

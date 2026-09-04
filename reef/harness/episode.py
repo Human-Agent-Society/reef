@@ -20,6 +20,7 @@ finding.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import tempfile
@@ -147,6 +148,12 @@ def run_episode(
         # Point HOME at the root unless the descriptor relocates it itself:
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
+        # Named host variables, for an adapter whose episodes reach a hosted
+        # sandbox and need that provider's credential. Absent ones stay absent.
+        for name in descriptor.inherit_env:
+            value = os.environ.get(name)
+            if value is not None:
+                env.setdefault(name, value)
         env.setdefault("HOME", str(root))
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
