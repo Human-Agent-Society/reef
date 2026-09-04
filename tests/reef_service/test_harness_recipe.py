@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
-import reef.train.cordis_backend as reef_cordis_backend
+import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError

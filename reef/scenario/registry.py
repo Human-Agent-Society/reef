@@ -207,22 +207,23 @@ class ScenarioRegistry:
             self._scenario_factory.validate_existing(current, release_id)
             return current
         current = self._scenario_factory.load_or_create(scenario, release_id)
-        training = isinstance(current.runtime, TrainingRuntime)
+        runtime = current.runtime
+        training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
         with self._lock:
-            shared_runtime = training and getattr(current.runtime, "concurrent_training_scenarios", False)
-            if training and not shared_runtime and self._training_scenario not in (None, scenario):
+            shared_runtime = training_runtime is not None and training_runtime.concurrent_training_scenarios
+            if training_runtime is not None and not shared_runtime and self._training_scenario not in (None, scenario):
                 current.close()
                 raise ReefError(
                     f"training is already bound to scenario {self._training_scenario!r}: a reef process "
                     f"trains one scenario for its lifetime, so {scenario!r} needs its own stack "
                     f"(restart this one, or run a second stack on other ports)"
                 )
-            if training:
+            if training_runtime is not None:
                 if self._training_scenario is None:
                     self._training_scenario = scenario
                 if scenario not in self._training_scenarios:
                     self._training_scenarios.append(scenario)
             self._scenarios[scenario] = current
-        if training and self._on_training_scenario_resolved is not None:
+        if training_runtime is not None and self._on_training_scenario_resolved is not None:
             self._on_training_scenario_resolved(current)
         return current

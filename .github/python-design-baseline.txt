@@ -19,7 +19,6 @@ PYD003|reef/harness/nodes.py|<module>|NODE_KINDS
 PYD003|reef/recipe/config_fields.py|<module>|_PARSERS
 PYD003|reef/recipe/config_fields.py|ConfigField|parse
 PYD003|reef/scenario/registry.py|ScenarioRegistry|self._on_training_scenario_resolved
-PYD003|reef/service/request_service.py|RequestPayloadNormalizer|self._normalizers
 PYD003|reef/train/cordis_backend/compose/events.py|Hook|callback
 PYD003|reef/train/cordis_backend/compose/fiber.py|EffectHandle|self._collected
 PYD003|reef/train/cordis_backend/compose/fiber.py|Fiber|self._hooks

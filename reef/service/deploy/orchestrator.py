@@ -20,7 +20,8 @@ import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from types import FrameType
+from typing import Any, TextIO
 
 import yaml
 
@@ -39,7 +40,7 @@ _PROCESS_REAP_TIMEOUT = 5
 _WATCHDOG_INTERVAL = 5
 
 
-def _log(msg):
+def _log(msg: str) -> None:
     print(f"[reef] {msg}", file=sys.stderr)
 
 
@@ -134,7 +135,7 @@ class _TeeStream:
     own stdout. This lets the operator see live output without ``tail -f``.
     """
 
-    def __init__(self, log_fp, terminal):
+    def __init__(self, log_fp: TextIO, terminal: TextIO) -> None:
         self._read_fd, self._write_fd = os.pipe()
         self._log_fp = log_fp
         self._terminal = terminal
@@ -142,10 +143,10 @@ class _TeeStream:
         self._thread.start()
 
     @property
-    def write_fd(self):
+    def write_fd(self) -> int:
         return self._write_fd
 
-    def _pump(self):
+    def _pump(self) -> None:
         while True:
             try:
                 chunk = os.read(self._read_fd, 4096)
@@ -165,7 +166,7 @@ class _TeeStream:
         with contextlib.suppress(OSError):
             os.close(self._read_fd)
 
-    def close(self):
+    def close(self) -> None:
         with contextlib.suppress(OSError):
             os.close(self._write_fd)
         self._thread.join(timeout=5)
@@ -181,35 +182,42 @@ class _Stack:
     Engine: spawn → probe readiness → block → signal-driven shutdown.
     """
 
-    def __init__(self, config, services, run_dir, ready_timeout_default, config_path):
+    def __init__(
+        self,
+        config: dict[str, Any],
+        services: Sequence[dict[str, Any]],
+        run_dir: Path,
+        ready_timeout_default: int,
+        config_path: str | Path,
+    ) -> None:
         self.config = config
         self.services = services
         self.run_dir = run_dir
         self.ready_timeout_default = ready_timeout_default
         self.config_path = Path(config_path)
-        self._procs: dict[str, subprocess.Popen] = {}
+        self._procs: dict[str, subprocess.Popen[bytes]] = {}
         # Every POSIX service starts a fresh session, so its process-group ID
         # is the leader PID. Keep that identity after the leader exits:
         # launchers such as Ray and SGLang can leave workers alive after their
         # direct child has gone, and shutdown must still reach those workers.
         self._process_groups: dict[str, int] = {}
-        self._log_fps: dict[str, object] = {}
+        self._log_fps: dict[str, TextIO] = {}
         self._tees: dict[str, _TeeStream] = {}
         self._names = [svc["name"] for svc in services]
         self._stopping = threading.Event()
         self._unexpected_exit = threading.Event()
 
-    def _pid_file(self, name):
+    def _pid_file(self, name: str) -> Path:
         return self.run_dir / f"{name}.pid"
 
-    def _log_file(self, name):
+    def _log_file(self, name: str) -> Path:
         return self.run_dir / f"{name}.log"
 
-    def _is_alive(self, name):
+    def _is_alive(self, name: str) -> bool:
         proc = self._procs.get(name)
         return proc is not None and proc.poll() is None
 
-    def _service_env(self, svc):
+    def _service_env(self, svc: Mapping[str, Any]) -> dict[str, str]:
         """The environment a service and its ready probe run under.
 
         The bridge driver's readiness marker lives under ``run_dir`` with the
@@ -226,7 +234,7 @@ class _Stack:
             env["CUDA_VISIBLE_DEVICES"] = interpolate_config(self.config, str(cuda))
         return env
 
-    def _check_deps(self, svc):
+    def _check_deps(self, svc: Mapping[str, Any]) -> None:
         name = svc["name"]
         for dep in svc.get("depends_on") or []:
             if dep not in self._names:
@@ -234,7 +242,7 @@ class _Stack:
             if not self._is_alive(dep):
                 sys.exit(f"[reef] ERROR: service {name!r} requires {dep!r}, which is not running")
 
-    def _wait_ready(self, svc, proc):
+    def _wait_ready(self, svc: Mapping[str, Any], proc: subprocess.Popen[bytes]) -> None:
         name = svc["name"]
         ready = svc.get("ready")
         if not ready:
@@ -256,7 +264,7 @@ class _Stack:
             time.sleep(5)
             waited += 5
 
-    def _start_service(self, svc):
+    def _start_service(self, svc: Mapping[str, Any]) -> None:
         name = svc["name"]
         if self._is_alive(name):
             _log(f"{name}: already running (pid {self._procs[name].pid})")
@@ -288,12 +296,12 @@ class _Stack:
         self._wait_ready(svc, proc)
         _log(f"{name}: ready")
 
-    def start(self):
+    def start(self) -> None:
         for svc in self.services:
             self._start_service(svc)
         _log(f"stack up. logs: {self.run_dir}/*.log")
 
-    def _watchdog(self):
+    def _watchdog(self) -> None:
         """Poll Popen handles; bring down the stack if any service exits.
 
         GPU processes that crash leave CUDA state suspect, so — following TGI /
@@ -315,11 +323,11 @@ class _Stack:
                     return
             self._stopping.wait(_WATCHDOG_INTERVAL)
 
-    def block(self):
+    def block(self) -> None:
         """Run the watchdog thread and block until a signal arrives or a
         service exits."""
 
-        def _request_stop(signum, frame):
+        def _request_stop(signum: int, frame: FrameType | None) -> None:
             _log("received signal, shutting down")
             self._stopping.set()
 
@@ -329,7 +337,7 @@ class _Stack:
         watcher.start()
         self._stopping.wait()
 
-    def _safe_process_group(self, name, proc):
+    def _safe_process_group(self, name: str, proc: subprocess.Popen[bytes]) -> int | None:
         """Return the spawn-time PGID only when it is safe to signal."""
         pgid = self._process_groups.get(name)
         if os.name != "posix" or pgid is None or pgid <= 1 or pgid != proc.pid or pgid == os.getpgrp():
@@ -353,7 +361,7 @@ class _Stack:
                 return None
         return pgid
 
-    def _process_tree_alive(self, name, proc):
+    def _process_tree_alive(self, name: str, proc: subprocess.Popen[bytes]) -> bool:
         """Whether a managed leader or one of its process-group children lives."""
         # Reap an exited direct child before probing the group; otherwise its
         # zombie can make killpg(..., 0) report a group that has already gone.
@@ -371,7 +379,7 @@ class _Stack:
             return True
         return True
 
-    def _signal_process_tree(self, name, proc, signum):
+    def _signal_process_tree(self, name: str, proc: subprocess.Popen[bytes], signum: int) -> None:
         """Signal one service's whole tree, with a direct-child test fallback."""
         pgid = self._safe_process_group(name, proc)
         if pgid is not None:
@@ -388,7 +396,7 @@ class _Stack:
             else:
                 proc.kill()
 
-    def shutdown(self, grace=_DEFAULT_GRACE_TIMEOUT):
+    def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
         """Kill service process groups in reverse order: SIGTERM → wait → SIGKILL."""
         self._stopping.set()
         deadline = time.monotonic() + max(0, grace)

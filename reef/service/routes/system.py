@@ -36,7 +36,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         return web.json_response(catalog)
 
     async def status(request: web.Request) -> web.Response:
-        value = await asyncio.to_thread(lambda: request_service.dispatcher.training_status)
+        value = await asyncio.to_thread(lambda: request_service.dispatcher.build_training_status())
         return web.json_response(value)
 
     async def adapters(request: web.Request) -> web.Response:
