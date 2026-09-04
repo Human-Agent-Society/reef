@@ -329,15 +329,17 @@ class RecordStore:
         metadata_json = self._json(dict(receipt_metadata or {}))
         with self._lock, self._connection:
             if receipt_id is not None:
+                # A receipt is identified by (scenario, receipt_id, compacted ids), the
+                # primary key of compaction_receipts. One receipt_id may therefore cover
+                # several distinct id sets, so only the metadata can conflict.
                 existing = self._connection.execute(
                     """
-                    SELECT compacted_ids_json, metadata_json
+                    SELECT metadata_json
                     FROM compaction_receipts
                     WHERE scenario = ? AND receipt_id = ? AND compacted_ids_json = ?
                     """,
                     (scenario, receipt_id, compacted_ids_json),
                 ).fetchone()
-                # Receipt identity includes the compacted ID set, matching the primary key.
                 if existing is not None and existing["metadata_json"] != metadata_json:
                     raise RecordConflict(
                         f"compaction receipt {receipt_id!r} for scenario {scenario!r} has different content"
