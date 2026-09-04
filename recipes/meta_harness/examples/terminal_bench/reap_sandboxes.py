@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import time
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -49,6 +50,11 @@ def _sandboxes(module):
             return found
 
 
+def live_ours(module, ours) -> int:
+    """How many sandboxes this benchmark currently holds."""
+    return sum(1 for sandbox in _sandboxes(module) if _environment(sandbox) in ours)
+
+
 def _environment(sandbox) -> str:
     """The task a sandbox was created for, or empty when it carries no metadata."""
     metadata = getattr(sandbox, "metadata", None) or {}
@@ -66,8 +72,7 @@ def select_doomed(alive, ours, now, older_than, ignore_age=False):
     return [
         sandbox
         for sandbox in alive
-        if _environment(sandbox) in ours
-        and (ignore_age or (now - sandbox.started_at).total_seconds() > older_than)
+        if _environment(sandbox) in ours and (ignore_age or (now - sandbox.started_at).total_seconds() > older_than)
     ]
 
 
@@ -95,6 +100,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="only reap sandboxes whose environment_name is one of these tasks",
     )
     parser.add_argument("--all", action="store_true", help="ignore age (still filtered by owner)")
+    parser.add_argument(
+        "--watch",
+        type=int,
+        default=0,
+        help="reap every N seconds instead of once; run alongside a job to clear leaks as they appear",
+    )
     parser.add_argument("--yes", action="store_true", help="kill rather than report what would be killed")
     arguments = parser.parse_args(argv)
 
@@ -103,10 +114,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ImportError:
         print("the reaper needs e2b: pip install e2b", file=sys.stderr)
         return 2
-
-    now = datetime.datetime.now(datetime.timezone.utc)
-    alive = _sandboxes(Sandbox)
     ours = {task.split("/")[-1] for task in read_tasks(arguments.tasks_file)}
+
+    while True:
+        code = _pass(Sandbox, arguments, ours)
+        if not arguments.watch:
+            return code
+        time.sleep(arguments.watch)
+
+
+def _pass(module, arguments, ours) -> int:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    alive = _sandboxes(module)
     doomed = select_doomed(
         alive,
         ours,
@@ -122,7 +141,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  would kill {sandbox.sandbox_id} ({age:.0f} min)")
         return 0
 
-    killed = sum(_kill(Sandbox, sandbox.sandbox_id) for sandbox in doomed)
+    killed = sum(_kill(module, sandbox.sandbox_id) for sandbox in doomed)
     print(f"killed {killed}")
     return 0
 

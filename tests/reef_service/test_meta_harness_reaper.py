@@ -61,3 +61,65 @@ def test_no_flag_reaches_a_foreign_sandbox() -> None:
     foreign = _Sandbox("some-other-suite", age_minutes=600)
     assert select_doomed([foreign], OURS, NOW, older_than=14400) == []
     assert select_doomed([foreign], OURS, NOW, older_than=14400, ignore_age=True) == []
+
+
+@pytest.mark.unit
+def test_live_ours_counts_only_this_benchmarks_sandboxes() -> None:
+    from recipes.meta_harness.examples.terminal_bench.reap_sandboxes import live_ours
+
+    class _Module:
+        @staticmethod
+        def list():
+            class _Page:
+                def __init__(self):
+                    self._sent = False
+                    self.has_next = False
+
+                def next_items(self):
+                    if self._sent:
+                        return []
+                    self._sent = True
+                    return [
+                        _Sandbox("password-recovery", 5),
+                        _Sandbox("bn-fit-modify", 5),
+                        _Sandbox("some-other-suite", 5),
+                    ]
+
+            return _Page()
+
+    assert live_ours(_Module, OURS) == 2
+
+
+@pytest.mark.unit
+def test_a_run_refuses_to_start_without_headroom(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Harbor swallows a failed sandbox delete, so leftovers from a previous run
+    # spend this run's share before it starts.
+    import sys
+    import types
+
+    from recipes.meta_harness.examples.terminal_bench import reap_sandboxes as reaper
+    from recipes.meta_harness.examples.terminal_bench import run as driver
+
+    fake = types.ModuleType("e2b")
+    fake.Sandbox = object
+    monkeypatch.setitem(sys.modules, "e2b", fake)
+    monkeypatch.setattr(reaper, "live_ours", lambda _module, _ours: 20)
+
+    with pytest.raises(SystemExit) as excinfo:
+        driver.check_sandbox_headroom(concurrency=16, cap=32)
+    assert "over the 32 share" in str(excinfo.value)
+
+    # 20 live plus 10 more is inside the share, so it proceeds.
+    driver.check_sandbox_headroom(concurrency=10, cap=32)
+
+
+@pytest.mark.unit
+def test_the_headroom_check_is_skipped_without_e2b(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The render path and CI have no e2b; the check must not become a hard
+    # dependency of running the driver at all.
+    import sys
+
+    from recipes.meta_harness.examples.terminal_bench import run as driver
+
+    monkeypatch.setitem(sys.modules, "e2b", None)
+    driver.check_sandbox_headroom(concurrency=16, cap=32)

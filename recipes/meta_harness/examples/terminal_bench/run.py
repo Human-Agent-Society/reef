@@ -80,6 +80,33 @@ class EpisodeScorer:
         return 0.0
 
 
+def check_sandbox_headroom(concurrency: int, cap: int) -> None:
+    """Refuse to start when this benchmark is already near its sandbox share.
+
+    The e2b account is shared and this project's slice is a convention, not an
+    enforced quota. Harbor deletes a sandbox after each trial but swallows a
+    failed delete, so a previous run can leave sandboxes behind and the next
+    one starts against a share that is already spent. Checking here turns that
+    into a refusal instead of an iteration of episodes that never run.
+    """
+    if cap <= 0:
+        return
+    try:
+        from e2b import Sandbox
+
+        from .reap_sandboxes import live_ours
+    except ImportError:
+        return  # no e2b here: nothing to check against
+    ours = {task.split("/")[-1] for task in read_tasks(str(Path(__file__).with_name("tasks-89.txt")))}
+    live = live_ours(Sandbox, ours)
+    if live + concurrency > cap:
+        raise SystemExit(
+            f"{live} sandboxes from this benchmark are already live and this run wants {concurrency} "
+            f"more, over the {cap} share. Reap the leftovers first:\n"
+            f"    python -m recipes.meta_harness.examples.terminal_bench.reap_sandboxes --all --yes"
+        )
+
+
 def build(arguments: argparse.Namespace, ledger: ObservedCostLedger) -> tuple[MetaHarnessBackend, PopulationStore]:
     output = Path(arguments.output_dir)
     store = PopulationStore(output / "population.json")
@@ -132,6 +159,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     source.add_argument("--tasks-file", help="file of Harbor task ids, one per line or comma-separated")
     parser.add_argument("--trials", type=int, default=2)
     parser.add_argument(
+        "--max-live-sandboxes",
+        type=int,
+        default=32,
+        help="this benchmark's share of the shared e2b account; 0 disables the check",
+    )
+    parser.add_argument(
         "--max-episode-failure-rate",
         type=float,
         default=0.5,
@@ -151,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     output = Path(arguments.output_dir)
     output.mkdir(parents=True, exist_ok=True)
+    check_sandbox_headroom(arguments.concurrency, arguments.max_live_sandboxes)
     ledger = ObservedCostLedger(output / "observed-cost.json", arguments.max_observed_cost_usd)
     backend, store = build(arguments, ledger)
 
