@@ -1,5 +1,5 @@
-Evolve agent prompts, rules, and skills
-=======================================
+Evolve your harness
+===================
 
 A harness is everything around the model: the control loop, rules, prompt
 templates, skills, tools, config, and extension code. Together, the model and
@@ -12,10 +12,6 @@ the paired episodes, and publishes or reverts. You supply two Python
 callables, ``propose`` (which edit to try) and ``evaluate`` (how an episode
 scored). `Write a harness method <../developer-guide/write-a-harness-method.rst>`__ documents the
 contract.
-
-If this is your first Reef deployment, run the `inference and feedback
-quickstart <../getting-started/quickstart.rst>`__ to learn how scenarios,
-receipts, and reports connect before starting the harness tutorial below.
 
 The harness tree
 ----------------
@@ -303,12 +299,3 @@ Connect a different agent
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.
-
-Try a learning recipe
----------------------
-
-Use `GEPA harness optimization <recipes/gepa.rst>`__ to reflect on agent
-transcripts and propose better prompts, rules, and skills. Use `SkillClaw
-skill evolution <recipes/skillclaw.rst>`__ to grow a skill pool from agent
-feedback. Both pages include runnable examples; `Compare learning recipes
-<recipes.rst>`__ explains their feedback and compute requirements.
