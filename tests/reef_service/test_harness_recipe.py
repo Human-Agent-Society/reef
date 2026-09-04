@@ -1348,7 +1348,7 @@ def _tagged_batch(*pairs: tuple[str, str | None]) -> TraceBatch:
     samples = tuple(
         TraceSample(
             f"a{i}",
-            {"messages": [{"role": "user", "content": p}], "metadata": {"tags": {"source": s}} if s else {}},
+            {"messages": [{"role": "user", "content": p}], "metadata": {"tags": {"client": s}} if s else {}},
             0.0,
         )
         for i, (p, s) in enumerate(pairs)
@@ -1385,7 +1385,7 @@ def test_directive_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
 
 
 def test_promotion_caps_each_tagged_source_and_exempts_untagged(tmp_path: Path) -> None:
-    b = _promoting_backend(tmp_path, max_promoted_per_source=2)
+    b = _promoting_backend(tmp_path, max_promoted_per_client=2)
     first = run_backend_step(
         b,
         _tagged_batch(("A1", "alice"), ("A2", "alice"), ("A3", "alice"), ("B1", "bob"), ("U1", None)),
@@ -1393,25 +1393,25 @@ def test_promotion_caps_each_tagged_source_and_exempts_untagged(tmp_path: Path) 
     )
     # alice fills her cap at two; bob and the untagged sender are not affected by it.
     assert first.state["promoted_tasks"] == ["A1", "A2", "B1", "U1"]
-    assert first.state["promoted_sources"] == {"alice": 2, "bob": 1}
+    assert first.state["promoted_clients"] == {"alice": 2, "bob": 1}
     # The count persists, so alice stays full on the next step.
     second = run_backend_step(b, _tagged_batch(("A4", "alice"), ("B2", "bob"), ("U2", None)), first.state)
     assert second.state["promoted_tasks"] == ["A1", "A2", "B1", "U1", "B2", "U2"]
-    assert second.state["promoted_sources"] == {"alice": 2, "bob": 2}
+    assert second.state["promoted_clients"] == {"alice": 2, "bob": 2}
 
 
-def test_propose_receives_provenance_only_when_declared(tmp_path: Path) -> None:
+def test_propose_receives_sources_only_when_declared(tmp_path: Path) -> None:
     seen: dict[str, object] = {}
 
-    def propose(nodes, samples, models, provenance):
-        seen["provenance"] = provenance
+    def propose(nodes, samples, models, sources):
+        seen["sources"] = sources
         return Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
 
     b = _promoting_backend(tmp_path, propose=resolve_proposer(propose))
     run_backend_step(b, _tagged_batch(("A1", "alice"), ("U1", None)), b.initial_state())
-    assert seen["provenance"] == (
-        {"record": "a0", "source": "alice", "untrusted": True},
-        {"record": "a1", "source": "untagged", "untrusted": True},
+    assert seen["sources"] == (
+        {"record": "a0", "client": "alice", "untrusted": True},
+        {"record": "a1", "client": "untagged", "untrusted": True},
     )
 
 
@@ -1474,17 +1474,17 @@ def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
         }
 
     on = CordisRecipe.from_environment(
-        {}, config=config(promote_failures=True, max_promoted_tasks=10, max_promoted_per_source=0)
+        {}, config=config(promote_failures=True, max_promoted_tasks=10, max_promoted_per_client=0)
     )
-    assert on.promote_failures is True and on.max_promoted_tasks == 10 and on.max_promoted_per_source == 0
+    assert on.promote_failures is True and on.max_promoted_tasks == 10 and on.max_promoted_per_client == 0
     off = CordisRecipe.from_environment({}, config=config())
-    assert off.promote_failures is False and off.max_promoted_tasks == 50 and off.max_promoted_per_source == 5
+    assert off.promote_failures is False and off.max_promoted_tasks == 50 and off.max_promoted_per_client == 5
     with pytest.raises(RecipeConfigError, match="promote_failures must be a boolean"):
         CordisRecipe.from_environment({}, config=config(promote_failures="yes"))
     with pytest.raises(RecipeConfigError, match="max_promoted_tasks must be an integer"):
         CordisRecipe.from_environment({}, config=config(max_promoted_tasks=-1))
-    with pytest.raises(RecipeConfigError, match="max_promoted_per_source must be an integer"):
-        CordisRecipe.from_environment({}, config=config(max_promoted_per_source=True))
+    with pytest.raises(RecipeConfigError, match="max_promoted_per_client must be an integer"):
+        CordisRecipe.from_environment({}, config=config(max_promoted_per_client=True))
 
 
 def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: Path) -> None:

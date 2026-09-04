@@ -101,7 +101,7 @@ carrying a key-shaped literal is never promoted, never persisted, and never
 re-run as a task, and the step goes on without it. A prompt shaped like an
 instruction override (``ignore the previous instructions``, a forged system
 message, a chat-template control token) is screened the same way, and one
-tagged client holds at most ``evolution.max_promoted_per_source`` promoted
+tagged client holds at most ``evolution.max_promoted_per_client`` promoted
 tasks, so a single sender cannot fill the suite. Which prompts are
 promoted is the method's call: an optional ``evolution.promote`` callable
 receives the step's trace samples (and the failure manifest when its

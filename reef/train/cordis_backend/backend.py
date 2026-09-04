@@ -88,20 +88,20 @@ def _default_promote(samples: Sequence[TraceSample]) -> list[str]:
     return [prompt for prompt in prompts if prompt is not None]
 
 
-def _source_of(sample: TraceSample) -> str:
-    """The client behind a trace: its x-reef-tag-source, else its session tag, else ``untagged``."""
+def _client_of(sample: TraceSample) -> str:
+    """The client that sent a trace: its x-reef-tag-client, else its session tag, else ``untagged``."""
     metadata = sample.payload.get("metadata") if isinstance(sample.payload, Mapping) else None
     tags = metadata.get("tags") if isinstance(metadata, Mapping) else None
-    for key in ("source", "session"):
+    for key in ("client", "session"):
         value = tags.get(key) if isinstance(tags, Mapping) else None
         if isinstance(value, str) and value.strip():
             return value
     return "untagged"
 
 
-def _provenance_of(sample: TraceSample) -> dict[str, Any]:
+def _source_of(sample: TraceSample) -> dict[str, Any]:
     """What a proposer may know about where a sample came from; the text itself stays untrusted."""
-    return {"record": sample.source_agent_record_id, "source": _source_of(sample), "untrusted": True}
+    return {"record": sample.source_agent_record_id, "client": _client_of(sample), "untrusted": True}
 
 
 def _screened(prompt: str) -> bool:
@@ -115,8 +115,8 @@ def _admit_promoted(
     seed: frozenset[str],
     cap: int,
     *,
-    per_source: int = 0,
-    sources: Mapping[str, str] | None = None,
+    per_client: int = 0,
+    clients: Mapping[str, str] | None = None,
     counts: dict[str, int] | None = None,
 ) -> list[str]:
     """Append new candidate prompts under the caps; a screened or malformed prompt is skipped, never failed."""
@@ -128,12 +128,12 @@ def _admit_promoted(
             break
         if not isinstance(prompt, str) or not prompt.strip() or prompt in seen or _screened(prompt):
             continue
-        # Untagged traffic has no identity to count under, so only a tagged client meets the per-source cap.
-        source = (sources or {}).get(prompt, "untagged")
-        if per_source and source != "untagged":
-            if counts.get(source, 0) >= per_source:
+        # Untagged traffic has no identity to count under, so only a tagged client meets the per-client cap.
+        client = (clients or {}).get(prompt, "untagged")
+        if per_client and client != "untagged":
+            if counts.get(client, 0) >= per_client:
                 continue
-            counts[source] = counts.get(source, 0) + 1
+            counts[client] = counts.get(client, 0) + 1
         promoted.append(prompt)
         seen.add(prompt)
     return promoted
@@ -280,7 +280,7 @@ class CordisBackend(TrainingBackend):
         executor: EpisodeExecutor | None = None,
         promote_failures: bool = False,
         max_promoted_tasks: int = 50,
-        max_promoted_per_source: int = 5,
+        max_promoted_per_client: int = 5,
         promote: Promoter | None = None,
         recheck_every: int = 0,
         max_rejected_history: int = 25,
@@ -312,7 +312,7 @@ class CordisBackend(TrainingBackend):
         # ``__call__`` predates the manifest keyword is called without it.
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
         self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
-        self._propose_accepts_provenance = accepts_keyword(propose.__call__, "provenance")
+        self._propose_accepts_sources = accepts_keyword(propose.__call__, "sources")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -345,11 +345,11 @@ class CordisBackend(TrainingBackend):
         self._executor = executor or LocalExecutor()
         if max_promoted_tasks < 0:
             raise ValueError("max_promoted_tasks must be at least 0")
-        if max_promoted_per_source < 0:
-            raise ValueError("max_promoted_per_source must be at least 0")
+        if max_promoted_per_client < 0:
+            raise ValueError("max_promoted_per_client must be at least 0")
         self._promote_failures = promote_failures
         self._max_promoted_tasks = max_promoted_tasks
-        self._max_promoted_per_source = max_promoted_per_source
+        self._max_promoted_per_client = max_promoted_per_client
         self._promote_task = promote
         self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
         self._recheck_every = recheck_every
@@ -427,9 +427,9 @@ class CordisBackend(TrainingBackend):
         promoted = list(state.get("promoted_tasks", ()))
         if promoted:
             carried["promoted_tasks"] = promoted
-        promoted_sources = dict(state.get("promoted_sources", {}))
-        if promoted_sources:
-            carried["promoted_sources"] = promoted_sources
+        promoted_clients = dict(state.get("promoted_clients", {}))
+        if promoted_clients:
+            carried["promoted_clients"] = promoted_clients
         # Carried through skips so a no-commit step keeps the rollback target.
         rollback_entries = state.get("rollback_entries")
         rollback_gated_against = state.get("rollback_gated_against")
@@ -467,20 +467,20 @@ class CordisBackend(TrainingBackend):
                 candidates = self._promote_task(batch.samples, manifest=manifest)
             else:
                 candidates = self._promote_task(batch.samples)
-            sources = {prompt: _source_of(sample) for sample in batch.samples if (prompt := _prompt_of(sample))}
+            clients = {prompt: _client_of(sample) for sample in batch.samples if (prompt := _prompt_of(sample))}
             promoted = _admit_promoted(
                 promoted,
                 candidates,
                 frozenset(self._tasks),
                 self._max_promoted_tasks,
-                per_source=self._max_promoted_per_source,
-                sources=sources,
-                counts=promoted_sources,
+                per_client=self._max_promoted_per_client,
+                clients=clients,
+                counts=promoted_clients,
             )
             if promoted:
                 carried["promoted_tasks"] = promoted
-            if promoted_sources:
-                carried["promoted_sources"] = promoted_sources
+            if promoted_clients:
+                carried["promoted_clients"] = promoted_clients
             metrics["screened_tasks"] = sum(
                 1 for prompt in candidates if isinstance(prompt, str) and _screened(prompt)
             )
@@ -516,8 +516,8 @@ class CordisBackend(TrainingBackend):
             extra["manifest"] = manifest
         if self._propose_accepts_rejected:
             extra["rejected"] = tuple(rejected)
-        if self._propose_accepts_provenance:
-            extra["provenance"] = tuple(_provenance_of(sample) for sample in batch.samples)
+        if self._propose_accepts_sources:
+            extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
         proposal = self._propose(self._nodes(), batch.samples, models, **extra)
         mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         if not mutations:
