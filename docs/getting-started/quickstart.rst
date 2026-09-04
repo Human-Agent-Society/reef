@@ -1,5 +1,10 @@
-Quickstart
-==========
+Quickstart: serve inference and report feedback
+===============================================
+
+Start Reef locally, send an inference request through a hosted provider,
+report feedback on the response, and inspect the release history. This
+quickstart needs no GPU; the final section links to recipes that learn
+from the records you collect.
 
 A typical Reef workflow includes the following steps:
 
@@ -160,3 +165,16 @@ file: a **preset** naming your ``propose`` and ``evaluate`` callables and the
 tasks to evaluate on. ``tutorials/harness_evolve/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
+
+Choose your next step
+---------------------
+
+- `Compare learning recipes <../user-guide/recipes.rst>`__ to choose between
+  model training and harness evolution based on the feedback you have.
+- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ or
+  `SkillClaw skill evolution <../user-guide/recipes/skillclaw.rst>`__ for
+  worked harness examples, or `SAO rollout training
+  <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
+- Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
+  your own agent: it covers inference headers, feedback reports, and release
+  management.

@@ -1,5 +1,5 @@
-openclawrl
-==========
+OpenClaw-RL: learn from agent conversations
+===========================================
 
 OpenClaw-RL (`arXiv:2603.10165 <https://arxiv.org/abs/2603.10165>`__) trains
 a personal agent to satisfy the preferences of its user. It learns from their
@@ -152,3 +152,13 @@ training goes on, and the run reaches the paper's adaptation criterion
 The demo above replays two sessions from the same run. In session 1 the
 student rejects a formatted reply, reef keeps the training going, and by
 session 16 the first reply passes directly.
+
+Related guides
+--------------
+
+- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
+  learn the request, receipt, and report workflow.
+- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
+  set up the GPU stack and inspect published updates.
+- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
+  and query feedback, scenarios, and releases.
