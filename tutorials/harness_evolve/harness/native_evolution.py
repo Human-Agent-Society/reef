@@ -3,7 +3,7 @@
 ``propose`` is the self proposer of ``evolution.py`` with a wider vocabulary:
 one mutation on a skill, a ``native_tool`` (a schema plus a module defining
 ``run(args, workdir) -> str``) or a ``native_hook`` (a module defining
-``listen(payload, next) -> decision`` at one loop seam). ``evaluate`` reads
+``listen(payload, next) -> decision`` at one loop event). ``evaluate`` reads
 the native-jsonl trajectory. The grader and the answer table are shared with
 ``evolution.py``, so ``run.py`` scores recorded traffic the same way for
 both variants.
@@ -14,7 +14,7 @@ import json
 from harness.evolution import _ENTRY_NAME, grade_text
 
 KINDS = ("skill", "native_tool", "native_hook")
-SEAMS = ("pre_step", "request_error", "post_execute")
+EVENTS = ("pre_step", "request_error", "post_execute")
 
 #: The one JSON object the model answers with, per kind.
 SHAPES = (
@@ -22,7 +22,7 @@ SHAPES = (
     '{"id": "<name>", "name": "native_tool", "config": {"name": "<same name>", "description": "<one line>", '
     '"parameters": <JSON schema object>, "code": "<python defining run(args, workdir) -> str>"}}',
     '{"id": "<name>", "name": "native_hook", "config": {"name": "<same name>", '
-    '"seam": "<pre_step | request_error | post_execute>", '
+    '"event": "<pre_step | request_error | post_execute>", '
     '"code": "<python defining listen(payload, next) -> decision>"}}',
 )
 
@@ -49,7 +49,7 @@ def propose(nodes, samples, models):
         f"Current nodes:\n{json.dumps(current, indent=2)}\n\n"
         "Propose ONE mutation that would make these requests pass: an improved or new skill, tool, or "
         "hook. A tool module defines run(args, workdir) -> str and receives arguments validated against "
-        "its parameters schema. A hook module defines listen(payload, next) -> decision at one seam, "
+        "its parameters schema. A hook module defines listen(payload, next) -> decision at one event, "
         "where next() returns the decision of the layer below. Respond with exactly one JSON object in "
         "one of these shapes and nothing else:\n" + "\n".join(SHAPES) + "\n"
         "Reuse an existing node's name to update it; use a new lowercase-hyphen name to add one."
@@ -100,8 +100,8 @@ def _parse_proposal(reply: str):
     if not _text(code):
         return None
     if kind == "native_hook":
-        seam = config.get("seam")
-        return (kind, entry_id, {"name": entry_id, "seam": seam, "code": code}) if seam in SEAMS else None
+        event = config.get("event")
+        return (kind, entry_id, {"name": entry_id, "event": event, "code": code}) if event in EVENTS else None
     description, parameters = config.get("description"), config.get("parameters")
     if not _text(description) or not isinstance(parameters, dict):
         return None

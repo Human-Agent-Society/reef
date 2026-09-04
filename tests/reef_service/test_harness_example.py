@@ -207,7 +207,7 @@ NATIVE_NODES = (
     ),
     (
         "native_hook",
-        {"name": "loop_guard", "seam": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
+        {"name": "loop_guard", "event": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
     ),
     *NODES,
 )
@@ -217,7 +217,7 @@ TOOL = {
     "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
     "code": "def run(args, workdir):\n    return 'ok'\n",
 }
-HOOK = {"seam": "pre_step", "code": "def listen(payload, next):\n    return next()\n"}
+HOOK = {"event": "pre_step", "code": "def listen(payload, next):\n    return next()\n"}
 
 
 def native_proposal(kind: str, entry_id: str, **config) -> str:
@@ -257,8 +257,8 @@ def test_native_propose_routes_skills_tools_and_hooks(native_evolution) -> None:
 def test_native_propose_refuses_malformed_shapes(native_evolution) -> None:
     for reply in (
         proposal("answer-style", name="rules"),
-        native_proposal("native_hook", "h", seam="on_exit", code="x = 1"),
-        native_proposal("native_hook", "h", seam="pre_step", code="  "),
+        native_proposal("native_hook", "h", event="on_exit", code="x = 1"),
+        native_proposal("native_hook", "h", event="pre_step", code="  "),
         native_proposal("native_tool", "t", description="d", parameters="not a schema", code="x = 1"),
         native_proposal("native_tool", "t", description="", parameters={}, code="x = 1"),
         json.dumps({"id": "t", "name": "native_tool", "config": {"name": "other", **TOOL}}),

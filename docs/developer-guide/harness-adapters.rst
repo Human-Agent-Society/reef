@@ -6,9 +6,9 @@ coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
 adapter does. Reef bundles six, one per third-party coding-agent CLI;
 ``native``, its own agent, whose loop lives in this tree, whose tools are
-``native_tool`` nodes, and whose loop seams listen to ``native_hook`` nodes,
+``native_tool`` nodes, and whose loop events listen to ``native_hook`` nodes,
 so a mutation can add, rewrite, or remove a tool, or change what the loop
-does at a seam; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
+does at a event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
 agent class rather than a CLI, driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
@@ -127,20 +127,20 @@ compile; a module that fails to import, or defines no ``run``, ends the
 episode with reason ``error`` and code ``LOAD_ERROR`` before any model call,
 so the tree that carries it loses the gate instead of running without it.
 
-The loop has four seams, and a ``native_hook`` node listens at one of them.
+The loop has four events, and a ``native_hook`` node listens at one of them.
 It renders to ``native/hooks/{name}.py`` the same way: ``code`` defining
-``listen(payload, next) -> decision``, then ``NAME`` and ``SEAM`` from the
-node config. The hooks at one seam form a waterfall in file name order: each
+``listen(payload, next) -> decision``, then ``NAME`` and ``EVENT`` from the
+node config. The hooks at one event form a waterfall in file name order: each
 ``listen`` may call ``next()`` to get the decision of the layer below (the
 last layer is the loop's default) and return it, changed or not, or return
-its own decision without calling ``next`` and so own the seam. ``next`` runs
+its own decision without calling ``next`` and so own the event. ``next`` runs
 the layer below at most once however often it is called, and hands the hook
 a copy, so an in-place edit is a change like any other. A hook that raises,
 or returns anything but a plain object the log can carry, is skipped and the
 layer below stands; ``messages`` and ``contexts`` are read as lists of text
 and anything else in them is dropped. A hook module that fails to import,
-defines no ``listen``, or names an unknown seam ends the episode with
-``LOAD_ERROR`` like a tool. Every seam takes a plain object and returns one:
+defines no ``listen``, or names an unknown event ends the episode with
+``LOAD_ERROR`` like a tool. Every event takes a plain object and returns one:
 
 .. config::
 
@@ -159,7 +159,7 @@ run the tutorial on this adapter.
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, and hooks (name to
-seam); then ``turn/start``, per step ``step/start``, ``request/header`` (the
+event); then ``turn/start``, per step ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
 ``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
@@ -175,11 +175,11 @@ workspace, the model reads the head, one marker line naming that file and the
 omitted count, and the last 2,000 characters, and ``tool/result`` carries the
 file in ``meta.spill``. A failed model call logs ``request/error``
 (``attempt`` and the ``MODEL_ERROR`` failure) before the ``request_error``
-seam runs. A hook whose decision differs from the layer
-below it logs ``hook/decision`` (``seam``, ``step``, ``hook``, ``owned``, and
+event runs. A hook whose decision differs from the layer
+below it logs ``hook/decision`` (``event``, ``step``, ``hook``, ``owned``, and
 the decision), a hook that raised logs ``hook/error``, and a text a hook
 injected lands as ``user/message`` with ``source.kind`` ``hook`` and the
-``seam``.
+``event``.
 
 The descriptor
 --------------
