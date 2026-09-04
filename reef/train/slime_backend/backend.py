@@ -92,7 +92,7 @@ class SlimeTrainingBackend(TrainingBackend):
         Single-scenario runtimes (including user-written ones) keep the
         original ``reconcile_training_job`` signature.
         """
-        if self._scenario is not None and getattr(self._runtime, "concurrent_training_scenarios", False):
+        if self._scenario is not None and self._runtime.concurrent_training_scenarios:
             return self._scenario
         return None
 
@@ -116,7 +116,7 @@ class SlimeTrainingBackend(TrainingBackend):
             raise RuntimeContractError("training runtime prepared a train step without a payload")
         runtime = self._runtime
         payload = dict(prepared.payload)
-        if self._scenario is not None and getattr(runtime, "concurrent_training_scenarios", False):
+        if self._scenario is not None and runtime.concurrent_training_scenarios:
             # A runtime that trains several scenarios' adapters needs to know
             # whose slot this job fills; the job identity then includes it.
             payload["scenario"] = self._scenario

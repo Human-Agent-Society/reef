@@ -164,6 +164,54 @@ def test_compact_hides_records_but_retains_retry_tombstones(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_compacted_record_id_rejects_a_retry_with_different_content(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    original = AgentRecord.create(
+        agent_record_id="same",
+        scenario="math",
+        request_type=RequestType.INFERENCE,
+        payload={"value": "original"},
+        created_at=1.0,
+    )
+    conflicting = AgentRecord.create(
+        agent_record_id="same",
+        scenario="math",
+        request_type=RequestType.INFERENCE,
+        payload={"value": "changed"},
+        created_at=2.0,
+    )
+    with RecordStore(database) as records:
+        records.append(original)
+        records.compact("math", frozenset({"same"}))
+
+    with RecordStore(database) as recovered, pytest.raises(RecordConflict, match="same"):
+        recovered.append(conflicting)
+
+
+@pytest.mark.unit
+def test_discarded_report_keeps_the_stored_content_canonical() -> None:
+    records = RecordStore()
+    records.append(item("inference", "math"))
+    stored = item("report", "math", RequestType.REPORT, references=("inference",))
+    records.append(stored)
+    records.compact("math", frozenset({"inference"}))
+
+    divergent = AgentRecord.create(
+        agent_record_id="report",
+        scenario="math",
+        request_type=RequestType.REPORT,
+        payload={"value": "changed"},
+        created_at=6.0,
+        references=("inference",),
+    )
+    with pytest.raises(RecordConflict, match="report"):
+        records.append(divergent)
+
+    assert records.get("math", "report") == stored
+    assert records.append_result(stored).inserted is False
+
+
+@pytest.mark.unit
 def test_compact_is_a_noop_for_empty_id_set() -> None:
     records = RecordStore()
     records.append(item("a", "math"))
@@ -177,6 +225,19 @@ def test_compact_skips_unknown_ids_silently() -> None:
     records.append(item("a", "math"))
     records.compact("math", frozenset({"missing"}))
     assert records.count("math") == 1
+
+
+@pytest.mark.unit
+def test_compact_fingerprints_large_id_sets_in_bounded_queries() -> None:
+    records = RecordStore()
+    items = [item(f"record-{index}", "math") for index in range(1001)]
+    for record in items:
+        records.append(record)
+
+    records.compact("math", frozenset(record.agent_record_id for record in items))
+
+    assert records.count("math") == 0
+    assert records.append_result(items[-1]).inserted is False
 
 
 @pytest.mark.unit

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -9,11 +10,29 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import NamedTuple
 from weakref import WeakValueDictionary
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+
+
+class EncodedRecord(NamedTuple):
+    """One record in its stored column order, as the ``agent_record`` row.
+
+    The field names are the column names, so the same tuple binds the INSERT
+    parameters and names the fields that participate in retry-content
+    comparison.
+    """
+
+    agent_record_id: str
+    scenario: str
+    request_type: str
+    created_at: float
+    payload_json: str
+    references_json: str
+    artifact_json: str | None
 
 
 class RecordConflict(ReefError):
@@ -37,6 +56,8 @@ class RecordStore:
     database keeps standalone/test construction lightweight; production callers
     should always pass a path.
     """
+
+    _SQLITE_ID_CHUNK_SIZE = 900
 
     def __init__(self, database: str | Path | None = None) -> None:
         self._database = ":memory:" if database is None else str(database)
@@ -76,7 +97,12 @@ class RecordStore:
             """
             )
             self._connection.execute(
-                "CREATE TABLE IF NOT EXISTS consumed_agent_record (agent_record_id TEXT PRIMARY KEY)"
+                """
+                CREATE TABLE IF NOT EXISTS consumed_agent_record (
+                    agent_record_id TEXT PRIMARY KEY,
+                    content_sha256 TEXT NOT NULL
+                )
+                """
             )
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS agent_record_scenario_sequence ON agent_record (scenario, sequence)"
@@ -98,19 +124,6 @@ class RecordStore:
                 """
             )
 
-    #: Column order of the tuples produced by :meth:`_encode` and
-    #: :meth:`_row_content`; :meth:`_content` uses it to name the fields that
-    #: participate in retry-content comparison.
-    _ENCODED_FIELDS = (
-        "agent_record_id",
-        "scenario",
-        "request_type",
-        "created_at",
-        "payload_json",
-        "references_json",
-        "artifact_json",
-    )
-
     @staticmethod
     def _json(value: object) -> str:
         try:
@@ -119,19 +132,19 @@ class RecordStore:
             raise TypeError("a record must contain JSON-serializable values") from exc
 
     @classmethod
-    def _encode(cls, item: AgentRecord) -> tuple[str, str, str, float, str, str, str | None]:
+    def _encode(cls, item: AgentRecord) -> EncodedRecord:
         artifact = item.artifact_ref
         artifact_json = None
         if artifact is not None:
             artifact_json = cls._json(encode_artifact_ref(artifact))
-        return (
-            item.agent_record_id,
-            item.scenario,
-            item.request_type.value,
-            item.created_at,
-            cls._json(dict(item.payload)),
-            cls._json(item.references),
-            artifact_json,
+        return EncodedRecord(
+            agent_record_id=item.agent_record_id,
+            scenario=item.scenario,
+            request_type=item.request_type.value,
+            created_at=item.created_at,
+            payload_json=cls._json(dict(item.payload)),
+            references_json=cls._json(item.references),
+            artifact_json=artifact_json,
         )
 
     @staticmethod
@@ -151,25 +164,22 @@ class RecordStore:
         )
 
     @staticmethod
-    def _row_content(row: sqlite3.Row) -> tuple[str, str, str, float, str, str, str | None]:
-        return (
-            row["agent_record_id"],
-            row["scenario"],
-            row["request_type"],
-            row["created_at"],
-            row["payload_json"],
-            row["references_json"],
-            row["artifact_json"],
-        )
+    def _row_content(row: sqlite3.Row) -> EncodedRecord:
+        return EncodedRecord(*(row[name] for name in EncodedRecord._fields))
 
     @classmethod
-    def _content(cls, encoded: tuple[str, str, str, float, str, str, str | None]) -> dict[str, object]:
+    def _content(cls, encoded: EncodedRecord) -> dict[str, object]:
         """The encoded fields that define row content, excluding ``created_at``.
 
         A client retrying with its own agent_record_id regenerates the
         timestamp, so a timestamp difference alone must dedup, not conflict.
         """
-        return {name: value for name, value in zip(cls._ENCODED_FIELDS, encoded, strict=True) if name != "created_at"}
+        return {name: value for name, value in encoded._asdict().items() if name != "created_at"}
+
+    @classmethod
+    def _content_sha256(cls, encoded: EncodedRecord) -> str:
+        canonical = cls._json(cls._content(encoded)).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
 
     def append(self, item: AgentRecord) -> AgentRecord:
         return self.append_result(item).item
@@ -178,10 +188,12 @@ class RecordStore:
         encoded = self._encode(item)
         with self._lock, self._connection:
             consumed = self._connection.execute(
-                "SELECT 1 FROM consumed_agent_record WHERE agent_record_id = ?",
+                "SELECT content_sha256 FROM consumed_agent_record WHERE agent_record_id = ?",
                 (item.agent_record_id,),
             ).fetchone()
             if consumed is not None:
+                if consumed["content_sha256"] != self._content_sha256(encoded):
+                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
                 return AppendResult(item, False)
             if item.request_type is RequestType.REPORT and item.references:
                 placeholders = ",".join("?" for _ in item.references)
@@ -190,9 +202,19 @@ class RecordStore:
                     item.references,
                 ).fetchone()
                 if consumed is not None:
-                    self._connection.execute(
-                        "INSERT INTO consumed_agent_record VALUES (?)",
+                    # A report is discarded once its references are gone, but a row
+                    # already stored under this id stays canonical: check the discard
+                    # against that row so a divergent retry cannot register its own
+                    # content as the receipt and reject the honest retry that follows.
+                    existing = self._connection.execute(
+                        "SELECT * FROM agent_record WHERE agent_record_id = ?",
                         (item.agent_record_id,),
+                    ).fetchone()
+                    if existing is not None and self._content(self._row_content(existing)) != self._content(encoded):
+                        raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
+                    self._connection.execute(
+                        "INSERT INTO consumed_agent_record (agent_record_id, content_sha256) VALUES (?, ?)",
+                        (item.agent_record_id, self._content_sha256(encoded)),
                     )
                     return AppendResult(item, False)
             cursor = self._connection.execute(
@@ -329,16 +351,26 @@ class RecordStore:
                     """,
                     (scenario, receipt_id, compacted_ids_json, metadata_json, time.time()),
                 )
-            self._connection.executemany(
-                "INSERT OR IGNORE INTO consumed_agent_record VALUES (?)",
-                ((agent_record_id,) for agent_record_id in agent_record_ids),
-            )
             if agent_record_ids:
-                placeholders = ",".join("?" for _ in agent_record_ids)
-                self._connection.execute(
-                    f"DELETE FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
-                    (scenario, *sorted(agent_record_ids)),
-                )
+                sorted_ids = sorted(agent_record_ids)
+                for start in range(0, len(sorted_ids), self._SQLITE_ID_CHUNK_SIZE):
+                    chunk = sorted_ids[start : start + self._SQLITE_ID_CHUNK_SIZE]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows = self._connection.execute(
+                        f"SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
+                        (scenario, *chunk),
+                    ).fetchall()
+                    self._connection.executemany(
+                        """
+                        INSERT OR IGNORE INTO consumed_agent_record (agent_record_id, content_sha256)
+                        VALUES (?, ?)
+                        """,
+                        ((row["agent_record_id"], self._content_sha256(self._row_content(row))) for row in rows),
+                    )
+                    self._connection.execute(
+                        f"DELETE FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
+                        (scenario, *chunk),
+                    )
         for agent_record_id in agent_record_ids:
             self._live_records.pop(agent_record_id, None)
 

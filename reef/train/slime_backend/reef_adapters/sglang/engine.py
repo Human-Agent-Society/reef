@@ -11,6 +11,10 @@ from slime.backends.sglang_utils.sglang_engine import SGLangEngine
 from urllib3.exceptions import NewConnectionError
 
 from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled, sglang_lora_target_modules
+from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
+    require_lora_distributed_request_schema,
+    require_lora_tensor_request_schema,
+)
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_node_ip_and_free_port, reef_rollout_env_vars
 
 logger = logging.getLogger(__name__)
@@ -251,32 +255,6 @@ class ReefSGLangEngine(SGLangEngine):
         return float(minutes) * 60
 
 
-def require_lora_distributed_request_schema() -> None:
-    required = {"lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"}
-    message = "loaded SGLang does not support Reef's distributed LoRA upsert schema"
-    try:
-        from sglang.srt.managers.io_struct import LoadLoRAAdapterFromDistributedReqInput
-    except ImportError as exc:
-        raise RuntimeError(message) from exc
-    fields = set(getattr(LoadLoRAAdapterFromDistributedReqInput, "__struct_fields__", ()))
-    missing = sorted(required - fields)
-    if missing:
-        raise RuntimeError(f"{message}; missing fields: {missing}; use Reef's pinned SGLang image")
-
-
-def require_lora_tensor_request_schema() -> None:
-    required = {"lora_name", "config_dict", "serialized_named_tensors", "load_format", "expected_checksums"}
-    message = "loaded SGLang does not support Reef's colocated LoRA tensor schema"
-    try:
-        from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
-    except ImportError as exc:
-        raise RuntimeError(message) from exc
-    fields = set(getattr(LoadLoRAAdapterFromTensorsReqInput, "__struct_fields__", ()))
-    missing = sorted(required - fields)
-    if missing:
-        raise RuntimeError(f"{message}; missing fields: {missing}; use Reef's pinned SGLang image")
-
-
 def install_sglang_extensions() -> None:
     """Install extensions in the dedicated rollout-manager process only."""
     from slime.ray import rollout, utils
@@ -293,6 +271,4 @@ def install_sglang_extensions() -> None:
 __all__ = [
     "ReefSGLangEngine",
     "install_sglang_extensions",
-    "require_lora_distributed_request_schema",
-    "require_lora_tensor_request_schema",
 ]
