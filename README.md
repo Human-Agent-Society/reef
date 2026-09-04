@@ -99,7 +99,7 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-### 1 · Start a weight-training deployment
+### Start a weight-training deployment
 
 The following example starts the SAO (arXiv:2607.07508) example deployment. Run it
 from a Reef checkout in an environment that satisfies the GPU requirements in
@@ -118,7 +118,7 @@ reef serve -c recipes/sao/examples/sao/serve.yaml \
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```
 
-### 2 · Train weights
+### Train weights
 
 Send inference requests through Reef and report a score for each response. The
 SAO recipe uses each eligible scored rollout to run a training step.
@@ -179,7 +179,7 @@ Once the recipe has enough feedback, it runs a training step and synchronizes
 the updated weights to the serving runtime. Later inference requests use the
 current version without restarting Reef.
 
-### 3 · Evolve your harness
+### Evolve your harness
 
 The `harness_evolve` recipe updates a harness tree that may contain rules,
 skills, configuration, prompts, and extensions. It builds a candidate from
