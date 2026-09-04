@@ -52,6 +52,7 @@ def _turn(
     logprobs=(-0.1, -0.2),
     runtime_load_id="v1",
     topk_rows=None,
+    session=None,
 ):
     training = {
         "tokens": list(tokens),
@@ -70,6 +71,8 @@ def _turn(
         payload={
             "messages": list(messages),
             "tools": list(tools),
+            # What the request plane stores for x-reef-tag-session.
+            **({"metadata": {"tags": {"session": session}}} if session else {}),
             "response": {
                 "choices": [{"message": {"role": "assistant", "content": "a"}}],
                 "training": training,
@@ -83,8 +86,8 @@ def _successor(prior_messages, next_state: str):
     return [*prior_messages, {"role": "assistant", "content": "a"}, {"role": "user", "content": next_state}]
 
 
-def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None):
-    context = ProcessorContext("s", {"batch_size": batch_size, "session_ttl_s": ttl_s})
+def _processor(batch_size: int = 1, *, worker=None, ttl_s: float = 900.0, clients=None, **config):
+    context = ProcessorContext("s", {"batch_size": batch_size, "session_ttl_s": ttl_s, **config})
     return OpenClawRLProcessor(context, worker=worker, clients=clients)
 
 
@@ -505,6 +508,106 @@ def test_session_tag_treats_a_repeated_request_as_a_retry() -> None:
     assert index.observe("first", messages, 0.0, session_tag="hw-1").binding is None
     retry = index.observe("second", messages, 1.0, session_tag="hw-1")
     assert retry.duplicate is True and retry.binding is None
+
+
+def _overlapping_sessions() -> SessionIndex:
+    """Two live sessions, one's transcript a prefix of the other's.
+
+    ``b1`` re-opens with the canonically identical first request after ``a1``
+    has already progressed, so the table holds a long session (last active at
+    1.0) and a short one that is a prefix of it (last active at 2.0). Any
+    later extension is a candidate successor to BOTH.
+    """
+    index = SessionIndex(900.0)
+    index.observe("a1", Q1, 0.0)
+    index.observe("a2", _successor(Q1, "reply"), 1.0)  # session A: [u, a, u]
+    index.observe("b1", Q1, 2.0)  # session B: [u], more recently active
+    return index
+
+
+@pytest.mark.unit
+def test_a_prefix_match_goes_to_the_most_recently_active_candidate() -> None:
+    """The documented tie rule, which the scan must hold without sorting."""
+    index = _overlapping_sessions()
+    extension = _successor(_successor(Q1, "reply"), "and then")
+    observation = index.observe("c1", extension, 3.0)
+    # B was active later than A, so B claims the successor — not whichever
+    # candidate the session table happens to yield first.
+    assert observation.binding is not None
+    assert observation.binding.receipt == "b1"
+    assert observation.binding.next_state_text == "and then"
+
+
+@pytest.mark.unit
+def test_a_retry_outranks_a_prefix_match_it_is_found_after() -> None:
+    """Equality wins wherever it turns up in the scan, or a retry trains twice."""
+    index = _overlapping_sessions()
+    # Identical to A's last request (a retry), and at the same time a valid
+    # extension of B, which is the more recently active of the two.
+    observation = index.observe("a2-retry", _successor(Q1, "reply"), 3.0)
+    assert observation.duplicate is True
+    assert observation.binding is None
+
+
+@pytest.mark.unit
+def test_the_session_table_is_capped_at_max_sessions() -> None:
+    """Requests the fallback never matches must not grow the table forever.
+
+    Trace matching opens a session per unmatched request, so a client it
+    cannot follow would otherwise leave one entry per request standing for a
+    whole TTL — and every scan runs on the trainer thread.
+    """
+    index = SessionIndex(900.0, max_sessions=2)
+    for i in range(3):
+        index.observe(f"r{i}", [{"role": "user", "content": f"unrelated {i}"}], float(i))
+    evicted = index.expire(3.0)  # nothing is near the TTL; this is the ceiling
+    assert evicted == ("r0",)  # the least recently active
+    assert index.stats.evicted == 1
+    assert index.stats.dropped_unbound == 1  # r0 never bound: it never trains
+
+
+@pytest.mark.unit
+def test_sessions_that_never_bind_are_counted_apart_from_ordinary_final_turns() -> None:
+    """A conversation's last turn is unbound by nature; a session that bound
+    nothing at all is the signature of correlation failing."""
+    index = SessionIndex(900.0)
+    index.observe("t1", Q1, 0.0)
+    index.observe("t2", _successor(Q1, "ok"), 1.0)  # binds t1
+    index.observe("lonely", Q2, 2.0)  # never gets a successor
+    assert index.expire(1000.0) == ("t2", "lonely")
+    stats = index.stats
+    assert stats.bound == 1
+    assert stats.dropped_unbound == 1  # only "lonely"; t2 is an ordinary tail
+    assert (stats.tagged, stats.untagged) == (0, 3)
+
+
+@pytest.mark.unit
+def test_traffic_without_a_session_tag_says_so_instead_of_training_on_nothing(caplog) -> None:
+    """The silent case: an agent that keeps history locally binds nothing.
+
+    Every turn opens its own session and expires untrained. Without a log
+    line the only symptom is a training set that never fills, diagnosable
+    solely by reading the processor.
+    """
+    processor = _processor(worker=FakeWorker())
+    with caplog.at_level("WARNING"):
+        for i in range(9):  # Hermes shape: each turn restarts the transcript
+            processor.ingest(_turn(f"t{i}", [{"role": "user", "content": f"homework {i}"}]))
+        assert "x-reef-tag-session" in caplog.text  # the fallback announced itself
+        caplog.clear()
+        processor.expire(time.monotonic() + 10_000.0)  # every session times out unbound
+    assert "without ever binding" in caplog.text
+    assert "x-reef-tag-session" in caplog.text
+
+
+@pytest.mark.unit
+def test_a_tagged_run_stays_quiet(caplog) -> None:
+    processor = _processor(worker=FakeWorker())
+    with caplog.at_level("WARNING"):
+        processor.ingest(_turn("t1", Q1, session="hw-1"))
+        processor.ingest(_turn("t2", Q2, session="hw-1"))
+        processor.expire(time.monotonic() + 10_000.0)
+    assert caplog.text == ""
 
 
 def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
