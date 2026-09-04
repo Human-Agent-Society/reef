@@ -1,10 +1,10 @@
-"""Reef's native coding agent: a headless single prompt loop whose tools and loop seams are composition nodes.
+"""Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
 One episode is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``
 and ``models.json``; the loop reads them, talks to the served model through
 the rendered binding, dispatches tool calls to the tool modules, asks the
-hook modules at three seams, and appends one JSONL session the
+hook modules at four events, and appends one JSONL session the
 ``native-jsonl`` trajectory reader decodes. Everything the model saw is in
 that log: the rendered system prompt, the tool declarations, every message,
 every call, every result, and every hook decision that changed the loop's
@@ -21,13 +21,13 @@ import os
 import re
 import sys
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol
 
 from reef.harness.model_binding import ModelBinding, ModelBindingError
-from reef.harness.nodes import NATIVE_SEAMS
+from reef.harness.nodes import NATIVE_EVENTS
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12
@@ -49,9 +49,10 @@ _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "object": dict,
     "array": list,
 }
-#: What the loop decides at each seam when no hook says otherwise.
+#: What the loop decides at each event when no hook says otherwise.
 _DEFAULTS: dict[str, dict[str, Any]] = {
     "pre_step": {"kind": "enter", "messages": []},
+    "pre_execute": {"kind": "allow"},
     "request_error": {"kind": "fail"},
     "post_execute": {"kind": "accept", "contexts": []},
 }
@@ -82,11 +83,19 @@ class HookListener(Protocol):
 class ToolModule:
     """One rendered ``native_tool`` node: its declaration for the model and its ``run``."""
 
-    def __init__(self, name: str, description: str, parameters: Mapping[str, Any], run: ToolRunner) -> None:
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: Mapping[str, Any],
+        run: ToolRunner,
+        capabilities: Sequence[str] = (),
+    ) -> None:
         self.name = name
         self.description = description
         self.parameters = dict(parameters) or {"type": "object", "properties": {}}
         self.run = run
+        self.capabilities = tuple(str(item) for item in capabilities)
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -112,11 +121,11 @@ class ToolModule:
 
 
 class HookModule:
-    """One rendered ``native_hook`` node: the seam it listens at and its ``listen``."""
+    """One rendered ``native_hook`` node: the event it listens at and its ``listen``."""
 
-    def __init__(self, name: str, seam: str, listen: HookListener) -> None:
+    def __init__(self, name: str, event: str, listen: HookListener) -> None:
         self.name = name
-        self.seam = seam
+        self.event = event
         self.listen = listen
 
 
@@ -142,19 +151,23 @@ def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
             raise LoadError(f"tool {path.name} defines no run(args, workdir)")
         name = str(getattr(module, "NAME", path.stem))
         parameters = getattr(module, "PARAMETERS", {})
-        tools[name] = ToolModule(name, str(getattr(module, "DESCRIPTION", "")), parameters, run)
+        capabilities = getattr(module, "CAPABILITIES", ())
+        description = str(getattr(module, "DESCRIPTION", ""))
+        tools[name] = ToolModule(
+            name, description, parameters, run, capabilities if isinstance(capabilities, list) else ()
+        )
     return tools
 
 
 def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
-    """Every hook under its seam, in file name order: that order is the waterfall order."""
-    hooks: dict[str, list[HookModule]] = {seam: [] for seam in NATIVE_SEAMS}
+    """Every hook under its event, in file name order: that order is the waterfall order."""
+    hooks: dict[str, list[HookModule]] = {event: [] for event in NATIVE_EVENTS}
     for path, module in _modules(hooks_dir, "reef_native_hook"):
         listen = getattr(module, "listen", None)
-        seam = str(getattr(module, "SEAM", ""))
-        if not callable(listen) or seam not in hooks:
-            raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known seam")
-        hooks[seam].append(HookModule(str(getattr(module, "NAME", path.stem)), seam, listen))
+        event = str(getattr(module, "EVENT", ""))
+        if not callable(listen) or event not in hooks:
+            raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
+        hooks[event].append(HookModule(str(getattr(module, "NAME", path.stem)), event, listen))
     return hooks
 
 
@@ -274,12 +287,12 @@ def _waterfall(
 
 
 def _decide(
-    session: Session, hooks: Sequence[HookModule], seam: str, step: int, payload: Mapping[str, Any]
+    session: Session, hooks: Sequence[HookModule], event: str, step: int, payload: Mapping[str, Any]
 ) -> dict[str, Any]:
     trace: list[dict[str, Any]] = []
-    decision = _waterfall(hooks, 0, payload, _DEFAULTS[seam], trace)
+    decision = _waterfall(hooks, 0, payload, _DEFAULTS[event], trace)
     for entry in trace:
-        session.write("hook/error" if "error" in entry else "hook/decision", {"seam": seam, "step": step, **entry})
+        session.write("hook/error" if "error" in entry else "hook/decision", {"event": event, "step": step, **entry})
     return decision
 
 
@@ -343,7 +356,7 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
 
 
 def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
-    """One turn: per step, pre_step, the request (request_error on failure), each call then post_execute."""
+    """One turn: per step, pre_step, the request (request_error on failure), each call behind pre_execute, then post_execute."""
     binding = binding_from(root / "models.json")
     session = Session(session_dir / "session.jsonl")
     header = {
@@ -366,7 +379,8 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             {
                 **header,
                 "tools": sorted(tools),
-                "hooks": {hook.name: seam for seam, listeners in hooks.items() for hook in listeners},
+                "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
+                "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
             },
         )
         session.write("turn/start", {"turn": 1})
@@ -374,8 +388,10 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         declarations = [tool.declaration() for tool in tools.values()]
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
 
-        def say(step: int, seam: str, content: str) -> None:
-            session.write("user/message", {"step": step, "source": {"kind": "hook", "seam": seam}, "content": content})
+        def say(step: int, event: str, content: str) -> None:
+            session.write(
+                "user/message", {"step": step, "source": {"kind": "hook", "event": event}, "content": content}
+            )
             messages.append({"role": "user", "content": content})
 
         for step in range(1, MAX_STEPS + 1):
@@ -420,7 +436,18 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 call_id = str(call.get("id") or name)
                 session.write("tool/call", {"step": step, "call_id": call_id, "name": name, "arguments": raw})
                 spill = workdir / SPILL_DIR / f"{step}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
-                result = _invoke(tools, name, raw, workdir, spill=spill)
+
+                def gate(tool: ToolModule, arguments: dict[str, Any], step=step, call_id=call_id) -> dict[str, Any]:
+                    payload = {
+                        "step": step,
+                        "call_id": call_id,
+                        "name": tool.name,
+                        "arguments": arguments,
+                        "capabilities": list(tool.capabilities),
+                    }
+                    return _decide(session, hooks["pre_execute"], "pre_execute", step, payload)
+
+                result = _invoke(tools, name, raw, workdir, spill=spill, gate=gate)
                 payload = {
                     "step": step,
                     "call_id": call_id,
@@ -458,36 +485,70 @@ def _clip(text: str, workdir: Path, spill: Path | None) -> tuple[str, dict[str, 
     return head + marker + tail, {"truncated": True, "spill": relative}
 
 
+def _error(code: str, message: str, arguments: Any) -> dict[str, Any]:
+    """A result the model reads as an error, with one closed code."""
+    return {
+        "content": f"Error: {message}",
+        "is_error": True,
+        "error": {"code": code, "message": message},
+        "arguments": arguments,
+    }
+
+
+def _refused(decision: Mapping[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
+    """The result when pre_execute did not allow the call: denied with a reason, or asked with no one here to answer."""
+    kind = decision.get("kind")
+    if kind == "deny":
+        return _error("HOOK_DENIED", str(decision.get("reason") or "denied by a hook"), arguments)
+    if kind == "ask":
+        reason = str(decision.get("reason") or "this call needs approval")
+        return _error(
+            "APPROVAL_REQUIRED", f"{reason} (headless run: no one to ask, so the call did not run)", arguments
+        )
+    return None
+
+
 def _invoke(
-    tools: Mapping[str, ToolModule], name: str, raw: str, workdir: Path, *, spill: Path | None = None
+    tools: Mapping[str, ToolModule],
+    name: str,
+    raw: str,
+    workdir: Path,
+    *,
+    spill: Path | None = None,
+    gate: Callable[[ToolModule, dict[str, Any]], Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments."""
+    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments the gate allowed."""
     try:
         arguments = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
         arguments = raw
 
-    def error(code: str, message: str) -> dict[str, Any]:
-        return {
-            "content": f"Error: {message}",
-            "is_error": True,
-            "error": {"code": code, "message": message},
-            "arguments": arguments,
-        }
-
     tool = tools.get(name)
     if tool is None:
-        return error("UNKNOWN_TOOL", f"unknown tool {name!r}; available: {', '.join(sorted(tools)) or 'none'}")
+        return _error(
+            "UNKNOWN_TOOL", f"unknown tool {name!r}; available: {', '.join(sorted(tools)) or 'none'}", arguments
+        )
     if not isinstance(arguments, dict):
-        return error("INVALID_ARGS", "arguments must be a JSON object")
+        return _error("INVALID_ARGS", "arguments must be a JSON object", arguments)
     violation = tool.validate(arguments)
     if violation is not None:
-        return error("INVALID_ARGS", violation)
+        return _error("INVALID_ARGS", violation, arguments)
+    if gate is not None:
+        decision = gate(tool, arguments)
+        refused = _refused(decision, arguments)
+        if refused is not None:
+            return refused
+        # An allow may rewrite the call; the rewrite meets the schema like the model's own arguments.
+        if isinstance(decision.get("arguments"), dict):
+            arguments = dict(decision["arguments"])
+            violation = tool.validate(arguments)
+            if violation is not None:
+                return _error("INVALID_ARGS", f"rewritten by a hook: {violation}", arguments)
     started = time.monotonic()
     try:
         result = tool.run(arguments, str(workdir))
     except Exception as exc:
-        return error("TOOL_FAILED", f"{type(exc).__name__}: {exc}")
+        return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
     content, clipped = _clip(text, workdir, spill)
     return {

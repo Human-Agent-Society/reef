@@ -33,14 +33,23 @@ NODES = (("skill", {"name": "answer-style", "text": "# answer-style\n\nStarter s
 SAMPLES = (TraceSample("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
 
 
-@pytest.fixture
-def evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+def _method(monkeypatch: pytest.MonkeyPatch, module: str) -> ModuleType:
     monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
     # Every example names its package ``harness``: drop any sibling
     # example's cached import so this file's syspath entry wins.
     for name in [name for name in sys.modules if name == "harness" or name.startswith("harness.")]:
         del sys.modules[name]
-    return importlib.import_module("harness.evolution")
+    return importlib.import_module(f"harness.{module}")
+
+
+@pytest.fixture
+def evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    return _method(monkeypatch, "evolution")
+
+
+@pytest.fixture
+def native_evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    return _method(monkeypatch, "native_evolution")
 
 
 class Model:
@@ -181,4 +190,121 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
+    assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
+
+
+# -- the native variant: skills, tools, and hooks --------------------------
+
+NATIVE_NODES = (
+    (
+        "native_tool",
+        {
+            "name": "read_file",
+            "description": "Read a text file.",
+            "parameters": {"type": "object"},
+            "code": "def run(args, workdir):\n    return ''\n",
+        },
+    ),
+    (
+        "native_hook",
+        {"name": "loop_guard", "event": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
+    ),
+    *NODES,
+)
+
+TOOL = {
+    "description": "Run python.",
+    "parameters": {"type": "object", "properties": {"code": {"type": "string"}}},
+    "code": "def run(args, workdir):\n    return 'ok'\n",
+}
+HOOK = {"event": "pre_step", "code": "def listen(payload, next):\n    return next()\n"}
+
+
+def native_proposal(kind: str, entry_id: str, **config) -> str:
+    return json.dumps({"id": entry_id, "name": kind, "config": {"name": entry_id, **config}})
+
+
+def native_message(text: str) -> dict:
+    return {
+        "type": "assistant/message",
+        "seq": 4,
+        "time": 0,
+        "data": {"content": text, "tool_calls": [], "finish": "stop"},
+    }
+
+
+def test_native_propose_routes_skills_tools_and_hooks(native_evolution) -> None:
+    tool = native_evolution.propose(
+        NATIVE_NODES, SAMPLES, canned(native_proposal("native_tool", "run_python", **TOOL))
+    )
+    assert (tool.op, tool.id) == ("create", "run_python")
+    assert tool.options == {"name": "native_tool", "config": {"name": "run_python", **TOOL}}
+    hook = native_evolution.propose(
+        NATIVE_NODES, SAMPLES, canned(native_proposal("native_hook", "answer_last", **HOOK))
+    )
+    assert (hook.op, hook.id, hook.options["name"]) == ("create", "answer_last", "native_hook")
+    # A name held by a node of the same kind updates it: the shipped seed tools are addressable by name.
+    same = native_evolution.propose(NATIVE_NODES, SAMPLES, canned(native_proposal("native_tool", "read_file", **TOOL)))
+    assert (same.op, same.id) == ("update", "read_file")
+    skill = native_evolution.propose(NATIVE_NODES, SAMPLES, canned(proposal("answer-style")))
+    assert (skill.op, skill.id, skill.options["name"]) == ("update", "answer-style", "skill")
+    # qwen2.5:7b was measured swapping the kind and the id; the config name settles it.
+    swapped = json.dumps({"id": "native_tool", "name": "median", "config": {"name": "median", **TOOL}})
+    mutation = native_evolution.propose(NATIVE_NODES, SAMPLES, canned(swapped))
+    assert (mutation.op, mutation.id, mutation.options["name"]) == ("create", "median", "native_tool")
+
+
+def test_native_propose_refuses_malformed_shapes(native_evolution) -> None:
+    for reply in (
+        proposal("answer-style", name="rules"),
+        native_proposal("native_hook", "h", event="on_exit", code="x = 1"),
+        native_proposal("native_hook", "h", event="pre_step", code="  "),
+        native_proposal("native_tool", "t", description="d", parameters="not a schema", code="x = 1"),
+        native_proposal("native_tool", "t", description="", parameters={}, code="x = 1"),
+        json.dumps({"id": "t", "name": "native_tool", "config": {"name": "other", **TOOL}}),
+        "no json here",
+    ):
+        assert native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply)) is None
+
+
+def test_native_evaluate_reads_the_last_assistant_message_with_content(native_evolution) -> None:
+    task = "[sieve] count the primes below 100000"
+    call = {
+        "type": "assistant/message",
+        "seq": 2,
+        "time": 0,
+        "data": {"content": "", "tool_calls": [{}], "finish": "x"},
+    }
+    assert native_evolution.evaluate(task, episode((call, native_message("Sieving...\n\n9592")))) == 1.0
+    # A tool-call message carries no text; the last text answer is the one graded.
+    assert native_evolution.evaluate(task, episode((native_message("9592"), call))) == 1.0
+    assert native_evolution.evaluate(task, episode((native_message("The count is 9592"),))) == 0.0
+    assert native_evolution.evaluate(task, episode(())) == 0.0
+
+
+def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolution, tmp_path, monkeypatch) -> None:
+    """The run.sh native contract, hermetic: the native serve file materializes
+    like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
+    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
+    config = load_config(EXAMPLE_DIR / "serve-native.yaml")
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    materialized = tmp_path / "harness_evolve.yaml"
+    materialized.write_text(yaml.safe_dump(recipe_sections))
+    from reef.service.assembly import _upstream_runtime
+
+    service = service_settings_from_config(config)
+    built = CordisRecipe.from_environment(
+        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
+    )
+    assert built.adapter == "native" and built.binary is None
+    # The same three tasks as the pi variant, so the two runs are comparable.
+    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "serve.yaml")["evolution"]["tasks"])
+    assert [entry["id"] for entry in built.seed] == [
+        "read_file",
+        "write_file",
+        "run_bash",
+        "loop_guard",
+        "answer-style",
+    ]
+    assert "upstream" not in yaml.safe_dump(list(built.seed))
     assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes

@@ -65,12 +65,13 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             # the declaration as constants, so the node config binds.
             fields: tuple[tuple[str, Any], ...]
             if kind == "native_hook":
-                fields = (("NAME", options.get("name")), ("SEAM", options.get("seam")))
+                fields = (("NAME", options.get("name")), ("EVENT", options.get("event")))
             else:
                 fields = (
                     ("NAME", options.get("name")),
                     ("DESCRIPTION", options.get("description", "")),
                     ("PARAMETERS", dict(options.get("parameters", {}) or {})),
+                    ("CAPABILITIES", list(options.get("capabilities", []) or [])),
                 )
             header = "\n".join(f"{key} = {value!r}" for key, value in fields)
             emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
