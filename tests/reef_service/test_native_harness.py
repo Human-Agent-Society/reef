@@ -1,4 +1,4 @@
-"""The native adapter: a loop inside the tree whose tools and seams are nodes, driven through the real episode engine.
+"""The native adapter: a loop inside the tree whose tools and events are nodes, driven through the real episode engine.
 
 A stdlib HTTP server plays the served model: it answers by conversation state
 (write a file, then read it back, then answer), so the whole loop, the tool
@@ -45,14 +45,17 @@ TOOL = (
         "code": "def run(args, workdir):\n    return str(args.get('text', '')).upper()\n",
     },
 )
-HOOK = ("native_hook", {"name": "echo", "seam": "pre_step", "code": "def listen(payload, next):\n    return next()\n"})
-# One hook per seam: retry the first failed request, block writes with a note, stop before the third step.
-SEAM_HOOKS = (
+HOOK = (
+    "native_hook",
+    {"name": "echo", "event": "pre_step", "code": "def listen(payload, next):\n    return next()\n"},
+)
+# One hook per event: retry the first failed request, block writes with a note, stop before the third step.
+EVENT_HOOKS = (
     (
         "native_hook",
         {
             "name": "retry",
-            "seam": "request_error",
+            "event": "request_error",
             "code": "def listen(payload, next):\n    return {'kind': 'retry', 'delay_ms': 0}\n",
         },
     ),
@@ -60,7 +63,7 @@ SEAM_HOOKS = (
         "native_hook",
         {
             "name": "veto",
-            "seam": "post_execute",
+            "event": "post_execute",
             "code": (
                 "def listen(payload, next):\n"
                 "    decision = next()\n"
@@ -74,7 +77,7 @@ SEAM_HOOKS = (
         "native_hook",
         {
             "name": "stop",
-            "seam": "pre_step",
+            "event": "pre_step",
             "code": (
                 "def listen(payload, next):\n"
                 "    if payload['step'] == 3:\n"
@@ -203,7 +206,7 @@ def test_native_adapter_is_bundled_and_renders_tools_as_modules() -> None:
     # The config constants come after the code, so the tree's values are what the module ends with.
     assert (
         files["native/hooks/echo.py"]
-        == "def listen(payload, next):\n    return next()\n\nNAME = 'echo'\nSEAM = 'pre_step'\n"
+        == "def listen(payload, next):\n    return next()\n\nNAME = 'echo'\nEVENT = 'pre_step'\n"
     )
     assert files["native/RULES.md"] == "Be brief.\n"
     assert type(reader_for("native-jsonl")).__name__ == "NativeSessionReader"
@@ -223,14 +226,14 @@ def test_native_tool_is_optional_per_adapter_and_validated() -> None:
         NODE_KINDS["native_tool"](None, {**TOOL[1], "code": "def run(args, workdir)\n    return 1\n"})
 
 
-def test_native_hook_is_optional_per_adapter_and_bound_to_a_seam() -> None:
+def test_native_hook_is_optional_per_adapter_and_bound_to_an_event() -> None:
     with pytest.raises(RenderError, match="does not render native_hook"):
         render_composition([HOOK], get_adapter("pi"))
     NODE_KINDS["native_hook"](None, HOOK[1])
-    with pytest.raises(ValueError, match="'seam' must be one of pre_step, request_error, post_execute"):
-        NODE_KINDS["native_hook"](None, {**HOOK[1], "seam": "tool_router"})
+    with pytest.raises(ValueError, match="'event' must be one of pre_step, pre_execute, request_error, post_execute"):
+        NODE_KINDS["native_hook"](None, {**HOOK[1], "event": "tool_router"})
     with pytest.raises(ValueError, match="'code'"):
-        NODE_KINDS["native_hook"](None, {"name": "x", "seam": "pre_step"})
+        NODE_KINDS["native_hook"](None, {"name": "x", "event": "pre_step"})
     with pytest.raises(ValueError, match="'code' does not compile"):
         NODE_KINDS["native_hook"](None, {**HOOK[1], "code": "def listen(:\n"})
     # A lone surrogate survives JSON but cannot be written as UTF-8 at render.
@@ -243,15 +246,15 @@ def test_native_hook_is_optional_per_adapter_and_bound_to_a_seam() -> None:
 def test_rendered_constants_bind_over_what_the_code_assigns(tmp_path: Path) -> None:
     sneaky = {
         "name": "sneaky",
-        "seam": "pre_step",
-        "code": "SEAM = 'post_execute'\nNAME = 'loop_guard'\ndef listen(payload, next):\n    return next()\n",
+        "event": "pre_step",
+        "code": "EVENT = 'post_execute'\nNAME = 'loop_guard'\ndef listen(payload, next):\n    return next()\n",
     }
     files = render_composition([("native_hook", sneaky)], get_adapter("native"))
     for relative, text in files.items():
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_text(text)
     hooks = load_hooks(tmp_path / "native" / "hooks")
-    assert [(hook.name, hook.seam) for hook in hooks["pre_step"]] == [("sneaky", "pre_step")]
+    assert [(hook.name, hook.event) for hook in hooks["pre_step"]] == [("sneaky", "pre_step")]
     assert hooks["post_execute"] == []
 
 
@@ -280,7 +283,7 @@ def test_hooks_form_a_waterfall_where_next_runs_once_and_a_raising_hook_is_skipp
     trace: list[dict] = []
     decision = _waterfall(hooks, 0, {"step": 1}, _DEFAULTS["pre_step"], trace)
     assert decision == {"kind": "enter", "messages": ["from c", "from a"]}
-    # c owned the seam, so d never ran; b's error fell through to c.
+    # c owned the event, so d never ran; b's error fell through to c.
     assert calls == ["a", "b", "c"]
     assert trace == [
         {"hook": "b", "error": "RuntimeError: boom"},
@@ -404,10 +407,10 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     assert sorted(tool["function"]["name"] for tool in first["tools"]) == ["read_file", "run_bash", "write_file"]
 
 
-def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
+def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     model = _FlakyModel()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *SEAM_HOOKS])
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *EVENT_HOOKS])
     finally:
         model.shutdown()
         model.server_close()
@@ -437,7 +440,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     assert failed["attempt"] == 1 and failed["error"]["code"] == "MODEL_ERROR" and failed["error"]["status"] == 500
     retry, block, reject = (event["data"] for event in _events(result.trajectory, "hook/decision"))
     assert retry == {
-        "seam": "request_error",
+        "event": "request_error",
         "step": 1,
         "hook": "retry",
         "owned": True,
@@ -445,7 +448,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     }
     assert block["hook"] == "veto" and block["owned"] is False and block["decision"]["kind"] == "block"
     assert reject == {
-        "seam": "pre_step",
+        "event": "pre_step",
         "step": 3,
         "hook": "stop",
         "owned": True,
@@ -458,7 +461,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     note = _events(result.trajectory, "user/message")[0]["data"]
     assert note == {
         "step": 1,
-        "source": {"kind": "hook", "seam": "post_execute"},
+        "source": {"kind": "hook", "event": "post_execute"},
         "content": "Writes are disabled here.",
     }
     assert result.trajectory[-1]["data"]["reason"] == {
@@ -473,7 +476,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
 
 
 def test_a_module_that_cannot_load_ends_the_episode_in_error(tmp_path: Path, fake_model) -> None:
-    broken = ("native_hook", {"name": "broken", "seam": "pre_step", "code": "raise RuntimeError('no')\n"})
+    broken = ("native_hook", {"name": "broken", "event": "pre_step", "code": "raise RuntimeError('no')\n"})
     result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), broken])
     assert result.exit_code == 1 and fake_model.requests == []
     assert [event["type"] for event in result.trajectory] == ["session", "turn/start", "turn/end"]
@@ -560,3 +563,126 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     # Both trees complete the scripted task, so the verdict is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
+
+
+# -- pre_execute: allow, deny, ask, and the capabilities a hook reads --------
+
+PRE_EXECUTE_HOOKS = (
+    (
+        "native_hook",
+        {
+            "name": "no_writes",
+            "event": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if 'write' in payload['capabilities']:\n"
+                "        return {'kind': 'deny', 'reason': 'writes are off'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+    (
+        "native_hook",
+        {
+            "name": "approve_reads",
+            "event": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if payload['name'] == 'read_file':\n"
+                "        return {'kind': 'ask', 'reason': 'read ' + payload['arguments']['path'] + '?'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+)
+
+
+def test_native_tool_capabilities_are_validated_rendered_and_declared_by_the_seed() -> None:
+    config = dict(TOOL[1], capabilities=["read", "network"])
+    NODE_KINDS["native_tool"](None, config)
+    for bad in ("read", ["read", "read"], ["fly"], [1]):
+        with pytest.raises(ValueError, match="capabilities"):
+            NODE_KINDS["native_tool"](None, dict(TOOL[1], capabilities=bad))
+    files = render_composition([("native_tool", config)], get_adapter("native"))
+    assert files["native/tools/shout.py"].rstrip().endswith("CAPABILITIES = ['read', 'network']")
+    assert {entry["config"]["name"]: entry["config"]["capabilities"] for entry in SEED_TOOLS} == {
+        "read_file": ["read"],
+        "write_file": ["write"],
+        "run_bash": ["exec", "write", "network"],
+    }
+
+
+def test_invoke_runs_only_what_the_gate_allows(tmp_path: Path) -> None:
+    tool = ToolModule("shout", "", TOOL[1]["parameters"], lambda args, workdir: args["text"].upper(), ["read"])
+    tools = {"shout": tool}
+    raw = json.dumps({"text": "hi"})
+    assert _invoke(tools, "shout", raw, tmp_path)["content"] == "HI"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow"})["content"] == "HI"
+    denied = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "deny", "reason": "quiet"})
+    assert denied["is_error"] is True and denied["error"] == {"code": "HOOK_DENIED", "message": "quiet"}
+    assert denied["content"] == "Error: quiet"
+    asked = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "ask", "reason": "may I shout?"})
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["error"]["message"].startswith("may I shout? (headless run: no one to ask")
+    # The gate runs after validation and sees the validated arguments and the declared capabilities.
+    seen = []
+
+    def gate(t, a):
+        seen.append((t.name, t.capabilities, a))
+        return {"kind": "allow"}
+
+    assert _invoke(tools, "shout", "{}", tmp_path, gate=gate)["error"]["code"] == "INVALID_ARGS"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=gate)["content"] == "HI"
+    assert seen == [("shout", ("read",), {"text": "hi"})]
+    # An allow may rewrite the call; the rewrite meets the schema like the model's own arguments.
+    rewritten = _invoke(
+        tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": "yo"}}
+    )
+    assert rewritten["content"] == "YO" and rewritten["arguments"] == {"text": "yo"}
+    bad = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": 3}})
+    assert bad["error"] == {"code": "INVALID_ARGS", "message": "rewritten by a hook: argument 'text' must be string"}
+
+
+def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_path: Path, fake_model) -> None:
+    result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
+    header = result.trajectory[0]["data"]
+    assert header["capabilities"] == {
+        "read_file": ["read"],
+        "run_bash": ["exec", "write", "network"],
+        "write_file": ["write"],
+    }
+    assert header["hooks"] == {"no_writes": "pre_execute", "approve_reads": "pre_execute"}
+    # File name order is waterfall order: approve_reads passes the write down, no_writes denies it by capability;
+    # approve_reads owns the read and asks, and a headless run has no one to answer.
+    decisions = [event["data"] for event in _events(result.trajectory, "hook/decision")]
+    assert decisions == [
+        {
+            "event": "pre_execute",
+            "step": 1,
+            "hook": "no_writes",
+            "owned": True,
+            "decision": {"kind": "deny", "reason": "writes are off"},
+        },
+        {
+            "event": "pre_execute",
+            "step": 2,
+            "hook": "approve_reads",
+            "owned": True,
+            "decision": {"kind": "ask", "reason": "read notes.txt?"},
+        },
+    ]
+    denied, asked = (event["data"] for event in _events(result.trajectory, "tool/result"))
+    assert denied["error"] == {"code": "HOOK_DENIED", "message": "writes are off"}
+    assert denied["content"] == "Error: writes are off" and denied["arguments"] == {
+        "path": "notes.txt",
+        "content": "hello",
+    }
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["content"].startswith("Error: read notes.txt? (headless run: no one to ask")
+    # What the model read: the denial as the tool result of its first call.
+    assert fake_model.requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Error: writes are off",
+    }
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}

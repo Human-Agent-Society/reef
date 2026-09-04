@@ -4,3 +4,4 @@ def run(args, workdir):
 NAME = 'shout'
 DESCRIPTION = 'Upper-case a string.'
 PARAMETERS = {'type': 'object', 'properties': {'text': {'type': 'string'}}, 'required': ['text']}
+CAPABILITIES = []
