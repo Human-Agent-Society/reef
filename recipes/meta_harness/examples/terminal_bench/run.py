@@ -142,8 +142,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     state: dict[str, Any] = dict(backend.initial_state())
     log = (output / "iterations.jsonl").open("a", encoding="utf-8")
     evaluator = DefaultCandidateEvaluationPlugin(backend, MetaHarnessSelector(store))
+    search(backend, evaluator, ledger, state, arguments.iterations, log)
+    log.close()
+    population = state.get(POPULATION_STATE_KEY, {})
+    (output / "final-population.json").write_text(json.dumps(population, indent=2, sort_keys=True) + "\n")
+    print(f"served candidate: {population.get('served_id')}", flush=True)
+    return 0
 
-    for iteration in range(1, arguments.iterations + 1):
+
+def search(
+    backend: Any,
+    evaluator: Any,
+    ledger: ObservedCostLedger,
+    state: dict[str, Any],
+    iterations: int,
+    log: Any,
+) -> dict[str, Any]:
+    """Propose, evaluate, settle and commit, once per iteration.
+
+    ``state`` is updated in place so a caller keeps the last committed value
+    even when the loop stops early.
+    """
+    for iteration in range(1, iterations + 1):
         try:
             ledger.before_trial(f"iteration-{iteration}")
         except SpendCapReached as exc:
@@ -153,7 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         prepared = backend.prepare_step(TraceBatch(batch_id=f"iteration-{iteration}", samples=()), state, iteration)
         if prepared.outcome == "skip":
             print(f"iteration {iteration}: no proposal ({prepared.metrics})", flush=True)
-            state = dict(prepared.state)
+            state.clear()
+            state.update(prepared.state)
             continue
         try:
             evaluation = evaluator.evaluate(prepared.candidate)
@@ -169,7 +190,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         # the next iteration's begin() sees state that never reached commit
         # and refuses to continue - correctly.
         backend.commit_applied(result.state)
-        state = dict(result.state)
+        state.clear()
+        state.update(result.state)
         row = {
             "iteration": iteration,
             "selected": bool(decision.selected),
@@ -179,12 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.write(json.dumps(row, sort_keys=True) + "\n")
         log.flush()
         print(json.dumps(row, sort_keys=True), flush=True)
-
-    log.close()
-    population = state.get(POPULATION_STATE_KEY, {})
-    (output / "final-population.json").write_text(json.dumps(population, indent=2, sort_keys=True) + "\n")
-    print(f"served candidate: {population.get('served_id')}", flush=True)
-    return 0
+    return state
 
 
 if __name__ == "__main__":
