@@ -109,11 +109,14 @@ def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[
             key = f"reef.{key}"
         parts = key.split(".")
         node: dict[str, Any] = config
-        for part in parts[:-1]:
-            existing = node.get(part)
-            if not isinstance(existing, dict):
+        for index, part in enumerate(parts[:-1]):
+            if part not in node:
                 node[part] = {}
-            node = node[part]
+            existing = node[part]
+            if not isinstance(existing, dict):
+                prefix = ".".join(parts[: index + 1])
+                raise InvalidOverrideError(f"override path {prefix!r} is not a section")
+            node = existing
         node[parts[-1]] = _coerce_value(raw_value)
     return config
 
@@ -498,6 +501,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     config_path = args.config or os.environ.get("REEF_CONFIG", "reef.yaml")
     try:
         overrides = _parse_overrides(extras)
+        exit_code = _run_orchestrator(config_path, overrides)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
-    sys.exit(_run_orchestrator(config_path, overrides))
+    sys.exit(exit_code)
