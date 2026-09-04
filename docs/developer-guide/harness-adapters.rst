@@ -55,10 +55,12 @@ into the prompt. ``code_extension`` is rejected: an evolved module would run
 in the runner's process, outside the container that isolates the agent's own
 commands, and it is outside Meta-Harness's search space in any case. On an
 empty tree every mapping is a no-op and the agent is stock Terminus 2, the
-equivalence the measured baseline rests on. Isolation is Harbor's task
-container: Docker does not nest in bubblewrap, so ``run_episode`` refuses
-this adapter under ``evolution.executor: sandbox``. The extra needs Python
-3.12, above Reef's own floor.
+equivalence the measured baseline rests on. Isolation is Harbor's task container: Docker does not nest in bubblewrap, so
+``run_episode`` refuses this adapter under ``evolution.executor: sandbox``.
+``REEF_TERMINUS_ENVIRONMENT`` names the Harbor backend that runs the
+container; Harbor's default is local Docker, which does not collect the
+verifier's reward on every host, so the descriptor names one explicitly. The
+extra needs Python 3.12, above Reef's own floor.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its
