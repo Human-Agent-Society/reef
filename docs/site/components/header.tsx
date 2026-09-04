@@ -11,11 +11,9 @@ import { ThemeToggle } from "./theme-toggle";
 
 type SearchDocument = { slug: string; title: string; description: string; text: string };
 
-// Two rows: identity, search and the repository on the first; the section
-// tabs on their own row below, so the tabs never compete with the search box
-// for width. Under 900px the tabs move into the drawer (MobileNav).
-export async function Header({ documents, navigation }: { documents: SearchDocument[]; navigation: NavGroup[] }) {
-  const { stars, version } = await getRepoStats();
+// Two rows: identity, search and the repository, then the section tabs; under 640px the tabs live in the drawer.
+export function Header({ documents, navigation }: { documents: SearchDocument[]; navigation: NavGroup[] }) {
+  const { stars, version } = getRepoStats();
 
   return (
     <header className="site-header">

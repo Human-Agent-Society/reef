@@ -4,9 +4,7 @@ import { Monitor, Moon, Sun } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
 import { MODES, Mode, THEME_KEY, apply, storedMode } from "@/lib/theme";
 
-// Three modes side by side, the current one filled, so a reader sees all
-// three and picks one in one click. The order is the settled cycle: system,
-// then dark, then light.
+// Three modes side by side, the current one filled, in the settled order: system, dark, light.
 const OPTIONS: { mode: Mode; label: string; Icon: typeof Monitor }[] = [
   { mode: "auto", label: "System color theme", Icon: Monitor },
   { mode: "dark", label: "Dark color theme", Icon: Moon },
@@ -51,13 +49,18 @@ export function ThemeToggle() {
     window.dispatchEvent(new Event(CHANGE));
   }
 
+  // The radio group keys: arrows move, Home and End jump.
   function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+    const index = MODES.indexOf(mode);
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    let target: number;
+    if (step !== undefined) target = (index + step + MODES.length) % MODES.length;
+    else if (event.key === "Home") target = 0;
+    else if (event.key === "End") target = MODES.length - 1;
+    else return;
     event.preventDefault();
-    const step = event.key === "ArrowRight" ? 1 : -1;
-    const next = MODES[(MODES.indexOf(mode) + step + MODES.length) % MODES.length];
-    choose(next);
-    (event.currentTarget.querySelector(`[data-mode="${next}"]`) as HTMLElement | null)?.focus();
+    choose(MODES[target]);
+    (event.currentTarget.querySelector(`[data-mode="${MODES[target]}"]`) as HTMLElement | null)?.focus();
   }
 
   return (

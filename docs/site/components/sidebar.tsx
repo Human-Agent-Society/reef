@@ -2,20 +2,26 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useRef } from "react";
 import type { NavGroup } from "@/lib/docs";
 
 function isCurrent(pathname: string, href: string) {
   return pathname === href || pathname === `${href}/`;
 }
 
-// The whole tree, every group with its pages, so a reader sees where a page
-// sits among the rest and reaches any page in one click. The header tabs
-// jump between groups; the sidebar scrolls on its own.
+// The whole tree, every section with its pages; the tabs jump between sections and the sidebar scrolls on its own.
 export function Sidebar({ navigation }: { navigation: NavGroup[] }) {
   const pathname = usePathname();
+  const aside = useRef<HTMLElement>(null);
+
+  // The tree is longer than the viewport, so the current page is brought into view on every page change.
+  useEffect(() => {
+    const active = aside.current?.querySelector<HTMLElement>('a[aria-current="page"]');
+    active?.scrollIntoView({ block: "nearest" });
+  }, [pathname]);
 
   return (
-    <aside className="docs-sidebar">
+    <aside ref={aside} className="docs-sidebar">
       <nav aria-label="Documentation navigation">
         {navigation.map((group) => (
           <div key={group.title} className="sidebar-group">

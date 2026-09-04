@@ -126,7 +126,7 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
 
   return (
     <>
-      <button className="search-trigger" type="button" onClick={() => setOpen(true)}>
+      <button className="search-trigger" type="button" onClick={() => setOpen(true)} aria-label="Search documentation" title="Search">
         <SearchIcon size={16} />
         <span>Search</span>
         <kbd>⌘ K</kbd>

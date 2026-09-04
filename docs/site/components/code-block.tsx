@@ -31,10 +31,7 @@ function languageOf(className?: string) {
   return name ? (LABELS[name] ?? name) : "";
 }
 
-// Every code block gets a head bar: the language on the left, the copy button
-// on the right, always visible, so a phone needs no hover and the button never
-// covers the first line of code. The text copied is the block's own
-// textContent, which the shiki path stores with real newlines.
+// A head bar per block: the language, and a copy button that is always in view and never covers the code.
 export function CodeBlock({ className, children }: { className?: string; children: ReactNode }) {
   const ref = useRef<HTMLPreElement>(null);
   const [copied, setCopied] = useState(false);
@@ -57,7 +54,7 @@ export function CodeBlock({ className, children }: { className?: string; childre
         <span>{language}</span>
         <button type="button" className="code-copy" onClick={copy} aria-label={copied ? "Copied" : "Copy code"} title={copied ? "Copied" : "Copy"}>
           {copied ? <Check size={14} /> : <Copy size={14} />}
-          <span>{copied ? "Copied" : "Copy"}</span>
+          <span aria-live="polite">{copied ? "Copied" : "Copy"}</span>
         </button>
       </div>
       <pre ref={ref} className={className}>
