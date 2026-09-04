@@ -2,7 +2,12 @@
 
 Skipped unless ``METAHARNESS_DIR`` names an upstream ``terminal_bench_2``
 checkout, because it imports and drives upstream's own ``update_frontier``
-rather than a description of it.
+rather than a description of it. Upstream's module-scope imports have to
+resolve too, so run it under an interpreter that has them::
+
+    METAHARNESS_DIR=/path/to/terminal_bench_2 \
+      uv run --extra dev --with python-dotenv python -m pytest \
+      tests/reef_service/test_meta_harness_replay.py
 
 This is where the reproduction claim lives. A live run cannot carry it: at any
 affordable scale the two arms can select different candidates from sampling
@@ -31,8 +36,17 @@ def _upstream_on_path():
     import sys
 
     sys.path.insert(0, CHECKOUT)
-    yield
-    sys.path.remove(CHECKOUT)
+    try:
+        # Upstream imports its own third-party deps at module scope. Without them
+        # every test below fails on the import, which reads like the selection
+        # rules diverged rather than like a missing package. Skip instead.
+        try:
+            import meta_harness  # noqa: F401
+        except ImportError as exc:
+            pytest.skip(f"upstream meta_harness is not importable here: {exc}")
+        yield
+    finally:
+        sys.path.remove(CHECKOUT)
 
 
 @pytest.mark.unit
