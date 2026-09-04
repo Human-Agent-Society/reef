@@ -199,6 +199,11 @@ both `reef.upstream_model` and `model.path` to its model name. The example
 uses `http://127.0.0.1:8000` and `qwen3-8b`. Its proposer and evaluator live
 in the tutorial's `harness` package, and evaluation runs the `pi` agent.
 
+`REEF_UPSTREAM_API_KEY` is your model provider's API key: use your OpenAI API
+key when connecting to OpenAI, or the corresponding key for another provider.
+Leave it unset for a local endpoint without authentication. `REEF_TOKEN` is
+the separate token your agent uses to access Reef.
+
 From the repository root, in your activated Python environment:
 
 ```bash
@@ -210,8 +215,9 @@ mkdir -p work/recipes
 python3 materialize_recipe.py serve.yaml
 export REEF_RECIPE_CONFIG_DIR="$PWD/work/recipes"
 export REEF_TOKEN="reef-local"
-# If your model endpoint requires a key:
-# export REEF_UPSTREAM_API_KEY="your-provider-key"
+# For OpenAI, use your OpenAI API key; otherwise use your provider's key.
+# Omit this for a local endpoint without authentication.
+# export REEF_UPSTREAM_API_KEY="your-api-key"
 
 reef serve -c "$PWD/serve.yaml" \
   --reef.port "8901" \
