@@ -204,9 +204,7 @@ class MetaHarnessProposer(Proposer):
             if not mutations:
                 raise ValueError("proposal does not change the served composition")
         except (KeyError, TypeError, ValueError, RenderError) as exc:
-            population.pending_id = None
-            if population.candidates and population.candidates[-1].outcome == "pending":
-                population.candidates.pop()
+            population.discard_pending()
             population.record_attempt(**audit, status="invalid", error=str(exc))
             return None
 
@@ -223,8 +221,11 @@ class MetaHarnessProposer(Proposer):
     def _binding(self, models: ModelBindings) -> ModelBinding:
         try:
             return models[self._model]
-        except KeyError:
-            return models.served
+        except KeyError as exc:
+            raise ValueError(
+                f"Meta-Harness proposer model {self._model!r} is not declared under evolution.models; "
+                "the harness under test must not propose its own improvements"
+            ) from exc
 
     def _validate_entries(
         self,
@@ -314,10 +315,13 @@ class MetaHarnessSelector:
         current_scores = _evaluation_scores(evaluation.metrics.get("current_scores", ()))
         if len(candidate_scores) != len(current_scores):
             raise ValueError("Meta-Harness evaluation score vectors must have equal lengths")
-        incumbent = population.served
-        incumbent_scores = incumbent.scores or current_scores
+        # The incumbent's number is the one from this batch, not the one it
+        # scored when it won. Cordis interleaves candidate and current inside
+        # each pairing so drift lands on both sides; comparing against a stored
+        # score throws that away and ratchets the bar up to the incumbent's
+        # luckiest run, which no later candidate has to beat on merit.
         candidate_mean = fmean(candidate_scores)
-        incumbent_mean = fmean(incumbent_scores)
+        incumbent_mean = fmean(current_scores)
         selected = candidate_mean > incumbent_mean
         population.record_decision(
             candidate_scores=candidate_scores,

@@ -294,6 +294,23 @@ class Population:
             self.pending_id = candidate.candidate_id
             return candidate, True
 
+    def discard_pending(self) -> None:
+        """Undo a staged candidate that never became a proposal.
+
+        Staging appends and sets ``pending_id`` together, so unwinding both is
+        the population's own business; a caller reaching into ``candidates``
+        would have to guess which record was its own.
+        """
+        pending_id = self.pending_id
+        self.pending_id = None
+        if pending_id is None:
+            return
+        self.candidates = [
+            candidate
+            for candidate in self.candidates
+            if not (candidate.candidate_id == pending_id and candidate.outcome == "pending")
+        ]
+
     def record_decision(
         self,
         *,
@@ -304,8 +321,10 @@ class Population:
         candidate = self.pending
         served = self.served
         candidate.scores = _scores(candidate_scores)
-        if served.scores is None:
-            served.scores = _scores(current_scores)
+        # Refreshed every round, not written once: this is the incumbent's
+        # score in the batch just run, and it is what the proposer reads back
+        # as history. A frozen first observation would age into fiction.
+        served.scores = _scores(current_scores)
         candidate.outcome = "selected" if selected else "retained"
         if selected:
             self.served_id = candidate.candidate_id

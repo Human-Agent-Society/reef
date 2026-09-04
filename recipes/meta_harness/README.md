@@ -57,7 +57,7 @@ def propose(nodes, samples, models, *, manifest=None, rejected=()):
     ...
 ```
 
-It calls `evolution.models.proposer`, falling back to the served model when
+It calls `evolution.models.proposer`, and refuses to run when
 that name is not configured. The model sees all retained candidate
 compositions and scores, their lineage, the current trace batch, the
 validation task names, and the adapter's Reef node vocabulary. It returns one
@@ -82,8 +82,11 @@ for example, an adapter may still reject an otherwise valid Reef node kind.
 
 Every unique valid candidate is retained, including non-winners, and can be a
 future parent. Selection is a strict improvement in mean validation score over
-the committed incumbent. Failed episodes count as zero; a non-finite score is
-rejected by Reef before settlement.
+the incumbent *in the same batch*: Reef interleaves candidate and incumbent
+inside each pairing so provider drift lands on both sides, and comparing
+against a stored score from an earlier batch would discard that and raise the
+bar to whatever the incumbent's luckiest run happened to be. Failed episodes
+count as zero; a non-finite score is rejected by Reef before settlement.
 
 The complete population, lineage, scores, served id, proposal attempts, and
 budget counters live under `meta_harness_population` in Reef's algorithm
