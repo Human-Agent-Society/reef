@@ -187,6 +187,44 @@ reported interactions, evaluates the current and candidate harnesses on the
 configured tasks, and publishes the candidate only when it wins that
 comparison. Harness scenarios do not share data or versions.
 
+#### Start a separate harness deployment
+
+You can start here after the source installation above. This deployment uses
+an OpenAI-compatible model endpoint and needs no training GPUs. It runs on
+port `8901`, independently of the weight-training deployment on `8900`.
+
+Use the tutorial's [deployment config](tutorials/harness_evolve/serve.yaml).
+Set `reef.upstream_url` to your provider's base URL (without `/v1`), and set
+both `reef.upstream_model` and `model.path` to its model name. The example
+uses `http://127.0.0.1:8000` and `qwen3-8b`. Its proposer and evaluator live
+in the tutorial's `harness` package, and evaluation runs the `pi` agent.
+
+From the repository root, in your activated Python environment:
+
+```bash
+uv pip install -e tutorials/harness_evolve
+npm install -g @earendil-works/pi-coding-agent@0.84.2
+
+cd tutorials/harness_evolve
+mkdir -p work/recipes
+python3 materialize_recipe.py serve.yaml
+export REEF_RECIPE_CONFIG_DIR="$PWD/work/recipes"
+export REEF_TOKEN="reef-local"
+# If your model endpoint requires a key:
+# export REEF_UPSTREAM_API_KEY="your-provider-key"
+
+reef serve -c "$PWD/serve.yaml" \
+  --reef.port "8901" \
+  --reef.token "$REEF_TOKEN"
+```
+
+Leave this process running. In another terminal, set `REEF_TOKEN=reef-local`
+and check `curl -f http://127.0.0.1:8901/healthz` before installing the harness.
+The example keeps its records and artifacts under `tutorials/harness_evolve/work/`.
+Its three coding tasks demonstrate evaluation; adapt the tasks, proposer, and
+evaluator to your workload using the
+[harness evolution tutorial](tutorials/harness_evolve/README.md).
+
 #### Install a versioned harness
 
 You can install Reef harness like how you install most coding agents.
@@ -195,7 +233,7 @@ and bundled with the downloaded harness.
 
 ```bash
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
-  'http://localhost:8900/reef/harness/install?adapter=pi' | bash
+  'http://localhost:8901/reef/harness/install?adapter=pi' | bash
 
 reef-pi -p "fix the bug"
 ```
@@ -206,7 +244,7 @@ For example, if you have a scenario `harness-evolve-code-repair`, you can instal
 ```bash
 curl -fsS -H 'x-reef-scenario: harness-evolve-code-repair' \
   -H "Authorization: Bearer $REEF_TOKEN" \
-  'http://localhost:8900/reef/harness/install?adapter=pi' | bash
+  'http://localhost:8901/reef/harness/install?adapter=pi' | bash
 ```
 
 #### Report a task result
