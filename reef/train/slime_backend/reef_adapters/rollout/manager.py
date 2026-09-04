@@ -130,14 +130,14 @@ class ReefRolloutManagerImpl:
         return None if not ip or not port else f"http://{ip}:{port}"
 
     def pause_generation_for_update(self):
-        """Stop generation for a publication, leaving nothing that outlives the weights.
+        """Stop generation for a publication, leaving no reusable cache entry.
 
         A ``retract`` pause releases every in-flight request's KV, which is
         what lets the shared prefix cache be cleared: an entry the previous
         weights built must not be matchable by a request running under the
         next ones. A colocated engine drops the cache with its KV allocation
-        anyway; clearing it here is what extends the same guarantee to a
-        disjoint engine that opted into sharing prefixes.
+        anyway; clearing it here extends the same guarantee to a disjoint
+        engine that opted into sharing prefixes.
         """
         mode = getattr(self.args, "weight_update_pause_mode", "retract")
         engines = self.updatable_rollout_engines

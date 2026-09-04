@@ -267,13 +267,6 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
 def test_failed_pause_barrier_retires_engines(monkeypatch: pytest.MonkeyPatch, failed_phase: str) -> None:
     raw_rollout, module = _load_manager_module(monkeypatch)
 
-    class _Remote:
-        def __init__(self, phase):
-            self.phase = phase
-
-        def remote(self, *args, **kwargs):
-            return self.phase
-
     def resolve(handles, **kwargs):
         if failed_phase in handles:
             raise TimeoutError(failed_phase)
@@ -283,7 +276,9 @@ def test_failed_pause_barrier_retires_engines(monkeypatch: pytest.MonkeyPatch, f
 
     engines = [
         types.SimpleNamespace(
-            pause_generation=_Remote("pause"), flush_cache=_Remote("flush"), shutdown=_Remote("shutdown")
+            pause_generation=_RemoteMethod("pause"),
+            flush_cache=_RemoteMethod("flush"),
+            shutdown=_RemoteMethod("shutdown"),
         )
         for _ in range(2)
     ]

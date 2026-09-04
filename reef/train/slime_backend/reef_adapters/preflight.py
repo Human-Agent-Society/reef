@@ -54,48 +54,32 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
 def configure_sglang_runtime(args) -> None:
     """Apply Reef's serving invariants through generic Slime/SGLang options.
 
-    Disjoint/PD weight updates preserve each active request's private KV state.
-    Colocated regular engines retract instead, because their KV allocation
-    must leave the GPU during training, and recompute it after publication.
+    A radix-cache entry carries no runtime-load-ID identity, so reusing one
+    across a publication would let a request generate under new weights from a
+    prefix the previous weights encoded — contamination in the prefix's
+    encoding, which the rollout's runtime-load spans cannot express. Prefix
+    sharing is therefore one decision with retracting publication, which
+    releases every in-flight request's KV and clears the cache before the
+    weights change, so no entry outlives the weights that built it.
 
-    A shared radix-cache entry carries no runtime-load-ID identity of its own,
-    and reusing one across a publication would let a request generate under
-    new weights from a prefix the previous weights encoded — a provenance the
-    rollout's runtime-load spans cannot express, since the contamination is in
-    the prefix's encoding rather than in a suffix of the sequence. What makes
-    that impossible is releasing the KV cache: a colocated training step
-    releases it before every publication, and SGLang's own release path
-    flushes the tree when releasing that allocation, so no entry outlives the
-    weights that built it. Colocated engines therefore keep cross-request
-    prefix reuse, which is where an agent workload's long shared prefixes pay
-    off.
-
-    A disjoint engine keeps its KV across the update by default and so shares
-    nothing. ``--disjoint-prefix-sharing`` trades that: publication retracts
-    in-flight requests and clears the cache before the weights change, so
-    again no entry outlives the weights that built it. The cost is
-    re-prefilling whatever was in flight at each publication; the gain is
-    reuse for every request in between.
-
-    One engine also holds several scenarios' adapters, and the same prefix has
-    different KV under each. That isolation belongs to SGLang, which folds the
-    adapter into the entry's key; a build that does not is left with reuse
-    off rather than trusted to keep the scenarios apart.
+    Colocated engines retract already, because their KV allocation must leave
+    the GPU during training and be recomputed after publication. A disjoint
+    engine preserves in-flight KV by default and shares nothing;
+    ``--disjoint-prefix-sharing`` opts it into retracting instead, trading a
+    re-prefill at each publication for reuse in between. Under LoRA, sharing
+    also requires SGLang to fold the adapter into the entry's key, because one
+    engine holds several scenarios' adapters and the same prefix has different
+    KV under each.
 
     SGLang's native plugin hook installs Reef's token metadata and colocated
     suspension policy inside each scheduler.
     """
     colocate = bool(getattr(args, "colocate", False))
-    lora = int(getattr(args, "megatron_lora_rank", 0) or 0) > 0
-    # Sharing prefixes and retracting on publication are one decision, not
-    # two: an entry may only be reused while nothing can carry it across a
-    # publication, and clearing the cache is only possible once no request
-    # holds KV. Colocated engines retract already, because their KV has to
-    # leave the GPU regardless.
-    retracts = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
-    args.weight_update_pause_mode = "retract" if retracts else "in_place"
-    requires_private_cache = not retracts or (lora and not _adapter_scoped_prefix_cache_supported())
-    args.sglang_disable_radix_cache = requires_private_cache
+    uses_lora = int(getattr(args, "megatron_lora_rank", 0) or 0) > 0
+    retracts_at_publication = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
+    args.weight_update_pause_mode = "retract" if retracts_at_publication else "in_place"
+    shares_prefixes = retracts_at_publication and (not uses_lora or _adapter_scoped_prefix_cache_supported())
+    args.sglang_disable_radix_cache = not shares_prefixes
     # Reef consumes /generate as a token-native SSE source. Disjoint chunks
     # keep text, ids, log-probs, and scheduler metadata linear in rollout
     # length and give the capture path one unambiguous wire contract.
@@ -107,11 +91,11 @@ def configure_sglang_runtime(args) -> None:
     )
     os.environ["SGLANG_PLUGINS"] = ",".join(dict.fromkeys((*plugins, SGLANG_PLUGIN_NAME)))
 
-    if int(getattr(args, "megatron_lora_rank", 0) or 0) > 0:
+    if uses_lora:
         _require_lora_tensor_schema()
         _require_lora_distributed_schema()
 
-    if retracts and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
+    if retracts_at_publication and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
         raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
 
     config_path = getattr(args, "sglang_config", None)
@@ -121,11 +105,11 @@ def configure_sglang_runtime(args) -> None:
     from slime.backends.sglang_utils.sglang_config import SglangConfig
 
     config = SglangConfig.from_yaml(config_path)
-    if retracts and config.has_pd_disaggregation:
+    if retracts_at_publication and config.has_pd_disaggregation:
         raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
-    if not requires_private_cache:
-        # Overrides may enable sharing only when both publication and
-        # adapter isolation permit it.
+    if shares_prefixes:
+        # Sharing is already safe here, so a group's overrides may set
+        # disable_radix_cache either way.
         return
     for model in config.models:
         for group in model.server_groups:
@@ -152,17 +136,18 @@ def _adapter_scoped_prefix_cache_supported() -> bool:
         keys = []
         for index, adapter in enumerate(("reef-probe-a", "reef-probe-a", "reef-probe-b")):
             tokens = array("q", [1])
-            req = Req(
+            request = Req(
                 rid=f"reef-prefix-probe-{index}",
                 origin_input_text="",
                 origin_input_ids=tokens,
                 sampling_params=SamplingParams(max_new_tokens=1),
                 lora_id=adapter,
             )
-            keys.append(RadixKey(token_ids=tokens, extra_key=req.extra_key).child_key())
+            keys.append(RadixKey(token_ids=tokens, extra_key=request.extra_key).child_key())
     except (ImportError, AttributeError, TypeError):
         return False
-    return keys[0] == keys[1] and keys[0] != keys[2]
+    first_key, same_adapter_key, other_adapter_key = keys
+    return first_key == same_adapter_key and first_key != other_adapter_key
 
 
 def _require_lora_distributed_schema() -> None:
