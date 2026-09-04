@@ -127,6 +127,21 @@ SEED_TOOLS: tuple[dict[str, Any], ...] = (
 #: The loop guard is a hook, not loop code: a tree may retune or drop it.
 SEED_HOOKS: tuple[dict[str, Any], ...] = (_hook("loop_guard", "post_execute", _LOOP_GUARD),)
 
-SEED_NODES: tuple[dict[str, Any], ...] = (*SEED_TOOLS, *SEED_HOOKS)
+#: Today's loop as a graph: think, act while the model calls tools, end when it answers. The loop runs this
+#: when a tree carries no graph, so an old tree behaves as before; as a node a proposer may rewrite it.
+SEED_GRAPH: dict[str, Any] = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {"think": {"kind": "model"}, "act": {"kind": "tools"}, "done": {"kind": "end", "reason": "completed"}},
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "done"},
+        {"from": "act", "when": "done", "to": "think"},
+    ],
+}
+SEED_GRAPHS: tuple[dict[str, Any], ...] = ({"id": "main", "name": "native_graph", "config": SEED_GRAPH},)
 
-__all__ = ["SEED_HOOKS", "SEED_NODES", "SEED_TOOLS"]
+SEED_NODES: tuple[dict[str, Any], ...] = (*SEED_TOOLS, *SEED_HOOKS, *SEED_GRAPHS)
+
+__all__ = ["SEED_GRAPH", "SEED_GRAPHS", "SEED_HOOKS", "SEED_NODES", "SEED_TOOLS"]

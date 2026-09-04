@@ -43,6 +43,8 @@ Seven kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``native_hook``    | a named listener at one event of the native loop (code)  |
 +--------------------+----------------------------------------------------------+
+| ``native_graph``   | the native loop's control flow: stages and edges (data)  |
++--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
