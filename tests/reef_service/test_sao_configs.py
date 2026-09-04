@@ -328,6 +328,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
+        "tutorials/harness_evolve/deployment.yaml",
         "tutorials/harness_evolve/serve-native.yaml",
         "tutorials/harness_evolve/serve.yaml",
         "recipes/sao/examples/sao/serve.yaml",

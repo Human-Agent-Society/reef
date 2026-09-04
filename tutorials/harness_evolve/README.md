@@ -7,11 +7,13 @@ The pinned paper reproduction built on this mechanism lives at `recipes/skillcla
 
 ```text
 harness_evolve/
+  deployment.yaml the minimal long-running pi deployment used by the root README;
+                  run it directly with reef serve -c
   serve.yaml     the stack (reef service) plus the harness_evolve recipe
-                 sections: tasks, seed composition, dotted method references
+                 sections used by the self-contained ./run.sh pi demo
   serve-native.yaml
-                 the same stack on reef's native harness: the loop's own
-                 tools and hook are the seed, so the proposer can change them
+                 the ./run.sh native variant: the loop's own tools and hook
+                 are the seed, so the proposer can change them
   harness/       the method package serve.yaml's dotted refs name
     evolution.py the method: propose (self proposer over failures, skill
                  nodes only) and evaluate (exact last-line answer grading)
@@ -46,6 +48,31 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ```
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The one value it does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
+
+## Keep a deployment running
+
+Set `model.path` in [deployment.yaml](deployment.yaml) to your provider's model
+name. From the repository root, after the source installation and with `pi` on PATH:
+
+```bash
+export REEF_UPSTREAM_URL="https://api.openai.com"  # no /v1 suffix
+export REEF_UPSTREAM_API_KEY="your-openai-api-key"
+reef serve -c tutorials/harness_evolve/deployment.yaml
+```
+
+Use your provider's API key, or omit it for a local endpoint without authentication.
+`deployment.yaml` keeps Reef running until interrupted. It contains both the
+deployment and its named recipe preset; no recipe generation or extra Python
+launcher is needed. A YAML anchor shares the model name between the recipe
+and the upstream runtime, so inference, proposal, and evaluation use the same model.
+Defaults: port `8901`, Reef access token `reef-local`, state under
+`work/deployment/`. Use `--reef.port` and `--reef.token` to override the port
+and access token. The `run.sh` demo keeps its separate configuration and state.
+
+Install a harness from this service and submit feedback as shown in the
+[root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s
+tasks and `harness/evolution.py`'s proposer and grader for your workload before
+starting the deployment.
 
 ## Notebook
 

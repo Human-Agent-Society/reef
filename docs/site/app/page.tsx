@@ -42,6 +42,7 @@ const methods = [
   { name: "tttd", href: "/docs/user-guide/recipes/tttd", signal: "A fixed grid of sibling attempts at one problem", evolves: "model weights", gpu: "yes" },
   { name: "openclawrl", href: "/docs/user-guide/recipes/openclawrl", signal: "Nothing on the wire — just agent conversations", evolves: "model weights", gpu: "yes" },
   { name: "skillclaw", href: "/docs/user-guide/recipes/skillclaw", signal: "Scores on requests, and failures worth learning from", evolves: "harness tree", gpu: "no" },
+  { name: "gepa", href: "/docs/user-guide/recipes/gepa", signal: "Scores and transcripts to reflect on", evolves: "harness tree", gpu: "no" },
 ];
 
 const steps = [
@@ -147,8 +148,8 @@ curl http://localhost:8900/healthz`}</code></pre>
 
       <section className="home-section">
         <div className="section-heading-row">
-          <h2>Two surfaces</h2>
-          <p>The deployment&apos;s recipe decides which surface its scenarios evolve.</p>
+          <h2>Train weights or improve the harness</h2>
+          <p>Use a supported GPU stack to train model weights, or optimize prompts, skills, and rules with a hosted model.</p>
         </div>
         <div className="path-grid path-grid-2">
           {surfaces.map((item) => {
