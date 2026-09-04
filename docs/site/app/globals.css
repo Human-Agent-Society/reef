@@ -91,7 +91,8 @@ button { cursor: pointer; }
 
 /* Header and navigation */
 .site-header { position: sticky; z-index: 50; top: 0; border-bottom: 1px solid color-mix(in srgb, var(--border) 76%, transparent); background: color-mix(in srgb, var(--background) 86%, transparent); backdrop-filter: blur(20px) saturate(140%); }
-.header-row { height: 60px; padding: 0 32px; display: grid; grid-template-columns: 1fr minmax(0, 520px) 1fr; align-items: center; gap: 24px; }
+/* Both header rows share the docs layout's centered 1440px width, so the logo, the tabs and the sidebar keep one left edge on a wide screen. */
+.header-row { width: min(1440px, 100%); height: 60px; margin: 0 auto; padding: 0 32px; display: grid; grid-template-columns: 1fr minmax(0, 520px) 1fr; align-items: center; gap: 24px; }
 .header-brand { display: flex; align-items: center; gap: 12px; }
 .logo { display: inline-flex; align-items: center; gap: 11px; color: var(--foreground); font-weight: 600; }
 .logo-mark { color: var(--brand); stroke-width: 2.4; }
@@ -114,7 +115,7 @@ button { cursor: pointer; }
 .icon-button { width: 36px; height: 36px; padding: 0; display: inline-grid; place-items: center; color: var(--muted); border: 0; border-radius: 10px; background: transparent; }
 .icon-button:hover { color: var(--brand-strong); background: var(--accent); }
 .icon-button.menu-toggle { display: none; }
-.header-tabs { min-height: 44px; padding: 0 24px; display: flex; flex-wrap: wrap; align-items: stretch; gap: 0 4px; }
+.header-tabs { width: min(1440px, 100%); min-height: 44px; margin: 0 auto; padding: 0 24px; display: flex; flex-wrap: wrap; align-items: stretch; gap: 0 4px; }
 .header-tabs a { min-height: 44px; padding: 0 8px; display: flex; align-items: center; color: var(--muted); border-bottom: 2px solid transparent; font-size: 14px; font-weight: 500; white-space: nowrap; }
 .header-tabs a:hover { color: var(--foreground); }
 .header-tabs a.active { color: var(--foreground); border-bottom-color: var(--brand); }
