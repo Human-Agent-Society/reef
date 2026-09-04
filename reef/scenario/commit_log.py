@@ -4,14 +4,14 @@ Every step-advancing commit appends exactly one record here, and every other
 store is derived from it: record-store compaction is replayed from the
 records' high-water marks, the checkpoint head is restored from the last
 record's ref, and the trainer's algorithm state and read progress resume from
-the same record. The log is append-only JSONL; the append (+fsync) is the
-commit point, ordered so a crash anywhere else is recoverable by replay:
+the same record. The log is append-only JSONL; the idempotent append (+fsync)
+is the commit point, ordered so a crash anywhere else is recoverable by replay:
 
-- live step:       commit trainer -> append record -> compact -> advance head
-- checkpoint step: commit trainer -> publish version -> append record -> compact
-- local step:      commit trainer -> stage -> advance head -> append record -> compact
-- no-artifact:     commit trainer -> append record -> compact
-- rollback:        restore surface -> commit trainer -> publish copy -> append record -> compact
+- live step:       prepare trainer -> append record -> advance head -> apply trainer
+- checkpoint step: prepare trainer -> publish version -> append record -> apply trainer
+- local step:      prepare trainer -> stage -> advance head -> append record -> apply trainer
+- no-artifact:     prepare trainer -> append record -> apply trainer
+- rollback:        restore surface -> prepare trainer -> publish copy -> append record -> apply trainer
 
 A checkpoint publish therefore never loses its record (the repository write comes
 first), and a crash between append and compaction is healed at recovery by
@@ -30,9 +30,10 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from reef.artifact.artifact import ArtifactRef, decode_artifact_ref, encode_artifact_ref
@@ -214,28 +215,176 @@ class CommitLog:
     """Append-only JSONL commit log for one scenario.
 
     Appends serialize the record to a single line and fsync before returning;
-    that is the commit point. Reads tolerate exactly one torn tail (a crash
-    mid-append) and reject corruption anywhere else.
+    that is the commit point. Retrying the same scenario step is a no-op, while
+    different content for an existing step is a conflict. Reads tolerate
+    exactly one torn tail (a crash mid-append) and reject corruption elsewhere.
     """
 
     def __init__(self, path: Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = RLock()
+        self._cached_records: list[CommitRecord] | None = None
+        self._cached_steps: dict[int, CommitRecord] | None = None
+        self._cached_snapshot: tuple[CommitRecord, ...] | None = None
+        self._cached_signature: tuple[int, int, int, int] | None = None
+        self._run_segment = 0
+        self._run_step = 0
 
     @property
     def path(self) -> Path:
         return self._path
 
     def append(self, record: CommitRecord) -> None:
-        line = json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        with open(self._path, "a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        encoded = (
+            json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+        ).encode("utf-8")
+        with self._lock:
+            self._truncate_partial_tail()
+            previous_signature = self._file_signature()
+            cached_records = self._cached_records
+            records: Sequence[CommitRecord]
+            if cached_records is None or previous_signature != self._cached_signature:
+                records = self._reload_cache(previous_signature)
+            else:
+                records = cached_records
+            cached_steps = self._cached_steps
+            existing = (
+                cached_steps.get(record.step)
+                if cached_steps is not None
+                else next((item for item in records if item.step == record.step), None)
+            )
+            if existing is not None:
+                if self._same_commit(existing, record):
+                    return
+                raise CommitLogError(f"commit step {record.step} conflicts with its existing record")
+            if records and record.step < records[-1].step:
+                raise CommitLogError(f"commit step {record.step} precedes existing step {records[-1].step}")
+            with open(self._path, "ab") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            current_signature = self._file_signature()
+            cached_records = self._cached_records
+            if (
+                cached_records is not None
+                and previous_signature == self._cached_signature
+                and self._is_exclusive_append(previous_signature, current_signature, len(encoded))
+            ):
+                cached_records.append(record)
+                if cached_steps is not None:
+                    cached_steps[record.step] = record
+                self._cached_snapshot = None
+                self._advance_run_position(record)
+                self._cached_signature = current_signature
+            else:
+                self._invalidate_cache()
+
+    @staticmethod
+    def _same_commit(left: CommitRecord, right: CommitRecord) -> bool:
+        return {key: value for key, value in left.to_dict().items() if key != "recorded_at"} == {
+            key: value for key, value in right.to_dict().items() if key != "recorded_at"
+        }
 
     def records(self) -> tuple[CommitRecord, ...]:
+        with self._lock:
+            signature = self._file_signature()
+            cached_records = self._cached_records
+            if cached_records is not None and signature == self._cached_signature:
+                if self._cached_snapshot is None:
+                    self._cached_snapshot = tuple(cached_records)
+                return self._cached_snapshot
+            return self._reload_cache(signature)
+
+    def training_run_position(self) -> tuple[int, int]:
+        """Return the latest rollback step and training steps after it."""
+        with self._lock:
+            signature = self._file_signature()
+            if self._cached_records is not None and signature == self._cached_signature:
+                return self._run_segment, self._run_step
+            records = self._reload_cache(signature)
+            if self._cached_records is not None and signature == self._cached_signature:
+                return self._run_segment, self._run_step
+            return self._position(records)
+
+    def _file_signature(self) -> tuple[int, int, int, int] | None:
+        try:
+            stat = self._path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+    def _truncate_partial_tail(self) -> None:
+        try:
+            with open(self._path, "r+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    return
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) == b"\n":
+                    return
+                handle.seek(0)
+                content = handle.read()
+                handle.truncate(content.rfind(b"\n") + 1)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileNotFoundError:
+            return
+
+    def _cache(self, records: tuple[CommitRecord, ...], signature: tuple[int, int, int, int] | None) -> None:
+        self._cached_records = list(records)
+        self._cached_steps = {record.step: record for record in records}
+        self._cached_snapshot = records
+        self._cached_signature = signature
+        self._run_segment, self._run_step = self._position(records)
+
+    @staticmethod
+    def _is_exclusive_append(
+        previous: tuple[int, int, int, int] | None,
+        current: tuple[int, int, int, int] | None,
+        appended_bytes: int,
+    ) -> bool:
+        if current is None:
+            return False
+        if previous is None:
+            return current[2] == appended_bytes
+        return current[:2] == previous[:2] and current[2] == previous[2] + appended_bytes
+
+    def _reload_cache(self, signature: tuple[int, int, int, int] | None) -> tuple[CommitRecord, ...]:
+        self._invalidate_cache()
+        records, complete = self._read_records()
+        if complete and signature == self._file_signature():
+            self._cache(records, signature)
+        return records
+
+    def _invalidate_cache(self) -> None:
+        self._cached_records = None
+        self._cached_steps = None
+        self._cached_snapshot = None
+        self._cached_signature = None
+
+    @staticmethod
+    def _position(records: tuple[CommitRecord, ...]) -> tuple[int, int]:
+        run_segment = 0
+        run_step = 0
+        for record in records:
+            if record.operation == "rollback":
+                run_segment = record.step
+                run_step = 0
+            elif record.operation == "training" and record.step > run_segment:
+                run_step += 1
+        return run_segment, run_step
+
+    def _advance_run_position(self, record: CommitRecord) -> None:
+        if record.operation == "rollback":
+            self._run_segment = record.step
+            self._run_step = 0
+        elif record.operation == "training" and record.step > self._run_segment:
+            self._run_step += 1
+
+    def _read_records(self) -> tuple[tuple[CommitRecord, ...], bool]:
         if not self._path.exists():
-            return ()
+            return (), True
         records: list[CommitRecord] = []
         with open(self._path, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
@@ -246,7 +395,7 @@ class CommitLog:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
                 if index == len(lines) - 1:
-                    break  # torn tail from a crash mid-append; the commit never happened
+                    return tuple(records), False  # torn tail from a crash mid-append
                 raise CommitLogError(f"commit log {self._path} has a corrupt record at line {index + 1}") from exc
             if not isinstance(value, dict):
                 raise CommitLogError(f"commit log {self._path} line {index + 1} is not a record object")
@@ -254,4 +403,4 @@ class CommitLog:
                 records.append(CommitRecord.from_dict(value))
             except CommitLogError as exc:
                 raise CommitLogError(f"commit log {self._path} line {index + 1}: {exc}") from exc
-        return tuple(records)
+        return tuple(records), True
