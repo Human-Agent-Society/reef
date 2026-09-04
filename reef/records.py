@@ -205,6 +205,16 @@ class RecordStore:
                     item.references,
                 ).fetchone()
                 if consumed is not None:
+                    # A report is discarded once its references are gone, but a row
+                    # already stored under this id stays canonical: check the discard
+                    # against that row so a divergent retry cannot register its own
+                    # content as the receipt and reject the honest retry that follows.
+                    existing = self._connection.execute(
+                        "SELECT * FROM agent_record WHERE agent_record_id = ?",
+                        (item.agent_record_id,),
+                    ).fetchone()
+                    if existing is not None and self._content(self._row_content(existing)) != self._content(encoded):
+                        raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
                     self._connection.execute(
                         "INSERT INTO consumed_agent_record (agent_record_id, content_sha256) VALUES (?, ?)",
                         (item.agent_record_id, self._content_sha256(encoded)),
