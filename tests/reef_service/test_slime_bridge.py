@@ -669,7 +669,14 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
 
 
 @pytest.mark.unit
-def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
+def test_pause_barrier_failure_marks_the_engines_it_retired_for_rebuild(tmp_path) -> None:
+    """Retiring the engines is what makes CHECKPOINT unreplayable.
+
+    The barrier terminates every updatable engine on failure, so replaying
+    CHECKPOINT would pause handles that no longer exist. The marker has to
+    carry that instead: UPDATING_WEIGHTS is the status whose recovery rebuilds
+    the engines and forces a full publication.
+    """
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
@@ -688,9 +695,41 @@ def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
     with pytest.raises(RuntimeError, match="pause failed"):
         actor.update_serving_weights(checkpoint.training_job_id)
 
-    assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "CHECKPOINT"
     assert terminated == ["terminated"]
+    assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "UPDATING_WEIGHTS"
     assert group.update_calls == 1  # startup publication only
+
+
+@pytest.mark.unit
+def test_publication_retry_rebuilds_the_engines_the_barrier_retired(tmp_path) -> None:
+    """The retry a failed barrier leaves behind has to recover before it pauses."""
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    group = _DurableGroup(template)
+    manager = _FakeRolloutManager(["packed"])
+    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    payload = _payload(loss="sft")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
+    checkpoint = actor.execute_training_job(payload)
+    barrier_fails = True
+
+    def pause() -> None:
+        if barrier_fails:
+            raise RuntimeError("cache flush failed")
+        manager._record("pause_generation")
+
+    manager.pause_generation_for_update = _RemoteMethod(pause)
+    with pytest.raises(RuntimeError, match="cache flush failed"):
+        actor.update_serving_weights(checkpoint.training_job_id)
+
+    barrier_fails = False
+    manager.lifecycle_calls.clear()
+    group.update_force_full.clear()
+    result = actor.update_serving_weights(checkpoint.training_job_id)
+
+    assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
+    assert group.update_force_full == [True]
+    assert result.outcome == "complete"
+    assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "READY_TO_COMMIT"
 
 
 @pytest.mark.unit

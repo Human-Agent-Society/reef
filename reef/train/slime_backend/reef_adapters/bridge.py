@@ -492,6 +492,12 @@ class TrainBridgeActorImpl:
             except BaseException:
                 with suppress(Exception):
                     self._manager_call("terminate_updatable_engines")
+                if marker_status == "CHECKPOINT" and marker is not None:
+                    # Startup retires the engines the same way a publication
+                    # does, so the next boot must rebuild them instead of
+                    # replaying a CHECKPOINT whose engines are gone.
+                    with suppress(Exception):
+                        transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
                 raise
         if marker_status == "CHECKPOINT":
             if marker is None:
@@ -739,6 +745,10 @@ class TrainBridgeActorImpl:
                 raise RuntimeError(f"training job is {status}; operator recovery required")
 
             recovering = status == "UPDATING_WEIGHTS"
+            # Whether the marker already says the engines need rebuilding. Every
+            # failure below retires them, so the answer has to be yes before
+            # this call returns unsuccessfully.
+            engines_declared_uncertain = recovering
             try:
                 if recovering:
                     self._manager_call("recover_updatable_engines")
@@ -758,10 +768,11 @@ class TrainBridgeActorImpl:
                     # left another scenario in the slot.
                     self._group.activate_scenario(str(marker["scenario"]))
                 if not recovering:
-                    # Persist uncertainty only after every engine has crossed
-                    # the pause barrier. A pause failure has not changed any
-                    # weights and remains safely replayable from CHECKPOINT.
+                    # Persist uncertainty once every engine has crossed the
+                    # pause barrier, so a publication that fails from here on
+                    # replays as a recovery rather than as a fresh checkpoint.
                     transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
+                    engines_declared_uncertain = True
                 published = self._update_serving(force_full=recovering, scenario=self._marker_scenario(marker))
                 if self._ledger is not None:
                     from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
@@ -779,6 +790,14 @@ class TrainBridgeActorImpl:
                 self._phase = "weight_sync_failed"
                 with suppress(Exception):
                     self._manager_call("terminate_updatable_engines")
+                if not engines_declared_uncertain:
+                    # The barrier failed before the marker moved, and retiring
+                    # the engines just made CHECKPOINT unreplayable: a retry
+                    # from it would pause handles that no longer exist. Record
+                    # what the engines now need — a rebuild and a forced full
+                    # publication — which is what UPDATING_WEIGHTS means here.
+                    with suppress(Exception):
+                        transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
                 traceback.print_exc(file=sys.stderr)
                 raise
 

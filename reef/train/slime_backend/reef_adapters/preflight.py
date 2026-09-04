@@ -131,6 +131,10 @@ def _adapter_scoped_prefix_cache_supported() -> bool:
     Exercise the request and radix-key APIs with identical tokens: requests
     using one adapter must share a key, while another adapter must not. These
     CPU-side request objects allocate no serving KV or model weights.
+
+    Any failure answers "no". The probe exists to survive a pin bump, so a
+    build whose request API raises something unforeseen must leave sharing off
+    rather than abort the deployment before it starts.
     """
     try:
         from sglang.srt.managers.schedule_batch import Req
@@ -148,7 +152,7 @@ def _adapter_scoped_prefix_cache_supported() -> bool:
                 lora_id=adapter,
             )
             keys.append(RadixKey(token_ids=tokens, extra_key=request.extra_key).child_key())
-    except (ImportError, AttributeError, TypeError):
+    except Exception:
         return False
     first_key, same_adapter_key, other_adapter_key = keys
     return first_key == same_adapter_key and first_key != other_adapter_key

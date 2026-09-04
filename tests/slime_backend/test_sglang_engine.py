@@ -496,7 +496,7 @@ def test_sglang_plugin_environment_crosses_ray_actor_boundaries(monkeypatch: pyt
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("broken", [None, "request", "radix", "request_id", "unsupported"])
+@pytest.mark.parametrize("broken", [None, "request", "radix", "request_id", "unsupported", "unforeseen"])
 def test_adapter_prefix_probe_checks_actual_key_isolation(monkeypatch: pytest.MonkeyPatch, broken: str | None) -> None:
     preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
     requests = types.ModuleType("sglang.srt.managers.schedule_batch")
@@ -507,6 +507,8 @@ def test_adapter_prefix_probe_checks_actual_key_isolation(monkeypatch: pytest.Mo
         def __init__(self, *, rid, origin_input_text, origin_input_ids, sampling_params, lora_id):
             if broken == "unsupported":
                 raise TypeError("unsupported request API")
+            if broken == "unforeseen":
+                raise ValueError("a later pin rejects this request shape")
             self.extra_key = None if broken == "request" else lora_id
             if broken == "request_id":
                 self.extra_key = rid
