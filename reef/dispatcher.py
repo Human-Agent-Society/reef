@@ -174,6 +174,11 @@ class Dispatcher:
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
 
+    @property
+    def recipe_name(self) -> str:
+        """The deployment's served recipe name, for correlation metadata."""
+        return self._recipe.name
+
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()

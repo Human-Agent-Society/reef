@@ -17,6 +17,7 @@ from reef.core.records_types import RequestType, parse_references
 
 SCENARIO_HEADER = "x-reef-scenario"
 RELEASE_ID_HEADER = "x-reef-release-id"
+AGENT_RECORD_ID_HEADER = "x-reef-agent-record-id"
 #: Harness-stamped side-channel context (method-integration RFC §3.2). The
 #: service never reads a tag's meaning — it carries the pair through to
 #: the INFERENCE record so a processor can correlate on it. Header-free
@@ -34,6 +35,8 @@ class RequestHeaders:
     scenario: str
     request_type: RequestType
     release_id: str | None = None
+    #: Optional client-selected inference receipt for retry-safe requests.
+    agent_record_id: str | None = None
     #: ``x-reef-tag-<name>`` pairs, lowercased names, opaque values.
     tags: Mapping[str, str] = field(default_factory=dict)
 
@@ -44,6 +47,7 @@ def parse_request_headers(headers: Mapping[str, str], request_type: RequestType)
     if not scenario:
         raise HeaderError(f"missing or empty {SCENARIO_HEADER}")
     release_id = normalized.get(RELEASE_ID_HEADER, "").strip() or None
+    agent_record_id = normalized.get(AGENT_RECORD_ID_HEADER, "").strip() or None
 
     tags = {
         key[len(TAG_HEADER_PREFIX) :]: value.strip()
@@ -55,6 +59,7 @@ def parse_request_headers(headers: Mapping[str, str], request_type: RequestType)
         scenario=scenario,
         request_type=request_type,
         release_id=release_id,
+        agent_record_id=agent_record_id,
         tags=tags,
     )
 

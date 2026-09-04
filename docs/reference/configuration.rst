@@ -311,3 +311,63 @@ Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
+
+Inference tracing with LangSmith
+--------------------------------
+
+LangSmith tracing is an optional service-edge observer and is disabled by
+default. Install the extra, export the credential, and select a project in the
+deployment config:
+
+.. code:: bash
+
+   pip install 'reef[langsmith]'
+   export LANGSMITH_API_KEY=lsv2_...
+
+.. code:: yaml
+
+   observability:
+     langsmith:
+       enabled: true
+       project: reef-production
+       # endpoint: https://eu.api.smith.langchain.com
+       include_inputs: true
+       include_outputs: true
+       include_metadata: true
+       redact_keys: [authorization, x-api-key, api_key, password, secret, token]
+       queue_size: 1024
+       batch_size: 32
+       flush_timeout_s: 2.0
+
+``endpoint`` is optional. Without it, the SDK uses ``LANGSMITH_ENDPOINT`` or
+the LangSmith SaaS default; set either form for an EU/APAC region, self-hosted
+installation, or custom gateway. ``LANGSMITH_WORKSPACE_ID`` is also forwarded
+when set. Credentials are environment-only: Reef has no API-key config field,
+and never adds a credential to trace payloads, logs, records, or commit metrics.
+
+Enabling the observer exports request inputs, response outputs, and client
+metadata by default. Set any ``include_*`` switch to ``false`` to omit that
+class of data entirely. ``redact_keys`` is case-insensitive and recursively
+replaces matching object fields before export; its defaults cover common
+credential names. Reef correlation fields (scenario, recipe, receipt,
+release and runtime-load IDs, retry count, completion/delivery state) remain even
+when ``include_metadata`` is false. Review Reef tags and structured report
+feedback for private data before enabling a project.
+
+Each inference receipt maps to a root LangSmith run UUID as
+``UUIDv5(da12da5a-abb9-5c19-a395-6f93f23f25ee, agent_record_id)``. This mapping
+accepts arbitrary client ids, is stable across processes and restarts, and is
+the compatibility contract used to attach a later ``/reef/report`` to every
+receipt in ``references``. No LangSmith identifier is stored in Reef's record
+schema. Search for ``reef.agent_record_id`` to open a trace from a receipt;
+``reef.scenario``, ``reef.recipe``, ``reef.release_id``,
+``reef.serving_runtime_load_id``, and ``reef.tag.<name>`` provide the other
+filter dimensions.
+
+The exporter uses a bounded background queue and a bounded shutdown flush.
+Initialization, queue pressure, rate limits, network/export errors, flush
+errors, and SDK absence are logged by error type only and never alter request
+responses, durable record acceptance, report acceptance, training, commit, or
+shutdown. An interrupted stream is still recorded according to Reef's normal
+rules, but its trace says ``incomplete``/``disconnected`` and is never made
+training-eligible merely by the observer.

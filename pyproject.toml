@@ -40,6 +40,10 @@ terminus = [
 wandb = [
     "wandb>=0.29.0",
 ]
+# Optional service-edge inference tracing. The base install never imports it.
+langsmith = [
+    "langsmith>=0.11.2",
+]
 # Python-side dependencies used by the Slime backend. The runtime source pin
 # lives in the `runtime` dependency group below.
 # torch / SGLang / Megatron-Core / FlashAttention remain supplied by the
