@@ -1,8 +1,10 @@
 CLI
 ===
 
-Reef has one command. It reads a deployment config and starts every process the
-config declares, in dependency order.
+Reef has one command you run. It reads a deployment config and starts every
+process the config declares, in dependency order. (The wheel also installs
+``reef-native`` and ``reef-terminus``, the loop runners those two harness
+adapters launch per episode; nothing calls them by hand.)
 
 .. code:: bash
 
