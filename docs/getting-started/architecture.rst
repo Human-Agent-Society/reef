@@ -16,13 +16,14 @@ The core loop
 .. code:: mermaid
 
    sequenceDiagram
-       accTitle: How Reef serves, records, trains, and publishes
+       accTitle: How Reef serves, records, trains, evaluates, and publishes
        autonumber
        participant H as Harness
        participant S as Scenario
        participant I as Inference
        participant T as Trainer
        participant G as Training*
+       participant E as Artifact evaluation
 
        opt Harness recipe: pull the served tree
          H->>S: GET /reef/harness for scenario
@@ -39,15 +40,31 @@ The core loop
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
        opt Processor has a batch
-         Note over S,G: Update and commit
+         Note over S,E: Produce, evaluate, and select a candidate
          T->>G: Prepared step
-         G-->>T: Trained artifact ready
-         T->>S: Commit new release
+         G-->>T: Candidate artifact ready
+         T->>E: evaluate(candidate)
+         E-->>T: Evaluation result
+         T->>E: decide(candidate, result)
+         E-->>T: Select or reject
+         alt Candidate selected
+           T->>S: Commit new release
+         else Candidate rejected
+           Note over S,I: Previous release keeps serving
+         end
        end
 
 The inference runtime is always required. The training runtime exists only for
 recipes that change weights; recipes that change text run their step in Reef's
 own process, with no GPU.
+
+Before publication, the trainer runs artifact evaluation using the plugin
+configured by the recipe: ``evaluate`` measures the candidate artifact, then
+``decide`` selects or rejects it. A
+rejection leaves the previous release serving. The default weight-recipe
+selector is ``AlwaysSelect``; configure a custom evaluator to apply your quality
+criteria. See `Gate a candidate
+<../developer-guide/write-a-recipe.rst#gate-a-candidate>`__.
 
 The opening pull is for recipes whose artifact is the harness tree: the agent
 fetches the currently served tree (``GET /reef/harness``, or the install script
