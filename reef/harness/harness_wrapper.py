@@ -178,7 +178,7 @@ def _bindings(descriptor: AdapterDescriptor) -> list[_Binding]:
             while stack:
                 path, value = stack.pop()
                 if isinstance(value, Mapping):
-                    stack.extend((path + (str(key),), item) for key, item in value.items())
+                    stack.extend(((*path, str(key)), item) for key, item in value.items())
                 elif isinstance(value, str) and "{base_url}" in value:
                     found.setdefault((target, path), _Binding(target, path, value))
     return list(found.values())

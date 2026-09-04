@@ -804,9 +804,8 @@ def test_wrapper_refuses_a_binding_file_that_leaves_the_composition(tmp_path, mo
     ):
         targets = dict(base.config_targets)
         targets["models"] = replace(targets["models"], path=path)
-        monkeypatch.setattr(
-            "reef.harness.harness_wrapper.get_adapter", lambda name, d=replace(base, config_targets=targets): d
-        )
+        descriptor = replace(base, config_targets=targets)
+        monkeypatch.setattr("reef.harness.harness_wrapper.get_adapter", lambda name: descriptor)
         with pytest.raises(WrapperError, match=message):
             _extract_reef_url("native", tmp_path)
 
