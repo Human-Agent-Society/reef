@@ -47,17 +47,33 @@ from .budget import ObservedCostLedger, SpendCapReached
 SEED: tuple = ()
 
 
-def score_episode(task: str, result: Any) -> float:
-    """The verifier's reward, read off the trajectory the runner wrote."""
-    del task  # the reward is per-episode; the task is already in the trial file
-    for event in getattr(result, "trajectory", ()) or ():
-        if event.get("type") == "verifier":
+class EpisodeScorer:
+    """Reads the verifier's reward, and charges what the episode cost.
+
+    The cost has to be taken here because the episode root is deleted once
+    ``run_episode`` returns: the trial record the runner wrote is the last
+    place it exists, and it reaches this scorer on the trajectory.
+    """
+
+    def __init__(self, ledger: ObservedCostLedger) -> None:
+        self._ledger = ledger
+        self._episode = 0
+
+    def __call__(self, task: str, result: Any) -> float:
+        del task  # the reward is per-episode; the task is already on the record
+        self._episode += 1
+        for event in getattr(result, "trajectory", ()) or ():
+            if event.get("type") != "verifier":
+                continue
+            cost = event.get("cost_usd")
+            if isinstance(cost, (int, float)):
+                self._ledger.record_trial(f"episode-{self._episode}", float(cost))
             reward = event.get("reward")
             return 0.0 if reward is None else float(reward)
-    return 0.0
+        return 0.0
 
 
-def build(arguments: argparse.Namespace) -> tuple[MetaHarnessBackend, PopulationStore]:
+def build(arguments: argparse.Namespace, ledger: ObservedCostLedger) -> tuple[MetaHarnessBackend, PopulationStore]:
     output = Path(arguments.output_dir)
     store = PopulationStore(output / "population.json")
     descriptor = get_adapter("terminus")
@@ -88,7 +104,7 @@ def build(arguments: argparse.Namespace) -> tuple[MetaHarnessBackend, Population
         population_store=store,
         descriptor=descriptor,
         propose=proposer,
-        score_episode=score_episode,
+        score_episode=EpisodeScorer(ledger),
         tasks=tasks,
         models=ModelBindings(served=served, named={"proposer": proposer_binding}),
         episode_repeats=arguments.trials,
@@ -117,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     output = Path(arguments.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     ledger = ObservedCostLedger(output / "observed-cost.json", arguments.max_observed_cost_usd)
-    backend, store = build(arguments)
+    backend, store = build(arguments, ledger)
 
     state: dict[str, Any] = dict(backend.initial_state())
     log = (output / "iterations.jsonl").open("a", encoding="utf-8")
