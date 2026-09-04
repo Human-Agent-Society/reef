@@ -23,7 +23,7 @@ Env vars (baked into the wrapper at install time):
   ``REEF_HARNESS_BINARY``    absolute path to the agent binary
   ``REEF_HARNESS_COMPOSE``   absolute path to the composition directory
   ``REEF_HARNESS_SCENARIO``  the reef scenario name
-  ``REEF_HARNESS_ADAPTER``   adapter name (pi, opencode, ...)
+  ``REEF_HARNESS_ADAPTER``   adapter name (pi, opencode, native)
   ``REEF_HARNESS_ENV_VAR``   the env var that relocates the composition
 
 Optional:
@@ -165,6 +165,14 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
             url = provider.get("options", {}).get("baseURL")
             if url:
                 return url.rstrip("/")
+    elif adapter == "native":
+        # The rendered model binding: one object, base_url without /v1 (the loop's request paths add it).
+        models_path = compose_dir / "models.json"
+        if not models_path.exists():
+            return None
+        url = json.loads(models_path.read_text(encoding="utf-8")).get("base_url")
+        if url:
+            return str(url).rstrip("/")
     return None
 
 
@@ -200,6 +208,16 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
             if "baseURL" in options:
                 options["baseURL"] = proxy_url
         dst.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    elif adapter == "native":
+        src = compose_dir / "models.json"
+        if not src.exists():
+            return
+        dst = temp_dir / "models.json"
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        models = json.loads(src.read_text(encoding="utf-8"))
+        models["base_url"] = _strip_v1(proxy_url)
+        dst.write_text(json.dumps(models, indent=2) + "\n", encoding="utf-8")
 
 
 def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) -> str:
@@ -282,6 +300,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
+    if adapter == "native":
+        # The loop's session log outlives the temp copy: it lands beside the installed tree.
+        env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
     try:
         result = subprocess.run([binary, *args], env=env)

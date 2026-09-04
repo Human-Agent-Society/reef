@@ -58,7 +58,7 @@ Harness evolution
 
 **reef-pi captures no receipts, so report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 
-**reef-pi exits with no provider baseUrl found.** The wrapper finds Reef through a provider entry in the tree's ``pi-agent/models.json`` (``opencode/opencode.json`` for opencode). The published tree carries no endpoint on purpose; add a provider whose ``baseUrl`` is your Reef URL before running the wrapper.
+**reef-pi exits with no provider baseUrl found.** The wrapper finds Reef through a provider entry in the tree's ``pi-agent/models.json`` (``opencode/opencode.json`` for opencode, the ``base_url`` of ``native/models.json`` for native). The published tree carries no endpoint on purpose; add a provider whose ``baseUrl`` is your Reef URL before running the wrapper.
 
 Docs and links
 --------------

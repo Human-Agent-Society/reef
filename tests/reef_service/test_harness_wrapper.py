@@ -572,3 +572,104 @@ def test_opencode_run_agent_captures_receipts_and_report_posts_them(tmp_path) ->
         assert not captures_file.exists()
 
     server.shutdown()
+
+
+def _make_native_compose(tmp_path: Path, reef_port: int) -> str:
+    """A minimal native tree: the rendered model binding pointing at reef, rules, and empty tool and hook dirs."""
+    compose = tmp_path / "native-compose" / "native"
+    (compose / "tools").mkdir(parents=True)
+    (compose / "hooks").mkdir()
+    (compose / "RULES.md").write_text("Answer in one word.\n")
+    (compose / "models.json").write_text(
+        json.dumps(
+            {"api": "openai", "base_url": f"http://127.0.0.1:{reef_port}", "api_key": "dummy", "model": "qwen3-8b"}
+        )
+        + "\n"
+    )
+    return str(compose)
+
+
+def _make_native_launcher(tmp_path: Path) -> Path:
+    """reef-native as the installed console script would be: this interpreter running the loop."""
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    binary = tmp_path / "reef-native"
+    binary.write_text(
+        f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(root)!r})\n"
+        "from reef.harness.native import main\nsys.exit(main())\n"
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+@pytest.mark.unit
+def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp_path) -> None:
+    """The native adapter path: the wrapper rewrites models.json base_url to the proxy, the loop reads it
+    through REEF_NATIVE_DIR, its session log lands beside the installed tree, and the receipt reports."""
+    import http.server
+    import threading
+
+    receipt_id = "native-receipt-789"
+    reports: list[dict] = []
+    seen: list[dict] = []
+
+    class FakeReefHandler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            if self.path.startswith("/v1/chat/completions"):
+                seen.append({"headers": dict(self.headers), "body": body})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("x-reef-agent-record-id", receipt_id)
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode()
+                )
+            elif self.path == "/reef/report":
+                reports.append(body)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), FakeReefHandler)
+    reef_port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    compose = _make_native_compose(tmp_path, reef_port)
+    binary = _make_native_launcher(tmp_path)
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    env.pop("REEF_NATIVE_SESSION_DIR", None)
+    with patch.dict(os.environ, env, clear=True):
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), compose, "native-scenario", "native", "REEF_NATIVE_DIR", ["-p", "say ok"])
+
+        # The loop talked to reef through the proxy: the scenario header rode along and the rules were the system prompt.
+        (request,) = seen
+        assert request["headers"].get("x-reef-scenario") == "native-scenario"
+        assert request["body"]["messages"][0] == {"role": "system", "content": "Answer in one word."}
+        # The session log outlived the temp copy, beside the installed tree.
+        session = Path(compose) / "sessions" / "session.jsonl"
+        assert session.exists() and '"turn/end"' in session.read_text()
+
+        (captures_file,) = tmp_path.glob("*.pending.json")
+        data = json.loads(captures_file.read_text())
+        assert receipt_id in [t["receipt"] for t in data["turns"] if t.get("receipt")]
+
+        report("native-scenario", "native", 1.0, "answered")
+
+        assert len(reports) == 1 and receipt_id in reports[0]["references"]
+        assert not captures_file.exists()
+
+    server.shutdown()
