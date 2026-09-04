@@ -16,6 +16,20 @@ belong to an episode still allowed to run.
 Age alone is not enough. Reaping on age alone here killed 97 sandboxes, most
 of them other teams' running work.
 
+Set ``--older-than`` from the longest agent timeout in the task set actually
+being run, not from the default. The default covers the whole dataset
+(12000s + margin) and is therefore far looser than a run of upstream's hard
+subset needs, whose longest task is 7200s. A looser threshold lets leaks sit
+for hours.
+
+There is a floor on how tight it can go, and it bounds what the reaper can
+achieve: the threshold must exceed the longest *live* episode, so with 7200s
+tasks nothing younger than about two hours can be touched. Leaks accumulate
+during that window, so sustained usage settles well above the configured
+concurrency -- 32 concurrent episodes held about 54 sandboxes here. Running
+inside a fixed share means choosing concurrency with that overhead in mind,
+not just the episode count.
+
     python -m recipes.meta_harness.examples.terminal_bench.reap_sandboxes --older-than 14400
     python -m recipes.meta_harness.examples.terminal_bench.reap_sandboxes --all --yes
 """
