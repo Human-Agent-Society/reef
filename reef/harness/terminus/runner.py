@@ -23,6 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
+import sys
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -105,6 +108,46 @@ def atif_steps(trial_dir: Path) -> list[dict[str, Any]]:
     return steps
 
 
+# An episode that never got a sandbox measured nothing, and scoring it zero
+# puts an outage into the mean. The e2b account this runs on is shared, so
+# another team saturating it looks exactly like a candidate that stopped
+# working: one run read as a collapse from 0.35 to 0.017 when in fact 92% of
+# its episodes never started.
+TRANSIENT_MARKERS = (
+    "ratelimitexception",
+    "rate limit exceeded",
+    "maximum number of concurrent",
+    "429",
+)
+MAX_ATTEMPTS_ENV = "REEF_TERMINUS_MAX_ATTEMPTS"
+DEFAULT_MAX_ATTEMPTS = 4
+BACKOFF_BASE_SECONDS = 15.0
+BACKOFF_CEILING_SECONDS = 240.0
+
+
+def is_transient(error: str) -> bool:
+    """Whether a trial error is the environment being unavailable rather than a result."""
+    lowered = error.lower()
+    return any(marker in lowered for marker in TRANSIENT_MARKERS)
+
+
+def max_attempts() -> int:
+    """How many times to run one episode before recording its failure."""
+    raw = os.environ.get(MAX_ATTEMPTS_ENV, "")
+    if not raw.strip():
+        return DEFAULT_MAX_ATTEMPTS
+    try:
+        return max(1, int(raw))
+    except ValueError as exc:
+        raise TerminusTreeError(f"{MAX_ATTEMPTS_ENV} must be an integer, got {raw!r}") from exc
+
+
+def backoff_seconds(attempt: int) -> float:
+    """Exponential backoff, jittered so concurrent episodes do not retry in lockstep."""
+    delay = min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), BACKOFF_CEILING_SECONDS)
+    return delay * (0.5 + random.random() / 2)
+
+
 def trial_cost_usd(trials_dir: Path) -> float:
     """What Harbor measured this trial cost, summed over its result files.
 
@@ -179,8 +222,20 @@ def run(task: str) -> int:
     environment = os.environ.get(ENVIRONMENT_ENV)
     if environment:
         overrides["environment"] = {"type": environment}
-    row = asyncio.run(Lab(trials).run(task, agent_spec(root, tree), **overrides))
-    error = str((getattr(row, "tags", None) or {}).get("error") or "")
+    attempts = max_attempts()
+    for attempt in range(1, attempts + 1):
+        row = asyncio.run(Lab(trials).run(task, agent_spec(root, tree), **overrides))
+        error = str((getattr(row, "tags", None) or {}).get("error") or "")
+        if attempt == attempts or not is_transient(error):
+            break
+        delay = backoff_seconds(attempt)
+        print(
+            f"terminus: {task} hit a transient environment failure "
+            f"(attempt {attempt}/{attempts}), retrying in {delay:.1f}s: {error[:120]}",
+            file=sys.stderr,
+            flush=True,
+        )
+        time.sleep(delay)
     record = trial_record(task, getattr(row, "rewards", None), trials, error)
     write_trial(record, sessions)
     return 1 if record["failed"] else 0
