@@ -618,7 +618,22 @@ class Dispatcher:
         with self._training.lock:
             storage_status = self._training.storage_status
             last_drain = self._training.last_drain
-        scenarios = self._scenario_status_blocks(storage_status, last_drain)
+        # One scenario's status failing stops the sweep: the recorded error goes
+        # out with whatever was collected before it.
+        scenarios: dict[str, dict[str, Any]] = {}
+        failed = False
+        for scenario_name in self._registry.training_status_scenario_names:
+            try:
+                block = self._scenario_status(scenario_name, storage_status, last_drain)
+            except Exception as exc:
+                failed = True
+                if self._record_status_build_error(f"{scenario_name}: {self._error_text(exc)}"):
+                    logger.exception("failed to build training status for scenario %r", scenario_name)
+                break
+            if block is not None:
+                scenarios[scenario_name] = block
+        if not failed:
+            self._record_status_build_error(None)
         errors = self._training_errors()
         return {
             "error": "\n".join(errors) or None,
@@ -628,26 +643,7 @@ class Dispatcher:
             "serving": self._serving_status(),
         }
 
-    def _scenario_status_blocks(
-        self,
-        storage_status: Mapping[str, Any] | None,
-        last_drain: float | None,
-    ) -> dict[str, dict[str, Any]]:
-        """One status block per scenario, stopping at the first that cannot be built."""
-        scenarios: dict[str, dict[str, Any]] = {}
-        for scenario_name in self._registry.training_status_scenario_names:
-            try:
-                block = self._scenario_status_block(scenario_name, storage_status, last_drain)
-            except Exception as exc:
-                if self._record_status_build_error(f"{scenario_name}: {self._error_text(exc)}"):
-                    logger.exception("failed to build training status for scenario %r", scenario_name)
-                return scenarios
-            if block is not None:
-                scenarios[scenario_name] = block
-        self._record_status_build_error(None)
-        return scenarios
-
-    def _scenario_status_block(
+    def _scenario_status(
         self,
         scenario_name: str,
         storage_status: Mapping[str, Any] | None,
