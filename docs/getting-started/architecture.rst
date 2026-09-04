@@ -1,5 +1,5 @@
-Architecture
-============
+Reef architecture: inference to learning
+========================================
 
 An agent is a model plus its harness. Reef sits between the harness and the
 runtime that executes the model. It records the release that served
