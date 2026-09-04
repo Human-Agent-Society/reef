@@ -10,6 +10,12 @@ export const metadata: Metadata = {
   title: { default: siteConfig.title, template: `%s | Reef Docs` },
   description: siteConfig.description,
   metadataBase: new URL(siteConfig.url),
+  icons: {
+    icon: [
+      { url: "/favicon.png", type: "image/png", sizes: "96x96" },
+      { url: "/icon.svg", type: "image/svg+xml", sizes: "any" },
+    ],
+  },
   openGraph: {
     siteName: "Reef",
     title: siteConfig.title,
