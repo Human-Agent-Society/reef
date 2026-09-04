@@ -263,7 +263,11 @@ Reef 为会持续成长的 AI 提供基础设施：
 
 ## 团队
 
-Reef 由以下团队成员共同构建，按姓氏字母顺序排列：
+Reef 是一个由社区驱动的项目，汇聚工程师和研究者，共同构建面向持续学习与自我进化
+agent 的基础设施。
+
+我们欢迎各种形式的贡献，包括研究、代码、文档和反馈。以下列出部分团队成员，
+按姓氏字母顺序排列：
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),

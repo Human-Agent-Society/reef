@@ -282,7 +282,12 @@ If Reef looks useful to you, please give it a ⭐ — it helps the community to 
 
 ## The Team
 
-Reef is built by the following team members, listed in alphabetical order by last name:
+Reef is a community-driven project bringing together engineers and researchers
+to build infrastructure for continual learning and self-improving agents.
+
+We welcome contributions in all forms, including research, code, documentation,
+and feedback. The following is a non-exhaustive list of team members, presented
+in alphabetical order by last name:
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
