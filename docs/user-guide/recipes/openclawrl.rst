@@ -55,7 +55,17 @@ to its session by trace. Identical histories can be ambiguous, while history
 changes that no longer preserve a prefix, such as compaction or sliding
 windows, break the chain and leave the pre-rewrite turn unmatched. The
 included Hermes example uses a small header shim because Hermes cannot set the
-tag itself. When a session's next state arrives, the finished turn is judged
+tag itself.
+
+A turn that never correlates is never judged and never trains, so a run on the
+fallback can produce an empty training set with nothing else to show for it.
+The processor therefore says so: it warns once when it sees untagged traffic,
+warns again when sessions keep expiring without ever binding a turn, and counts
+both under ``correlation`` in the ``prm_record_file`` line. ``max_open_sessions``
+caps the table those unmatched requests fill, evicting the least recently active
+sessions above it.
+
+When a session's next state arrives, the finished turn is judged
 by a PRM on a private worker. The PRM votes on
 whether the message shows acceptance, and on acceptance it also proposes a
 hindsight hint, a short instruction that would have produced this reply if
@@ -78,6 +88,7 @@ Configuration
 
    batch_size | 16 | judged turns per training step. Must equal the driver's ``--global-batch-size``.
    session_ttl_s | 900.0 | idle window before a session expires
+   max_open_sessions | 4096 | ceiling on live sessions; the least recently active are evicted above it
    prm_url | "" | the PRM's sglang server
    prm_tokenizer_path | "" | required whenever ``prm_url`` is set
    prm_m | 3 | judge votes per turn
