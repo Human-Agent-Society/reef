@@ -100,7 +100,7 @@ def test_status_exposes_the_last_drain_time_and_ready_state() -> None:
     _bind(dispatcher, pending=False, batch_ready=True)
     drained_at = time.time()
     dispatcher._training.last_drain = drained_at
-    status = dispatcher.training_status
+    status = dispatcher.build_training_status()
     assert status["last_drain_at"] == drained_at
     assert status["scenarios"]["s"]["batch_ready"] is True
 
@@ -114,7 +114,7 @@ def test_status_exposes_the_last_committed_step_outcome() -> None:
     }
     _bind(dispatcher, pending=False, last_committed_step=committed)
 
-    assert dispatcher.training_status["scenarios"]["s"]["last_committed_step"] == committed
+    assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
 
 
 def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch) -> None:
@@ -144,14 +144,14 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
         runtime=Runtime(),
     )
 
-    status = dispatcher.training_status["scenarios"]["s"]
+    status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["current_runtime_load_id"] == "engine:old"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
     runtime = dispatcher._registry.get_optional("s").runtime
     runtime.current = "engine:new"
     runtime.open = True
-    status = dispatcher.training_status["scenarios"]["s"]
+    status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["current_runtime_load_id"] == "engine:new"
     assert status["inference_admission"] == {"open": True, "active": 0}
 
@@ -169,7 +169,7 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
     }
     _bind(dispatcher, pending=False, processor_status=outcome)
 
-    assert dispatcher.training_status["scenarios"]["s"]["processor"] == outcome
+    assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome
 
 
 def test_status_reports_build_failure_instead_of_raising() -> None:
@@ -181,13 +181,13 @@ def test_status_reports_build_failure_instead_of_raising() -> None:
 
     dispatcher._registry.get_optional("s").trainer.batch_ready = fail
 
-    status = dispatcher.training_status
+    status = dispatcher.build_training_status()
 
     assert status["scenarios"] == {}
     assert status["error"] == "s: RuntimeError: processor status is unavailable"
 
     dispatcher._registry.get_optional("s").trainer.batch_ready = lambda: False
-    recovered = dispatcher.training_status
+    recovered = dispatcher.build_training_status()
     assert recovered["error"] is None
     assert "s" in recovered["scenarios"]
 
@@ -202,7 +202,7 @@ def test_status_reports_training_and_build_failures() -> None:
 
     dispatcher._registry.get_optional("s").trainer.batch_ready = fail
 
-    assert dispatcher.training_status["error"] == (
+    assert dispatcher.build_training_status()["error"] == (
         "s: RuntimeError: backend failed\ns: RuntimeError: processor status is unavailable"
     )
 
@@ -215,7 +215,7 @@ def test_status_reports_an_unexpectedly_stopped_training_thread() -> None:
     stopped.join()
     dispatcher._training.thread = stopped
 
-    assert dispatcher.training_status["error"] == "s: RuntimeError: training thread stopped unexpectedly"
+    assert dispatcher.build_training_status()["error"] == "s: RuntimeError: training thread stopped unexpectedly"
 
 
 def test_training_loop_reports_recovery_failures_outside_a_training_attempt() -> None:
@@ -234,7 +234,7 @@ def test_training_loop_reports_recovery_failures_outside_a_training_attempt() ->
     dispatcher._registry.reload = fail_reload
     dispatcher._run_training()
 
-    assert dispatcher.training_status["error"] == "s: RuntimeError: scenario reload failed"
+    assert dispatcher.build_training_status()["error"] == "s: RuntimeError: scenario reload failed"
 
 
 def test_a_ready_batch_undrained_past_the_bound_warns_once(caplog) -> None:
@@ -245,7 +245,7 @@ def test_a_ready_batch_undrained_past_the_bound_warns_once(caplog) -> None:
     dispatcher._training.last_drain = time.time() - _UNDRAINED_WARNING_SECONDS - 1
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
         for _ in range(2):
-            assert dispatcher.training_status["scenarios"]["s"]["batch_ready"] is True
+            assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True
     assert sum("undrained" in record.message for record in caplog.records) == 1
     # A completed drain re-arms the warning for the next stall.
     dispatcher._record_training_drain()
@@ -257,5 +257,5 @@ def test_a_freshly_drained_ready_batch_does_not_warn(caplog) -> None:
     _bind(dispatcher, pending=False, batch_ready=True)
     dispatcher._training.last_drain = time.time()
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
-        assert dispatcher.training_status["scenarios"]["s"]["batch_ready"] is True
+        assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True
     assert not caplog.records
