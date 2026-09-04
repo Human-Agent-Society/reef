@@ -630,10 +630,10 @@ def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_
             self.publish_count = 0
             self.expected_parents = []
 
-        def publish(self, candidate, *, expected_parent):
+        def publish(self, candidate, *, expected_parent, advance_head=True):
             self.publish_count += 1
             self.expected_parents.append(expected_parent)
-            return super().publish(candidate, expected_parent=expected_parent)
+            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
 
     backend = CountingBackend.factory(initial, root=tmp_path / "repository")
     dispatcher = build_default_dispatcher(
@@ -987,10 +987,10 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path, failure
     initial.mkdir()
 
     class FailingBackend(InMemoryRepositoryBackend):
-        def publish(self, candidate, *, expected_parent):
+        def publish(self, candidate, *, expected_parent, advance_head=True):
             if failure_source == "repository":
                 raise ArtifactPublicationError("repository failed")
-            return super().publish(candidate, expected_parent=expected_parent)
+            return super().publish(candidate, expected_parent=expected_parent, advance_head=advance_head)
 
     class FailingStrategy:
         def should_checkpoint(self, scenario, version, result):
