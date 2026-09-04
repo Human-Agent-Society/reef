@@ -1,0 +1,57 @@
+# Terminal-Bench 2 reproduction: the Reef arm.
+#
+# Every setting that has an upstream counterpart is matched to it. The ones
+# that differ are listed in README.md with the reason; none of them are
+# accidents of this file.
+#
+#   executor      local, not sandbox. terminus is self_isolating: Harbor's task
+#                 container is the boundary and Docker does not nest in
+#                 bubblewrap, so run_episode refuses the jail for this adapter.
+#   environment   e2b. Harbor's default is local Docker, which runs the agent
+#                 but collects no verifier reward on macOS; upstream's own
+#                 launcher accepts only runloop and modal for the same reason.
+#   episodes      2 trials x 5 iterations, upstream's defaults. Reef pairs
+#                 candidate against incumbent, so it spends two evaluations per
+#                 iteration where upstream spends one; budgets are counted in
+#                 iterations, and max_target_episodes reflects the pairing.
+
+reef:
+  upstream_url: https://api.openai.com
+  upstream_model: gpt-5.6-luna
+  upstream_api_key_env: OPENAI_API_KEY
+  upstream_api: openai
+
+recipe: recipes.meta_harness.recipe:MetaHarnessRecipe
+
+evolution:
+  adapter: terminus
+  # local, never sandbox: see the note above.
+  executor: local
+  evaluate: recipes.meta_harness.examples.terminal_bench.scoring:score_episode
+  episode_repeats: 2
+  # 40 reliability-panel tasks are written here by select_panel.py, which keeps
+  # the tasks the seed neither always passes nor always fails. A task the seed
+  # always fails and one it always passes each carry almost no information
+  # about whether a candidate is better.
+  tasks: []
+  models:
+    # The meta-optimizer. Upstream uses the Claude CLI on alias `opus`; this
+    # arm uses gpt-5.6-sol. An undeclared name is refused rather than falling
+    # back to the served model, so the harness under test cannot author itself.
+    proposer:
+      url: https://api.openai.com
+      model: gpt-5.6-sol
+      api_key_env: OPENAI_API_KEY
+  meta_harness:
+    archive: ${REEF_WORK}/meta-harness/terminal-bench
+    mode: full_history
+    # Upstream mutates Python agent files; Reef mutates declarative nodes, so
+    # the search space is rules, skills, and commands. That is also exactly
+    # what upstream's own Meta-Harness composition allows.
+    kinds: [rules, skill, agent_command]
+    # 5 iterations, one candidate each, matching upstream's default and its
+    # skill's "one mechanism per candidate".
+    max_candidates: 5
+    # 5 iterations x 2 sides x 40 tasks x 2 trials, plus the seed evaluation.
+    max_target_episodes: 880
+    max_nodes: 32
