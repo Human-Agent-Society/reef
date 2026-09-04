@@ -22,6 +22,7 @@ files:
   code_extension: "native/extensions/{name}.py"
   native_tool: "native/tools/{name}.py"
   native_hook: "native/hooks/{name}.py"
+  native_graph: "native/graphs/{name}.json"
 trajectory:
   format: native-jsonl
   path: "native/sessions"

@@ -156,6 +156,39 @@ retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
 ``tutorials/harness_evolve/serve-native.yaml`` seeds them by reference to
 run the tutorial on this adapter.
 
+The loop's own control flow is a ``native_graph`` node, rendered to
+``native/graphs/main.json``: named stages from a closed vocabulary and edges
+keyed by each stage's outcome. ``reef.harness.native.seed.SEED_GRAPH`` is
+today's loop as that data (``think`` asks the model, ``act`` runs its tool
+calls, ``done`` ends the turn), the loop runs it when a tree carries no graph,
+and a tree that carries one runs that instead, so a proposal that rewrites
+the graph changes what the loop does between its events while hooks keep
+deciding at them. Admission refuses a graph that could not run: an unknown
+kind or key (no code enters this kind), an outcome without exactly one edge,
+a stage not reachable from ``start``, a stage from which no end stage is
+reachable, and a cycle with no model stage, so the step budget
+(``max_steps``, 1 to 32) ends every run; a ``tools`` allow list naming a
+tool the tree lacks fails at render. The stages:
+
+.. config::
+
+   model | one request over the messages with the declared tools; fires ``pre_step`` and ``request_error``; outcomes ``tool_calls``, ``text``
+   tools | runs the pending calls of the last assistant message, each behind ``pre_execute`` then ``post_execute``; optional ``allow`` restricts them to named tools; outcome ``done``
+   verify | reads the last assistant text: ``check`` is ``last_line_integer``, ``last_line_matches`` with a ``pattern``, or ``nonempty``; an optional ``message`` is appended as a user message on failure; outcomes ``pass``, ``fail``
+   message | appends ``text`` as a user message; outcome ``done``
+   end | ends the turn with ``reason`` ``completed`` or ``gave_up``
+
+Each model stage is one step, so ``max_steps`` bounds model calls as before;
+entering a model stage with the budget spent ends the turn with
+``max-steps``. The log names the path: ``stage/enter`` (``step``, ``stage``,
+``kind``) and ``stage/exit`` (``outcome``, ``to``, and for a verify stage
+``check`` and ``last_line``), text a stage injects is a ``user/message`` with
+``source.kind`` ``stage``, the session header's ``graph`` says whether
+``main`` or the ``seed`` ran, and a graph that cannot load is a
+``LOAD_ERROR`` like a tool. A run that somehow exceeds
+``(max_steps + 1) * 16`` transitions ends with ``GRAPH_ERROR``; admission
+proves that cannot happen, the guard is the backstop.
+
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, and hooks (name to

@@ -27,7 +27,7 @@ from reef.harness.native import (
     _waterfall,
     load_hooks,
 )
-from reef.harness.native.seed import SEED_NODES, SEED_TOOLS
+from reef.harness.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import reader_for
@@ -369,7 +369,8 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
     result = _episode(tmp_path, fake_model, [*_seed_nodes(), ("rules", {"text": "Be brief."})])
     kinds = [event["type"] for event in result.trajectory]
-    assert kinds == [
+    # The seed graph reproduces the fixed loop it replaced: without the stage events the sequence is the old one.
+    assert [kind for kind in kinds if not kind.startswith("stage/")] == [
         "session",
         "turn/start",
         "step/start",
@@ -388,10 +389,40 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
         "step/end",
         "turn/end",
     ]
+    assert kinds == [
+        "session",
+        "turn/start",
+        "stage/enter",
+        "step/start",
+        "request/header",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "tool/call",
+        "tool/result",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "step/start",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "tool/call",
+        "tool/result",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "step/start",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "turn/end",
+    ]
     assert [event["seq"] for event in result.trajectory] == list(range(len(kinds)))
     header = result.trajectory[0]["data"]
     assert header["version"] == 1 and header["tools"] == ["read_file", "run_bash", "write_file"]
-    assert header["hooks"] == {"loop_guard": "post_execute"}
+    assert header["hooks"] == {"loop_guard": "post_execute"} and header["graph"] == "main"
     request = _events(result.trajectory, "request/header")[0]["data"]
     assert request["system"] == "Be brief."
     assert sorted(tool["function"]["name"] for tool in request["tools"]) == ["read_file", "run_bash", "write_file"]
@@ -415,7 +446,7 @@ def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
         model.shutdown()
         model.server_close()
     kinds = [event["type"] for event in result.trajectory]
-    assert kinds == [
+    assert [kind for kind in kinds if not kind.startswith("stage/")] == [
         "session",
         "turn/start",
         "step/start",
@@ -686,3 +717,308 @@ def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_
         "content": "Error: writes are off",
     }
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+
+
+# -- native_graph: the loop's control flow as data --------------------------------------------------
+
+VERIFY_GRAPH = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {
+        "think": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "check": {
+            "kind": "verify",
+            "check": "last_line_integer",
+            "message": "Reply with the final answer as a plain integer alone on the last line.",
+        },
+        "done": {"kind": "end", "reason": "completed"},
+    },
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "check"},
+        {"from": "act", "when": "done", "to": "think"},
+        {"from": "check", "when": "pass", "to": "done"},
+        {"from": "check", "when": "fail", "to": "think"},
+    ],
+}
+
+
+def _graph(**changes):
+    import copy
+
+    graph = copy.deepcopy(SEED_GRAPH)
+    graph.update(changes)
+    return graph
+
+
+class _ProseThenIntegerModel(_FakeModel):
+    """The measured failure: a tool call, then the count in prose; a bare integer only after being asked again."""
+
+    def script(self, body: dict) -> dict:
+        messages = body["messages"]
+        if not any(m.get("role") == "tool" for m in messages):
+            return _reply(tool_calls=[_call("run_bash", {"command": "python3 -c 'print(9592)'"}, "c1")])
+        if messages[-1].get("role") == "user" and "plain integer" in messages[-1]["content"]:
+            return _reply(content="9592")
+        return _reply(content="The sieve finds 9592 primes below 100000.")
+
+
+def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
+    NODE_KINDS["native_graph"](None, SEED_GRAPH)
+    NODE_KINDS["native_graph"](None, VERIFY_GRAPH)
+    stages = SEED_GRAPH["stages"]
+    edges = SEED_GRAPH["edges"]
+    bad = [
+        (_graph(stages={**stages, "x": {"kind": "loop"}}), "kind must be one of"),
+        (_graph(stages={**stages, "think": {"kind": "model", "code": "x"}}), "does not take code"),
+        (_graph(edges=[*edges, {"from": "act", "when": "done", "to": "done"}]), "two edges for outcome 'done'"),
+        (_graph(edges=edges[:2]), "stage 'act' has no edge for outcome 'done'"),
+        (
+            _graph(
+                stages={**stages, "trap": {"kind": "message", "text": "again"}},
+                edges=[
+                    *edges[:1],
+                    {"from": "think", "when": "text", "to": "trap"},
+                    {"from": "act", "when": "done", "to": "done"},
+                    {"from": "trap", "when": "done", "to": "trap"},
+                ],
+            ),
+            "stages trap cannot reach an end stage",
+        ),
+        (
+            _graph(
+                stages={**stages, "lonely": {"kind": "message", "text": "hi"}},
+                edges=[*edges, {"from": "lonely", "when": "done", "to": "done"}],
+            ),
+            "not reachable from 'think'",
+        ),
+        (
+            _graph(
+                edges=[
+                    {"from": "think", "when": "text", "to": "done"},
+                    {"from": "think", "when": "tool_calls", "to": "done"},
+                    {"from": "act", "when": "done", "to": "act"},
+                ]
+            ),
+            "not reachable",
+        ),
+        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(max_steps=33), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(start="nowhere"), "'start' must name a stage"),
+        (
+            _graph(
+                stages={**stages, "v": {"kind": "verify", "check": "last_line_matches"}},
+                edges=[
+                    *edges,
+                    {"from": "v", "when": "pass", "to": "done"},
+                    {"from": "v", "when": "fail", "to": "done"},
+                ],
+            ),
+            "takes 'pattern' exactly when",
+        ),
+        (
+            _graph(
+                stages={**stages, "m": {"kind": "message", "text": "use sk-abcdef1234567890ABCDEFGH"}},
+                edges=[*edges, {"from": "m", "when": "done", "to": "done"}],
+            ),
+            "inline credential",
+        ),
+    ]
+    for graph, message in bad:
+        with pytest.raises(ValueError, match=message):
+            NODE_KINDS["native_graph"](None, graph)
+    # Two text stages that only feed each other never spend the budget.
+    loop = _graph(
+        stages={**stages, "a": {"kind": "message", "text": "a"}, "b": {"kind": "message", "text": "b"}},
+        edges=[
+            *edges[:1],
+            {"from": "act", "when": "done", "to": "done"},
+            {"from": "think", "when": "text", "to": "a"},
+            {"from": "a", "when": "done", "to": "b"},
+            {"from": "b", "when": "done", "to": "a"},
+        ],
+    )
+    with pytest.raises(ValueError, match="stages a, b cannot reach an end stage"):
+        NODE_KINDS["native_graph"](None, loop)
+    cycle = _graph(
+        stages={**stages, "a": {"kind": "message", "text": "a"}, "b": {"kind": "verify", "check": "nonempty"}},
+        edges=[
+            *edges[:1],
+            edges[2],
+            {"from": "think", "when": "text", "to": "a"},
+            {"from": "a", "when": "done", "to": "b"},
+            {"from": "b", "when": "pass", "to": "done"},
+            {"from": "b", "when": "fail", "to": "a"},
+        ],
+    )
+    with pytest.raises(ValueError, match="cycle without a model stage"):
+        NODE_KINDS["native_graph"](None, cycle)
+
+
+def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
+    descriptor = get_adapter("native")
+    files = render_composition([("native_graph", VERIFY_GRAPH), TOOL], descriptor)
+    assert files["native/graphs/main.json"] == json.dumps(VERIFY_GRAPH, indent=2, sort_keys=True) + "\n"
+    allowed = _graph(stages={**SEED_GRAPH["stages"], "act": {"kind": "tools", "allow": ["shout"]}})
+    assert "native/graphs/main.json" in render_composition([("native_graph", allowed), TOOL], descriptor)
+    with pytest.raises(RenderError, match="allows tools the tree lacks: shout"):
+        render_composition([("native_graph", allowed)], descriptor)
+    with pytest.raises(RenderError, match="does not render native_graph"):
+        render_composition([("native_graph", SEED_GRAPH)], get_adapter("pi"))
+
+
+def test_a_tree_without_a_graph_runs_the_seed_graph_and_a_bad_graph_is_a_load_error(
+    tmp_path: Path, fake_model
+) -> None:
+    result = _episode(tmp_path, fake_model, _seed_nodes(SEED_TOOLS))
+    assert result.trajectory[0]["data"]["graph"] == "seed"
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = dict(render_composition([*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(descriptor)], descriptor))
+    files["native/graphs/main.json"] = '{"name": "main", "start": "x", "stages": {}, "edges": []}\n'
+    broken = run_episode(descriptor, files, "hi", binary=_launcher(tmp_path))
+    assert broken.exit_code == 1 and [event["type"] for event in broken.trajectory] == [
+        "session",
+        "turn/start",
+        "turn/end",
+    ]
+    assert broken.trajectory[-1]["data"]["reason"]["error"]["code"] == "LOAD_ERROR"
+
+
+def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Path) -> None:
+    """The measured sieve failure: prose after a tool call scores 0.0 on the seed; the verify graph asks once more and scores 1.0."""
+
+    def final_line(task, result):
+        answers = [e["data"].get("content") or "" for e in result.trajectory if e["type"] == "assistant/message"]
+        lines = [line.strip() for line in (answers[-1] if answers else "").splitlines() if line.strip()]
+        return 1.0 if lines and lines[-1] == "9592" else 0.0
+
+    model = _ProseThenIntegerModel()
+    try:
+        # The interpreter alone: the verify stage fails, injects its message, and the next answer passes.
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", VERIFY_GRAPH)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "check"]
+        assert [(e["outcome"], e["to"], e["last_line"]) for e in exits] == [
+            ("fail", "think", "The sieve finds 9592 primes below 100000."),
+            ("pass", "done", "9592"),
+        ]
+        note = next(e["data"] for e in result.trajectory if e["type"] == "user/message")
+        assert note["source"] == {"kind": "stage", "stage": "check"} and note["content"].startswith("Reply with")
+        assert final_line("[sieve]", result) == 1.0 and result.trajectory[-1]["data"]["reason"] == {
+            "kind": "completed"
+        }
+
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        backend = CordisBackend(
+            descriptor=get_adapter("native"),
+            propose=resolve_proposer(
+                lambda nodes, samples, models: Mutation(
+                    "update", "main", {"name": "native_graph", "config": VERIFY_GRAPH}
+                )
+            ),
+            score_episode=resolve_episode_scorer(final_line),
+            tasks=(
+                "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
+            ),
+            models=binding,
+            binary=_launcher(tmp_path),
+            seed=SEED_NODES,
+        )
+        batch = TraceBatch("demo:trace:graph", (TraceSample("a1", {"messages": []}, 0.0),))
+        prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+        assert prepared.candidate is not None
+        assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
+        assert "check" in json.loads(prepared.candidate.candidate_files["native/graphs/main.json"])["stages"]
+        evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+        settled = backend.settle_step(prepared, decision)
+        assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
+        assert settled.metrics["selected"] is True
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: Path) -> None:
+    """Property: any graph admission accepts ends within (max_steps + 1) * 16 transitions, whatever the model does."""
+    import random
+
+    from reef.harness.native import graph as graphs
+    from reef.harness.native import run_loop
+
+    rng = random.Random(7)
+    texts = ("a", "b", "c")
+
+    def random_graph() -> dict:
+        extras = rng.randint(0, 3)
+        stages = {"think": {"kind": "model"}, "act": {"kind": "tools"}, "done": {"kind": "end"}}
+        names = ["think", "act", "done"]
+        for i in range(extras):
+            kind = rng.choice(("verify", "message"))
+            name = f"s{i}"
+            stages[name] = (
+                {"kind": "message", "text": rng.choice(texts)}
+                if kind == "message"
+                else {"kind": "verify", "check": rng.choice(("nonempty", "last_line_integer"))}
+            )
+            names.append(name)
+        # Text stages only point forward (to a later text stage, think, or done), so no text cycle exists.
+        text_names = [n for n in names if n.startswith("s")]
+
+        def forward(index: int) -> str:
+            later = text_names[index + 1 :]
+            return rng.choice([*later, "think", "done"])
+
+        edges = [
+            {"from": "think", "when": "tool_calls", "to": rng.choice(["act", *text_names])},
+            {"from": "think", "when": "text", "to": rng.choice(["done", *text_names])},
+            {"from": "act", "when": "done", "to": rng.choice(["think", *text_names])},
+        ]
+        for index, name in enumerate(text_names):
+            for outcome in ("pass", "fail") if stages[name]["kind"] == "verify" else ("done",):
+                edges.append({"from": name, "when": outcome, "to": forward(index)})
+        return {"name": "main", "start": "think", "max_steps": rng.randint(1, 4), "stages": stages, "edges": edges}
+
+    class _Chaos(_FakeModel):
+        def script(self, body: dict) -> dict:
+            if rng.random() < 0.5:
+                return _reply(tool_calls=[_call("read_file", {"path": "x"}, f"c{len(self.requests)}")])
+            return _reply(content=rng.choice(("9592", "prose", "")))
+
+    model = _Chaos()
+    try:
+        admitted = 0
+        for _ in range(300):
+            if admitted >= 20:
+                break
+            graph = random_graph()
+            try:
+                NODE_KINDS["native_graph"](None, graph)
+            except ValueError:
+                continue  # an unreachable stage, say; the rule names it and the tree loses at admission
+            admitted += 1
+            root = tmp_path / f"g{admitted}"
+            descriptor = get_adapter("native")
+            binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+            files = render_composition(
+                [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), *binding.compose_nodes(descriptor)], descriptor
+            )
+            for relative, text in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text(text, encoding="utf-8")
+            (root / "workspace").mkdir()
+            code = run_loop("t", root / "native", root / "native" / "sessions", root / "workspace")
+            events = [
+                json.loads(line) for line in (root / "native" / "sessions" / "session.jsonl").read_text().splitlines()
+            ]
+            reason = events[-1]["data"]["reason"]["kind"]
+            transitions = sum(1 for e in events if e["type"] == "stage/enter")
+            assert code == 0 and reason in ("completed", "gave_up", "max-steps"), (graph, reason)
+            assert transitions <= (graph["max_steps"] + 1) * graphs.TRANSITIONS_PER_STEP
+        assert admitted == 20
+    finally:
+        model.shutdown()
+        model.server_close()

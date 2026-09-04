@@ -304,6 +304,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
         "write_file",
         "run_bash",
         "loop_guard",
+        "main",
         "answer-style",
     ]
     assert "upstream" not in yaml.safe_dump(list(built.seed))

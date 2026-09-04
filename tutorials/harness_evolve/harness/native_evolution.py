@@ -1,9 +1,10 @@
-"""The method on reef's native harness: the loop's own tools and hooks are nodes the model may mutate.
+"""The method on reef's native harness: the loop's own tools, hooks and graph are nodes the model may mutate.
 
 ``propose`` is the self proposer of ``evolution.py`` with a wider vocabulary:
 one mutation on a skill, a ``native_tool`` (a schema plus a module defining
-``run(args, workdir) -> str``) or a ``native_hook`` (a module defining
-``listen(payload, next) -> decision`` at one loop event). ``evaluate`` reads
+``run(args, workdir) -> str``), a ``native_hook`` (a module defining
+``listen(payload, next) -> decision`` at one loop event) or the
+``native_graph`` that is the loop's own control flow. ``evaluate`` reads
 the native-jsonl trajectory. The grader and the answer table are shared with
 ``evolution.py``, so ``run.py`` scores recorded traffic the same way for
 both variants.
@@ -13,7 +14,7 @@ import json
 
 from harness.evolution import _ENTRY_NAME, grade_text
 
-KINDS = ("skill", "native_tool", "native_hook")
+KINDS = ("skill", "native_tool", "native_hook", "native_graph")
 EVENTS = ("pre_step", "request_error", "post_execute")
 
 #: The one JSON object the model answers with, per kind.
@@ -22,8 +23,20 @@ SHAPES = (
     '{"id": "<name>", "name": "native_tool", "config": {"name": "<same name>", "description": "<one line>", '
     '"parameters": <JSON schema object>, "code": "<python defining run(args, workdir) -> str>"}}',
     '{"id": "<name>", "name": "native_hook", "config": {"name": "<same name>", '
-    '"event": "<pre_step | request_error | post_execute>", '
+    '"event": "<pre_step | pre_execute | request_error | post_execute>", '
     '"code": "<python defining listen(payload, next) -> decision>"}}',
+    '{"id": "main", "name": "native_graph", "config": {"name": "main", "start": "<stage>", "max_steps": 12, '
+    '"stages": {"<stage>": {"kind": "model | tools | verify | message | end", ...}}, '
+    '"edges": [{"from": "<stage>", "when": "<outcome>", "to": "<stage>"}]}}',
+)
+#: What each graph stage does and the outcomes its edges must cover; the loop's own vocabulary.
+STAGES = (
+    "model: one request to the model; outcomes tool_calls, text",
+    "tools: run the model's pending tool calls (optional allow: [tool names]); outcome done",
+    "verify: check the last assistant text (check: last_line_integer | last_line_matches with pattern | nonempty; "
+    "optional message appended on failure); outcomes pass, fail",
+    "message: append text as a user message; outcome done",
+    "end: finish (reason: completed | gave_up); no outcomes",
 )
 
 
@@ -48,10 +61,12 @@ def propose(nodes, samples, models):
         f"Failing requests:\n{requests}\n\n"
         f"Current nodes:\n{json.dumps(current, indent=2)}\n\n"
         "Propose ONE mutation that would make these requests pass: an improved or new skill, tool, or "
-        "hook. A tool module defines run(args, workdir) -> str and receives arguments validated against "
-        "its parameters schema. A hook module defines listen(payload, next) -> decision at one event, "
-        "where next() returns the decision of the layer below. Respond with exactly one JSON object in "
-        "one of these shapes and nothing else:\n" + "\n".join(SHAPES) + "\n"
+        "hook, or a rewrite of the loop's graph. A tool module defines run(args, workdir) -> str and "
+        "receives arguments validated against its parameters schema. A hook module defines "
+        "listen(payload, next) -> decision at one event, where next() returns the decision of the layer "
+        "below. The graph names stages and the edges between them; every stage is reachable, every "
+        "outcome of every stage has one edge, and every cycle passes a model stage:\n" + "\n".join(STAGES) + "\n"
+        "Respond with exactly one JSON object in one of these shapes and nothing else:\n" + "\n".join(SHAPES) + "\n"
         "Reuse an existing node's name to update it; use a new lowercase-hyphen name to add one."
     )
     try:
@@ -96,6 +111,14 @@ def _parse_proposal(reply: str):
     if kind == "skill":
         text = config.get("text")
         return (kind, entry_id, {"name": entry_id, "text": text}) if _text(text) else None
+    if kind == "native_graph":
+        stages, edges, start = config.get("stages"), config.get("edges"), config.get("start")
+        if not isinstance(stages, dict) or not isinstance(edges, list) or not _text(start):
+            return None
+        graph = {"name": entry_id, "start": start, "stages": stages, "edges": edges}
+        if isinstance(config.get("max_steps"), int):
+            graph["max_steps"] = config["max_steps"]
+        return kind, entry_id, graph
     code = config.get("code")
     if not _text(code):
         return None
