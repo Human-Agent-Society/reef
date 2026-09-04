@@ -98,7 +98,11 @@ grows from real failures and no later candidate can win while bringing one
 back (the method's ``evaluate`` must score an arbitrary prompt). A prompt is
 real traffic, so it meets the tree's own credential tripwire first: a prompt
 carrying a key-shaped literal is never promoted, never persisted, and never
-re-run as a task, and the step goes on without it. Which prompts are
+re-run as a task, and the step goes on without it. A prompt shaped like an
+instruction override (``ignore the previous instructions``, a forged system
+message, a chat-template control token) is screened the same way, and one
+tagged client holds at most ``evolution.max_promoted_per_client`` promoted
+tasks, so a single sender cannot fill the suite. Which prompts are
 promoted is the method's call: an optional ``evolution.promote`` callable
 receives the step's trace samples (and the failure manifest when its
 signature names ``manifest``) and returns the prompts to promote; without it

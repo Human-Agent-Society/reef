@@ -24,7 +24,14 @@ from reef.train.cordis_backend.backend import CordisBackend, HarnessCandidate, S
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
 from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.cordis_backend.recipe import CordisRecipe
-from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation, MutationError, Promoter, Proposer
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Mutation,
+    MutationError,
+    Promoter,
+    Proposer,
+    untrusted_text,
+)
 
 __all__ = [
     "CordisBackend",
@@ -40,4 +47,5 @@ __all__ = [
     "Promoter",
     "Proposer",
     "ScoreComparisonSelector",
+    "untrusted_text",
 ]
