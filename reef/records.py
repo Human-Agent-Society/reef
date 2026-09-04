@@ -337,9 +337,8 @@ class RecordStore:
                     """,
                     (scenario, receipt_id, compacted_ids_json),
                 ).fetchone()
-                if existing is not None and (
-                    existing["compacted_ids_json"] != compacted_ids_json or existing["metadata_json"] != metadata_json
-                ):
+                # Receipt identity includes the compacted ID set, matching the primary key.
+                if existing is not None and existing["metadata_json"] != metadata_json:
                     raise RecordConflict(
                         f"compaction receipt {receipt_id!r} for scenario {scenario!r} has different content"
                     )
