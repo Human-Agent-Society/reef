@@ -105,8 +105,8 @@ export default function Home() {
     <main className="home">
       <section className="home-hero">
         <div>
-          <p className="pill">Reef by Human-Agent Society</p>
-          <h1>Continuous post-training for AI agents</h1>
+          <p className="pill">Continual learning infrastructure</p>
+          <h1>Agents that improve from every run</h1>
           <p className="lead">{siteConfig.description}</p>
           <div className="home-actions">
             <Link className="primary-action" href="/docs/getting-started/quickstart">Quickstart</Link>
