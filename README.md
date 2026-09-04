@@ -99,7 +99,9 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-### Start a weight-training deployment
+### Weight-training deployment
+
+#### Start the deployment
 
 The following example starts the SAO (arXiv:2607.07508) example deployment. Run it
 from a Reef checkout in an environment that satisfies the GPU requirements in
@@ -118,12 +120,10 @@ reef serve -c recipes/sao/examples/sao/serve.yaml \
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```
 
-### Train weights
+#### Send an inference request and report feedback
 
 Send inference requests through Reef and report a score for each response. The
 SAO recipe uses each eligible scored rollout to run a training step.
-
-#### Send an inference request and report feedback
 
 Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`
 and `/v1/messages` take the provider's own request body. A request includes the
@@ -179,7 +179,7 @@ Once the recipe has enough feedback, it runs a training step and synchronizes
 the updated weights to the serving runtime. Later inference requests use the
 current version without restarting Reef.
 
-### Evolve your harness
+### Harness-evolving deployment
 
 The `harness_evolve` recipe updates a harness tree that may contain rules,
 skills, configuration, prompts, and extensions. It builds a candidate from
@@ -187,7 +187,7 @@ reported interactions, evaluates the current and candidate harnesses on the
 configured tasks, and publishes the candidate only when it wins that
 comparison. Harness scenarios do not share data or versions.
 
-#### Start a separate harness deployment
+#### Start the deployment
 
 You can start here after the source installation above. This deployment uses
 an OpenAI-compatible model endpoint and needs no training GPUs. It runs on
