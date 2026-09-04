@@ -1,17 +1,30 @@
 #!/bin/bash
 # Serve + run. Setup (once): see README. State and logs go to ./work.
+# ./run.sh runs on pi (serve.yaml); ./run.sh native runs on reef's native
+# harness (serve-native.yaml).
 set -e
 cd "$(dirname "$0")"
-mkdir -p work/recipes
+mkdir -p work/recipes work/bin
 
-# Copy serve.yaml's recipe sections where the recipe registry reads them, and
-# drop the task list beside them for run.py.
+SERVE=serve.yaml
+if [ "${1:-}" = native ]; then
+    SERVE=serve-native.yaml
+    # The native loop is reef's own; this launcher stands in for the
+    # reef-native console script an installed reef would put on PATH.
+    printf '#!/bin/sh\nexport PYTHONPATH=%s\nexec %s -m reef.harness.native "$@"\n' \
+        "$(cd ../.. && pwd)" "$(command -v python3)" > work/bin/reef-native
+    chmod +x work/bin/reef-native
+    export PATH="$PWD/work/bin:$PATH"
+fi
+
+# Copy the serve file's recipe sections where the recipe registry reads
+# them, and drop the task list beside them for run.py.
 export REEF_RECIPE_CONFIG_DIR="$PWD/work/recipes"
-python3 materialize_recipe.py
+python3 materialize_recipe.py "$SERVE"
 
 # Start Reef, stop it again when this script exits. The -c path is absolute:
 # reef resolves a relative config path against its own repo root.
-PYTHONPATH=../.. python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
+PYTHONPATH=../.. python3 -m reef serve -c "$PWD/$SERVE" > work/reef.log 2>&1 &
 SERVE_PID=$!
 trap 'kill "$SERVE_PID" 2>/dev/null' EXIT
 
