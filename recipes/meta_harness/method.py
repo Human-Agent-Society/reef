@@ -315,13 +315,16 @@ class MetaHarnessSelector:
         current_scores = _evaluation_scores(evaluation.metrics.get("current_scores", ()))
         if len(candidate_scores) != len(current_scores):
             raise ValueError("Meta-Harness evaluation score vectors must have equal lengths")
-        # The incumbent's number is the one from this batch, not the one it
-        # scored when it won. Cordis interleaves candidate and current inside
-        # each pairing so drift lands on both sides; comparing against a stored
-        # score throws that away and ratchets the bar up to the incumbent's
-        # luckiest run, which no later candidate has to beat on merit.
+        # Upstream Meta-Harness keeps a frontier: each candidate's average is
+        # compared against the best average recorded so far, and the incumbent
+        # is never re-run. Reproducing that means judging against the
+        # incumbent's committed score rather than this batch's paired one, even
+        # though Cordis measures both. The bar is therefore a high-water mark,
+        # which is upstream's behaviour and not an accident of this port.
+        incumbent = population.served
+        incumbent_scores = incumbent.scores or current_scores
         candidate_mean = fmean(candidate_scores)
-        incumbent_mean = fmean(current_scores)
+        incumbent_mean = fmean(incumbent_scores)
         selected = candidate_mean > incumbent_mean
         population.record_decision(
             candidate_scores=candidate_scores,

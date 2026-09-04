@@ -82,11 +82,12 @@ for example, an adapter may still reject an otherwise valid Reef node kind.
 
 Every unique valid candidate is retained, including non-winners, and can be a
 future parent. Selection is a strict improvement in mean validation score over
-the incumbent *in the same batch*: Reef interleaves candidate and incumbent
-inside each pairing so provider drift lands on both sides, and comparing
-against a stored score from an earlier batch would discard that and raise the
-bar to whatever the incumbent's luckiest run happened to be. Failed episodes
-count as zero; a non-finite score is rejected by Reef before settlement.
+the score the incumbent was admitted on, which reproduces upstream's frontier:
+it keeps a high-water best and never re-runs the incumbent. Reef's paired gate
+still measures both sides, so this method spends two evaluations per iteration
+where upstream spends one; budgets expressed in episodes are not directly
+comparable to upstream's iteration counts. Failed episodes count as zero; a
+non-finite score is rejected by Reef before settlement.
 
 The complete population, parents, scores, served id, proposal attempts, and
 budget counters live under `meta_harness_population` in Reef's algorithm

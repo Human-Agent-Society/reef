@@ -348,16 +348,16 @@ def test_candidate_and_episode_budgets_stop_before_another_model_call(tmp_path: 
     }
 
 
-def test_selector_compares_within_the_paired_batch_not_against_a_stored_score(tmp_path: Path) -> None:
-    # The incumbent once scored 0.8, but in this batch it scored 0.1 while the
-    # candidate scored 0.7. Reef ran both sides together so drift cancels;
-    # judging against the stale 0.8 would reject a candidate that beat the
-    # incumbent sevenfold under identical conditions.
+def test_selector_judges_against_the_frontier_the_incumbent_was_admitted_on(tmp_path: Path) -> None:
+    # Upstream keeps a high-water frontier and never re-runs the incumbent, so
+    # a candidate must beat the score the incumbent was admitted on, not the
+    # one it happens to post in this batch. Reproducing the search means
+    # reproducing that, including its bias against a lucky incumbent.
     store = PopulationStore(tmp_path / "mirror.json")
     population = Population()
     genesis = population.sync_served(SEED, step=0)
     genesis.scores = (0.8,)
-    population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
+    proposed, _ = population.stage_candidate(IMPROVED, parent_id=genesis.candidate_id, step=1)
     store.restore_committed(population.to_dict())
     store.begin(population.to_dict())
 
@@ -366,11 +366,11 @@ def test_selector_compares_within_the_paired_batch_not_against_a_stored_score(tm
         evaluation(candidate=(0.7,), current=(0.1,)),
     )
 
-    assert decision.selected
-    assert decision.metrics["incumbent_mean"] == 0.1
-    # The incumbent's record carries the batch just measured, so the proposer
-    # reads a live number rather than the one it won with.
-    assert store.active.by_id(genesis.candidate_id).scores == (0.1,)
+    assert not decision.selected
+    assert decision.metrics["incumbent_mean"] == 0.8
+    # The frontier does not drift down to this batch's measurement.
+    assert store.active.by_id(genesis.candidate_id).scores == (0.8,)
+    assert store.active.by_id(proposed.candidate_id).outcome == "retained"
     assert store.active.episode_calls == 2
 
 

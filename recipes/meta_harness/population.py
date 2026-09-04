@@ -321,10 +321,12 @@ class Population:
         candidate = self.pending
         served = self.served
         candidate.scores = _scores(candidate_scores)
-        # Refreshed every round, not written once: this is the incumbent's
-        # score in the batch just run, and it is what the proposer reads back
-        # as history. A frozen first observation would age into fiction.
-        served.scores = _scores(current_scores)
+        # Written once, never refreshed: the frontier only moves when a
+        # candidate wins, so an incumbent keeps the score it was admitted on.
+        # Overwriting it with each batch would let the bar drift downward,
+        # which upstream's `if avg > current_best_avg` never does.
+        if served.scores is None:
+            served.scores = _scores(current_scores)
         candidate.outcome = "selected" if selected else "retained"
         if selected:
             self.served_id = candidate.candidate_id
