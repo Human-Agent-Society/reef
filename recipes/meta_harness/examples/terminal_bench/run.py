@@ -1,0 +1,164 @@
+"""Drive the Reef arm of the Terminal-Bench 2 reproduction.
+
+Runs the Meta-Harness search directly over ``MetaHarnessBackend``: propose,
+evaluate the candidate against the incumbent, settle, repeat. Reef's Trainer
+does this in production; here the loop is explicit so an experiment can be
+resumed, capped, and inspected.
+
+The seed is evaluated before the first proposal. Upstream always seeds its
+frontier from the baselines ("Always seed frontier from baselines if results
+exist"), and against an empty frontier its comparison is ``avg > -1``, so the
+first candidate would win unconditionally. Reef's paired gate measures the
+incumbent alongside every candidate, which supplies the same number, but only
+if step one actually runs before anything is judged.
+
+    OPENAI_API_KEY=... E2B_API_KEY=... \
+        python -m recipes.meta_harness.examples.terminal_bench.run \
+            --tasks extract-elf,password-recovery --trials 1 --iterations 2 \
+            --max-observed-cost-usd 5 --output-dir /tmp/tb2-run
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+from reef.harness.adapters import get_adapter
+from reef.harness.executor import LocalExecutor
+from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.types import TraceBatch
+
+from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
+from recipes.meta_harness.method import MetaHarnessProposer, MetaHarnessSelector
+from recipes.meta_harness.population import PopulationStore
+
+from .budget import ObservedCostLedger, SpendCapReached
+
+#: The seed is the empty tree, which the terminus adapter renders as stock
+#: Terminus 2. That is upstream's `baseline_terminus2`, so both arms start
+#: from the same agent.
+SEED: tuple = ()
+
+
+def score_episode(task: str, result: Any) -> float:
+    """The verifier's reward, read off the trajectory the runner wrote."""
+    del task  # the reward is per-episode; the task is already in the trial file
+    for event in getattr(result, "trajectory", ()) or ():
+        if event.get("type") == "verifier":
+            reward = event.get("reward")
+            return 0.0 if reward is None else float(reward)
+    return 0.0
+
+
+def build(arguments: argparse.Namespace) -> tuple[MetaHarnessBackend, PopulationStore]:
+    output = Path(arguments.output_dir)
+    store = PopulationStore(output / "population.json")
+    descriptor = get_adapter("terminus")
+    tasks = tuple(task.strip() for task in arguments.tasks.split(",") if task.strip())
+    if not tasks:
+        raise SystemExit("--tasks must name at least one Terminal-Bench task")
+
+    served = ModelBinding(
+        base_url=arguments.target_url,
+        model=arguments.target_model,
+        api_key=os.environ["OPENAI_API_KEY"],
+    )
+    proposer_binding = ModelBinding(
+        base_url=arguments.proposer_url,
+        model=arguments.proposer_model,
+        api_key=os.environ["OPENAI_API_KEY"],
+    )
+    proposer = MetaHarnessProposer(
+        store=store,
+        descriptor=descriptor,
+        tasks=tasks,
+        episode_repeats=arguments.trials,
+        mode=arguments.mode,
+        kinds=("rules", "skill", "agent_command"),
+        max_candidates=arguments.iterations,
+    )
+    backend = MetaHarnessBackend(
+        population_store=store,
+        descriptor=descriptor,
+        propose=proposer,
+        score_episode=score_episode,
+        tasks=tasks,
+        models=ModelBindings(served=served, named={"proposer": proposer_binding}),
+        episode_repeats=arguments.trials,
+        episode_timeout_s=arguments.episode_timeout_s,
+        executor=LocalExecutor(),
+        seed=SEED,
+    )
+    return backend, store
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="tb2-reef-arm", description=__doc__)
+    parser.add_argument("--tasks", required=True, help="comma-separated Harbor task ids")
+    parser.add_argument("--trials", type=int, default=2)
+    parser.add_argument("--iterations", type=int, default=5)
+    parser.add_argument("--mode", default="full_history")
+    parser.add_argument("--target-model", default="gpt-5.6-luna")
+    parser.add_argument("--target-url", default="https://api.openai.com")
+    parser.add_argument("--proposer-model", default="gpt-5.6-sol")
+    parser.add_argument("--proposer-url", default="https://api.openai.com")
+    parser.add_argument("--episode-timeout-s", type=float, default=1800.0)
+    parser.add_argument("--max-observed-cost-usd", type=float, required=True)
+    parser.add_argument("--output-dir", required=True)
+    arguments = parser.parse_args(argv)
+
+    output = Path(arguments.output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    ledger = ObservedCostLedger(output / "observed-cost.json", arguments.max_observed_cost_usd)
+    backend, store = build(arguments)
+
+    state: dict[str, Any] = dict(backend.initial_state())
+    log = (output / "iterations.jsonl").open("a", encoding="utf-8")
+    evaluator = DefaultCandidateEvaluationPlugin(backend, MetaHarnessSelector(store))
+
+    for iteration in range(1, arguments.iterations + 1):
+        try:
+            ledger.before_trial(f"iteration-{iteration}")
+        except SpendCapReached as exc:
+            print(f"stopping: {exc}", flush=True)
+            break
+        started = time.time()
+        prepared = backend.prepare_step(TraceBatch(batch_id=f"iteration-{iteration}", samples=()), state, iteration)
+        if prepared.outcome == "skip":
+            print(f"iteration {iteration}: no proposal ({prepared.metrics})", flush=True)
+            state = dict(prepared.state)
+            continue
+        try:
+            evaluation = evaluator.evaluate(prepared.candidate)
+            decision = evaluator.decide(prepared.candidate, evaluation)
+            result = backend.settle_step(prepared, decision)
+        except BaseException:
+            backend.abort_step(prepared)
+            raise
+        state = dict(result.state)
+        row = {
+            "iteration": iteration,
+            "selected": bool(decision.selected),
+            "metrics": {k: v for k, v in (decision.metrics or {}).items() if isinstance(v, (int, float, str))},
+            "seconds": round(time.time() - started, 1),
+        }
+        log.write(json.dumps(row, sort_keys=True) + "\n")
+        log.flush()
+        print(json.dumps(row, sort_keys=True), flush=True)
+
+    log.close()
+    population = state.get(POPULATION_STATE_KEY, {})
+    (output / "final-population.json").write_text(json.dumps(population, indent=2, sort_keys=True) + "\n")
+    print(f"served candidate: {population.get('served_id')}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

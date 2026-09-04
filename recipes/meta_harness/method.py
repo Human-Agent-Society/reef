@@ -34,6 +34,19 @@ from .population import Population, PopulationStore, normalize_entries
 
 SEARCH_MODES = ("full_history", "incumbent_only")
 
+#: What each node kind's ``config`` must contain. The proposer is told this
+#: because the vocabulary alone does not describe the shape, and on the first
+#: step the population carries no example to copy: an empty seed renders as the
+#: stock agent, so there is nothing to infer the schema from.
+_NODE_CONFIG_SCHEMA = {
+    "config": {"data": "object merged into the adapter's config target", "target": "optional target name"},
+    "rules": {"text": "non-empty string, context appended to the agent's rules file"},
+    "agent_command": {"name": "non-empty identifier", "text": "non-empty string, the prompt template"},
+    "skill": {"name": "non-empty identifier", "text": "non-empty string, the SKILL.md body"},
+    "code_extension": {"name": "non-empty identifier", "code": "non-empty string that must compile"},
+    "native_tool": {"name": "non-empty identifier", "code": "non-empty string", "description": "string"},
+}
+
 _SYSTEM_PROMPT = """You are the proposal policy in a Meta-Harness search.
 Improve the fixed model's harness composition using the retained candidates,
 their evaluation scores, and the latest recorded traces. Choose a parent,
@@ -281,6 +294,9 @@ class MetaHarnessProposer(Proposer):
         ]
         surface = {
             "mode": self._mode,
+            "node_config_schema": {
+                kind: schema for kind, schema in _NODE_CONFIG_SCHEMA.items() if kind in self._kinds
+            },
             "served_candidate_id": population.served_id,
             "evaluation_tasks": list(self._tasks),
             "episode_repeats": self._episode_repeats,
@@ -291,7 +307,9 @@ class MetaHarnessProposer(Proposer):
             "recent_traces": traffic,
         }
         return (
-            "Propose exactly one complete Reef composition. In full_history mode you may branch from any "
+            "Propose exactly one complete Reef composition. Each entry's config must match "
+            "node_config_schema for its name exactly; a missing or empty required field is rejected "
+            "and the proposal is discarded. In full_history mode you may branch from any "
             "candidate_id in population; in incumbent_only mode use served_candidate_id. Each entry must have "
             "a unique root-level id, a name from adapter_node_kinds, and that node kind's config. Entries whose "
             "name is not in evolvable_node_kinds must be copied unchanged from the selected parent. Return exactly "
