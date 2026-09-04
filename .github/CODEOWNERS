@@ -5,6 +5,9 @@
 /.github/ @BobbyZhouZijian
 /docker/ @BobbyZhouZijian
 /pyproject.toml @BobbyZhouZijian
+/README.md @BobbyZhouZijian
+/README.zh.md @BobbyZhouZijian
+/README.i18n.yaml @BobbyZhouZijian
 
 # Core product areas. Keep these entries separate so ownership can be
 # delegated one subsystem at a time as the maintainer group grows.
