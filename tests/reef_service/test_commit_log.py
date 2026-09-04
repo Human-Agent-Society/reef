@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from dataclasses import KW_ONLY, dataclass
 from threading import Event, Thread
@@ -124,6 +125,96 @@ def test_commit_record_round_trips_training_job_identity(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_commit_log_tracks_the_current_training_run_position(tmp_path) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    log.append(sample_record(step=1))
+    log.append(sample_record(step=2, runtime_load_id="w2"))
+    assert log.training_run_position() == (0, 2)
+
+    rollback = CommitRecord(
+        scenario="math",
+        step=3,
+        artifact_ref=ArtifactRef("artifact:1", "checkpoint:3", "checkpoint:1"),
+        checkpoint=True,
+        algorithm_state={"steps": 2},
+        high_water_sequence=4,
+        high_water_offset=4,
+        operation="rollback",
+        rollback_target_release_id="checkpoint:1",
+    )
+    log.append(rollback)
+    assert log.training_run_position() == (3, 0)
+
+    log.append(sample_record(step=4, runtime_load_id="w4"))
+    assert log.training_run_position() == (3, 1)
+
+
+@pytest.mark.unit
+def test_commit_log_retry_is_idempotent_but_conflicting_step_is_rejected(tmp_path) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    original = sample_record(step=1)
+    retry = CommitRecord.from_dict({**original.to_dict(), "recorded_at": original.recorded_at + 1})
+
+    log.append(original)
+    log.append(retry)
+    second = sample_record(step=2, runtime_load_id="w2")
+    log.append(second)
+    log.append(retry)
+
+    assert log.records() == (original, second)
+    with pytest.raises(CommitLogError, match="conflicts"):
+        log.append(sample_record(step=1, runtime_load_id="different"))
+
+
+@pytest.mark.unit
+def test_commit_log_retry_reconciles_an_fsync_error_after_the_write(tmp_path, monkeypatch) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    record = sample_record(step=1)
+    original_fsync = os.fsync
+    should_fail = True
+
+    def fail_after_sync(fd):
+        nonlocal should_fail
+        original_fsync(fd)
+        if should_fail:
+            should_fail = False
+            raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_after_sync)
+
+    with pytest.raises(OSError, match="injected fsync failure"):
+        log.append(record)
+    log.append(record)
+
+    assert log.records() == (record,)
+
+
+@pytest.mark.unit
+def test_commit_log_invalidates_its_cache_when_another_writer_interleaves(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "commits.jsonl"
+    first = CommitLog(path)
+    second = CommitLog(path)
+    first.append(sample_record(step=1))
+    assert len(first.records()) == 1
+
+    file_signature = first._file_signature
+    interleave = True
+
+    def signature_with_interleaved_append():
+        nonlocal interleave
+        signature = file_signature()
+        if interleave:
+            interleave = False
+            second.append(sample_record(step=2, runtime_load_id="w2"))
+        return signature
+
+    monkeypatch.setattr(first, "_file_signature", signature_with_interleaved_append)
+    first.append(sample_record(step=3, runtime_load_id="w3"))
+
+    assert [record.step for record in first.records()] == [1, 2, 3]
+
+
+@pytest.mark.unit
 def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
     weight_value = sample_record().to_dict()["artifact_ref"]
     assert weight_value == {
@@ -206,6 +297,21 @@ def test_records_tolerate_a_torn_tail(tmp_path) -> None:
 
     records = log.records()
     assert [record.step for record in records] == [1]
+
+
+@pytest.mark.unit
+def test_append_discards_a_torn_tail_before_writing_the_retry(tmp_path) -> None:
+    path = tmp_path / "commits.jsonl"
+    log = CommitLog(path)
+    first = sample_record(step=1)
+    second = sample_record(step=2, runtime_load_id="w2")
+    log.append(first)
+    with open(path, "ab") as handle:
+        handle.write(b'{"record":"reef-commit/5","scenario":"ma')
+
+    log.append(second)
+
+    assert log.records() == (first, second)
 
 
 @pytest.mark.unit
