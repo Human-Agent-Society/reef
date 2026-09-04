@@ -42,6 +42,17 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Scientific discoveries | Test-time training | An execution environment, a correctness checker, and a measurable objective |
 
 
+## How Reef fits your stack
+
+| Ability | Inference engine (vLLM, SGLang, …) | RL training framework (Slime, veRL, AReaL, …) | **Reef** |
+|---|:---:|:---:|:---:|
+| Serves live traffic | ✅ | ❌ | ✅ |
+| Trains weights | ❌ | ✅ | ✅ |
+| Version management | ❌ | ❌ | ✅ |
+| Stays live through updates | ❌ | ❌ | ✅ |
+| Evolves beyond weights (skills, harness) | ❌ | ❌ | ✅ |
+
+
 ## How it works
 
 <div align="center">
