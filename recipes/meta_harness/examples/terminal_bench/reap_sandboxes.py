@@ -134,15 +134,22 @@ def _pass(module, arguments, ours) -> int:
         ignore_age=arguments.all,
     )
     foreign = sum(1 for sandbox in alive if _environment(sandbox) not in ours)
-    print(f"{len(alive)} alive, {foreign} not from this benchmark, {len(doomed)} to reap")
+    # Flushed and stamped: watch mode writes to a log nobody is tailing live,
+    # and a watchdog whose output is buffered cannot be distinguished from one
+    # that has stopped.
+    stamp = now.astimezone().strftime("%H:%M:%S")
+    print(
+        f"[{stamp}] {len(alive)} alive, {foreign} not from this benchmark, {len(doomed)} to reap",
+        flush=True,
+    )
     if not arguments.yes:
         for sandbox in doomed:
             age = (now - sandbox.started_at).total_seconds() / 60
-            print(f"  would kill {sandbox.sandbox_id} ({age:.0f} min)")
+            print(f"  would kill {sandbox.sandbox_id} ({age:.0f} min)", flush=True)
         return 0
 
     killed = sum(_kill(module, sandbox.sandbox_id) for sandbox in doomed)
-    print(f"killed {killed}")
+    print(f"killed {killed}", flush=True)
     return 0
 
 
