@@ -54,6 +54,32 @@ end to end and that their selection rules agree on real data. It is not a
 measured comparison of search quality, and the published tree is a mechanism
 demonstration rather than a measured improvement.
 
+## The task set is a weak instrument, and by how much
+
+A scaled run (30 tasks x 2 trials x 5 iterations) measured the seed on
+upstream's hard subset. `select_panel.py` recovers the per-task result:
+
+| | Tasks |
+| --- | --- |
+| Seed always passes | 4 |
+| Seed always fails | 21 |
+| **Panel: seed sometimes passes** | **5** |
+
+25 of 30 tasks add the same constant to both sides of every comparison, so
+**84% of each 60-episode evaluation cannot move a decision**. The first
+iteration selected on 0.233 against 0.217 — one extra passing episode, which
+at that panel size is noise rather than an improvement.
+
+This is the cost of substituting upstream's hard subset for a measured panel.
+The subset is chosen to be hard, so it concentrates on the tasks this target
+model cannot do, which is precisely the opposite of what discriminates. It
+also explains a large swing between runs: with so few live tasks, which
+borderline ones happen to land moves the mean a long way. An earlier run of
+the same seed on the same 30 tasks scored 0.400 against this run's 0.217.
+
+The next run should draw its panel from the full 89 rather than the hard
+subset, seeded by a one-off baseline sweep and filtered by `select_panel.py`.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
