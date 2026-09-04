@@ -49,25 +49,26 @@ serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 s
 
 ## Keep a deployment running
 
-From the repository root, after the source installation and with `pi` on PATH:
+Set `model.path` in [deployment.yaml](deployment.yaml) to your provider's model
+name. From the repository root, after the source installation and with `pi` on PATH:
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # no /v1 suffix
-export REEF_UPSTREAM_MODEL="your-model-name"
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-python tutorials/harness_evolve/serve.py
+reef serve -c tutorials/harness_evolve/deployment.yaml
 ```
 
 Use your provider's API key, or omit it for a local endpoint without authentication.
-`serve.py` prepares the recipe from `serve.yaml` and keeps Reef running until
-interrupted. It sets the provider model in both the recipe and the service.
+`deployment.yaml` keeps Reef running until interrupted. It contains both the
+deployment and its named recipe preset; no recipe generation or extra Python
+launcher is needed. A YAML anchor shares the model name between the recipe
+and the upstream runtime, so inference, proposal, and evaluation use the same model.
 Defaults: port `8901`, Reef access token `reef-local`, state under
-`work/deployment/`. Override these with `REEF_PORT`, `REEF_TOKEN`, and
-`REEF_HARNESS_WORK_DIR`. With no endpoint or model overrides, it uses the
-`serve.yaml` defaults. The original YAML and the `run.sh` demo's state stay intact.
+`work/deployment/`. Use `--reef.port` and `--reef.token` to override the port
+and access token. The `run.sh` demo keeps its separate configuration and state.
 
 Install a harness from this service and submit feedback as shown in the
-[root README](../../README.md#harness-evolving-deployment). Adapt `serve.yaml`'s
+[root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s
 tasks and `harness/evolution.py`'s proposer and grader for your workload before
 starting the deployment.
 

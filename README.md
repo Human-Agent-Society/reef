@@ -181,20 +181,20 @@ current version without restarting Reef.
 
 ### Harness-evolving deployment
 
-Improve harness skills using a model API, with no training GPUs. From your
-Reef checkout and activated Python environment:
+Improve harness skills using a model API, with no training GPUs. Set `model.path`
+in [deployment.yaml](tutorials/harness_evolve/deployment.yaml) to your model name,
+then run from your Reef checkout and activated Python environment:
 
 ```bash
 npm install -g @earendil-works/pi-coding-agent@0.84.2
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
-export REEF_UPSTREAM_MODEL="your-model-name"
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-python tutorials/harness_evolve/serve.py
+reef serve -c tutorials/harness_evolve/deployment.yaml
 ```
 
 For another provider, use its URL, model name, and API key. For a local endpoint
-without authentication, omit the key. The script starts Reef on `8901` with
-`reef-local` as its access token and prepares the tutorial's recipe automatically.
+without authentication, omit the key. Reef runs on `8901` with `reef-local`
+as its access token. The YAML includes the recipe and evaluation tasks.
 
 In another terminal, install the harness and run a task:
 
