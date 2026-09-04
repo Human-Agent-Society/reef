@@ -103,6 +103,9 @@ class ServiceSettings:
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
     wandb_config: Mapping[str, Any] = field(default_factory=dict)
+    #: Optional service-edge inference tracing, sourced from
+    #: ``observability.langsmith`` and disabled by default.
+    langsmith_config: Mapping[str, Any] = field(default_factory=dict)
     training_settings: Mapping[str, Any] = field(default_factory=dict)
     #: Optional pre-publication checkpoint evaluator and selection plugin.
     evaluation_settings: Mapping[str, Any] | None = None
@@ -157,7 +160,7 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
-    non_reef_fields = {"evaluation_settings", "training_settings", "wandb_config"}
+    non_reef_fields = {"evaluation_settings", "training_settings", "wandb_config", "langsmith_config"}
     return frozenset(
         settings_field.name
         for settings_field in dataclasses.fields(ServiceSettings)
@@ -263,6 +266,7 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
             _config_service_value(config, "reef", "allow_implicit_scenario_creation", default=True)
         ),
         wandb_config=_config_service_mapping(config, "observability", "wandb"),
+        langsmith_config=_config_service_mapping(config, "observability", "langsmith"),
         training_settings=_config_service_mapping(config, "training"),
         evaluation_settings=_config_optional_mapping(config, "evaluation"),
         recipe_settings=_reef_section(config),

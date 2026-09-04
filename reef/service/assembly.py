@@ -16,7 +16,7 @@ from typing import Any
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.observability import build_experiment_tracker
+from reef.observability import build_experiment_tracker, build_inference_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
@@ -220,11 +220,13 @@ def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = 
         timeout_s=settings.inference_retry_timeout_s,
     )
     dispatcher = build_dispatcher(settings, environ=environ, connector=connector)
+    inference_observer = build_inference_observer(settings.langsmith_config, environ=environ)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     return create_app(
         dispatcher,
         tokens=settings.tokens,
         inference_retry_policy=retry_policy,
+        inference_observer=inference_observer,
         close_dispatcher=True,
     )

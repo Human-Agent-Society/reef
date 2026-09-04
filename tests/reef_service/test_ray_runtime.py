@@ -1210,6 +1210,8 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
             return self.ref
 
     class Dispatcher:
+        recipe_name = "test"
+
         def __init__(self, scenario) -> None:
             self.current = scenario
 
@@ -1290,6 +1292,8 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             self.runtime = runtime
 
     class Dispatcher:
+        recipe_name = "test"
+
         @staticmethod
         def get_or_create_scenario(*args, **kwargs):
             del args, kwargs

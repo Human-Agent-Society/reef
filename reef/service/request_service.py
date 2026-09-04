@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -21,8 +22,9 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.observability import InferenceObserver, InferenceTrace, NullInferenceObserver, ReportFeedback
 from reef.recipe.errors import RecipeConfigError
-from reef.records import AgentRecord
+from reef.records import AgentRecord, RecordConflict
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
@@ -94,6 +96,8 @@ class PendingInference:
     lease: InferenceLease | None = None
     deferred_prepared: PreparedInference | None = None
     path: str | None = None
+    started_at: float = 0.0
+    recipe: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ class PreparedInference:
     #: True when a training runtime serves the scenario: the recorded payload
     #: must then carry the engine-confirmed runtime load ID.
     durable: bool
+    recipe: str
     admission: InferenceAdmissionHandle | None = None
     #: Releases serving state the surface held for this attempt (an adapter
     #: lease); called exactly once when the attempt ends.
@@ -137,14 +142,41 @@ class InferenceRetryTimeout(ReefError):
 
 
 class RequestService:
-    def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
+    def __init__(
+        self,
+        dispatcher: Dispatcher,
+        *,
+        retry_policy: InferenceRetryPolicy | None = None,
+        inference_observer: InferenceObserver | None = None,
+    ) -> None:
         self._dispatcher = dispatcher
         self._payload_normalizer = RequestPayloadNormalizer()
         self._retry_policy = retry_policy or InferenceRetryPolicy()
+        self._inference_observer = inference_observer or NullInferenceObserver()
 
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
+
+    def close(self) -> None:
+        """Best-effort observer flush; durable service shutdown never depends on it."""
+
+        try:
+            self._inference_observer.close()
+        except Exception as exc:
+            logger.warning("inference observer close failed (%s)", type(exc).__name__)
+
+    def _observe_inference(self, trace: InferenceTrace) -> None:
+        try:
+            self._inference_observer.record_inference(trace)
+        except Exception as exc:
+            logger.warning("inference observer failed (%s)", type(exc).__name__)
+
+    def _observe_feedback(self, feedback: ReportFeedback) -> None:
+        try:
+            self._inference_observer.record_feedback(feedback)
+        except Exception as exc:
+            logger.warning("inference observer feedback failed (%s)", type(exc).__name__)
 
     @staticmethod
     def _require_inference(headers: Mapping[str, str]) -> RequestHeaders:
@@ -161,7 +193,27 @@ class RequestService:
         if request_type is RequestType.INFERENCE:
             raise ValueError("inference requests must use infer()")
         parsed = parse_request_headers(headers, request_type)
-        return self._accept(parsed, payload, agent_record_id=agent_record_id)
+        existing = None
+        if agent_record_id is not None:
+            scenario = self._dispatcher.get_or_create_scenario(
+                parsed.scenario,
+                release_id=parsed.release_id,
+            )
+            if scenario is not None:
+                existing = scenario.records.get(parsed.scenario, agent_record_id)
+        item = self._accept(parsed, payload, agent_record_id=agent_record_id)
+        if existing is None and item.request_type is RequestType.REPORT and item.references:
+            self._observe_feedback(
+                ReportFeedback(
+                    report_record_id=item.agent_record_id,
+                    scenario=item.scenario,
+                    references=item.references,
+                    score=item.payload.get("score"),
+                    feedback=item.payload.get("feedback"),
+                    metadata=item.payload.get("metadata", {}),
+                )
+            )
+        return item
 
     async def infer(
         self,
@@ -181,67 +233,105 @@ class RequestService:
         backend: InferenceBackend | None = None,
     ) -> tuple[dict[str, Any], AgentRecord]:
         original_payload = dict(payload)
+        requested = self._require_inference(headers)
+        agent_record_id = requested.agent_record_id or uuid.uuid4().hex
+        trace_started_at = time.time()
         retry_delay = self._retry_policy.initial_s
         loop = asyncio.get_running_loop()
         remaining_budget = self._retry_policy.timeout_s
         timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
         attempt = 0
-        while True:
-            attempt += 1
-            prepared, payload = await self._prepare_request(headers, original_payload, path, backend)
-            try:
-                if prepared.durable:
-                    payload = {**payload, "return_meta_info": True}
-                if remaining_budget <= 0:
-                    raise InferenceRetryTimeout(timeout_error)
-                started = loop.time()
+        prepared: PreparedInference | None = None
+        try:
+            while True:
+                attempt += 1
+                prepared, payload = await self._prepare_request(headers, original_payload, path, backend)
                 try:
-                    response = await asyncio.wait_for(
-                        prepared.backend.inference(prepared.artifact, path, payload),
-                        timeout=remaining_budget,
-                    )
-                except TimeoutError as exc:
-                    logger.warning(
-                        "inference for scenario %r timed out after %d attempt(s) at artifact %r",
+                    if prepared.durable:
+                        payload = {**payload, "return_meta_info": True}
+                    if requested.agent_record_id is not None:
+                        replayed = self._replay_inference(prepared, payload, requested.agent_record_id)
+                        if replayed is not None:
+                            return replayed
+                    if remaining_budget <= 0:
+                        raise InferenceRetryTimeout(timeout_error)
+                    started = loop.time()
+                    try:
+                        response = await asyncio.wait_for(
+                            prepared.backend.inference(prepared.artifact, path, payload),
+                            timeout=remaining_budget,
+                        )
+                    except TimeoutError as exc:
+                        logger.warning(
+                            "inference for scenario %r timed out after %d attempt(s) at artifact %r",
+                            prepared.parsed.scenario,
+                            attempt,
+                            prepared.artifact.ref.release_id,
+                        )
+                        raise InferenceRetryTimeout(timeout_error) from exc
+                    finally:
+                        remaining_budget -= loop.time() - started
+                    interrupted = _inference_aborted(response)
+                    if not interrupted:
+                        # A completed response with invalid runtime-load-ID information is a
+                        # backend contract error, not a retryable inference abort.
+                        if prepared.surface.inference is not None:
+                            prepared.surface.inference.verify_response(prepared.artifact, path, response)
+                        self._stamp_durable_runtime_load_id(prepared, payload, response)
+                        item = await asyncio.to_thread(
+                            self._accept,
+                            prepared.parsed,
+                            {**payload, "response": response},
+                            agent_record_id=agent_record_id,
+                            artifact_ref=prepared.artifact.ref,
+                        )
+                        client_response = client_inference_response(response)
+                        self._observe_inference(
+                            self._completed_trace(
+                                item=item,
+                                prepared=prepared,
+                                path=path,
+                                started_at=trace_started_at,
+                                retry_count=attempt - 1,
+                                inputs=original_payload,
+                                outputs=client_response,
+                                streaming=False,
+                            )
+                        )
+                        return client_response, item
+                    # A backend ``abort`` finish reason makes the attempt unusable.
+                    # Restart the request against the latest artifact and never record it.
+                    logger.info(
+                        "retrying backend-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
+                        "engine reported runtime load ID %r",
                         prepared.parsed.scenario,
                         attempt,
                         prepared.artifact.ref.release_id,
+                        reported_runtime_load_id(response),
                     )
-                    raise InferenceRetryTimeout(timeout_error) from exc
                 finally:
-                    remaining_budget -= loop.time() - started
-                interrupted = _inference_aborted(response)
-                if not interrupted:
-                    # A completed response with invalid runtime-load-ID information is a
-                    # backend contract error, not a retryable inference abort.
-                    if prepared.surface.inference is not None:
-                        prepared.surface.inference.verify_response(prepared.artifact, path, response)
-                    self._stamp_durable_runtime_load_id(prepared, payload, response)
-                    item = await asyncio.to_thread(
-                        self._accept,
-                        prepared.parsed,
-                        {**payload, "response": response},
-                        artifact_ref=prepared.artifact.ref,
-                    )
-                    return client_inference_response(response), item
-                # A backend ``abort`` finish reason makes the attempt unusable.
-                # Restart the request against the latest artifact and never record it.
-                logger.info(
-                    "retrying backend-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
-                    "engine reported runtime load ID %r",
-                    prepared.parsed.scenario,
-                    attempt,
-                    prepared.artifact.ref.release_id,
-                    reported_runtime_load_id(response),
+                    prepared.release()
+                if remaining_budget <= 0:
+                    raise InferenceRetryTimeout(timeout_error)
+                sleep_for = min(retry_delay, remaining_budget)
+                await asyncio.sleep(sleep_for)
+                remaining_budget -= sleep_for
+                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+        except BaseException as exc:
+            self._observe_inference(
+                self._failed_trace(
+                    agent_record_id=agent_record_id,
+                    headers=headers,
+                    prepared=prepared,
+                    path=path,
+                    started_at=trace_started_at,
+                    retry_count=max(0, attempt - 1),
+                    inputs=original_payload,
+                    error=type(exc).__name__,
+                    streaming=False,
                 )
-            finally:
-                prepared.release()
-            if remaining_budget <= 0:
-                raise InferenceRetryTimeout(timeout_error)
-            sleep_for = min(retry_delay, remaining_budget)
-            await asyncio.sleep(sleep_for)
-            remaining_budget -= sleep_for
-            retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+            )
+            raise
 
     async def start_stream(
         self,
@@ -250,7 +340,28 @@ class RequestService:
         path: str,
         backend: InferenceBackend | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        prepared, payload = await self._prepare_request(headers, payload, path, backend)
+        original_payload = dict(payload)
+        requested = self._require_inference(headers)
+        agent_record_id = requested.agent_record_id or uuid.uuid4().hex
+        trace_started_at = time.time()
+        prepared: PreparedInference | None = None
+        try:
+            prepared, payload = await self._prepare_request(headers, payload, path, backend)
+        except BaseException as exc:
+            self._observe_inference(
+                self._failed_trace(
+                    agent_record_id=agent_record_id,
+                    headers=headers,
+                    prepared=prepared,
+                    path=path,
+                    started_at=trace_started_at,
+                    retry_count=0,
+                    inputs=original_payload,
+                    error=type(exc).__name__,
+                    streaming=True,
+                )
+            )
+            raise
         admission = prepared.admission
         lease = prepared.lease
         try:
@@ -274,7 +385,7 @@ class RequestService:
                 raise RuntimeLoadMismatch(
                     "durable streaming inference requires an atomic record_response with serving runtime load IDs"
                 )
-        except BaseException:
+        except BaseException as exc:
             try:
                 if "stream" in locals():
                     await stream.close()
@@ -285,23 +396,40 @@ class RequestService:
                 finally:
                     if admission is not None:
                         admission.release()
+            self._observe_inference(
+                self._failed_trace(
+                    agent_record_id=agent_record_id,
+                    headers=headers,
+                    prepared=prepared,
+                    path=path,
+                    started_at=trace_started_at,
+                    retry_count=0,
+                    inputs=original_payload,
+                    error=type(exc).__name__,
+                    streaming=True,
+                )
+            )
             raise
         pending = PendingInference(
             item=AgentRecord.create(
                 scenario=prepared.parsed.scenario,
                 request_type=RequestType.INFERENCE,
                 payload=_with_tags(payload, prepared.parsed),
+                agent_record_id=agent_record_id,
                 artifact_ref=prepared.artifact.ref,
             ),
             release_id=prepared.parsed.release_id,
             admission=admission,
             lease=lease,
             deferred_prepared=prepared if record_response_pending else None,
-            path=path if record_response_pending else None,
+            path=path,
+            started_at=trace_started_at,
+            recipe=prepared.recipe,
         )
         return stream, pending
 
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
+        stored: AgentRecord | None = None
         try:
             payload = dict(pending.item.payload)
             # A token-native streaming backend fills record_response only when
@@ -324,16 +452,19 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
-            return self._dispatcher.accept_record(
+            stored = self._dispatcher.accept_record(
                 item,
                 release_id=pending.release_id,
             )
+            self._observe_inference(self._stream_trace(pending, stored, response, record_accepted=True))
+            return stored
         except Exception:
             logger.exception(
                 "dispatcher rejected the stream record for scenario %r (record %s)",
                 pending.item.scenario,
                 pending.item.agent_record_id,
             )
+            self._observe_inference(self._stream_trace(pending, pending.item, response, record_accepted=False))
             raise
         finally:
             try:
@@ -435,7 +566,166 @@ class RequestService:
             backend=selected_backend,
             surface=scenario.surface,
             durable=isinstance(scenario.runtime, TrainingRuntime),
+            recipe=self._dispatcher.recipe_name,
             admission=admission,
+        )
+
+    def _replay_inference(
+        self,
+        prepared: PreparedInference,
+        payload: Mapping[str, Any],
+        agent_record_id: str,
+    ) -> tuple[dict[str, Any], AgentRecord] | None:
+        """Return an accepted client-id retry without calling the provider.
+
+        The stored response and Reef-generated runtime-load fields are not
+        part of request equality. A reused id with different request content
+        retains the record store's conflict semantics.
+        """
+
+        scenario = self._dispatcher.get_or_create_scenario(
+            prepared.parsed.scenario,
+            release_id=prepared.parsed.release_id,
+        )
+        if scenario is None:
+            return None
+        stored = scenario.records.get(prepared.parsed.scenario, agent_record_id)
+        if stored is None:
+            return None
+        if stored.request_type is not RequestType.INFERENCE:
+            raise RecordConflict(f"agent_record_id {agent_record_id!r} already has different content")
+        stored_request = dict(stored.payload)
+        response = stored_request.pop("response", None)
+        stored_request.pop("runtime_load_id", None)
+        stored_request.pop("runtime_load_spans", None)
+        expected = dict(_with_tags(payload, prepared.parsed))
+        if stored_request != expected or not isinstance(response, Mapping):
+            raise RecordConflict(f"agent_record_id {agent_record_id!r} already has different content")
+        # The original acceptance already exported this deterministic run id.
+        # Skipping observer emission also avoids duplicate client calls.
+        return client_inference_response(response), stored
+
+    @staticmethod
+    def _trace_metadata(item: AgentRecord) -> Mapping[str, Any]:
+        metadata = item.payload.get("metadata", {})
+        return metadata if isinstance(metadata, Mapping) else {}
+
+    @staticmethod
+    def _serving_runtime_load_id(item: AgentRecord) -> str | None:
+        value = item.payload.get("runtime_load_id")
+        return value if isinstance(value, str) else None
+
+    def _completed_trace(
+        self,
+        *,
+        item: AgentRecord,
+        prepared: PreparedInference,
+        path: str,
+        started_at: float,
+        retry_count: int,
+        inputs: Mapping[str, Any],
+        outputs: Mapping[str, Any],
+        streaming: bool,
+    ) -> InferenceTrace:
+        return InferenceTrace(
+            agent_record_id=item.agent_record_id,
+            scenario=item.scenario,
+            recipe=prepared.recipe,
+            path=path,
+            started_at=started_at,
+            ended_at=time.time(),
+            retry_count=retry_count,
+            completion_state="complete",
+            delivery_state="successful",
+            record_accepted=True,
+            streaming=streaming,
+            inputs=inputs,
+            outputs=outputs,
+            metadata=self._trace_metadata(item),
+            content_id=prepared.artifact.ref.content_id,
+            release_id=prepared.artifact.ref.release_id,
+            serving_runtime_load_id=self._serving_runtime_load_id(item),
+        )
+
+    def _failed_trace(
+        self,
+        *,
+        agent_record_id: str,
+        headers: Mapping[str, str],
+        prepared: PreparedInference | None,
+        path: str,
+        started_at: float,
+        retry_count: int,
+        inputs: Mapping[str, Any],
+        error: str,
+        streaming: bool,
+    ) -> InferenceTrace:
+        normalized_headers = {key.lower(): value for key, value in headers.items()}
+        scenario = prepared.parsed.scenario if prepared is not None else normalized_headers.get(SCENARIO_HEADER, "")
+        tags = prepared.parsed.tags if prepared is not None else {}
+        ref = None if prepared is None else prepared.artifact.ref
+        return InferenceTrace(
+            agent_record_id=agent_record_id,
+            scenario=scenario,
+            recipe=None if prepared is None else prepared.recipe,
+            path=path,
+            started_at=started_at,
+            ended_at=time.time(),
+            retry_count=retry_count,
+            completion_state="backend_error",
+            delivery_state="failed",
+            record_accepted=False,
+            streaming=streaming,
+            inputs=inputs,
+            metadata={"tags": dict(tags)} if tags else {},
+            content_id=None if ref is None else ref.content_id,
+            release_id=None if ref is None else ref.release_id,
+            error=error,
+        )
+
+    def _stream_trace(
+        self,
+        pending: PendingInference,
+        item: AgentRecord,
+        response: Mapping[str, Any],
+        *,
+        record_accepted: bool,
+    ) -> InferenceTrace:
+        delivery = response.get("stream_delivery")
+        delivery_data = delivery if isinstance(delivery, Mapping) else response
+        complete = delivery_data.get("complete") is True
+        error_value = delivery_data.get("error")
+        error = error_value if isinstance(error_value, str) else None
+        if not record_accepted:
+            completion_state, delivery_state = "rejected", "failed"
+        elif complete:
+            completion_state, delivery_state = "complete", "successful"
+        elif error == "client disconnected":
+            completion_state, delivery_state = "incomplete", "disconnected"
+        elif error:
+            completion_state, delivery_state = "backend_error", "failed"
+        else:
+            completion_state, delivery_state = "incomplete", "incomplete"
+        ref = item.artifact_ref
+        return InferenceTrace(
+            agent_record_id=item.agent_record_id,
+            scenario=item.scenario,
+            recipe=pending.recipe,
+            path=pending.path or "",
+            started_at=pending.started_at,
+            ended_at=time.time(),
+            retry_count=0,
+            completion_state=completion_state,
+            delivery_state=delivery_state,
+            record_accepted=record_accepted,
+            streaming=True,
+            inputs={key: value for key, value in pending.item.payload.items() if key != "metadata"},
+            outputs=client_inference_response(response),
+            metadata=self._trace_metadata(item),
+            content_id=None if ref is None else ref.content_id,
+            release_id=None if ref is None else ref.release_id,
+            serving_runtime_load_id=self._serving_runtime_load_id(item),
+            error=error if record_accepted else "RecordRejected",
         )
 
     def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
