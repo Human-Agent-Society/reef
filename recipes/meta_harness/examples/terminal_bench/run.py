@@ -109,6 +109,9 @@ def build(arguments: argparse.Namespace, ledger: ObservedCostLedger) -> tuple[Me
         models=ModelBindings(served=served, named={"proposer": proposer_binding}),
         episode_repeats=arguments.trials,
         episode_timeout_s=arguments.episode_timeout_s,
+        # Pairings run in one pool. Without this the evaluation is sequential,
+        # and 600 episodes at two minutes each is a day rather than an hour.
+        episode_workers=arguments.concurrency,
         executor=LocalExecutor(),
         seed=SEED,
     )
@@ -126,6 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--proposer-model", default="gpt-5.6-sol")
     parser.add_argument("--proposer-url", default="https://api.openai.com")
     parser.add_argument("--episode-timeout-s", type=float, default=1800.0)
+    parser.add_argument("--concurrency", type=int, default=8, help="pairings evaluated in parallel")
     parser.add_argument("--max-observed-cost-usd", type=float, required=True)
     parser.add_argument("--output-dir", required=True)
     arguments = parser.parse_args(argv)
