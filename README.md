@@ -286,14 +286,6 @@ sequenceDiagram
     end
 ```
 
-The inference runtime is always required. The training runtime is needed only for
-recipes that update model weights. Harness recipes run their step in Reef’s own
-process, with no training GPU.
-
-Artifact evaluation measures each candidate artifact and decides whether to
-select or reject it before publication. The default weight-recipe selector is
-`AlwaysSelect`; configure a custom evaluator to apply your quality criteria.
-
 See the [architecture guide](https://reefinfra.ai/docs/getting-started/architecture/)
 for the request path, scenarios, and release lifecycle.
 
