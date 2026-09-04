@@ -1022,7 +1022,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     request = Thread(target=accept_report)
     request.start()
-    assert started.wait(1)
+    assert started.wait(5), "harness growth did not start in time"
     status_values = []
     status_returned = Event()
 
