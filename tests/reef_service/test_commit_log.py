@@ -12,12 +12,13 @@ import hashlib
 import logging
 import os
 import time
-from dataclasses import KW_ONLY, dataclass
+from dataclasses import KW_ONLY, dataclass, replace
+from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
@@ -30,10 +31,15 @@ from reef.scenario.commit_log import RECORD_KIND, CommitLog, CommitLogError, Com
 from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train import RetentionDecision, Trainer
+from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation import (
+    DefaultCandidateEvaluationPlugin,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
@@ -437,6 +443,65 @@ def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") 
             return
         time.sleep(0.001)
     raise AssertionError("async training did not commit")
+
+
+class _SavedArtifactBackend(TrainingBackend):
+    def __init__(self, artifact_path: Path) -> None:
+        self._artifact_path = artifact_path
+        self.batch_ids: list[str] = []
+
+    def initial_state(self):
+        return {"steps": 0}
+
+    def prepare_step(self, batch, state, scenario_step):
+        del scenario_step
+        self.batch_ids.append(batch.batch_id)
+        return PreparedStep.with_candidate(
+            UpdateCandidate(batch.batch_id),
+            state={"steps": int(state["steps"]) + 1},
+        )
+
+    def evaluate(self, candidate):
+        del candidate
+        return EvaluationResult("test", "1", {})
+
+    def settle_step(self, prepared, decision: SelectionDecision):
+        del decision
+        return TrainStepResult(prepared.state, artifact=Artifact.local(self._artifact_path))
+
+    def abort_step(self, prepared):
+        del prepared
+
+
+@dataclass(frozen=True)
+class _SavedArtifactRecipe(Recipe):
+    backend: TrainingBackend
+
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        del experiment_logger
+        return Trainer.build(
+            scenario,
+            records,
+            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            training_backend=self.backend,
+            algorithm_state=algorithm_state,
+        )
+
+
+def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    artifact_path = tmp_path / "candidate"
+    artifact_path.mkdir()
+    (artifact_path / "model.txt").write_text("trained")
+    backend = _SavedArtifactBackend(artifact_path)
+    dispatcher = Dispatcher(
+        _SavedArtifactRecipe(backend=backend),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=agent_record_dir,
+    )
+    return dispatcher, backend
 
 
 @pytest.mark.unit
@@ -1095,6 +1160,184 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
     wait_for_step(dispatcher, 1, scenario="skills")
     assert calls == failed_attempts + 1
     assert dispatcher.build_training_status()["error"] is None
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_log"])
+def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, monkeypatch, failure_point) -> None:
+    agent_record_dir = tmp_path / "records" if failure_point == "commit_log" else None
+    dispatcher, backend = _build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=agent_record_dir,
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    result = scenario.prepare_training_step()
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+    protocol = scenario._commit_protocol
+
+    if failure_point == "commit_log":
+        target = scenario.commit_log
+        method_name = "append"
+        assert target is not None
+    elif failure_point == "activation":
+        target = protocol
+        method_name = "_activate"
+    else:
+        target = protocol._artifacts
+        method_name = failure_point
+    original = getattr(target, method_name)
+    calls_before_failure = 2 if failure_point == "activation" else 1
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls_before_failure
+        calls_before_failure -= 1
+        if calls_before_failure == 0:
+            raise RuntimeError(f"injected {failure_point} failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, method_name, fail_once)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.pending_batch is pending
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
+
+    scenario.records.append(sft_inference("i2"))
+    scenario.commit(result)
+
+    assert backend.batch_ids == [pending.batch_id]
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i2"]
+    if scenario.commit_log is not None:
+        assert len(scenario.commit_log.records()) == 1
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["commit_applied", "apply_compaction"])
+def test_post_commit_failure_resumes_the_recorded_step_without_republication(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+) -> None:
+    dispatcher, backend = _build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=tmp_path / "records",
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    result = scenario.prepare_training_step()
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+    original = getattr(scenario.trainer, failure_point)
+    should_fail = True
+
+    def fail_after_effect(*args, **kwargs):
+        nonlocal should_fail
+        outcome = original(*args, **kwargs)
+        if should_fail:
+            should_fail = False
+            raise RuntimeError(f"injected {failure_point} failure")
+        return outcome
+
+    monkeypatch.setattr(scenario.trainer, failure_point, fail_after_effect)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.pending_batch is pending
+    assert scenario.commit_log is not None
+    [record] = scenario.commit_log.records()
+    published_release = record.artifact_ref.release_id
+    with pytest.raises(RuntimeError, match="does not match the pending step"):
+        scenario.commit(replace(result, state={"steps": 999}))
+
+    scenario.commit(result)
+
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert len(scenario.commit_log.records()) == 1
+    assert scenario.repository.require_current_artifact().release_id == published_release
+    assert backend.batch_ids == [pending.batch_id]
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["advance", "commit_log"])
+def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch, failure_point) -> None:
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    agent_record_dir = tmp_path / "records"
+    runtime = RecordingRuntime()
+    dispatcher = build_training_dispatcher(
+        runtime,
+        tmp_path,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        agent_record_dir=agent_record_dir,
+    )
+    dispatcher._registry.set_training_scenario_callback(lambda scenario: None)
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    assert scenario.reserve_training_batch() is not None
+    execution = scenario.execute_reserved_training_step()
+    result = execution.result
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+
+    if failure_point == "advance":
+        target = scenario._commit_protocol._artifacts
+        method_name = "advance"
+    else:
+        target = scenario.commit_log
+        method_name = "append"
+        assert target is not None
+    original = getattr(target, method_name)
+    should_fail = True
+
+    def fail_once(*args, **kwargs):
+        nonlocal should_fail
+        if should_fail:
+            should_fail = False
+            if failure_point == "commit_log":
+                original(*args, **kwargs)
+            raise RuntimeError(f"injected {failure_point} failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, method_name, fail_once)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {}
+    assert scenario.trainer.pending_batch is pending
+    assert scenario.commit_log is not None
+    assert len(scenario.commit_log.records()) == 1
+
+    scenario.commit(result)
+
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert scenario.commit_log.training_run_position() == (0, 1)
+    assert len(scenario.commit_log.records()) == 1
+    assert runtime.trained_batches == [["i1"]]
     dispatcher.close()
 
 
