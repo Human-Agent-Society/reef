@@ -272,7 +272,7 @@ Reef 汇聚了一群探索 agent 如何从经验中学习、持续进化的人�
 [Shuangrui Ding](https://github.com/Mark12Ding),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
-[Chonhe Jiang](https://github.com/Chonghe-Jiang),
+[Chonghe Jiang](https://github.com/Chonghe-Jiang),
 [Nan Jiang](https://github.com/nanjiangwill),
 [Xuan Jiang](https://github.com/Xuan-1998),
 [Xiaochen Li](https://github.com/SeuperHakkerJa),
