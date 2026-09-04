@@ -19,7 +19,7 @@ native harness adds kinds only it renders:
   ``extensions/``, opencode ``plugin/``).
 - ``native_tool``: a named tool of the native harness, a JSON schema plus
   code defining ``run(args, workdir)`` (``native/tools/``).
-- ``native_hook``: a named listener at one seam of the native loop, code
+- ``native_hook``: a named listener at one event of the native loop, code
   defining ``listen(payload, next)`` (``native/hooks/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
@@ -34,8 +34,8 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-#: The native loop's seams, the only places a native_hook node may listen.
-NATIVE_SEAMS = ("pre_step", "pre_execute", "request_error", "post_execute")
+#: The native loop's events, the only places a native_hook node may listen.
+NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
@@ -230,11 +230,11 @@ def native_tool_node(ctx: Any, config: Any) -> None:
 
 
 def native_hook_node(ctx: Any, config: Any) -> None:
-    """A named listener the native loop calls at one seam: code defining ``listen(payload, next)``."""
+    """A named listener the native loop calls at one event: code defining ``listen(payload, next)``."""
     options = _require_mapping(config)
     _require_name(options)
-    if options.get("seam") not in NATIVE_SEAMS:
-        raise ValueError(f"native_hook node 'seam' must be one of {', '.join(NATIVE_SEAMS)}")
+    if options.get("event") not in NATIVE_EVENTS:
+        raise ValueError(f"native_hook node 'event' must be one of {', '.join(NATIVE_EVENTS)}")
     _require_python(options, "native_hook node")
 
 

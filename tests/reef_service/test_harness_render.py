@@ -326,7 +326,7 @@ NATIVE_TOOL = (
 
 NATIVE_HOOK = (
     "native_hook",
-    {"name": "guard", "seam": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
+    {"name": "guard", "event": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
 )
 
 

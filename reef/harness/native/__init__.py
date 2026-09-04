@@ -1,10 +1,10 @@
-"""Reef's native coding agent: a headless single prompt loop whose tools and loop seams are composition nodes.
+"""Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
 One episode is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``
 and ``models.json``; the loop reads them, talks to the served model through
 the rendered binding, dispatches tool calls to the tool modules, asks the
-hook modules at four seams, and appends one JSONL session the
+hook modules at four events, and appends one JSONL session the
 ``native-jsonl`` trajectory reader decodes. Everything the model saw is in
 that log: the rendered system prompt, the tool declarations, every message,
 every call, every result, and every hook decision that changed the loop's
@@ -27,7 +27,7 @@ from types import ModuleType
 from typing import Any, Protocol
 
 from reef.harness.model_binding import ModelBinding, ModelBindingError
-from reef.harness.nodes import NATIVE_SEAMS
+from reef.harness.nodes import NATIVE_EVENTS
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12
@@ -49,7 +49,7 @@ _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "object": dict,
     "array": list,
 }
-#: What the loop decides at each seam when no hook says otherwise.
+#: What the loop decides at each event when no hook says otherwise.
 _DEFAULTS: dict[str, dict[str, Any]] = {
     "pre_step": {"kind": "enter", "messages": []},
     "pre_execute": {"kind": "allow"},
@@ -121,11 +121,11 @@ class ToolModule:
 
 
 class HookModule:
-    """One rendered ``native_hook`` node: the seam it listens at and its ``listen``."""
+    """One rendered ``native_hook`` node: the event it listens at and its ``listen``."""
 
-    def __init__(self, name: str, seam: str, listen: HookListener) -> None:
+    def __init__(self, name: str, event: str, listen: HookListener) -> None:
         self.name = name
-        self.seam = seam
+        self.event = event
         self.listen = listen
 
 
@@ -160,14 +160,14 @@ def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
 
 
 def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
-    """Every hook under its seam, in file name order: that order is the waterfall order."""
-    hooks: dict[str, list[HookModule]] = {seam: [] for seam in NATIVE_SEAMS}
+    """Every hook under its event, in file name order: that order is the waterfall order."""
+    hooks: dict[str, list[HookModule]] = {event: [] for event in NATIVE_EVENTS}
     for path, module in _modules(hooks_dir, "reef_native_hook"):
         listen = getattr(module, "listen", None)
-        seam = str(getattr(module, "SEAM", ""))
-        if not callable(listen) or seam not in hooks:
-            raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known seam")
-        hooks[seam].append(HookModule(str(getattr(module, "NAME", path.stem)), seam, listen))
+        event = str(getattr(module, "EVENT", ""))
+        if not callable(listen) or event not in hooks:
+            raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
+        hooks[event].append(HookModule(str(getattr(module, "NAME", path.stem)), event, listen))
     return hooks
 
 
@@ -287,12 +287,12 @@ def _waterfall(
 
 
 def _decide(
-    session: Session, hooks: Sequence[HookModule], seam: str, step: int, payload: Mapping[str, Any]
+    session: Session, hooks: Sequence[HookModule], event: str, step: int, payload: Mapping[str, Any]
 ) -> dict[str, Any]:
     trace: list[dict[str, Any]] = []
-    decision = _waterfall(hooks, 0, payload, _DEFAULTS[seam], trace)
+    decision = _waterfall(hooks, 0, payload, _DEFAULTS[event], trace)
     for entry in trace:
-        session.write("hook/error" if "error" in entry else "hook/decision", {"seam": seam, "step": step, **entry})
+        session.write("hook/error" if "error" in entry else "hook/decision", {"event": event, "step": step, **entry})
     return decision
 
 
@@ -380,7 +380,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 **header,
                 "tools": sorted(tools),
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
-                "hooks": {hook.name: seam for seam, listeners in hooks.items() for hook in listeners},
+                "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
             },
         )
         session.write("turn/start", {"turn": 1})
@@ -388,8 +388,10 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         declarations = [tool.declaration() for tool in tools.values()]
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
 
-        def say(step: int, seam: str, content: str) -> None:
-            session.write("user/message", {"step": step, "source": {"kind": "hook", "seam": seam}, "content": content})
+        def say(step: int, event: str, content: str) -> None:
+            session.write(
+                "user/message", {"step": step, "source": {"kind": "hook", "event": event}, "content": content}
+            )
             messages.append({"role": "user", "content": content})
 
         for step in range(1, MAX_STEPS + 1):

@@ -91,8 +91,8 @@ def _tool(
     }
 
 
-def _hook(name: str, seam: str, code: str) -> dict[str, Any]:
-    return {"id": name, "name": "native_hook", "config": {"name": name, "seam": seam, "code": code}}
+def _hook(name: str, event: str, code: str) -> dict[str, Any]:
+    return {"id": name, "name": "native_hook", "config": {"name": name, "event": event, "code": code}}
 
 
 SEED_TOOLS: tuple[dict[str, Any], ...] = (
