@@ -10,11 +10,29 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
+from typing import NamedTuple
 from weakref import WeakValueDictionary
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+
+
+class EncodedRecord(NamedTuple):
+    """One record in its stored column order, as the ``agent_record`` row.
+
+    The field names are the column names, so the same tuple binds the INSERT
+    parameters and names the fields that participate in retry-content
+    comparison.
+    """
+
+    agent_record_id: str
+    scenario: str
+    request_type: str
+    created_at: float
+    payload_json: str
+    references_json: str
+    artifact_json: str | None
 
 
 class RecordConflict(ReefError):
@@ -106,19 +124,6 @@ class RecordStore:
                 """
             )
 
-    #: Column order of the tuples produced by :meth:`_encode` and
-    #: :meth:`_row_content`; :meth:`_content` uses it to name the fields that
-    #: participate in retry-content comparison.
-    _ENCODED_FIELDS = (
-        "agent_record_id",
-        "scenario",
-        "request_type",
-        "created_at",
-        "payload_json",
-        "references_json",
-        "artifact_json",
-    )
-
     @staticmethod
     def _json(value: object) -> str:
         try:
@@ -127,19 +132,19 @@ class RecordStore:
             raise TypeError("a record must contain JSON-serializable values") from exc
 
     @classmethod
-    def _encode(cls, item: AgentRecord) -> tuple[str, str, str, float, str, str, str | None]:
+    def _encode(cls, item: AgentRecord) -> EncodedRecord:
         artifact = item.artifact_ref
         artifact_json = None
         if artifact is not None:
             artifact_json = cls._json(encode_artifact_ref(artifact))
-        return (
-            item.agent_record_id,
-            item.scenario,
-            item.request_type.value,
-            item.created_at,
-            cls._json(dict(item.payload)),
-            cls._json(item.references),
-            artifact_json,
+        return EncodedRecord(
+            agent_record_id=item.agent_record_id,
+            scenario=item.scenario,
+            request_type=item.request_type.value,
+            created_at=item.created_at,
+            payload_json=cls._json(dict(item.payload)),
+            references_json=cls._json(item.references),
+            artifact_json=artifact_json,
         )
 
     @staticmethod
@@ -159,28 +164,20 @@ class RecordStore:
         )
 
     @staticmethod
-    def _row_content(row: sqlite3.Row) -> tuple[str, str, str, float, str, str, str | None]:
-        return (
-            row["agent_record_id"],
-            row["scenario"],
-            row["request_type"],
-            row["created_at"],
-            row["payload_json"],
-            row["references_json"],
-            row["artifact_json"],
-        )
+    def _row_content(row: sqlite3.Row) -> EncodedRecord:
+        return EncodedRecord(*(row[name] for name in EncodedRecord._fields))
 
     @classmethod
-    def _content(cls, encoded: tuple[str, str, str, float, str, str, str | None]) -> dict[str, object]:
+    def _content(cls, encoded: EncodedRecord) -> dict[str, object]:
         """The encoded fields that define row content, excluding ``created_at``.
 
         A client retrying with its own agent_record_id regenerates the
         timestamp, so a timestamp difference alone must dedup, not conflict.
         """
-        return {name: value for name, value in zip(cls._ENCODED_FIELDS, encoded, strict=True) if name != "created_at"}
+        return {name: value for name, value in encoded._asdict().items() if name != "created_at"}
 
     @classmethod
-    def _content_sha256(cls, encoded: tuple[str, str, str, float, str, str, str | None]) -> str:
+    def _content_sha256(cls, encoded: EncodedRecord) -> str:
         canonical = cls._json(cls._content(encoded)).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 

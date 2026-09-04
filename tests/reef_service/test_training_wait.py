@@ -121,6 +121,9 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
     class Runtime:
         open = False
         current = "engine:old"
+        # This double stands in for TrainingRuntime, so it carries every
+        # attribute the dispatcher reads off that interface.
+        concurrent_training_scenarios = False
 
         @property
         def inference_admission_status(self):
