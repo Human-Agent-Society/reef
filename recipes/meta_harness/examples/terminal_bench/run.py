@@ -125,6 +125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     source.add_argument("--tasks", help="comma-separated Harbor task ids")
     source.add_argument("--tasks-file", help="file of Harbor task ids, one per line or comma-separated")
     parser.add_argument("--trials", type=int, default=2)
+    parser.add_argument(
+        "--max-episode-failure-rate",
+        type=float,
+        default=0.5,
+        help="stop when this share of an iteration's episodes produce no score at all",
+    )
     parser.add_argument("--iterations", type=int, default=5)
     parser.add_argument("--mode", default="full_history")
     parser.add_argument("--target-model", default="gpt-5.6-luna")
@@ -145,7 +151,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     state: dict[str, Any] = dict(backend.initial_state())
     log = (output / "iterations.jsonl").open("a", encoding="utf-8")
     evaluator = DefaultCandidateEvaluationPlugin(backend, MetaHarnessSelector(store))
-    search(backend, evaluator, ledger, state, arguments.iterations, log)
+    search(
+        backend,
+        evaluator,
+        ledger,
+        state,
+        arguments.iterations,
+        log,
+        arguments.max_episode_failure_rate,
+    )
     log.close()
     population = state.get(POPULATION_STATE_KEY, {})
     (output / "final-population.json").write_text(json.dumps(population, indent=2, sort_keys=True) + "\n")
@@ -160,6 +174,7 @@ def search(
     state: dict[str, Any],
     iterations: int,
     log: Any,
+    max_episode_failure_rate: float = 1.0,
 ) -> dict[str, Any]:
     """Propose, evaluate, settle and commit, once per iteration.
 
@@ -195,15 +210,32 @@ def search(
         backend.commit_applied(result.state)
         state.clear()
         state.update(result.state)
+        # An episode that produced no score never ran. Nothing else in this row
+        # distinguishes a weak candidate from an outage -- a full sandbox quota,
+        # a provider refusing every call -- so a run that scored near zero
+        # because nothing executed reads back as a search result.
+        failures = int(evaluation.metrics.get("episode_failures", 0) or 0)
+        episodes = len(evaluation.metrics.get("candidate_scores", ())) + len(
+            evaluation.metrics.get("current_scores", ())
+        )
+        failure_rate = failures / episodes if episodes else 0.0
         row = {
             "iteration": iteration,
             "selected": bool(decision.selected),
             "metrics": {k: v for k, v in (decision.metrics or {}).items() if isinstance(v, (int, float, str))},
+            "episodes": episodes,
+            "episode_failures": failures,
             "seconds": round(time.time() - started, 1),
         }
         log.write(json.dumps(row, sort_keys=True) + "\n")
         log.flush()
         print(json.dumps(row, sort_keys=True), flush=True)
+        if failure_rate > max_episode_failure_rate:
+            raise SystemExit(
+                f"iteration {iteration}: {failures} of {episodes} episodes produced no score "
+                f"({failure_rate:.0%}). Scores measured through that are not a comparison; "
+                f"fix the environment and rerun rather than spending the remaining iterations."
+            )
     return state
 
 

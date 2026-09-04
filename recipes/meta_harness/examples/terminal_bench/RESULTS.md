@@ -172,6 +172,43 @@ never refreshes its incumbent cannot spend it. Skipping the incumbent leg when
 price of making Cordis's pairing a no-op for this method. That belongs to
 whoever owns the selector, not to a reproduction run.
 
+## The sandbox quota, and what it did to iterations 4 and 5
+
+The run's last two iterations are not measurements. Episodes that produced no
+score at all -- the sandbox never started, so nothing reached the model --
+run like this through the cost ledger:
+
+| ledger episodes | produced no score |
+| --- | --- |
+| 1-120 | 28-45% |
+| 121-360 | 0% |
+| 361-541 | 72-92% |
+
+Iteration 5 finished in 1808s against 4700-4900s for iterations 2 and 3, and
+scored 0.017. That is an outage, not a candidate that broke the agent. The
+frontier at 0.350 was set in the clean window and stands; the seed's 0.217 was
+measured in the 28-45% window and may be depressed, which would make the
+seed-to-frontier gain smaller than it looks.
+
+The cause was e2b's cap of 100 concurrent sandboxes. Nothing in the iteration
+log showed it, because the driver recorded only means and timings, so an
+outage was indistinguishable from a search result. `run.py` now records
+`episodes` and `episode_failures` per iteration and stops the run when most
+episodes produce no score, rather than spending the remaining iterations
+measuring an outage.
+
+**The account is shared.** Sandboxes on it carry an `environment_name`, and
+during this investigation 42 belonged to an unrelated benchmark
+(`actionlint-action-pinning-lint`, `dynamodb-toolbox-...`), not to
+terminal-bench. Reaping on age alone killed 97 sandboxes here, an unknown
+number of which were not this project's. `reap_sandboxes.py` therefore filters
+on `environment_name` against the shipped task list before it considers age,
+and `--all` still will not cross that line; only an explicit `--any-owner`
+does, and that is correct solely on an account this run owns alone.
+
+How much of the quota this project was actually consuming is not established:
+the 97 were counted, not attributed.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it

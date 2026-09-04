@@ -10,6 +10,7 @@ commit', which is what happened on the first scaled run.
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Any
 
@@ -61,9 +62,23 @@ class _Backend:
         self.calls.append("abort")
 
 
+class _Evaluation:
+    """The shape Cordis returns: score vectors plus a count of episodes that produced none."""
+
+    def __init__(self, episodes: int = 2, failures: int = 0) -> None:
+        self.metrics = {
+            "candidate_scores": tuple(0.0 for _ in range(episodes // 2)),
+            "current_scores": tuple(0.0 for _ in range(episodes - episodes // 2)),
+            "episode_failures": failures,
+        }
+
+
 class _Evaluator:
+    def __init__(self, evaluation: Any = None) -> None:
+        self.evaluation = evaluation or _Evaluation()
+
     def evaluate(self, candidate):
-        return "evaluation"
+        return self.evaluation
 
     def decide(self, candidate, evaluation):
         return _Decision()
@@ -124,3 +139,44 @@ def test_a_failed_evaluation_aborts_rather_than_committing(tmp_path: Path) -> No
     with pytest.raises(RuntimeError, match="evaluation failed"):
         search(backend, _Exploding(), ledger, {}, iterations=2, log=io.StringIO())
     assert backend.calls == ["prepare:1", "abort"]
+
+
+@pytest.mark.unit
+def test_an_iteration_records_how_many_episodes_produced_no_score(tmp_path: Path) -> None:
+    # Without this the log cannot tell a weak candidate from an outage. A run
+    # whose sandbox quota was exhausted scored 0.017 and read as a search
+    # result until the ledger was inspected by hand.
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    log = io.StringIO()
+    search(backend, _Evaluator(_Evaluation(episodes=10, failures=3)), ledger, {}, iterations=1, log=log)
+
+    row = json.loads(log.getvalue().strip())
+    assert row["episodes"] == 10
+    assert row["episode_failures"] == 3
+
+
+@pytest.mark.unit
+def test_the_run_stops_when_most_episodes_never_ran(tmp_path: Path) -> None:
+    # Spending the remaining iterations measuring an outage is waste, and the
+    # scores it produces are not a comparison with anything.
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluator = _Evaluator(_Evaluation(episodes=10, failures=9))
+
+    with pytest.raises(SystemExit) as excinfo:
+        search(backend, evaluator, ledger, {}, iterations=5, log=io.StringIO(), max_episode_failure_rate=0.5)
+
+    assert "9 of 10 episodes produced no score" in str(excinfo.value)
+    # It stops after the iteration that failed, not before recording it.
+    assert backend.calls.count("commit:1") == 1
+    assert "prepare:2" not in backend.calls
+
+
+@pytest.mark.unit
+def test_a_tolerable_failure_rate_does_not_stop_the_run(tmp_path: Path) -> None:
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluator = _Evaluator(_Evaluation(episodes=10, failures=1))
+    search(backend, evaluator, ledger, {}, iterations=2, log=io.StringIO(), max_episode_failure_rate=0.5)
+    assert "prepare:2" in backend.calls
