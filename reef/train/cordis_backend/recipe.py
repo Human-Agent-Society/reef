@@ -163,7 +163,7 @@ class CordisRecipe(Recipe):
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
-    max_promoted_per_source: int = 5
+    max_promoted_per_client: int = 5
     promote: Promoter | None = None
     recheck_every: int = 0
     max_rejected_history: int = 25
@@ -260,9 +260,9 @@ class CordisRecipe(Recipe):
         max_promoted_tasks = evolution.get("max_promoted_tasks", 50)
         if isinstance(max_promoted_tasks, bool) or not isinstance(max_promoted_tasks, int) or max_promoted_tasks < 0:
             raise RecipeConfigError("evolution.max_promoted_tasks must be an integer of at least 0")
-        per_source = evolution.get("max_promoted_per_source", 5)
-        if isinstance(per_source, bool) or not isinstance(per_source, int) or per_source < 0:
-            raise RecipeConfigError("evolution.max_promoted_per_source must be an integer of at least 0")
+        per_client = evolution.get("max_promoted_per_client", 5)
+        if isinstance(per_client, bool) or not isinstance(per_client, int) or per_client < 0:
+            raise RecipeConfigError("evolution.max_promoted_per_client must be an integer of at least 0")
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -341,7 +341,7 @@ class CordisRecipe(Recipe):
             "executor": executor,
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
-            "max_promoted_per_source": per_source,
+            "max_promoted_per_client": per_client,
             "publish": publish,
             "review_kinds": tuple(review_kinds),
             "seed": tuple(seed),
@@ -405,7 +405,7 @@ class CordisRecipe(Recipe):
             "max_model_calls_per_step": self.max_model_calls_per_step,
             "promote_failures": self.promote_failures,
             "max_promoted_tasks": self.max_promoted_tasks,
-            "max_promoted_per_source": self.max_promoted_per_source,
+            "max_promoted_per_client": self.max_promoted_per_client,
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,

@@ -213,12 +213,12 @@ regressed and at least one improved.
 Name it ``selection: my_pkg.policies:pareto_selection``. Publishing outside
 candidate selection breaks revert.
 
-Trust boundary
-~~~~~~~~~~~~~~
+Untrusted input
+~~~~~~~~~~~~~~~
 
 Every sample is client text. It enters the proposer's model prompt, and with
 ``promote_failures`` it is re-run as a gate task, so a method treats it as
-data: fence it before it reaches a prompt, and read ``provenance`` when a
+data: fence it before it reaches a prompt, and read ``sources`` when a
 decision depends on who sent it.
 
 .. code:: python
@@ -228,25 +228,24 @@ decision depends on who sent it.
    from reef.train.cordis_backend import Mutation, untrusted_text
 
 
-   def propose(nodes, samples, models, provenance):
-       tagged = [s for s, p in zip(samples, provenance, strict=True) if p["source"] != "untagged"]
+   def propose(nodes, samples, models, sources):
+       tagged = [s for s, p in zip(samples, sources, strict=True) if p["client"] != "untagged"]
        shown = untrusted_text(json.dumps([s.payload for s in tagged], default=str))
        reply = models.served.chat([{"role": "user", "content": f"Failing requests:\n{shown}\n\nPropose one skill."}])
        ...
 
 ``untrusted_text`` wraps text in a block whose delimiters carry a fresh random
 token, so nothing inside the block can close it and speak as the prompt's
-author. ``provenance`` is one mapping per sample, in sample order: ``record``
-(the agent record id), ``source`` (the client's ``x-reef-tag-source`` header,
-else its session tag, else ``untagged``) and ``untrusted`` (always true). A
-tag is set by the client, so a source is an identity only where a gateway
-sets it.
+author. ``sources`` is one mapping per sample, in sample order: ``record``
+(the agent record id), ``client`` (the ``x-reef-tag-client`` header's value,
+else the session tag, else ``untagged``) and ``untrusted`` (always true). A
+tag is set by the client, so it names a client only where a gateway sets it.
 
 Reef screens what the method promotes. A prompt that carries a credential or
 an instruction override (``ignore the previous instructions``, a forged ``new
 system prompt:``, a chat-template control token) is skipped and counted in
-the step's ``screened_tasks`` metric; one tagged source holds at most
-``evolution.max_promoted_per_source`` promoted tasks and the whole ledger at
+the step's ``screened_tasks`` metric; one tagged client holds at most
+``evolution.max_promoted_per_client`` promoted tasks and the whole ledger at
 most ``evolution.max_promoted_tasks``. A code-bearing mutation
 (``code_extension``, ``native_tool``, ``native_hook``) proposed from client
 text belongs behind ``evolution.review_kinds``, so a person reads it before
