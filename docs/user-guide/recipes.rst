@@ -14,8 +14,8 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 | **Harness:** prompts,   | ``skillclaw``: grows a skill pool from           | not available                            |
-| rules, skills, config   | the failures in its own served traffic           |                                          |
-|                         |                                                  |                                          |
+| rules, skills, config,  | the failures in its own served traffic           |                                          |
+| tools, loop             |                                                  |                                          |
 |                         | ``gepa``: rewrites the tree by reflecting on     |                                          |
 |                         | the transcripts it already served                |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+

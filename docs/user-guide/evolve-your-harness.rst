@@ -13,6 +13,38 @@ callables, ``propose`` (which edit to try) and ``evaluate`` (how an episode
 scored). `Write a harness method <../developer-guide/write-a-harness-method.rst>`__ documents the
 contract.
 
+At a glance
+-----------
+
++-------------------+--------------------------------------------------------------+
+| What evolves      | Config, rules, prompt templates, skills, and extension code; |
+|                   | on the native harness also its tools, its hook listeners,    |
+|                   | and the graph that is its control loop.                      |
++-------------------+--------------------------------------------------------------+
+| Which agents      | pi, opencode, Claude Code, Codex, DeepSeek Harness, Hermes   |
+|                   | Agent, Terminus 2, and ``native``, Reef's own loop. One      |
+|                   | adapter per agent maps the tree onto that agent's files.     |
++-------------------+--------------------------------------------------------------+
+| What decides      | The candidate and the current tree run the same tasks in     |
+|                   | fresh roots. The candidate is published only when it wins    |
+|                   | more tasks than it loses, by more than a margin you set.     |
++-------------------+--------------------------------------------------------------+
+| What holds it     | A rejected candidate reverts to the snapshot. A failing      |
+|                   | prompt joins the task suite only after a credential and an   |
+|                   | instruction override screen, with a cap per client. Wins     |
+|                   | that touch code can wait for a person before they are        |
+|                   | served. A periodic recheck rolls back a publish that a       |
+|                   | grown suite now scores as a regression. Episodes can run in  |
+|                   | a sandbox with no host credentials and no network beyond the |
+|                   | model endpoint.                                              |
++-------------------+--------------------------------------------------------------+
+| Where to start    | `Run the example <#run-the-example>`__ evolves one skill on  |
+|                   | ``pi`` with a local model and no GPU. The tutorial's         |
+|                   | ``serve-native.yaml`` runs the same loop on the native       |
+|                   | harness, where the model proposes tools, hooks, and graph    |
+|                   | changes to its own loop.                                     |
++-------------------+--------------------------------------------------------------+
+
 The harness tree
 ----------------
 
@@ -22,7 +54,7 @@ fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
 ``native_hook``), ``config.name`` is the file name the entry renders to.
-Seven kinds are registered in
+Eight kinds are registered in
 `reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
@@ -51,11 +83,12 @@ decided by an adapter, which maps every kind to a concrete file for one agent.
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
-are ``native_tool`` nodes and whose loop events listen to ``native_hook``
-nodes, so the agent can evolve the tools it runs and how its loop behaves, not
+are ``native_tool`` nodes, whose loop events listen to ``native_hook``
+nodes, and whose control flow is a ``native_graph`` node, so the agent can
+evolve the tools it runs, how its loop reacts, and the loop itself, not
 only the text around a vendor binary; and ``terminus``, Terminal-Bench's
 Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those two kinds.
+those three kinds.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 ``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
@@ -316,6 +349,36 @@ Reef ships no proposer and no episode scorer. You supply ``propose``,
 
 Connect a different agent
 -------------------------
+
+An adapter is one descriptor: where each node kind is written, which kinds
+the agent accepts, how the binary is launched, and where the proxy captures
+the model calls. The bundled descriptors cover these agents:
+
++---------------+----------------------------------+----------------------------------------+
+| Adapter       | Agent                            | Kinds it renders                       |
++===============+==================================+========================================+
+| ``pi``        | pi coding agent                  | config, rules, agent_command, skill,   |
+|               |                                  | code_extension                         |
++---------------+----------------------------------+----------------------------------------+
+| ``opencode``  | OpenCode                         | config, rules, agent_command, skill,   |
+|               |                                  | code_extension                         |
++---------------+----------------------------------+----------------------------------------+
+| ``claude``    | Claude Code                      | config, rules, agent_command, skill,   |
+|               |                                  | code_extension                         |
++---------------+----------------------------------+----------------------------------------+
+| ``codex``     | Codex CLI                        | config, rules, agent_command, skill    |
++---------------+----------------------------------+----------------------------------------+
+| ``dsh``       | DeepSeek Harness                 | config, rules, agent_command, skill,   |
+|               |                                  | code_extension                         |
++---------------+----------------------------------+----------------------------------------+
+| ``hermes``    | Hermes Agent                     | config, rules, agent_command, skill,   |
+|               |                                  | code_extension                         |
++---------------+----------------------------------+----------------------------------------+
+| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill    |
++---------------+----------------------------------+----------------------------------------+
+| ``native``    | Reef's own loop                  | the five above plus native_tool,       |
+|               |                                  | native_hook, native_graph              |
++---------------+----------------------------------+----------------------------------------+
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.

@@ -22,7 +22,7 @@ const surfaces = [
   {
     eyebrow: "No GPU",
     title: "Evolve the harness",
-    text: "Reef proposes an edit to your agent's rules, prompts, skills, and config, runs the agent both ways on your tasks, and publishes the winner.",
+    text: "Reef proposes an edit to your agent's rules, skills, config, tools, or loop, runs the agent both ways on your tasks, and publishes the winner. Eight coding agents, including Reef's own.",
     href: "/docs/user-guide/evolve-your-harness",
     cta: "Harness evolution",
     icon: PlugZap,
@@ -41,7 +41,7 @@ const methods = [
   { name: "sao", href: "/docs/user-guide/recipes/sao", signal: "Feedback on each attempt, over a stream of tasks", evolves: "model weights", gpu: "yes" },
   { name: "tttd", href: "/docs/user-guide/recipes/tttd", signal: "A fixed grid of sibling attempts at one problem", evolves: "model weights", gpu: "yes" },
   { name: "openclawrl", href: "/docs/user-guide/recipes/openclawrl", signal: "Nothing on the wire — just agent conversations", evolves: "model weights", gpu: "yes" },
-  { name: "harness_evolve", href: "/docs/user-guide/recipes/harness-evolve", signal: "Scores on requests, and failures worth learning from", evolves: "harness tree", gpu: "no" },
+  { name: "skillclaw", href: "/docs/user-guide/recipes/skillclaw", signal: "Scores on requests, and failures worth learning from", evolves: "harness tree", gpu: "no" },
 ];
 
 const steps = [
