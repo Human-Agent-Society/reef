@@ -30,9 +30,16 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Promoter, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    resolve_episode_scorer,
+    resolve_promoter,
+    resolve_proposer,
+)
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -141,6 +148,7 @@ class CordisRecipe(Recipe):
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
+    max_promoted_per_client: int = 5
     promote: Promoter | None = None
     recheck_every: int = 0
     max_rejected_history: int = 25
@@ -237,6 +245,9 @@ class CordisRecipe(Recipe):
         max_promoted_tasks = evolution.get("max_promoted_tasks", 50)
         if isinstance(max_promoted_tasks, bool) or not isinstance(max_promoted_tasks, int) or max_promoted_tasks < 0:
             raise RecipeConfigError("evolution.max_promoted_tasks must be an integer of at least 0")
+        per_client = evolution.get("max_promoted_per_client", 5)
+        if isinstance(per_client, bool) or not isinstance(per_client, int) or per_client < 0:
+            raise RecipeConfigError("evolution.max_promoted_per_client must be an integer of at least 0")
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
@@ -308,6 +319,7 @@ class CordisRecipe(Recipe):
             "executor": executor,
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
+            "max_promoted_per_client": per_client,
             "publish": publish,
             "review_kinds": tuple(review_kinds),
             "seed": tuple(seed),
@@ -371,6 +383,7 @@ class CordisRecipe(Recipe):
             "max_model_calls_per_step": self.max_model_calls_per_step,
             "promote_failures": self.promote_failures,
             "max_promoted_tasks": self.max_promoted_tasks,
+            "max_promoted_per_client": self.max_promoted_per_client,
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,

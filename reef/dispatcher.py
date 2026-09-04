@@ -305,9 +305,7 @@ class Dispatcher:
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
-        records = () if current.commit_log is None else current.commit_log.records()
-        run_segment = max((record.step for record in records if record.operation == "rollback"), default=0)
-        run_step = sum(record.operation == "training" and record.step > run_segment for record in records)
+        run_segment, run_step = (0, 0) if current.commit_log is None else current.commit_log.training_run_position()
         return TrainingExperimentContext(
             scenario=current.name,
             recipe=self._recipe.name,
@@ -607,56 +605,81 @@ class Dispatcher:
         with self._training.lock:
             return self._training.storage_status
 
-    @property
-    def training_status(self) -> Mapping[str, Any]:
-        name = self._registry.training_scenario_name
-        names = self._registry.training_status_scenario_names
+    def build_training_status(self) -> Mapping[str, Any]:
+        """Assemble the training status block, checking training health as it goes.
+
+        This is a method rather than a property because reading it is also the
+        only health check Reef runs: it is where an undrained batch is warned
+        about and where a training thread that died without recording an error
+        is noticed. Both record state so a repeated read does not repeat the
+        log line, so callers must expect a status read to have effects.
+        """
         preload_errors = self._registry.preload_errors
         with self._training.lock:
             storage_status = self._training.storage_status
             last_drain = self._training.last_drain
-        scenarios = {}
-        status_error: str | None = None
-        for scenario_name in names:
+        # One scenario's status failing stops the sweep: the recorded error goes
+        # out with whatever was collected before it.
+        scenarios: dict[str, dict[str, Any]] = {}
+        failed = False
+        for scenario_name in self._registry.training_status_scenario_names:
             try:
-                current = self._registry.get_optional(scenario_name)
-                if current is not None:
-                    runtime = current.runtime
-                    inference_admission = runtime.inference_admission_status if runtime is not None else None
-                    batch_ready = current.trainer.batch_ready()
-                    if batch_ready:
-                        self._warn_if_undrained(scenario_name, last_drain)
-                    block: dict[str, Any] = {
-                        **current.commit_status,
-                        # A version is current only after Reef commits its head
-                        # and reopens admission. The backend may report it
-                        # earlier while the update is still being published.
-                        "current_runtime_load_id": (
-                            runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
-                        ),
-                        "checkpoint_storage": storage_status,
-                        "batch_ready": batch_ready,
-                        "processor": current.trainer.processor_status(),
-                        "inference_admission": inference_admission,
-                    }
-                    if isinstance(runtime, TrainingRuntime) and getattr(
-                        runtime, "concurrent_training_scenarios", False
-                    ):
-                        block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
-                    scenarios[scenario_name] = block
-            except Exception as exc:  # noqa: PERF203
-                status_error = f"{scenario_name}: {self._error_text(exc)}"
-                if self._record_status_build_error(status_error):
+                block = self._scenario_status(scenario_name, storage_status, last_drain)
+            except Exception as exc:
+                failed = True
+                if self._record_status_build_error(f"{scenario_name}: {self._error_text(exc)}"):
                     logger.exception("failed to build training status for scenario %r", scenario_name)
                 break
-        if status_error is None:
+            if block is not None:
+                scenarios[scenario_name] = block
+        if not failed:
             self._record_status_build_error(None)
+        errors = self._training_errors()
+        return {
+            "error": "\n".join(errors) or None,
+            "last_drain_at": last_drain,
+            "preload_errors": preload_errors,
+            "scenarios": scenarios,
+            "serving": self._serving_status(),
+        }
 
+    def _scenario_status(
+        self,
+        scenario_name: str,
+        storage_status: Mapping[str, Any] | None,
+        last_drain: float | None,
+    ) -> dict[str, Any] | None:
+        current = self._registry.get_optional(scenario_name)
+        if current is None:
+            return None
+        runtime = current.runtime
+        batch_ready = current.trainer.batch_ready()
+        if batch_ready:
+            self._warn_if_undrained(scenario_name, last_drain)
+        block: dict[str, Any] = {
+            **current.commit_status,
+            # A version is current only after Reef commits its head
+            # and reopens admission. The backend may report it
+            # earlier while the update is still being published.
+            "current_runtime_load_id": (
+                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
+            ),
+            "checkpoint_storage": storage_status,
+            "batch_ready": batch_ready,
+            "processor": current.trainer.processor_status(),
+            "inference_admission": runtime.inference_admission_status if runtime is not None else None,
+        }
+        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+        return block
+
+    def _training_errors(self) -> list[str]:
+        """Every recorded training error, noticing a training thread that died silently."""
         with self._training.lock:
             training_errors = dict(self._training.errors)
             status_build_error = self._training.status_build_error
             training_thread = self._training.thread
-        training_scenario = name or "<unbound>"
+        training_scenario = self._registry.training_scenario_name or "<unbound>"
         if (
             training_scenario not in training_errors
             and training_thread is not None
@@ -670,13 +693,7 @@ class Dispatcher:
         errors = [f"{key}: {training_errors[key]}" for key in sorted(training_errors)]
         if status_build_error is not None:
             errors.append(status_build_error)
-        return {
-            "error": "\n".join(errors) or None,
-            "last_drain_at": last_drain,
-            "preload_errors": preload_errors,
-            "scenarios": scenarios,
-            "serving": self._serving_status(),
-        }
+        return errors
 
     def _serving_status(self) -> dict[str, Any]:
         """Runtime-wide serving state for the deployment's recipe."""

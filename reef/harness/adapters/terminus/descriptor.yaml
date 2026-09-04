@@ -1,0 +1,65 @@
+# Terminal-Bench's Terminus 2, driven through a Reef-owned runner.
+#
+# Terminus 2 is not a binary that takes a prompt: it is a Harbor agent class
+# that Harbor runs against a task container. The ``reef-terminus`` console
+# script is that runner. It reads the rendered tree from REEF_TERMINUS_DIR,
+# hands it to Harbor's own terminus-2 agent as native configuration, runs the
+# task, and writes the verifier's reward and the ATIF trajectory under
+# REEF_TERMINUS_SESSION_DIR.
+#
+# The prompt is the task: a Harbor task directory or a registry id, which is
+# what reef-eval resolves. An episode therefore needs no dataset location in
+# its environment, which run_episode would not have carried anyway - it hands
+# an episode only the descriptor's own env, and {root}/{prompt} are the only
+# substitutions.
+#
+# Isolation is Harbor's task container, not Reef's jail: Docker cannot nest in
+# bubblewrap, so a sandbox-executor deployment refuses to boot instead.
+name: terminus
+binary: reef-terminus
+argv:
+  - --task
+  - "{prompt}"
+env:
+  # The episode root, not the terminus directory: terminus-commands is a
+  # sibling of terminus, so the runner reads the tree from one level up.
+  REEF_TERMINUS_DIR: "{root}"
+  REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
+  REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
+files:
+  config:
+    primary:
+      path: "terminus/config.json"
+      defaults: {}
+  rules: "terminus/AGENTS.md"
+  # Terminus 2 has no slash-command surface, so an agent_command is a skill in
+  # a second root. Harbor loads both roots and keeps its progressive skill
+  # loading, so a command is discovered rather than pasted into the prompt.
+  agent_command: "terminus-commands/{name}/SKILL.md"
+  skill: "terminus/skills/{name}/SKILL.md"
+  # Kept as the shared schema's render target; the quirk rejects this node
+  # because evolved Python would run in the runner's process, outside the
+  # container that isolates the agent's own commands.
+  code_extension: "terminus/context/{name}.py"
+trajectory:
+  format: terminus-atif-json
+  path: "terminus/sessions"
+cleanup_whitelist:
+  - "terminus/sessions/**"
+  # Harbor writes its trial tree here: logs, the container's outputs, and the
+  # ATIF trajectory the runner reads back.
+  - "terminus/trials/**"
+# Docker does not nest in bubblewrap: Harbor's task container is the
+# boundary, so a sandbox-executor deployment refuses to boot instead.
+self_isolating: true
+quirks: reef.harness.adapters.terminus.quirks
+# Terminus 2 reaches the model through litellm, so the binding is the provider
+# base URL, key, and model name. The served tree never carries a provider.
+model_binding:
+  openai:
+    - target: primary
+      data:
+        model_name: "{model}"
+        api_base: "{base_url}/v1"
+        llm_kwargs:
+          api_key: "{api_key}"

@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
-from dataclasses import KW_ONLY, dataclass
+from dataclasses import KW_ONLY, dataclass, replace
+from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
@@ -29,10 +31,15 @@ from reef.scenario.commit_log import RECORD_KIND, CommitLog, CommitLogError, Com
 from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train import RetentionDecision, Trainer
+from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation import (
+    DefaultCandidateEvaluationPlugin,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
@@ -124,6 +131,96 @@ def test_commit_record_round_trips_training_job_identity(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_commit_log_tracks_the_current_training_run_position(tmp_path) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    log.append(sample_record(step=1))
+    log.append(sample_record(step=2, runtime_load_id="w2"))
+    assert log.training_run_position() == (0, 2)
+
+    rollback = CommitRecord(
+        scenario="math",
+        step=3,
+        artifact_ref=ArtifactRef("artifact:1", "checkpoint:3", "checkpoint:1"),
+        checkpoint=True,
+        algorithm_state={"steps": 2},
+        high_water_sequence=4,
+        high_water_offset=4,
+        operation="rollback",
+        rollback_target_release_id="checkpoint:1",
+    )
+    log.append(rollback)
+    assert log.training_run_position() == (3, 0)
+
+    log.append(sample_record(step=4, runtime_load_id="w4"))
+    assert log.training_run_position() == (3, 1)
+
+
+@pytest.mark.unit
+def test_commit_log_retry_is_idempotent_but_conflicting_step_is_rejected(tmp_path) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    original = sample_record(step=1)
+    retry = CommitRecord.from_dict({**original.to_dict(), "recorded_at": original.recorded_at + 1})
+
+    log.append(original)
+    log.append(retry)
+    second = sample_record(step=2, runtime_load_id="w2")
+    log.append(second)
+    log.append(retry)
+
+    assert log.records() == (original, second)
+    with pytest.raises(CommitLogError, match="conflicts"):
+        log.append(sample_record(step=1, runtime_load_id="different"))
+
+
+@pytest.mark.unit
+def test_commit_log_retry_reconciles_an_fsync_error_after_the_write(tmp_path, monkeypatch) -> None:
+    log = CommitLog(tmp_path / "commits.jsonl")
+    record = sample_record(step=1)
+    original_fsync = os.fsync
+    should_fail = True
+
+    def fail_after_sync(fd):
+        nonlocal should_fail
+        original_fsync(fd)
+        if should_fail:
+            should_fail = False
+            raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(os, "fsync", fail_after_sync)
+
+    with pytest.raises(OSError, match="injected fsync failure"):
+        log.append(record)
+    log.append(record)
+
+    assert log.records() == (record,)
+
+
+@pytest.mark.unit
+def test_commit_log_invalidates_its_cache_when_another_writer_interleaves(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "commits.jsonl"
+    first = CommitLog(path)
+    second = CommitLog(path)
+    first.append(sample_record(step=1))
+    assert len(first.records()) == 1
+
+    file_signature = first._file_signature
+    interleave = True
+
+    def signature_with_interleaved_append():
+        nonlocal interleave
+        signature = file_signature()
+        if interleave:
+            interleave = False
+            second.append(sample_record(step=2, runtime_load_id="w2"))
+        return signature
+
+    monkeypatch.setattr(first, "_file_signature", signature_with_interleaved_append)
+    first.append(sample_record(step=3, runtime_load_id="w3"))
+
+    assert [record.step for record in first.records()] == [1, 2, 3]
+
+
+@pytest.mark.unit
 def test_commit_record_serializes_the_concrete_artifact_ref_kind() -> None:
     weight_value = sample_record().to_dict()["artifact_ref"]
     assert weight_value == {
@@ -206,6 +303,21 @@ def test_records_tolerate_a_torn_tail(tmp_path) -> None:
 
     records = log.records()
     assert [record.step for record in records] == [1]
+
+
+@pytest.mark.unit
+def test_append_discards_a_torn_tail_before_writing_the_retry(tmp_path) -> None:
+    path = tmp_path / "commits.jsonl"
+    log = CommitLog(path)
+    first = sample_record(step=1)
+    second = sample_record(step=2, runtime_load_id="w2")
+    log.append(first)
+    with open(path, "ab") as handle:
+        handle.write(b'{"record":"reef-commit/5","scenario":"ma')
+
+    log.append(second)
+
+    assert log.records() == (first, second)
 
 
 @pytest.mark.unit
@@ -331,6 +443,65 @@ def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") 
             return
         time.sleep(0.001)
     raise AssertionError("async training did not commit")
+
+
+class _SavedArtifactBackend(TrainingBackend):
+    def __init__(self, artifact_path: Path) -> None:
+        self._artifact_path = artifact_path
+        self.batch_ids: list[str] = []
+
+    def initial_state(self):
+        return {"steps": 0}
+
+    def prepare_step(self, batch, state, scenario_step):
+        del scenario_step
+        self.batch_ids.append(batch.batch_id)
+        return PreparedStep.with_candidate(
+            UpdateCandidate(batch.batch_id),
+            state={"steps": int(state["steps"]) + 1},
+        )
+
+    def evaluate(self, candidate):
+        del candidate
+        return EvaluationResult("test", "1", {})
+
+    def settle_step(self, prepared, decision: SelectionDecision):
+        del decision
+        return TrainStepResult(prepared.state, artifact=Artifact.local(self._artifact_path))
+
+    def abort_step(self, prepared):
+        del prepared
+
+
+@dataclass(frozen=True)
+class _SavedArtifactRecipe(Recipe):
+    backend: TrainingBackend
+
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        del experiment_logger
+        return Trainer.build(
+            scenario,
+            records,
+            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            training_backend=self.backend,
+            algorithm_state=algorithm_state,
+        )
+
+
+def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    artifact_path = tmp_path / "candidate"
+    artifact_path.mkdir()
+    (artifact_path / "model.txt").write_text("trained")
+    backend = _SavedArtifactBackend(artifact_path)
+    dispatcher = Dispatcher(
+        _SavedArtifactRecipe(backend=backend),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=agent_record_dir,
+    )
+    return dispatcher, backend
 
 
 @pytest.mark.unit
@@ -612,7 +783,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first.get_or_create_scenario("math").scenario_step == 1
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
 
@@ -642,7 +813,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert adopted.operation == "training"
     assert adopted.operation_verified is True
     assert adopted.metrics == committed["metrics"]
-    recovered_status = second.training_status["scenarios"]["math"]["last_committed_step"]
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
 
@@ -737,7 +908,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     wait_for_step(first, 1)
 
     assert first.get_or_create_scenario("math").commit_log is None
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
     assert not list(tmp_path.rglob("*.commits.jsonl"))
@@ -747,7 +918,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
-    assert second.training_status["scenarios"]["math"]["last_committed_step"] is None
+    assert second.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
     assert not isinstance(recovered.repository.require_current_artifact(), LiveWeightArtifactRef)
 
 
@@ -767,7 +938,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
-    committed = first.training_status["scenarios"]["math"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
 
     second = build_training_dispatcher(
         RecordingRuntime(),
@@ -779,7 +950,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
 
     assert recovered.scenario_step == 1
     assert recovered.commit_log is None
-    recovered_status = second.training_status["scenarios"]["math"]["last_committed_step"]
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
     assert not list(tmp_path.rglob("*.commits.jsonl"))
@@ -916,13 +1087,13 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     request = Thread(target=accept_report)
     request.start()
-    assert started.wait(1)
+    assert started.wait(5), "harness growth did not start in time"
     status_values = []
     status_returned = Event()
 
     def read_status() -> None:
         try:
-            status_values.append(dispatcher.training_status)
+            status_values.append(dispatcher.build_training_status())
         except Exception as exc:
             errors.append(exc)
         finally:
@@ -978,17 +1149,195 @@ def test_local_backend_failure_reaches_status_and_retries_pending_batch(tmp_path
     dispatcher.accept_record(trace_report("r1", "i1"))
 
     for _ in range(1000):
-        if dispatcher.training_status["error"] is not None:
+        if dispatcher.build_training_status()["error"] is not None:
             break
         time.sleep(0.001)
-    assert dispatcher.training_status["error"] == "skills: RuntimeError: proposal failed"
+    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: proposal failed"
 
     failed_attempts = calls
     should_fail = False
     dispatcher.accept_record(trace_inference("i2"))
     wait_for_step(dispatcher, 1, scenario="skills")
     assert calls == failed_attempts + 1
-    assert dispatcher.training_status["error"] is None
+    assert dispatcher.build_training_status()["error"] is None
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["stage", "publish", "activation", "commit_log"])
+def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, monkeypatch, failure_point) -> None:
+    agent_record_dir = tmp_path / "records" if failure_point == "commit_log" else None
+    dispatcher, backend = _build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=agent_record_dir,
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    result = scenario.prepare_training_step()
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+    protocol = scenario._commit_protocol
+
+    if failure_point == "commit_log":
+        target = scenario.commit_log
+        method_name = "append"
+        assert target is not None
+    elif failure_point == "activation":
+        target = protocol
+        method_name = "_activate"
+    else:
+        target = protocol._artifacts
+        method_name = failure_point
+    original = getattr(target, method_name)
+    calls_before_failure = 2 if failure_point == "activation" else 1
+
+    def fail_once(*args, **kwargs):
+        nonlocal calls_before_failure
+        calls_before_failure -= 1
+        if calls_before_failure == 0:
+            raise RuntimeError(f"injected {failure_point} failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, method_name, fail_once)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.pending_batch is pending
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
+
+    scenario.records.append(sft_inference("i2"))
+    scenario.commit(result)
+
+    assert backend.batch_ids == [pending.batch_id]
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i2"]
+    if scenario.commit_log is not None:
+        assert len(scenario.commit_log.records()) == 1
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["commit_applied", "apply_compaction"])
+def test_post_commit_failure_resumes_the_recorded_step_without_republication(
+    tmp_path,
+    monkeypatch,
+    failure_point,
+) -> None:
+    dispatcher, backend = _build_saved_artifact_dispatcher(
+        tmp_path,
+        agent_record_dir=tmp_path / "records",
+    )
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    result = scenario.prepare_training_step()
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+    original = getattr(scenario.trainer, failure_point)
+    should_fail = True
+
+    def fail_after_effect(*args, **kwargs):
+        nonlocal should_fail
+        outcome = original(*args, **kwargs)
+        if should_fail:
+            should_fail = False
+            raise RuntimeError(f"injected {failure_point} failure")
+        return outcome
+
+    monkeypatch.setattr(scenario.trainer, failure_point, fail_after_effect)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.pending_batch is pending
+    assert scenario.commit_log is not None
+    [record] = scenario.commit_log.records()
+    published_release = record.artifact_ref.release_id
+    with pytest.raises(RuntimeError, match="does not match the pending step"):
+        scenario.commit(replace(result, state={"steps": 999}))
+
+    scenario.commit(result)
+
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert len(scenario.commit_log.records()) == 1
+    assert scenario.repository.require_current_artifact().release_id == published_release
+    assert backend.batch_ids == [pending.batch_id]
+    dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_point", ["advance", "commit_log"])
+def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch, failure_point) -> None:
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    agent_record_dir = tmp_path / "records"
+    runtime = RecordingRuntime()
+    dispatcher = build_training_dispatcher(
+        runtime,
+        tmp_path,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        agent_record_dir=agent_record_dir,
+    )
+    dispatcher._registry.set_training_scenario_callback(lambda scenario: None)
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario.records.append(sft_inference("i1"))
+    scenario.records.append(sft_report("r1", "i1"))
+    assert scenario.reserve_training_batch() is not None
+    execution = scenario.execute_reserved_training_step()
+    result = execution.result
+    assert result is not None
+    pending = scenario.trainer.pending_batch
+    assert pending is not None
+
+    if failure_point == "advance":
+        target = scenario._commit_protocol._artifacts
+        method_name = "advance"
+    else:
+        target = scenario.commit_log
+        method_name = "append"
+        assert target is not None
+    original = getattr(target, method_name)
+    should_fail = True
+
+    def fail_once(*args, **kwargs):
+        nonlocal should_fail
+        if should_fail:
+            should_fail = False
+            if failure_point == "commit_log":
+                original(*args, **kwargs)
+            raise RuntimeError(f"injected {failure_point} failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(target, method_name, fail_once)
+
+    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+        scenario.commit(result)
+
+    assert scenario.scenario_step == 0
+    assert scenario.trainer.state == {}
+    assert scenario.trainer.pending_batch is pending
+    assert scenario.commit_log is not None
+    assert len(scenario.commit_log.records()) == 1
+
+    scenario.commit(result)
+
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.pending_batch is None
+    assert scenario.commit_log.training_run_position() == (0, 1)
+    assert len(scenario.commit_log.records()) == 1
+    assert runtime.trained_batches == [["i1"]]
     dispatcher.close()
 
 
@@ -1059,7 +1408,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
     assert recovered is not original
     assert recovered.records.get("skills", "i1") is None
     assert recovered.records.get("skills", "r1") is None
-    status = dispatcher.training_status["scenarios"]["skills"]
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 1
     assert status["last_committed_step"]["step"] == 1
     assert status["last_committed_step"]["metrics"]["skipped"] == "no proposal"
@@ -1074,7 +1423,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
     wait_for_step(dispatcher, 2, scenario="skills")
 
     assert [record.step for record in log.records()] == [1, 2]
-    status = dispatcher.training_status["scenarios"]["skills"]
+    status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 2
     assert status["last_committed_step"]["step"] == 2
     dispatcher.close()
@@ -1131,7 +1480,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     first.accept_record(trace_report("r1", "i1"))
     wait_for_step(first, 1, scenario="skills")
     assert first.get_or_create_scenario("skills").scenario_step == 1
-    committed = first.training_status["scenarios"]["skills"]["last_committed_step"]
+    committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["skipped"] == "no proposal"
 
@@ -1139,7 +1488,7 @@ def test_no_artifact_commit_survives_a_restart(tmp_path) -> None:
     recovered = second.get_or_create_scenario("skills")
     assert recovered.scenario_step == 1
     assert recovered.trainer.state["steps"] == 1
-    assert second.training_status["scenarios"]["skills"]["last_committed_step"] == committed
+    assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
     # Record progress resumes at the committed watermark, not sequence 0.
     assert recovered.trainer.data_offset == 2
     first.close()

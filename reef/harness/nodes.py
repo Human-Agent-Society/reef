@@ -49,6 +49,17 @@ _SECRET_TEXT = re.compile(
     r"|AKIA[0-9A-Z]{16}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----)"
 )
+#: Instruction-override shapes in recorded traffic: the phrasings that tell a
+#: reader to drop its instructions, a forged system message, and chat-template
+#: control tokens. A tripwire like _SECRET_TEXT: it matches the directive with
+#: its object, never the topic, so a task about prompts or rules passes.
+_DIRECTIVE_TEXT = re.compile(
+    r"(?i)(?:\b(?:ignore|disregard|forget)\s+(?:(?:all|any|the|your|of|every)\s+)*"
+    r"(?:previous|prior|above|earlier|preceding)\s+(?:instructions?|messages?|rules?|prompts?|guidelines?|directions?)\b"
+    r"|\b(?:new|updated|real|actual|true|hidden|secret)\s+(?:system|developer)\s+(?:prompt|message|instructions?)\s*:"
+    r"|<\|(?:im_start|im_end|system|start_header_id|end_header_id)\|>"
+    r"|\[INST\]|<<SYS>>)"
+)
 
 
 def _holds_literal(value: Any) -> bool:
@@ -144,6 +155,11 @@ def config_node(ctx: Any, config: Any) -> None:
 def secret_shaped(text: str) -> bool:
     """Whether free text carries a credential-shaped literal; shared by the tree boundary and the task ledger."""
     return _SECRET_TEXT.search(text) is not None
+
+
+def directive_shaped(text: str) -> bool:
+    """Whether free text carries an instruction-override phrasing or a chat-template control token; the task ledger's second tripwire."""
+    return _DIRECTIVE_TEXT.search(text) is not None
 
 
 def _reject_secret_shaped_text(text: str, where: str) -> None:

@@ -1,5 +1,5 @@
-Python API
-==========
+Python API for custom learning methods
+======================================
 
 The Python API is the set of extension points a learning method plugs into. Reef
 owns everything around them: accepting and replaying records, holding a batch

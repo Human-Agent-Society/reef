@@ -233,7 +233,7 @@ class RunService:
         while time.monotonic() < deadline:
             if self.training_step() > after:
                 return
-            if error := self.dispatcher.training_status["error"]:
+            if error := self.dispatcher.build_training_status()["error"]:
                 raise RuntimeError(f"night training failed: {error}")
             time.sleep(1.0)
         raise TimeoutError(f"night training did not advance past step {after}")

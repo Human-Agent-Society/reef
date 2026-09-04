@@ -1,5 +1,5 @@
-Configuration
-=============
+Configure Reef serving and training
+===================================
 
 A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
 every process in its ``services`` list in dependency order, and hands the
@@ -168,7 +168,7 @@ zero.
    evolution.evaluate | an ``EpisodeScorer``, likewise
    evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
-   evolution.adapter | pi | ``opencode``, ``claude``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes and whose loop seams listen to ``native_hook`` nodes), or an entry-point adapter
+   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes and whose loop seams listen to ``native_hook`` nodes), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
    evolution.binary | overrides the adapter's binary name
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
@@ -176,11 +176,12 @@ zero.
    evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
    evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
-   evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it
+   evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
    evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
-   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the cap and credential screen still apply
+   evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
+   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
    evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
