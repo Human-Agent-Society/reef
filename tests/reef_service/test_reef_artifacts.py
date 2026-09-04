@@ -76,8 +76,10 @@ def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> 
     chain = ArtifactReleaseChain(repository, process_id="worker")
 
     expected, live = chain.prepare_live(step=1, runtime_load_id="engine-1")
+    _, retry = chain.prepare_live(step=1, runtime_load_id="engine-1")
     assert expected == fork
     assert chain.current == fork
+    assert retry == live
     assert live.release_id == "live:worker:engine-1:1"
     assert live.parent_release_id == fork.release_id
 

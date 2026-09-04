@@ -189,6 +189,41 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
 
 
 @pytest.mark.unit
+def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_path, monkeypatch) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    created = value.get_or_create_scenario("math").releases()[0]["release_id"]
+    train(value, 1)
+    scenario = value.get_or_create_scenario("math")
+    original = scenario.trainer.commit_applied
+    should_fail = True
+
+    def fail_after_effect(state):
+        nonlocal should_fail
+        original(state)
+        if should_fail:
+            should_fail = False
+            raise RuntimeError("injected settlement failure")
+
+    monkeypatch.setattr(scenario.trainer, "commit_applied", fail_after_effect)
+
+    with pytest.raises(RuntimeError, match="injected settlement failure"):
+        value.rollback("math", created)
+
+    assert scenario.scenario_step == 1
+    assert scenario.commit_log is not None
+    recorded = scenario.commit_log.records()[-1]
+    assert recorded.step == 2
+    assert recorded.operation == "rollback"
+
+    published = value.rollback("math", created)
+
+    assert published == recorded.artifact_ref
+    assert scenario.scenario_step == 2
+    assert scenario.commit_log.records()[-1] == recorded
+    assert len(scenario.commit_log.records()) == 2
+
+
+@pytest.mark.unit
 def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
     tracker = RecordingExperimentTracker()
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
