@@ -286,21 +286,21 @@ Reef is built by the following team members, listed in alphabetical order by las
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
-Hao He,
-Haoze He,
+[Hao He](https://github.com/hehaodele),
+[Haoze He](https://github.com/HectorHHZ),
 [Chonhe Jiang](https://github.com/Chonghe-Jiang),
 [Nan Jiang](https://github.com/nanjiangwill),
-Xuan Jiang,
+[Xuan Jiang](https://github.com/Xuan-1998),
 [Xiaochen Li](https://github.com/SeuperHakkerJa),
 [Paul Liang](https://github.com/pliang279),
 [Bo Liu](https://github.com/Benjamin-eecs),
-Boyuan Long,
+[Boyuan Long](https://github.com/BoyuanLong),
 [Qiuyang Mang](https://github.com/joyemang33),
 [Zhenting Qi](https://github.com/zhentingqi),
 [Ao Qu](https://github.com/quao627),
-Mingruo Qu,
-Zhaokai Wang,
-Xuezhi Yan,
+[Mingruo Qu](https://github.com/workhardforcoding),
+[Zhaokai Wang](https://github.com/wzk1015),
+[Xuezhi Yan](https://github.com/yanxz),
 [Hanfei Yu](https://github.com/hanfeiyu),
 [Haofei Yu](https://github.com/lwaekfjlk),
 [Simon Yu](https://github.com/simonucl),
@@ -308,7 +308,7 @@ Xuezhi Yan,
 [Kaichen Zhou](https://github.com/kaichen-z),
 [Zijian Zhou](https://github.com/BobbyZhouZijian),
 [Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
-Dingyi Zhuang.
+[Dingyi Zhuang](https://github.com/ZhuangDingyi).
 
 
 ## Star History
