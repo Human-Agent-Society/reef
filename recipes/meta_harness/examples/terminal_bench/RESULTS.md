@@ -89,6 +89,31 @@ sigma**. Task by task, 21 of 30 agree exactly, and 8 of the 9 that differ are
 one episode moving on a two-trial task, in both directions -- the signature of
 noise, not of a systematic difference.
 
+### Open question: Reef measures the seed higher than upstream, every time
+
+Four independent measurements of the same agent:
+
+| | run 1 | run 2 | combined |
+| --- | --- | --- | --- |
+| Reef seed | 0.3833 | 0.3667 | 45/120 = **0.375** |
+| Upstream baseline | 0.2833 | 0.2833 | 34/120 = **0.283** |
+
+Reef is higher in every pairing. Combined, the gap is 0.092 at about 1.5
+sigma -- not significant, but consistently signed in a way noise usually is
+not. On a single pairing this was called noise here; four measurements make
+that call premature.
+
+Ruled out as causes: Reef's empty seed tree renders `terminus/config.json` as
+`{}` with no instruction paths and no agent kwargs, so it is stock Terminus 2
+with Harbor's defaults, and upstream no longer passes a temperature either.
+Upstream's retry can only raise its score, not lower it.
+
+What remains untested is that the arms reach Harbor differently: Reef drives
+`Trial` directly through reef-eval, upstream goes through `harbor run` as a
+Job. Job-level and trial-level defaults are not known to be identical. That is
+the next thing to check, and until it is checked neither "noise" nor
+"divergence" is the honest label.
+
 ### The same configuration, run twice
 
 Upstream's baseline was measured twice, same agent, same 30 tasks, same two
