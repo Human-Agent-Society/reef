@@ -1,5 +1,5 @@
 # Reef's own coding agent: a Python loop inside this tree, driven headless per
-# episode, whose tools are native_tool nodes and whose loop seams listen to
+# episode, whose tools are native_tool nodes and whose loop events listen to
 # native_hook nodes. REEF_NATIVE_DIR relocates the whole composition root so
 # nothing is read from the working directory.
 name: native

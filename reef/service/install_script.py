@@ -106,18 +106,7 @@ def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
     entry the user-facing wrapper needs (session/state dirs use the binary's
     own defaults outside episodes).
     """
-    primary = PurePosixPath(descriptor.config_targets["primary"].path)
-    for parent in primary.parents:
-        if parent == PurePosixPath("."):
-            break
-        marker = f"{{root}}/{parent}"
-        for key, value in descriptor.env.items():
-            if value == marker:
-                return key, str(parent)
-    raise DescriptorError(
-        f"adapter {descriptor.name!r} has no env var relocating a directory above {str(primary)!r} "
-        "(expected an entry with a {root}/<dir> value)"
-    )
+    return descriptor.compose_relocation()
 
 
 def _wrapper_lines(
@@ -131,7 +120,7 @@ def _wrapper_lines(
 
     Written inside the install script's ``else`` branch (only when the
     composition changed), after the checksum verifies and before the sidecar.
-    The wrapper calls ``reef_client.harness_wrapper``, which starts a local
+    The wrapper calls ``reef.harness.harness_wrapper``, which starts a local
     proxy between the agent binary and Reef — capturing receipts so
     ``reef-<adapter> report`` can report without manual receipt handling.
     """

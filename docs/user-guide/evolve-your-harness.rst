@@ -41,7 +41,7 @@ Seven kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``native_tool``    | a named tool the native harness loads (schema and code)  |
 +--------------------+----------------------------------------------------------+
-| ``native_hook``    | a named listener at one seam of the native loop (code)   |
+| ``native_hook``    | a named listener at one event of the native loop (code)  |
 +--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
@@ -49,7 +49,7 @@ decided by an adapter, which maps every kind to a concrete file for one agent.
 Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
-are ``native_tool`` nodes and whose loop seams listen to ``native_hook``
+are ``native_tool`` nodes and whose loop events listen to ``native_hook``
 nodes, so the agent can evolve the tools it runs and how its loop behaves, not
 only the text around a vendor binary; and ``terminus``, Terminal-Bench's
 Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
@@ -286,6 +286,24 @@ The script installs the pinned agent, writes the tree, and puts a
 the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
+
+The native adapter's binary is ``reef-native``, which ships with reef, so
+the install route serves no script for it. Pull the tree with the client,
+name your Reef URL in its ``native/models.json``, and run the wrapper module
+with the same five settings the script bakes into ``reef-pi``:
+
+.. code:: bash
+
+   python3 -c 'from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token="reef-local").harness_pull("harness-evolve-demo", "./reef-harness")'
+   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "reef-local", "model": "qwen3-8b"}\n' > reef-harness/native/models.json
+   export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
+   export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
+   python3 -m reef.harness.harness_wrapper -p "fix the failing test in auth.py"
+   python3 -m reef.harness.harness_wrapper report --score 0 --feedback "missed the empty-token case"
+
+The wrapper points the loop at its capture proxy through a temp copy of
+the tree, keeps the loop's session log under ``native/sessions`` beside
+the installed tree, and ``report`` works as for any adapter.
 
 Write a method
 --------------

@@ -6,9 +6,9 @@ coding-agent CLI and binds that harness to the served model. The harness and
 model together form the running agent. The tree never names a file path; the
 adapter does. Reef bundles six, one per third-party coding-agent CLI;
 ``native``, its own agent, whose loop lives in this tree, whose tools are
-``native_tool`` nodes, and whose loop seams listen to ``native_hook`` nodes,
+``native_tool`` nodes, and whose loop events listen to ``native_hook`` nodes,
 so a mutation can add, rewrite, or remove a tool, or change what the loop
-does at a seam; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
+does at an event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
 agent class rather than a CLI, driven by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
@@ -111,8 +111,13 @@ dangerous with a tool error, so no bypass flag is used.
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
 defines ``run(args, workdir) -> str``, and after it ``NAME``,
-``DESCRIPTION``, and ``PARAMETERS`` from the node config, so the tree's
-values are what the module ends with whatever the code assigned.
+``DESCRIPTION``, ``PARAMETERS`` and ``CAPABILITIES`` from the node config, so
+the tree's values are what the module ends with whatever the code assigned.
+``capabilities`` is optional: distinct names from ``read``, ``write``,
+``exec`` and ``network`` that say what the tool does. The loop reports them
+in the session header and hands them to ``pre_execute`` hooks, and the
+sandbox will read them when it enforces policy per tool. The seed tools
+declare theirs; ``run_bash`` declares all three a shell can do.
 ``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, and ``run_bash`` tools as entries a recipe can seed and the
 loop can then evolve. An adapter that declares no ``files.native_tool`` path
@@ -122,24 +127,25 @@ compile; a module that fails to import, or defines no ``run``, ends the
 episode with reason ``error`` and code ``LOAD_ERROR`` before any model call,
 so the tree that carries it loses the gate instead of running without it.
 
-The loop has three seams, and a ``native_hook`` node listens at one of them.
+The loop has four events, and a ``native_hook`` node listens at one of them.
 It renders to ``native/hooks/{name}.py`` the same way: ``code`` defining
-``listen(payload, next) -> decision``, then ``NAME`` and ``SEAM`` from the
-node config. The hooks at one seam form a waterfall in file name order: each
+``listen(payload, next) -> decision``, then ``NAME`` and ``EVENT`` from the
+node config. The hooks at one event form a waterfall in file name order: each
 ``listen`` may call ``next()`` to get the decision of the layer below (the
 last layer is the loop's default) and return it, changed or not, or return
-its own decision without calling ``next`` and so own the seam. ``next`` runs
+its own decision without calling ``next`` and so own the event. ``next`` runs
 the layer below at most once however often it is called, and hands the hook
 a copy, so an in-place edit is a change like any other. A hook that raises,
 or returns anything but a plain object the log can carry, is skipped and the
 layer below stands; ``messages`` and ``contexts`` are read as lists of text
 and anything else in them is dropped. A hook module that fails to import,
-defines no ``listen``, or names an unknown seam ends the episode with
-``LOAD_ERROR`` like a tool. Every seam takes a plain object and returns one:
+defines no ``listen``, or names an unknown event ends the episode with
+``LOAD_ERROR`` like a tool. Every event takes a plain object and returns one:
 
 .. config::
 
    pre_step | before each step: ``{step, task, messages}``; returns ``{kind: "enter", messages: [text...]}`` (each text becomes a user message before the request) or ``{kind: "reject", reason}`` (the turn ends with no step)
+   pre_execute | before each tool call runs, after its arguments are validated: ``{step, call_id, name, arguments, capabilities}``; returns ``{kind: "allow", arguments?}`` (with ``arguments`` the call runs with the rewrite, validated like the model's own), ``{kind: "deny", reason}`` (the tool does not run and the model reads a ``HOOK_DENIED`` error carrying ``reason``) or ``{kind: "ask", reason}`` (a headless run has no one to ask, so the tool does not run and the model reads an ``APPROVAL_REQUIRED`` error carrying ``reason``); ``post_execute`` still sees the call, with that error as its result
    request_error | after a failed model call: ``{step, attempt, error}`` where ``error`` is ``{code: "MODEL_ERROR", message, status?}`` with ``status`` the HTTP status when the endpoint answered one; returns ``{kind: "retry", delay_ms}`` or ``{kind: "fail"}``; the loop spends at most ``MAX_REQUEST_ATTEMPTS`` (4) attempts a step and waits at most ``MAX_RETRY_DELAY_MS`` (10 s), whatever the hook asks
    post_execute | after each tool call has run: ``{step, call_id, name, arguments, result}``; returns ``{kind: "accept", content?, contexts: [text...]}`` (``content`` replaces what the model reads) or ``{kind: "block", feedback, contexts}`` (the model reads a ``HOOK_BLOCKED`` error carrying ``feedback``; the tool's side effects stand); contexts land as user messages after the step's results, in call order
 
@@ -153,12 +159,13 @@ run the tutorial on this adapter.
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, and hooks (name to
-seam); then ``turn/start``, per step ``step/start``, ``request/header`` (the
+event); then ``turn/start``, per step ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
 ``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
 ``tool/result`` (``content``, ``is_error``, and on error a closed ``code``:
-``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_BLOCKED``),
+``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_DENIED``,
+``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
 ``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
 or ``LOAD_ERROR``). Arguments are validated against the tool's declared
@@ -168,11 +175,11 @@ workspace, the model reads the head, one marker line naming that file and the
 omitted count, and the last 2,000 characters, and ``tool/result`` carries the
 file in ``meta.spill``. A failed model call logs ``request/error``
 (``attempt`` and the ``MODEL_ERROR`` failure) before the ``request_error``
-seam runs. A hook whose decision differs from the layer
-below it logs ``hook/decision`` (``seam``, ``step``, ``hook``, ``owned``, and
+event runs. A hook whose decision differs from the layer
+below it logs ``hook/decision`` (``event``, ``step``, ``hook``, ``owned``, and
 the decision), a hook that raised logs ``hook/error``, and a text a hook
 injected lands as ``user/message`` with ``source.kind`` ``hook`` and the
-``seam``.
+``event``.
 
 The descriptor
 --------------
@@ -187,7 +194,7 @@ agent.
    argv | the argument list for one headless prompt; ``{prompt}`` is substituted
    files | where each node kind renders, like ``skills/{name}/SKILL.md``
    trajectory | the format and path of the session log Reef reads back
-   env | variables pointing the agent's state under the episode root; ``{root}`` is substituted
+   env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
