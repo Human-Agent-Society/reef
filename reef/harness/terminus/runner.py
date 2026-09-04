@@ -105,6 +105,25 @@ def atif_steps(trial_dir: Path) -> list[dict[str, Any]]:
     return steps
 
 
+def trial_cost_usd(trials_dir: Path) -> float:
+    """What Harbor measured this trial cost, summed over its result files.
+
+    The episode root is deleted when the episode ends, so a cost that stays in
+    Harbor's trial tree is unrecoverable. Carrying it on the trial record is
+    what lets a spend guard outside the episode see it at all.
+    """
+    total = 0.0
+    for path in sorted(Path(trials_dir).rglob("result.json")):
+        try:
+            context = json.loads(path.read_text(encoding="utf-8")).get("agent_result") or {}
+        except json.JSONDecodeError:
+            continue
+        value = context.get("cost_usd")
+        if isinstance(value, (int, float)):
+            total += float(value)
+    return total
+
+
 def trial_record(task: str, rewards: Any, trials_dir: Path, error: str = "") -> dict[str, Any]:
     """One trial as the ``terminus-atif-json`` reader expects it.
 
@@ -119,6 +138,7 @@ def trial_record(task: str, rewards: Any, trials_dir: Path, error: str = "") -> 
         "reward": next(iter(scores.values()), None),
         "failed": not scores,
         "error": error,
+        "cost_usd": trial_cost_usd(trials_dir),
         "steps": atif_steps(trials_dir),
     }
 
