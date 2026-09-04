@@ -1,5 +1,5 @@
-skillclaw
-=========
+SkillClaw: evolve skills from agent feedback
+============================================
 
 SkillClaw (`arXiv:2604.08377 <https://arxiv.org/abs/2604.08377>`__) grows an
 agent's skill pool from the agent's own traffic. By day the agent drains a

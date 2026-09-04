@@ -1,10 +1,16 @@
-HTTP API
-========
+HTTP API: inference, feedback, and releases
+===========================================
 
 Reef serves the provider's own inference routes: OpenAI at
 ``/v1/chat/completions`` and Anthropic at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
+
+For a complete request, receipt, and feedback example, start with the
+`inference and feedback quickstart <../getting-started/quickstart.rst>`__.
+To put the release routes into practice, follow the `agent harness tutorial
+<../user-guide/evolve-your-harness.rst>`__ or the `model weight training guide
+<../user-guide/evolve-your-model.rst>`__.
 
 .. code:: bash
 
