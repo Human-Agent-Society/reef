@@ -324,11 +324,18 @@ NATIVE_TOOL = (
 )
 
 
+NATIVE_HOOK = (
+    "native_hook",
+    {"name": "guard", "seam": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
+)
+
+
 def test_native_render_matches_the_golden_tree() -> None:
     # The native harness loads Python extensions, so its golden carries a Python body.
     nodes = [node for node in NODES if node[0] != "code_extension"]
     extension = ("code_extension", {"name": "tracer", "code": "def tracer():\n    pass\n"})
-    assert render_composition([*nodes, extension, NATIVE_TOOL], get_adapter("native")) == golden_tree("native")
+    rendered = render_composition([*nodes, extension, NATIVE_TOOL, NATIVE_HOOK], get_adapter("native"))
+    assert rendered == golden_tree("native")
 
 
 def test_config_nodes_deep_merge_in_tree_order() -> None:

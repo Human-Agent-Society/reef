@@ -1,4 +1,4 @@
-"""The native harness's starting tools as ``native_tool`` entries: a seed the evolution loop can mutate."""
+"""The native harness's starting tools and hooks as node entries: a seed the evolution loop can mutate."""
 
 from __future__ import annotations
 
@@ -52,11 +52,41 @@ def run(args, workdir):
 """
 
 
+_LOOP_GUARD = """\
+import json
+
+THRESHOLDS = (3, 5, 8)
+_chain = {"key": None, "count": 0}
+
+
+def listen(payload, next):
+    decision = next()
+    key = json.dumps([payload["name"], payload["arguments"]], sort_keys=True, default=str)
+    _chain["count"] = _chain["count"] + 1 if key == _chain["key"] else 1
+    _chain["key"] = key
+    if _chain["count"] in THRESHOLDS:
+        reminder = (
+            f"You have called {payload['name']} with the same arguments {_chain['count']} times in a row. "
+            "Change approach or answer."
+        )
+        return {**decision, "contexts": [*decision.get("contexts", []), reminder]}
+    return decision
+"""
+
+
 def _tool(name: str, description: str, parameters: dict[str, Any], code: str) -> dict[str, Any]:
     return {
         "id": f"tool-{name.replace('_', '-')}",
         "name": "native_tool",
         "config": {"name": name, "description": description, "parameters": parameters, "code": code},
+    }
+
+
+def _hook(name: str, seam: str, code: str) -> dict[str, Any]:
+    return {
+        "id": f"hook-{name.replace('_', '-')}",
+        "name": "native_hook",
+        "config": {"name": name, "seam": seam, "code": code},
     }
 
 
@@ -85,4 +115,9 @@ SEED_TOOLS: tuple[dict[str, Any], ...] = (
     ),
 )
 
-__all__ = ["SEED_TOOLS"]
+#: The loop guard is a hook, not loop code: a tree may retune or drop it.
+SEED_HOOKS: tuple[dict[str, Any], ...] = (_hook("loop_guard", "post_execute", _LOOP_GUARD),)
+
+SEED_NODES: tuple[dict[str, Any], ...] = (*SEED_TOOLS, *SEED_HOOKS)
+
+__all__ = ["SEED_HOOKS", "SEED_NODES", "SEED_TOOLS"]

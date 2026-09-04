@@ -57,20 +57,22 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("text", "")))
         elif kind == "code_extension":
             emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("code", "")))
-        elif kind == "native_tool":
+        elif kind in ("native_tool", "native_hook"):
             template = descriptor.node_paths.get(kind)
             if template is None:
-                raise RenderError(f"adapter {descriptor.name!r} does not render native_tool nodes")
-            # One importable module: the declaration as constants, then the code that defines run(args, workdir).
-            header = "\n".join(
-                f"{key} = {value!r}"
-                for key, value in (
+                raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
+            # One importable module: the code that defines run or listen, then the declaration as constants, so the node config binds.
+            fields = (
+                (("NAME", options.get("name")), ("SEAM", options.get("seam")))
+                if kind == "native_hook"
+                else (
                     ("NAME", options.get("name")),
                     ("DESCRIPTION", options.get("description", "")),
                     ("PARAMETERS", dict(options.get("parameters", {}) or {})),
                 )
             )
-            emit(template.format(name=options.get("name")), f"{header}\n\n{options.get('code', '')}")
+            header = "\n".join(f"{key} = {value!r}" for key, value in fields)
+            emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
         else:
             raise RenderError(f"unknown node kind {kind!r}")
 

@@ -132,7 +132,7 @@ def run_episode(
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
-            except OSError as exc:
+            except (OSError, UnicodeEncodeError) as exc:
                 raise EpisodeError(f"cannot write render path {relative!r}: {exc}") from exc
             written.add(str(relative_path))
         workspace = root / "workspace"
