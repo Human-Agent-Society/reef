@@ -219,17 +219,23 @@ def search(
         episodes = len(evaluation.metrics.get("candidate_scores", ())) + len(
             evaluation.metrics.get("current_scores", ())
         )
-        # An episode can produce a score without running: the adapter exits
-        # before it reaches the model and the scorer reads a reward of zero.
-        # `episode_failures` only counts a missing score, so that case is
-        # invisible to it -- two iterations here reported zero failures while
-        # claiming 120 episodes in 74 seconds. Cost is the ground truth for
-        # whether an episode called the model at all.
+        # `episode_failures` counts only episodes Cordis scored as None, which
+        # it does when run_episode raises. An episode that ran and produced no
+        # reward is not that case: the runner exits 1, Cordis records a
+        # FailureObservation with stage "exit", and the scorer still has to
+        # return a float, so the episode enters the mean as a zero. Those
+        # observations are the harness's own signal and were being dropped
+        # here -- two iterations reported zero failures while claiming 120
+        # episodes in 74 seconds.
+        observed = tuple(evaluation.metrics.get("candidate_failures", ())) + tuple(
+            evaluation.metrics.get("current_failures", ())
+        )
+        causes = sorted({str(entry.get("cause", ""))[:120] for entry in observed if entry.get("cause")})
         accounted, free = ledger.trial_tally()
         ran = max(0, accounted - accounted_before)
         free_now = max(0, free - free_before)
         accounted_before, free_before = accounted, free
-        unmeasured = failures + free_now
+        unmeasured = max(failures + free_now, len(observed))
         failure_rate = unmeasured / episodes if episodes else 0.0
         row = {
             "iteration": iteration,
@@ -239,6 +245,10 @@ def search(
             "episode_failures": failures,
             "episodes_accounted": ran,
             "episodes_without_cost": free_now,
+            "episode_failure_observations": len(observed),
+            # Keep a few distinct causes: the count says an iteration measured
+            # nothing, these say why.
+            "episode_failure_causes": causes[:3],
             "seconds": round(time.time() - started, 1),
         }
         log.write(json.dumps(row, sort_keys=True) + "\n")
@@ -248,8 +258,9 @@ def search(
             raise SystemExit(
                 f"iteration {iteration}: {unmeasured} of {episodes} episodes did not measure the "
                 f"agent ({failures} produced no score, {free_now} produced one without reaching "
-                f"the model). Scores built from that are not a comparison; fix the environment "
-                f"and rerun rather than spending the remaining iterations."
+                f"the model, {len(observed)} were observed failing). Scores built from that are "
+                f"not a comparison; fix the environment and rerun rather than spending the "
+                f"remaining iterations. Causes: {'; '.join(causes[:3]) or 'none recorded'}"
             )
     return state
 

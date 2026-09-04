@@ -141,7 +141,41 @@ model, and stops the run on the combined figure.
 What run B establishes is that the pipeline executes end to end and that the
 selector rejects every candidate it should. It does not establish how the
 proposed candidates perform, because four of five iterations did not measure
-them. The cause of the fast-failing episodes is not yet diagnosed.
+them.
+
+### Diagnosing the fast-failing episodes
+
+Ruled out by running them again, each a real episode on `password-recovery`
+against `gpt-5.6-luna` on e2b:
+
+| Suspect | Test | Result |
+| --- | --- | --- |
+| The seed composition | empty tree, one episode | exit 0, reward, 193s |
+| The candidate composition | iteration 5's `rules` node, one episode | exit 0, reward 1.0, 151s |
+| The adapter binary resolving the wrong worktree | `reef-terminus` from a neutral cwd | resolves `/Users/dobby/reef-pr4/reef`, retry helpers present |
+
+So it was neither the candidates nor the tooling. The remaining explanation is
+the environment: iterations 4 and 5 ran while the shared e2b account was at
+100/100, and a sandbox that cannot start makes an episode fail in seconds. That
+is circumstantial -- the timing fits and nothing else survives -- and it is not
+proven, because the run recorded no cause.
+
+**Why nothing caught it.** Cordis marks an episode `None` only when
+`run_episode` raises; the scorer must return a float, so an episode that ran
+and produced no reward becomes a zero. The runner does exit 1 in that case and
+Cordis records a `FailureObservation` with stage `exit` -- the signal existed
+the whole time, in `candidate_failures`/`current_failures`, and the driver
+dropped it by logging only scalars. It now records the observation count and a
+sample of causes per iteration, and stops on them. A recurrence will name
+itself.
+
+Reproducing a single episode needs the runtime venv, which has `reef-eval`:
+
+    OPENAI_API_KEY=... E2B_API_KEY=... REEF_TERMINUS_ENVIRONMENT=e2b \
+    REEF_REAL_TERMINUS_TASK=terminal-bench/password-recovery \
+    REEF_REAL_TERMINUS_MODEL=openai/gpt-5.6-luna \
+    PYTHONPATH=$PWD /path/to/runtime-venv/bin/python -m pytest \
+    tests/smoke/test_real_terminus.py
 
 ### Upstream
 

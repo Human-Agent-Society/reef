@@ -65,11 +65,15 @@ class _Backend:
 class _Evaluation:
     """The shape Cordis returns: score vectors plus a count of episodes that produced none."""
 
-    def __init__(self, episodes: int = 2, failures: int = 0) -> None:
+    def __init__(
+        self, episodes: int = 2, failures: int = 0, observed: int = 0, cause: str = "exit 1: no reward"
+    ) -> None:
         self.metrics = {
             "candidate_scores": tuple(0.0 for _ in range(episodes // 2)),
             "current_scores": tuple(0.0 for _ in range(episodes - episodes // 2)),
             "episode_failures": failures,
+            "candidate_failures": tuple({"task": "t", "stage": "exit", "cause": cause} for _ in range(observed)),
+            "current_failures": (),
         }
 
 
@@ -221,3 +225,40 @@ def test_paid_episodes_do_not_trip_the_guard(tmp_path: Path) -> None:
 
     search(backend, evaluator, ledger, {}, iterations=2, log=io.StringIO(), max_episode_failure_rate=0.5)
     assert "prepare:2" in backend.calls
+
+
+@pytest.mark.unit
+def test_observed_exit_failures_stop_a_run_that_scored_every_episode(tmp_path: Path) -> None:
+    # The case episode_failures cannot see: the episode ran, produced no
+    # reward, the runner exited 1, and the scorer still returned a float. Only
+    # Cordis's failure observations distinguish it from a weak candidate.
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluation = _Evaluation(episodes=10, failures=0, observed=9, cause="exit 1: verifier produced no reward")
+    evaluator = _Evaluator(evaluation, ledger=ledger, cost_each=0.02)
+
+    with pytest.raises(SystemExit) as excinfo:
+        search(backend, evaluator, ledger, {}, iterations=3, log=io.StringIO(), max_episode_failure_rate=0.5)
+
+    assert "9 were observed failing" in str(excinfo.value)
+    assert "verifier produced no reward" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_the_iteration_row_records_why_episodes_failed(tmp_path: Path) -> None:
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluation = _Evaluation(episodes=10, failures=0, observed=2, cause="exit 1: reef-terminus not found")
+    log = io.StringIO()
+    search(
+        backend,
+        _Evaluator(evaluation, ledger=ledger, cost_each=0.02),
+        ledger,
+        {},
+        iterations=1,
+        log=log,
+        max_episode_failure_rate=0.5,
+    )
+    row = json.loads(log.getvalue().strip())
+    assert row["episode_failure_observations"] == 2
+    assert row["episode_failure_causes"] == ["exit 1: reef-terminus not found"]
