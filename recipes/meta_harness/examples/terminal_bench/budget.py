@@ -61,6 +61,17 @@ class ObservedCostLedger:
         if float(state["observed_cost_usd"]) >= self.cap:
             raise SpendCapReached(f"recorded target-model cost reached ${self.cap:.2f}; no new trial was started")
 
+    def trial_tally(self) -> tuple[int, int]:
+        """How many trials are accounted, and how many of those cost nothing.
+
+        A trial that cost nothing never reached the model. It still carries a
+        score -- zero -- so it is invisible to a failure count that only looks
+        for a missing score, and it enters the mean as though the agent had
+        failed the task.
+        """
+        trials = self._read()["trials"]
+        return len(trials), sum(1 for value in trials.values() if not float(value))
+
     def record_trial(self, identity: str, cost_usd: float) -> None:
         if not math.isfinite(cost_usd) or cost_usd < 0:
             raise ValueError("recorded trial cost must be finite and non-negative")

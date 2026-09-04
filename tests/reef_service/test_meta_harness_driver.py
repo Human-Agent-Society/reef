@@ -74,10 +74,24 @@ class _Evaluation:
 
 
 class _Evaluator:
-    def __init__(self, evaluation: Any = None) -> None:
+    def __init__(self, evaluation: Any = None, ledger: Any = None, cost_each: float = 0.02) -> None:
         self.evaluation = evaluation or _Evaluation()
+        self.ledger = ledger
+        self.cost_each = cost_each
+        self.charged = 0
 
     def evaluate(self, candidate):
+        # EpisodeScorer charges the ledger per episode; without that the
+        # driver cannot tell a run episode from one that never started.
+        if self.ledger is not None:
+            episodes = len(self.evaluation.metrics["candidate_scores"]) + len(
+                self.evaluation.metrics["current_scores"]
+            )
+            for _ in range(episodes):
+                identity = f"episode-{self.charged}"
+                self.charged += 1
+                self.ledger.before_trial(identity)
+                self.ledger.record_trial(identity, self.cost_each)
         return self.evaluation
 
     def decide(self, candidate, evaluation):
@@ -167,7 +181,8 @@ def test_the_run_stops_when_most_episodes_never_ran(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as excinfo:
         search(backend, evaluator, ledger, {}, iterations=5, log=io.StringIO(), max_episode_failure_rate=0.5)
 
-    assert "9 of 10 episodes produced no score" in str(excinfo.value)
+    assert "did not measure the agent" in str(excinfo.value)
+    assert "9 produced no score" in str(excinfo.value)
     # It stops after the iteration that failed, not before recording it.
     assert backend.calls.count("commit:1") == 1
     assert "prepare:2" not in backend.calls
@@ -178,5 +193,31 @@ def test_a_tolerable_failure_rate_does_not_stop_the_run(tmp_path: Path) -> None:
     backend = _Backend()
     ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
     evaluator = _Evaluator(_Evaluation(episodes=10, failures=1))
+    search(backend, evaluator, ledger, {}, iterations=2, log=io.StringIO(), max_episode_failure_rate=0.5)
+    assert "prepare:2" in backend.calls
+
+
+@pytest.mark.unit
+def test_an_episode_that_scored_without_spending_counts_as_unmeasured(tmp_path: Path) -> None:
+    # An adapter that exits before reaching the model still yields a reward of
+    # zero, so episode_failures stays at zero while nothing was measured. Two
+    # iterations reported 120 episodes and no failures in 74 seconds that way.
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluator = _Evaluator(_Evaluation(episodes=10, failures=0), ledger=ledger, cost_each=0.0)
+
+    with pytest.raises(SystemExit) as excinfo:
+        search(backend, evaluator, ledger, {}, iterations=2, log=io.StringIO(), max_episode_failure_rate=0.5)
+
+    assert "did not measure the agent" in str(excinfo.value)
+    assert "10 produced one without reaching the model" in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_paid_episodes_do_not_trip_the_guard(tmp_path: Path) -> None:
+    backend = _Backend()
+    ledger = ObservedCostLedger(tmp_path / "spend.json", 10.0)
+    evaluator = _Evaluator(_Evaluation(episodes=10, failures=0), ledger=ledger, cost_each=0.02)
+
     search(backend, evaluator, ledger, {}, iterations=2, log=io.StringIO(), max_episode_failure_rate=0.5)
     assert "prepare:2" in backend.calls

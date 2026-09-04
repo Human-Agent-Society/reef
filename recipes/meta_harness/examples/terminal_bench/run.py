@@ -181,6 +181,7 @@ def search(
     ``state`` is updated in place so a caller keeps the last committed value
     even when the loop stops early.
     """
+    accounted_before, free_before = ledger.trial_tally()
     for iteration in range(1, iterations + 1):
         try:
             ledger.before_trial(f"iteration-{iteration}")
@@ -218,13 +219,26 @@ def search(
         episodes = len(evaluation.metrics.get("candidate_scores", ())) + len(
             evaluation.metrics.get("current_scores", ())
         )
-        failure_rate = failures / episodes if episodes else 0.0
+        # An episode can produce a score without running: the adapter exits
+        # before it reaches the model and the scorer reads a reward of zero.
+        # `episode_failures` only counts a missing score, so that case is
+        # invisible to it -- two iterations here reported zero failures while
+        # claiming 120 episodes in 74 seconds. Cost is the ground truth for
+        # whether an episode called the model at all.
+        accounted, free = ledger.trial_tally()
+        ran = max(0, accounted - accounted_before)
+        free_now = max(0, free - free_before)
+        accounted_before, free_before = accounted, free
+        unmeasured = failures + free_now
+        failure_rate = unmeasured / episodes if episodes else 0.0
         row = {
             "iteration": iteration,
             "selected": bool(decision.selected),
             "metrics": {k: v for k, v in (decision.metrics or {}).items() if isinstance(v, (int, float, str))},
             "episodes": episodes,
             "episode_failures": failures,
+            "episodes_accounted": ran,
+            "episodes_without_cost": free_now,
             "seconds": round(time.time() - started, 1),
         }
         log.write(json.dumps(row, sort_keys=True) + "\n")
@@ -232,9 +246,10 @@ def search(
         print(json.dumps(row, sort_keys=True), flush=True)
         if failure_rate > max_episode_failure_rate:
             raise SystemExit(
-                f"iteration {iteration}: {failures} of {episodes} episodes produced no score "
-                f"({failure_rate:.0%}). Scores measured through that are not a comparison; "
-                f"fix the environment and rerun rather than spending the remaining iterations."
+                f"iteration {iteration}: {unmeasured} of {episodes} episodes did not measure the "
+                f"agent ({failures} produced no score, {free_now} produced one without reaching "
+                f"the model). Scores built from that are not a comparison; fix the environment "
+                f"and rerun rather than spending the remaining iterations."
             )
     return state
 

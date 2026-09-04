@@ -116,17 +116,32 @@ partitions; it does not recommend.
 
 Seed 0.3833. Every candidate so far scores below it and is rejected:
 
-| Iteration | Candidate | Seed | Decision | Episodes that never ran |
-| --- | --- | --- | --- | --- |
-| 1 | 0.350 | 0.3833 | reject | 17/120 |
-| 2 | 0.100 | 0.3833 | reject | 4/120 |
-| 3 | 0.050 | 0.3833 | reject | 2/120 |
-| 4 | 0.000 | 0.3833 | reject | 0/120 |
+| Iteration | Candidate | Seed | Decision | Wall clock | Spend |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0.350 | 0.3833 | reject | 5208s | ~$4.0 |
+| 2 | 0.100 | 0.3833 | reject | 2755s | -- |
+| 3 | 0.050 | 0.3833 | reject | 2572s | -- |
+| 4 | 0.000 | 0.3833 | reject | **74s** | ~$0.002 |
+| 5 | 0.000 | 0.3833 | reject | **123s** | ~$0.002 |
 
-The failure column is what makes this readable. Iteration 4's 0.000 was
-measured with every episode running, so it is a real regression -- the
-proposer produced a candidate that broke the agent -- and not an outage. The
-search found nothing better than stock Terminus 2 in four iterations.
+**Only the seed and iteration 1 are measurements.** Iterations 4 and 5 claim
+120 episodes each in 74 and 123 seconds, which is impossible for tasks whose
+median timeout is 1800s, and they spent about $0.002 where a real episode
+costs roughly $0.02. They did not reach the model. Iterations 2 and 3 took
+real time but their cost is far below iteration 1's, so they are doubtful and
+are not reported as results either.
+
+`episode_failures` read 0 for iterations 4 and 5 and did not catch this. That
+metric counts an episode that produced *no score*; an adapter that exits
+before reaching the model still yields a reward of zero, which is a score. The
+driver now also counts episodes that produced a score without costing
+anything, since cost is the ground truth for whether an episode called the
+model, and stops the run on the combined figure.
+
+What run B establishes is that the pipeline executes end to end and that the
+selector rejects every candidate it should. It does not establish how the
+proposed candidates perform, because four of five iterations did not measure
+them. The cause of the fast-failing episodes is not yet diagnosed.
 
 ### Upstream
 
