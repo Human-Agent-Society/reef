@@ -59,7 +59,7 @@ def propose(nodes, samples, models, *, manifest=None, rejected=()):
 
 It calls `evolution.models.proposer`, and refuses to run when
 that name is not configured. The model sees all retained candidate
-compositions and scores, their lineage, the current trace batch, the
+compositions and scores, the parent each came from, the current trace batch, the
 validation task names, and the adapter's Reef node vocabulary. It returns one
 parent id and one complete composition. In `full_history` mode the parent may
 be any retained candidate; `incumbent_only` is the greedy control.
@@ -88,7 +88,7 @@ against a stored score from an earlier batch would discard that and raise the
 bar to whatever the incumbent's luckiest run happened to be. Failed episodes
 count as zero; a non-finite score is rejected by Reef before settlement.
 
-The complete population, lineage, scores, served id, proposal attempts, and
+The complete population, parents, scores, served id, proposal attempts, and
 budget counters live under `meta_harness_population` in Reef's algorithm
 state. Proposal and selection changes are staged until the scenario commit is
 durable. Evaluation, settlement, activation, publication, or commit failures

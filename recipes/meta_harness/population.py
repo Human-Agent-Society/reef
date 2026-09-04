@@ -66,7 +66,7 @@ def _scores(values: Sequence[float]) -> tuple[float, ...]:
 
 @dataclass
 class CandidateRecord:
-    """One unique composition and the committed evidence collected for it."""
+    """One unique composition and the committed results collected for it."""
 
     candidate_id: str
     entries: tuple[dict[str, Any], ...]

@@ -7,7 +7,7 @@ parent and returns one complete composition.  That composition is translated
 back into Reef mutations against the composition currently being served.
 
 The selector retains every unique, valid candidate and moves serving only on
-a strict mean-score improvement.  Scores and lineage are staged in the same
+a strict mean-score improvement.  Scores and parents are staged in the same
 population transaction as the composition update; the backend makes them
 durable together.
 """

@@ -89,7 +89,7 @@ its seed-1 run gained the official 12 points.
 
 [Meta-Harness](meta_harness/README.md) adds full-history population search on
 the same harness-evolution mechanism. Every candidate is a complete Reef
-composition with committed lineage and validation scores; retained
+composition with committed parents and validation scores; retained
 non-winners remain available as future parents, while only a strict mean-score
 improvement publishes. The method is adapter- and task-agnostic: Reef's normal
 descriptor, episode scorer, executor, timeout, residue, and artifact paths do
