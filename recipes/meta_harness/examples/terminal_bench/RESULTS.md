@@ -372,6 +372,13 @@ This biases Reef *downward*, so it does not explain Reef measuring the seed
 higher than upstream -- if anything it widens that gap. It does mean every
 Reef number recorded before this fix understates the agent on long tasks.
 
+The run in progress when the fix landed was allowed to finish on the old
+1800s value rather than restarted, so **its Reef figures are a lower bound**,
+not a clean measurement: roughly a sixth of every iteration's episodes were
+cut short and scored zero. Its selections are still meaningful -- candidate
+and incumbent were truncated alike within each pair -- but its absolute means
+are not comparable to upstream's.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
