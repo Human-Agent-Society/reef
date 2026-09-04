@@ -213,6 +213,50 @@ The real mitigation is not reaping at all: a run has to tolerate an account
 that other teams can saturate at any moment, which means retrying an episode
 that cannot get a sandbox rather than scoring it zero.
 
+## Both arms measured the same seed, and the answer is that they cannot tell
+
+Reef's seed is the empty tree, which the terminus adapter renders as stock
+Terminus 2 -- upstream's `baseline_terminus2`. Same agent, same 30 tasks, same
+two trials, same model, measured independently by each arm:
+
+| | mean | passes |
+| --- | --- | --- |
+| Reef seed | 0.3833 | 23/60 |
+| Upstream baseline | 0.2833 | 17/60 |
+
+That looks like a 10-point divergence and is not one. At 60 episodes the
+pooled standard error is 0.086, so the gap is **1.16 sigma**. Task by task, 21
+of 30 agree exactly, and 8 of the 9 that differ are a single episode moving on
+a two-trial task:
+
+```
+bn-fit-modify           reef 1.0  upstream 0.5
+fix-code-vulnerability  reef 1.0  upstream 0.5
+password-recovery       reef 1.0  upstream 0.5
+video-processing        reef 0.5  upstream 0.0
+write-compressor        reef 0.5  upstream 0.0
+fix-ocaml-gc            reef 0.5  upstream 1.0
+sparql-university       reef 0.0  upstream 1.0
+polyglot-rust-c         reef 1.0  upstream 0.0
+sam-cell-seg            reef 1.0  upstream 0.0
+```
+
+The disagreements run in both directions, which is what noise looks like and
+not what a systematic difference looks like.
+
+The consequence is larger than this table. If two independent measurements of
+the *same* agent land 0.10 apart, then a candidate beating an incumbent by
+0.02 or even 0.10 in one iteration has shown nothing. Iteration 1 of this run
+selected on 0.233 against 0.217 -- a sixth of a standard error. **At 30 tasks
+x 2 trials the search is choosing largely on noise, and no amount of matching
+between the arms changes that.** Distinguishing a real 5-point improvement
+would need roughly 8 trials per task, four times the episodes.
+
+This is the honest limit of the reproduction as scoped: it can show the two
+implementations make the same decision from the same scores, which the replay
+proves exactly. It cannot show that either implementation's decisions are
+right, because the measurement feeding them is too coarse.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
