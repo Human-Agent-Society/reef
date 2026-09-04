@@ -162,6 +162,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         except BaseException:
             backend.abort_step(prepared)
             raise
+        # settle_step returns speculative state and aborts the staged
+        # population; commit_applied is what installs it. Reef's scenario
+        # commit calls that once its durable record exists, and this loop
+        # stands in for the scenario, so it has to call it too. Without this
+        # the next iteration's begin() sees state that never reached commit
+        # and refuses to continue - correctly.
+        backend.commit_applied(result.state)
         state = dict(result.state)
         row = {
             "iteration": iteration,

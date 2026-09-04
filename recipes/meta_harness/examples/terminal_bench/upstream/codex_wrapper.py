@@ -104,12 +104,13 @@ def run(
     except FileNotFoundError as exc:
         exit_code, stdout, stderr = 127, "", str(exc)
 
-    events = []
-    for line in (stdout or "").splitlines():
+    def _event(line):
         try:
-            events.append(json.loads(line))
+            return json.loads(line)
         except json.JSONDecodeError:
-            continue
+            return None
+
+    events = [event for event in map(_event, (stdout or "").splitlines()) if event is not None]
 
     if log_dir:
         directory = os.path.join(log_dir, name or "session")
