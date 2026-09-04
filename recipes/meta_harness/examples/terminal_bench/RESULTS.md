@@ -108,6 +108,28 @@ either arm.
 Both entry points now take `--tasks-file`, which reads commas or newlines and
 ignores `#` comments, so the shipped list can be passed directly.
 
+## Wall clock for a larger run
+
+Every task declares an `agent.timeout_sec` cap. These are caps, not expected
+durations -- most episodes finish far inside them -- but they bound the tail,
+which is what a run has to be planned around:
+
+| Group | Tasks | Median cap | Longest |
+| --- | --- | --- | --- |
+| All official | 89 | 900s | 12000s |
+| Upstream's hard subset | 30 | 1800s | 7200s |
+| The other 59 | 59 | 900s | 12000s |
+
+The hard subset is the slower half by median, so a sample drawn from all 89
+runs faster per task than the runs recorded above, not slower.
+
+One task dominates the tail: `build-pov-ray` at 12000s, roughly 3.3 hours,
+against a 900s median. At concurrency 16 a single task like that can set an
+iteration's wall clock on its own. A sample that includes it should either
+raise concurrency or accept the tail deliberately.
+
+No task in the official set requests a GPU, so e2b is sufficient throughout.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
