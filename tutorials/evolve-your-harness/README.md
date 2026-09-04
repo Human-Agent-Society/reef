@@ -33,6 +33,9 @@ evolve-your-harness/
     materialize_recipe.py
                  copies a serve file's recipe sections where the recipe
                  registry reads them; run.sh calls it
+    probe_proposals.py
+                 samples the native proposer over one failing task and
+                 counts what admission lets through, by kind
   pyproject.toml makes harness/ an installable package
 ```
 
@@ -84,7 +87,7 @@ starting the deployment.
 
 `evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
-Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible in `work/agent-record/*.commits.jsonl`. The committed outputs are a full local pass with no GPU: ollama `qwen2.5:7b` on a Mac mini scored 1.0 / 0.0 / 1.0 on the recorded pass, the self proposer updated `answer-style`, and the gate published on 1 win, 0 losses, 2 ties.
+Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible in `work/agent-record/*.commits.jsonl`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
 
 ## What one run does
 
@@ -105,19 +108,56 @@ The recorded pass is identical, so the two variants are comparable on the same t
 
 ## Results
 
-Measured 2026-08-17 on one B200 node, pi 0.84.2 as `evolution.binary`, vllm 0.27.0 at `http://127.0.0.1:8000`, one fresh scenario per run.
+Last updated: 2026-09-05. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
 
-DeepSeek-V4-Flash-0731 as `deepseek-v4-flash` (tensor parallel 4, fp8 kv cache) answered every task exactly on the recorded pass (`9592`, `2880067194370816120`, `30` alone on the last line) in two runs of 3 s and 4 s each, so no report entered the `max_score: 0.0` window, nothing batched, and both runs printed `every task passed: nothing batched, no evolve step runs`. No proposal was made and no gate ran: the evolve path only opens when the recorded pass fails at least one task.
+The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, only a 0.0 report batches (`max_score: 0.0`, `batch_size: 1`), and each batched report runs one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
 
-Qwen3-8B as `qwen3-8b` (tensor parallel 1) opens that window. Serve it with tool calling enabled (`--enable-auto-tool-choice --tool-call-parser hermes`); without those flags vllm rejects pi's `tool_choice: "auto"` requests with a 400, every episode scores as failed, and every gate dead ties. One run, 63 s wall clock end to end:
+### Environment
 
-| pass | [sieve] | [fib] | [csv] |
-|------|---------|-------|-------|
-| recorded | 1.0 | 0.0 | 1.0 |
-| gate: current | 1.0 | 0.0 | 1.0 |
-| gate: candidate | 1.0 | 1.0 | 1.0 |
+| Setup | Host | Model server | Model | Agent |
+|---|---|---|---|---|
+| pi, B200 | one B200 node | vllm 0.27.0 | Qwen3-8B as `qwen3-8b`, tensor parallel 1; DeepSeek-V4-Flash-0731 as `deepseek-v4-flash`, tensor parallel 4, fp8 kv cache | pi 0.84.2 |
+| pi, notebook | Mac mini | ollama | `qwen2.5:7b` | pi 0.84.2 |
+| native | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout |
+| native + graph | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout, after #250 |
 
-The one failing report (`[fib]`) batched and triggered one evolve step. The self proposer (qwen3-8b) proposed `create direct-answer`, a new skill beside the starter; the gate scored candidate 3.0 against current 2.0 (1 win, 0 losses, 2 ties, 0 episode failures) and published artifact `0fe30330c6ddacd400fbb905113711c3940f7071`. The pulled tree carries the proposed skill verbatim:
+### Runs
+
+| Setup | Model | Run | Date | Code | Recorded pass | Proposal | Gate: current | Gate: candidate | W / L / T | Verdict | Launch to verdict (s) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| pi, B200 | deepseek-v4-flash | 1 | 2026-08-17 | #58 | 1.0 / 1.0 / 1.0 | none, nothing batched | - | - | - | no step | 3 [1] |
+| pi, B200 | deepseek-v4-flash | 2 | 2026-08-17 | #58 | 1.0 / 1.0 / 1.0 | none, nothing batched | - | - | - | no step | 4 [1] |
+| pi, B200 | qwen3-8b | 1 | 2026-08-17 | #58 | 1.0 / 0.0 / 1.0 | `create direct-answer` (skill) | 1.0 / 0.0 / 1.0 | 1.0 / 1.0 / 1.0 | 1 / 0 / 2 | published `0fe30330` | 63 [2] |
+| pi, notebook | qwen2.5:7b | 1 | 2026-08-31 | #70 | 1.0 / 0.0 / 1.0 | `update answer-style` (skill) | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 1 / 0 / 2 | published `f98266d2` | not recorded [3] |
+| native | qwen2.5:7b | 1 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-solver` (native_tool) | 0.0 / 0.0 / 1.0 | 0.0 / 1.0 / 0.0 | 1 / 1 / 1 | rejected | 93 [4] |
+| native | qwen2.5:7b | 2 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-skill` (skill) | 0.0 / 0.0 / 1.0 | 0.0 / 0.0 / 0.0 | 0 / 1 / 2 | rejected | 217 |
+| native + graph | qwen2.5:7b | 1 | 2026-09-05 | #258 | 1.0 / 0.0 / 1.0 | `update main` (native_graph) [5] | 1.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 645 |
+| native + graph | qwen2.5:7b | 2 | 2026-09-05 | #258 | 0.0 / 0.0 / 1.0 | `update main` (native_graph): a `check` stage | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 1.0 | 2 / 0 / 1 | published | 178 [6] |
+
+One run is one sample and no run was repeated, so the rows carry no spread. Gate episodes are stochastic: the seed tree scored `[sieve]` 1.0 on every recorded pass and 0.0 in four of the five gate episodes on the Mac, because with tools in hand the model runs the sieve and then answers in prose, so the integer is not alone on the last line.
+
+### Proposal admission by prompt shape
+
+Samples of the native proposer over the `[fib]` failure, measured 2026-09-05 at #258 with `harness/probe_proposals.py` against ollama at its default sampling settings; one call per sample under the proposer's 120 s and 2048 completion token budget. A sample is parsed when the reply carries a mutation and admitted when that mutation passes its node kind's admission rules, the check the evolve step runs before any episode.
+
+| Prompt shape | Model | Samples | Parsed | Graph | Graph admitted | Tool | Skill | Unparsed |
+|---|---|---|---|---|---|---|---|---|
+| placeholders (`<stage>`, `<outcome>`) | qwen2.5:7b | 30 | 25 | 11 | 0 [7] | 14 | 0 | 5 |
+| worked example (the seed loop plus a `check` stage) | qwen2.5:7b | 30 | 29 | 29 | 23 [8] | 0 | 0 | 1 |
+| worked example | qwen3:8b | 15 | 7 | 5 | 5 | 2 | 0 | 8 [9] |
+| worked example | qwen3.5:9b | 15 | 5 | 4 | 3 [10] | 0 | 1 | 10 [9] |
+
+The worked example moved graph admission from 0 of 11 to 23 of 29 and removed every tool and skill proposal, which is the trade the tutorial makes; the two newer models write admissible graphs when they answer at all and lose more than half their samples to the budget, which is why the tutorial stays on qwen2.5:7b.
+
+### Reading
+
+- Both pi publishes came from one failing task and one skill proposal, on Qwen3-8B behind vllm and on qwen2.5:7b behind ollama alike.
+- On the native loop without the graph node the gate held both proposals back: the tool won `[fib]` and lost `[csv]`, the skill won nothing.
+- With the graph node the proposer rewrote the loop instead: a `check` stage that verifies the last line is a plain integer and, on `fail`, returns to `think` with the message `Reply with the final answer as a plain integer alone on the last line.` Run 2 published it on wins at `[sieve]` and `[csv]`; `[fib]` stayed 0.0 on both sides because fib(90) exact is beyond this model. The rewrite is the prompt's worked example reproduced stage for stage, so the proposer chose it rather than invented it; whether this model writes a graph the prompt did not show is the open measurement.
+
+### Published artifacts
+
+The B200 run's skill, as pulled from the published tree:
 
 ```text
 --- pi-agent/skills/direct-answer/SKILL.md ---
@@ -126,32 +166,46 @@ The one failing report (`[fib]`) batched and triggered one evolve step. The self
 Enforces answers to be exact plain integers without additional text. For numerical problems requiring precise values (e.g., Fibonacci numbers, large computations), this skill ensures the response contains only the final integer result on the last line, adhering strictly to the format specified in the query.
 ```
 
-### Native variant
+The graph run's `main`, the stage it added and the edges that route through it:
 
-Measured 2026-09-04 on a Mac mini, ollama `qwen2.5:7b` at `http://127.0.0.1:11434` as the model under test, `./run.sh native`, one fresh scenario per run, two runs. The recorded pass scored 1.0 / 0.0 / 1.0 both times, so the `[fib]` report batched and one evolve step ran; the whole run from launch to the gate's verdict took 93 s and 217 s. Both steps went end to end on the native loop, proposal to verdict, and both verdicts were rejections:
+```text
+"check": {"kind": "verify", "check": "last_line_integer", "message": "Reply with the final answer as a plain integer alone on the last line."}
+{"from": "think", "when": "text", "to": "check"}, {"from": "check", "when": "pass", "to": "done"}, {"from": "check", "when": "fail", "to": "think"}
+```
 
-| run | proposal | gate: current | gate: candidate | wins / losses / ties |
-|-----|----------|---------------|-----------------|----------------------|
-| 1 | `create fib-solver` (native_tool) | 0.0 / 0.0 / 1.0 | 0.0 / 1.0 / 0.0 | 1 / 1 / 1 |
-| 2 | `create fib-skill` (skill) | 0.0 / 0.0 / 1.0 | 0.0 / 0.0 / 0.0 | 0 / 1 / 2 |
+The notebook keeps its own run's outputs cell by cell, the evolved `answer-style` skill included.
 
-The self proposer used both halves of its vocabulary: a tool with a memoized `fib` behind `run(args, workdir)` in run 1, a skill in run 2. The gate held both back, because a win on `[fib]` came with a loss on `[csv]` in run 1 and no win at all in run 2. Two things in the numbers are the loop's own. The seed tree scores `[sieve]` 0.0 in a gate episode while the recorded pass scored it 1.0: with tools in hand the model runs the sieve and then answers in prose, so the bare integer is not on the last line, which is what a skill mutation is there to fix. And run 1 reported `current_residue: 16`: Apple's `python3` writes its bytecode cache under `$HOME/Library/Caches/com.apple.python/`, and an episode's `HOME` is its root, so a `run_bash` call that runs that interpreter leaves those files; a Linux run reports 0, and residue is counted, never forbidden, unless `evolution.forbid_residue` is set. The first attempt at run 1 skipped its step with `no proposal` because the model wrote the kind into `id` and the name into `name`; the proposer now reads the swap off `config.name`, and the runs above are with that in place.
+### Reproduce
 
-### Native variant with the graph node
+```bash
+cd tutorials/evolve-your-harness
+# pi rows: configs/serve.yaml names the endpoint and the model. The B200 rows served
+#   vllm serve Qwen/Qwen3-8B --enable-auto-tool-choice --tool-call-parser hermes
+./run.sh
+# native rows: configs/serve-native.yaml, ollama on 127.0.0.1:11434
+./run.sh native
+# the admission table
+python3 harness/probe_proposals.py --samples 30 --model qwen2.5:7b
+```
 
-Measured 2026-09-05 on the same Mac mini and ollama `qwen2.5:7b`, after #250 made the loop a `native_graph` node the proposer can rewrite.
+The model name is set in three places, `model.path` and `upstream_model` in the serve file and `MODEL` in `run.py`; every row above had all three on the model in its Model column.
 
-The self proposer's shape for the graph mattered more than anything in the loop. With the graph described by placeholders (`"<stage>"`, `"<outcome>"`), 30 proposals over the `[fib]` failure gave 25 parsable mutations: 14 tools, all admitted, and 11 graphs, none admitted, because 9 left out the verify stage's `check` and 2 omitted the `fail` edge. Shown one worked graph instead (the seed loop plus a `check` stage with its two edges), the same 30 samples gave 29 graph proposals, 23 admitted, 6 refused for a duplicated edge or an outcome the stage does not have, and no tool or skill proposals at all: the example steers the model to the graph every time, which is the trade the tutorial makes. The refused proposals cost nothing; admission skips the step before any episode runs, and the commit names the rule.
+### Notes
 
-Two newer models of the same size were probed the same way, 15 samples each with the worked example, because the served model is also the proposer and a model that cannot write the mutation format cannot evolve its own loop. The proposer gives one call 120 s and 2048 completion tokens. `qwen3:8b` returned 7 parsable proposals, 5 graphs and 2 tools, all 7 admitted; of the other 8 samples, 4 hit the 120 s limit and 4 came back inside it with no mutation in the reply. `qwen3.5:9b` returned 5, 4 graphs (3 admitted, 1 refused because its new stage was unreachable from `think`) and 1 skill; 9 samples hit the limit and 1 came back empty. Their admitted graphs were as well formed as `qwen2.5:7b`'s, but at half the parse rate the tutorial stays on `qwen2.5:7b`; a model that reasons before it answers needs that turned off or a larger budget before it fits this proposer.
+[1] The recorded pass alone; no report batched and no step ran.
+[2] End to end, including the pull of the published tree.
+[3] The notebook's committed outputs hold the run cell by cell but no timing.
+[4] `current_residue: 16`: on macOS a `run_bash` call that runs Apple's python3 leaves its bytecode cache under the episode's `HOME`; a Linux run reports 0, and residue is counted, never forbidden, unless `evolution.forbid_residue` is set.
+[5] A rejected proposal's content is not kept: the commit and the `rejected` history that `propose` receives carry the mutation's id and op only, so this rewrite is known as a `main` update and nothing more (a follow up of #248).
+[6] The run's second failing report opened a second step, a `fib-optimize` tool, which was still on the gate when `run.py` pulled the published tree and `run.sh` stopped the service.
+[7] 9 graphs left out the verify stage's `check` and 2 omitted the `fail` edge.
+[8] 6 graphs carried a duplicated edge or an outcome the stage does not have.
+[9] qwen3:8b: 4 samples over the 120 s limit and 4 replies with no mutation; qwen3.5:9b: 9 over the limit and 1 with no mutation.
+[10] 1 graph had a stage unreachable from `think`.
 
-Two live runs, `./run.sh native`, one fresh scenario each:
+### Known limitations
 
-| run | recorded pass | proposal | gate: current | gate: candidate | wins / losses / ties | verdict |
-|-----|---------------|----------|---------------|-----------------|----------------------|---------|
-| 1 | 1.0 / 0.0 / 1.0 | `update main` (native_graph) | 1.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected; 645 s from launch to verdict |
-| 2 | 0.0 / 0.0 / 1.0 | `update main` (native_graph): a `check` stage, `last_line_integer`, `fail` back to `think` | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 1.0 | 2 / 0 / 1 | published; 178 s from launch to verdict |
-
-Run 2 is the result the graph node was added for. The proposer's rewrite of `main` routes every text reply through a `check` stage that verifies the last line is a plain integer and, on `fail`, sends the model back to `think` with the message `Reply with the final answer as a plain integer alone on the last line.`; the seed graph goes straight from `think` to `done`. On the gate the seed loop scored 0 on all three tasks and the rewritten loop passed `[sieve]` and `[csv]`, 2 wins and no loss, so the graph published, and the loop the agent runs after run 2 is one its own proposal chose. Chose, not invented: the rewrite is the prompt's worked example, reproduced stage for stage and message for message. The proposer picked the graph over a tool or a skill for a format failure, and the gate confirmed the pick; whether this model can write a graph the prompt did not show is the next measurement, and the placeholder shaped prompt above says it cannot yet. `[fib]` stayed 0 on both sides; the verify stage fixes the format, not the arithmetic, and fib(90) exact is beyond this model. Run 1 is the other half of the story: a rewrite of the same node, a tie on every task, no publish, because the seed loop answered `[sieve]` in the right format that time and nothing else moved. Run 2's second failing report opened a second step, a `fib-optimize` tool, which was still on the gate when `run.py` pulled the published tree and `run.sh` stopped the service; the tutorial stops at the first publish.
-
-A rejected proposal's content is not kept: the commit and the `rejected` history that `propose` receives carry the mutation's id and op only, so the run 1 rewrite is known to be a `main` update and nothing more. That is a gap for the proposer as much as for this table, and it is a follow up of #248.
+- `run.py` stops at the first publish, so a run with two failing reports records one verdict.
+- A rejected proposal's content is not persisted, so a rejected row can name the mutation's id and op only.
+- vllm serves Qwen3-8B for pi only with `--enable-auto-tool-choice --tool-call-parser hermes`; without them it answers pi's `tool_choice: "auto"` requests with a 400, every episode fails, and every gate ties.
+- The B200 rows and the Mac rows differ in host and model server, so wall clocks compare within a setup, not across.
