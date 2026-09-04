@@ -10,7 +10,7 @@ One pass:
              one gated evolve step - the model proposes a mutation over its
              own failures, real episodes score it, a win publishes
     pull   - GET /reef/harness returns the winning composition; the evolved
-             skill, tool, and hook files are printed
+             skill, tool, hook, and graph files are printed
 
 Start this through ./run.sh: it writes work/tasks.json and starts the Reef
 these constants point at, on pi (serve.yaml) or on reef's native harness
@@ -90,7 +90,7 @@ def main():
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
     print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
-        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/")):
+        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/")):
             print(f"--- {path} ---")
             print(text)
 
