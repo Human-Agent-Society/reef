@@ -54,31 +54,48 @@ end to end and that their selection rules agree on real data. It is not a
 measured comparison of search quality, and the published tree is a mechanism
 demonstration rather than a measured improvement.
 
-## The task set is a weak instrument, and by how much
+## What the seed partition does and does not tell you
 
 A scaled run (30 tasks x 2 trials x 5 iterations) measured the seed on
 upstream's hard subset. `select_panel.py` recovers the per-task result:
 
-| | Tasks |
-| --- | --- |
-| Seed always passes | 4 |
-| Seed always fails | 21 |
-| **Panel: seed sometimes passes** | **5** |
+| | Tasks | Can a better candidate show it here? |
+| --- | --- | --- |
+| Seed always passes | 4 | No — only regression is visible |
+| Seed always fails | 21 | **Yes — this is headroom** |
+| Seed sometimes passes | 5 | Yes — and seed variance lives here |
 
-25 of 30 tasks add the same constant to both sides of every comparison, so
-**84% of each 60-episode evaluation cannot move a decision**. The first
-iteration selected on 0.233 against 0.217 — one extra passing episode, which
-at that panel size is noise rather than an improvement.
+Iteration 2 settled which of those columns is right. The candidate scored
+0.350 against the incumbent's 0.233, and the gain did not come from the
+five variable tasks:
 
-This is the cost of substituting upstream's hard subset for a measured panel.
-The subset is chosen to be hard, so it concentrates on the tasks this target
-model cannot do, which is precisely the opposite of what discriminates. It
-also explains a large swing between runs: with so few live tasks, which
-borderline ones happen to land moves the mean a long way. An earlier run of
-the same seed on the same 30 tasks scored 0.400 against this run's 0.217.
+```
+unlocked (seed always failed, candidate passes)
+  mcmc-sampling-stan     [0,0] -> [1,1]
+  sparql-university      [0,0] -> [1,1]
+  fix-ocaml-gc           [0,0] -> [0,1]
+  password-recovery      [0,0] -> [1,0]
+  polyglot-rust-c        [0,0] -> [1,0]
+regressed (seed always passed)
+  fix-code-vulnerability [1,1] -> [0,1]
+```
 
-The next run should draw its panel from the full 89 rather than the hard
-subset, seeded by a one-off baseline sweep and filtered by `select_panel.py`.
+Seven of the net eight episodes came from tasks the seed never solved. So a
+task the seed always fails is not a constant added to both sides: it is the
+main thing a candidate can win. Only the four always-pass tasks are
+signal-free in the upward direction, and they still register regressions —
+`fix-code-vulnerability` did.
+
+Two consequences for the next run. Do **not** prefilter the task set down to
+the seed-variable tasks; that would have discarded the five tasks carrying
+most of iteration 2's improvement. And read `partition()` as a description of
+the seed, not as a prediction about candidates — its always-fail bucket is
+where the headroom is.
+
+What stays true is that the panel is small for judging *marginal* changes:
+iteration 1 selected on 0.233 against 0.217, one episode, which is noise.
+Iteration 2's margin is a different matter — five distinct tasks unlocked,
+two of them on both trials.
 
 ## Defects this found
 

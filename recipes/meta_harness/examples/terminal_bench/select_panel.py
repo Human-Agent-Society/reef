@@ -1,9 +1,11 @@
 """Select the reliability panel from a seed evaluation.
 
-A task the seed always passes and a task it always fails each say nothing
-about whether a candidate is better: both contribute the same constant to
-every mean. Only tasks the seed sometimes passes can move a comparison, so
-those are the ones worth paying for.
+This partitions a seed evaluation; it does not rank tasks by usefulness. A
+task the seed always passes can only show a regression. A task the seed
+always fails is headroom, not dead weight -- it is precisely where a better
+candidate has room to win, and in the run recorded in RESULTS.md five such
+tasks supplied most of one iteration's gain. Do not use the always-fail
+bucket to prune a task set.
 
 Run it against a population mirror written by ``run.py``::
 
