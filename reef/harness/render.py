@@ -61,16 +61,17 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             template = descriptor.node_paths.get(kind)
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
-            # One importable module: the code that defines run or listen, then the declaration as constants, so the node config binds.
-            fields = (
-                (("NAME", options.get("name")), ("SEAM", options.get("seam")))
-                if kind == "native_hook"
-                else (
+            # One importable module: the code that defines run or listen, then
+            # the declaration as constants, so the node config binds.
+            fields: tuple[tuple[str, Any], ...]
+            if kind == "native_hook":
+                fields = (("NAME", options.get("name")), ("SEAM", options.get("seam")))
+            else:
+                fields = (
                     ("NAME", options.get("name")),
                     ("DESCRIPTION", options.get("description", "")),
                     ("PARAMETERS", dict(options.get("parameters", {}) or {})),
                 )
-            )
             header = "\n".join(f"{key} = {value!r}" for key, value in fields)
             emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
         else:

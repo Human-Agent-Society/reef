@@ -114,11 +114,11 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
     release = Event()
     failed = False
 
-    def publish(self, artifact, *, expected_parent):
+    def publish(self, artifact, *, expected_parent, advance_head=True):
         type(self).started.set()
         if not type(self).release.wait(5):
             raise TimeoutError("test did not release blocked publication")
-        ref = super().publish(artifact, expected_parent=expected_parent)
+        ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
         if not type(self).failed:
             type(self).failed = True
             raise ArtifactPublicationError("lost publication acknowledgement")
@@ -221,17 +221,17 @@ def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
         if dispatcher.get_or_create_scenario("math").scenario_step == step:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
-    pytest.fail(f"scenario did not reach step {step}: {dispatcher.training_status}")
+    pytest.fail(f"scenario did not reach step {step}: {dispatcher.build_training_status()}")
 
 
 def _wait_for_error(dispatcher: Dispatcher) -> str:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
-        error = dispatcher.training_status["error"]
+        error = dispatcher.build_training_status()["error"]
         if isinstance(error, str):
             return error
         time.sleep(_ASYNC_WAIT_POLL_S)
-    pytest.fail(f"training error was not reported: {dispatcher.training_status}")
+    pytest.fail(f"training error was not reported: {dispatcher.build_training_status()}")
 
 
 @pytest.mark.unit
@@ -340,7 +340,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
     dispatcher.get_or_create_scenario("math")
 
-    assert dispatcher.training_status["scenarios"]["math"]["last_committed_step"] is None
+    assert dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
 
     _submit_pair(dispatcher)
     _wait_for_step(dispatcher, 1)
@@ -350,12 +350,12 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["selection"]["outcome"] == "select"
-    status = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 1
     assert isinstance(status["recorded_at"], float)
     assert status["metrics"] == committed
     status["metrics"]["selection"]["outcome"] = "mutated by caller"
-    refreshed = dispatcher.training_status["scenarios"]["math"]["last_committed_step"]
+    refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert refreshed["metrics"]["selection"]["outcome"] == "select"
 
 
@@ -435,9 +435,9 @@ def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, mon
     assert scenario.scenario_step == 0
     assert scenario.trainer.pending_batch is not None
     assert scenario.records.count("math") == 2
-    assert dispatcher.training_status["scenarios"]["math"]["checkpoint_storage"]["reasons"] == ["test cap"]
+    assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"]["reasons"] == ["test cap"]
     runtime.block_storage = False
     _wait_for_step(dispatcher, 1)
     assert runtime.calls[0]["rollout_id"] == 0
     assert runtime.calls[0]["source"] == "inference-1"
-    assert dispatcher.training_status["scenarios"]["math"]["checkpoint_storage"] is None
+    assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"] is None
