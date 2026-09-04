@@ -19,6 +19,8 @@ native harness adds kinds only it renders:
   ``extensions/``, opencode ``plugin/``).
 - ``native_tool``: a named tool of the native harness, a JSON schema plus
   code defining ``run(args, workdir)`` (``native/tools/``).
+- ``native_hook``: a named listener at one seam of the native loop, code
+  defining ``listen(payload, next)`` (``native/hooks/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.render`` reads it back out per adapter.
@@ -32,6 +34,8 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: The native loop's seams, the only places a native_hook node may listen.
+NATIVE_SEAMS = ("pre_step", "request_error", "post_execute")
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -65,7 +69,23 @@ def _require_text(config: Mapping[str, Any], key: str) -> str:
     value = config.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"node config requires a non-empty string {key!r}")
+    # A lone surrogate survives JSON but cannot be written as UTF-8 at render.
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"node config {key!r} must be UTF-8 encodable text: {exc}") from exc
     return value
+
+
+def _require_python(options: Mapping[str, Any], where: str) -> str:
+    """A ``code`` body the native loop will import: refused here when it cannot even compile."""
+    code = _require_text(options, "code")
+    try:
+        compile(code, f"{options.get('name')}.py", "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError(f"{where} 'code' does not compile: {exc}") from exc
+    _reject_secret_shaped_text(code, f"{where} 'code'")
+    return code
 
 
 def _require_name(config: Mapping[str, Any]) -> str:
@@ -175,7 +195,16 @@ def native_tool_node(ctx: Any, config: Any) -> None:
     _require_text(options, "description")
     if not isinstance(options.get("parameters", {}), Mapping):
         raise ValueError("native_tool node 'parameters' must be an object")
-    _reject_secret_shaped_text(_require_text(options, "code"), "native_tool node 'code'")
+    _require_python(options, "native_tool node")
+
+
+def native_hook_node(ctx: Any, config: Any) -> None:
+    """A named listener the native loop calls at one seam: code defining ``listen(payload, next)``."""
+    options = _require_mapping(config)
+    _require_name(options)
+    if options.get("seam") not in NATIVE_SEAMS:
+        raise ValueError(f"native_hook node 'seam' must be one of {', '.join(NATIVE_SEAMS)}")
+    _require_python(options, "native_hook node")
 
 
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
@@ -185,5 +214,6 @@ NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "skill": skill_node,
     "code_extension": code_extension_node,
     "native_tool": native_tool_node,
+    "native_hook": native_hook_node,
 }
 """Entry ``name`` to node plugin; the resolver of the composition loader."""
