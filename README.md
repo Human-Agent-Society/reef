@@ -280,6 +280,40 @@ Working on continual self-improving agent?
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
 
 
+## The Team
+
+Reef brings together people exploring how agents can learn from experience and
+improve over time. The people below help turn that idea into working infrastructure.
+
+This list is non-exhaustive, with team members listed alphabetically by last name:
+
+[Wenhao Chai](https://github.com/wenhaochai),
+[Shuangrui Ding](https://github.com/Mark12Ding),
+[Hao He](https://github.com/hehaodele),
+[Haoze He](https://github.com/HectorHHZ),
+[Chonghe Jiang](https://github.com/Chonghe-Jiang),
+[Nan Jiang](https://github.com/nanjiangwill),
+[Xuan Jiang](https://github.com/Xuan-1998),
+[Xiaochen Li](https://github.com/SeuperHakkerJa),
+[Paul Liang](https://github.com/pliang279),
+[Bo Liu](https://github.com/Benjamin-eecs),
+[Boyuan Long](https://github.com/BoyuanLong),
+[Qiuyang Mang](https://github.com/joyemang33),
+[Zhenting Qi](https://github.com/zhentingqi),
+[Ao Qu](https://github.com/quao627),
+[Mingruo Qu](https://github.com/workhardforcoding),
+[Zhaokai Wang](https://github.com/wzk1015),
+[Xuezhi Yan](https://github.com/yanxz),
+[Hanfei Yu](https://github.com/hanfeiyu),
+[Haofei Yu](https://github.com/lwaekfjlk),
+[Simon Yu](https://github.com/simonucl),
+[Han Zheng](https://github.com/MikeZheng777),
+[Kaichen Zhou](https://github.com/kaichen-z),
+[Zijian Zhou](https://github.com/BobbyZhouZijian),
+[Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
+[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+
+
 ## Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
