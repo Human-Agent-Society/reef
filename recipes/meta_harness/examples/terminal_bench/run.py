@@ -176,7 +176,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--target-url", default="https://api.openai.com")
     parser.add_argument("--proposer-model", default="gpt-5.6-sol")
     parser.add_argument("--proposer-url", default="https://api.openai.com")
-    parser.add_argument("--episode-timeout-s", type=float, default=1800.0)
+    parser.add_argument(
+        "--episode-timeout-s",
+        type=float,
+        # This covers the whole adapter invocation -- container build, agent
+        # and verifier -- not just the agent. terminal-bench@2.0 declares agent
+        # timeouts up to 12000s and half of upstream's hard subset is at or
+        # above 1800s, so a 1800s ceiling silently truncated a sixth of every
+        # iteration's episodes and scored them zero. Upstream allows its jobs
+        # 28800s. This is a guard against a hung episode, not a task budget.
+        default=14400.0,
+    )
     parser.add_argument("--concurrency", type=int, default=8, help="pairings evaluated in parallel")
     parser.add_argument("--max-observed-cost-usd", type=float, required=True)
     parser.add_argument("--output-dir", required=True)

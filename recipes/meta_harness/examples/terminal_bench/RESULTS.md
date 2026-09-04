@@ -341,6 +341,37 @@ Each phase blocks on its slowest task, which is what sets the wall clock: a
 60-episode baseline took an hour because 58 trials finished quickly and one
 ran 51 minutes.
 
+## Reef truncated its own episodes at half the task's budget
+
+The failure causes recorded per iteration named it on the first run that had
+them:
+
+```
+episode timed out after 1800.0s: reef-terminus --task terminal-bench/circuit-fibsqrt
+episode timed out after 1800.0s: reef-terminus --task terminal-bench/extract-moves-from-video
+episode timed out after 1800.0s: reef-terminus --task terminal-bench/fix-ocaml-gc
+```
+
+`--episode-timeout-s` defaulted to 1800s. That ceiling covers the whole
+adapter invocation -- container build, agent and verifier -- while
+`circuit-fibsqrt` and `fix-ocaml-gc` each declare a 3600s agent timeout on
+their own. **18 of the hard subset's 30 tasks declare 1800s or more**, up to
+7200s, and across the full dataset up to 12000s. Upstream allows each job
+28800s.
+
+So Reef was killing long tasks partway and scoring them zero, 21 of every 120
+episodes -- a sixth of each iteration -- while upstream let the same tasks run
+to their declared budget. The two arms were not measuring the same thing on
+those tasks.
+
+The default is now 14400s: above the longest declared agent timeout in the
+dataset with room for build and verification. It is a guard against a hung
+episode, not a task budget.
+
+This biases Reef *downward*, so it does not explain Reef measuring the seed
+higher than upstream -- if anything it widens that gap. It does mean every
+Reef number recorded before this fix understates the agent on long tasks.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it
