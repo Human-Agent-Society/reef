@@ -6,13 +6,9 @@
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 # The recipe uses the upstream runtime's model for evaluation as well as serving.
 execution:
-  services: local
+  services: auto
   evolution:
-    backend: auto  # uni for one CPU worker, mp for multiple workers.
-    workers: 1
-    resources:
-      cpus_per_worker: 1
-      gpus_per_worker: 0
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
 
 evolution:
   adapter: pi

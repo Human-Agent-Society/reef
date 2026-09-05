@@ -30,7 +30,7 @@ from reef.runtime import (
 )
 from reef.runtime.adapters import ray_runtime
 from reef.runtime.executor import ray as ray_executor
-from reef.runtime.executor.local import LocalExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
 from reef.service.deploy.settings import ServiceSettings
 from reef.train.evaluation import EvaluationResult, SelectionDecision
@@ -63,7 +63,7 @@ def test_ray_public_names_remain_compatible_aliases():
     assert RayTrainGroupHandle is TrainingGroupHandle
 
 
-@pytest.mark.parametrize("backend", ["local", LocalExecutor, "reef.runtime.executor.local:LocalExecutor"])
+@pytest.mark.parametrize("backend", ["uni", UniProcExecutor, "reef.runtime.executor.uniproc:UniProcExecutor"])
 def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
     runtime = RuntimeRegistry().build(
         {
@@ -102,7 +102,7 @@ def test_mapping_config_resolves_worker_import_and_constructor_arguments():
         {
             "type": "executor_training",
             "executor": {
-                "backend": "local",
+                "backend": "uni",
                 "workers": [
                     {
                         "worker_cls": "reef_service.test_executor_runtime:Coordinator",
@@ -126,8 +126,10 @@ def test_mapping_config_resolves_worker_import_and_constructor_arguments():
 
 
 def test_training_operations_target_only_the_selected_coordinator():
+    from executor_helpers import AttachedTestGroup
+
     worker0, worker1 = Coordinator(), Coordinator()
-    executor = LocalExecutor.from_workers((worker0, worker1))
+    executor = AttachedTestGroup.from_workers((worker0, worker1))
     runtime = RuntimeRegistry().build(
         {"type": "executor_training", "executor": executor, "coordinator_rank": 1},
         model_path="model",
@@ -150,7 +152,7 @@ def test_failed_runtime_construction_releases_created_executor_workers():
             {
                 "type": "executor_training",
                 "executor": {
-                    "backend": "local",
+                    "backend": "uni",
                     "workers": [
                         WorkerSpec(Coordinator, kwargs={"inference_url": None, "shutdown_events": shutdown_events})
                     ],
@@ -163,7 +165,7 @@ def test_failed_runtime_construction_releases_created_executor_workers():
 
 def test_failed_runtime_construction_preserves_an_injected_executor():
     worker = Coordinator(inference_url=None)
-    executor = LocalExecutor.from_workers((worker,), owned=True)
+    executor = UniProcExecutor.from_workers((worker,), owned=True)
     try:
         with pytest.raises(TrainingRuntimeError, match="inference_url is unset"):
             RuntimeRegistry().build({"type": "executor_training", "executor": executor}, model_path="model")
@@ -175,7 +177,7 @@ def test_failed_runtime_construction_preserves_an_injected_executor():
 
 @pytest.mark.parametrize(
     "value",
-    [None, "local", {"workers": "bad"}, {"workers": [None]}, {"workers": [{"unexpected": "argument"}]}],
+    [None, "uni", {"workers": "bad"}, {"workers": [None]}, {"workers": [{"unexpected": "argument"}]}],
 )
 def test_invalid_executor_runtime_configuration_is_rejected(value):
     with pytest.raises(RuntimeConfigError, match=r"runtime\.executor"):
@@ -184,7 +186,7 @@ def test_invalid_executor_runtime_configuration_is_rejected(value):
 
 @pytest.mark.parametrize("timeout", [0, -1, True, "300", float("inf"), float("nan")])
 def test_training_handle_rejects_invalid_timeout(timeout):
-    executor = LocalExecutor.from_workers((Coordinator(),))
+    executor = UniProcExecutor.from_workers((Coordinator(),))
     try:
         with pytest.raises(TrainingRuntimeError, match="training timeout"):
             ExecutorTrainGroupHandle(executor, timeout_s=timeout)
@@ -194,7 +196,7 @@ def test_training_handle_rejects_invalid_timeout(timeout):
 
 @pytest.mark.parametrize("rank", [-1, True, "0"])
 def test_training_handle_rejects_invalid_coordinator_rank(rank):
-    executor = LocalExecutor.from_workers((Coordinator(),))
+    executor = UniProcExecutor.from_workers((Coordinator(),))
     try:
         with pytest.raises(TrainingRuntimeError, match="coordinator rank"):
             ExecutorTrainGroupHandle(executor, rank=rank)
@@ -252,7 +254,7 @@ model:
 runtime:
   type: executor_training
   executor:
-    backend: local
+    backend: uni
     workers:
       - worker_cls: reef_service.test_executor_runtime:Coordinator
         kwargs:
@@ -281,7 +283,7 @@ runtime:
     )
     worker = Coordinator()
     runtime = ExecutorTrainingRuntime(
-        train_group_handle=ExecutorTrainGroupHandle(LocalExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     registry = RuntimeRegistry({"injected": lambda *args: runtime})
     with pytest.raises(RecipeConfigError, match="checkpoint_every_n_versions"):
@@ -297,7 +299,7 @@ def test_dispatcher_closes_owned_runtime_after_all_scenarios_but_not_on_reload(t
     events = []
     worker = SharedCoordinator(shutdown_events=events)
     runtime = ExecutorTrainingRuntime(
-        train_group_handle=ExecutorTrainGroupHandle(LocalExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -330,7 +332,7 @@ def test_dispatcher_closes_owned_runtime_after_all_scenarios_but_not_on_reload(t
 
 def test_dispatcher_keeps_a_borrowed_runtime_alive(tmp_path):
     worker = Coordinator()
-    executor = LocalExecutor.from_workers((worker,), owned=True)
+    executor = UniProcExecutor.from_workers((worker,), owned=True)
     runtime = ExecutorTrainingRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
     dispatcher = Dispatcher(Recipe(runtime=runtime), InMemoryRepositoryBackend.factory(tmp_path))
     try:
@@ -347,7 +349,7 @@ def test_dispatcher_releases_owned_runtime_when_scenario_teardown_fails(tmp_path
     monkeypatch.setattr(Dispatcher, "_start_training", lambda *args: None)
     worker = Coordinator()
     runtime = ExecutorTrainingRuntime(
-        train_group_handle=ExecutorTrainGroupHandle(LocalExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -374,7 +376,7 @@ def test_dispatcher_releases_owned_runtime_when_scenario_teardown_fails(tmp_path
 def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_path):
     worker = Coordinator()
     runtime = ExecutorTrainingRuntime(
-        train_group_handle=ExecutorTrainGroupHandle(LocalExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime))
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
@@ -393,7 +395,7 @@ def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_
 def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     worker = Coordinator()
     runtime = ExecutorTrainingRuntime(
-        train_group_handle=ExecutorTrainGroupHandle(LocalExecutor.from_workers((worker,), owned=True))
+        train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime))
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())

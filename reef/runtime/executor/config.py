@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -72,9 +74,10 @@ def select_executor(
 ) -> ExecutorSelection:
     """Explicit selection wins; auto uses the capabilities of the current role.
 
-    This is a pure policy: it neither probes GPUs nor starts a Ray runtime.
+    This never starts a Ray runtime. Only declared local GPU worker needs
+    probe CUDA capacity; CPU paths do not import Torch.
     Training/rollout are Slime roles, whose built-in distributed backend is
-    currently Ray. A single GPU does not make LocalExecutor a Slime launcher.
+    currently Ray. A single GPU does not make UniProcExecutor a Slime launcher.
     """
     if role not in ("services", "training", "rollout", "evolution"):
         raise ValueError(f"unknown executor role: {role!r}")
@@ -94,37 +97,83 @@ def select_executor(
     elif local_cuda and (requires_resources or settings.options):
         raise ValueError("auto cannot combine local CUDA visibility with cluster resource options")
     elif local_cuda:
-        backend, reason = "local", "service pins local CUDA visibility"
+        backend, reason = "uni", "one service controller with local CUDA visibility"
     elif requires_resources or settings.options:
         backend, reason = "ray", "service requests cluster resource/worker options"
     elif in_ray_placement_group:
         backend, reason = "ray", "service is running inside a Ray placement group"
     else:
-        backend, reason = "local", "service has no cluster placement requirements"
+        backend, reason = "uni", "one service controller with no cluster placement requirements"
     return ExecutorSelection(replace(settings, backend=backend), reason)
 
 
 def select_worker_executor(settings: ExecutorSettings, requirements: ExecutionRequirements) -> ExecutorSelection:
-    """Select only launchers the component supports, never by installed hardware."""
+    """Prefer uni/mp for local topology; Ray placement is explicit/contextual.
+
+    CPU-only components never probe CUDA. GPU capacity is checked only for a
+    declared local GPU workload, rather than silently switching it to Ray.
+    """
     requirements = worker_requirements(settings, requirements)
     backend = settings.backend
     reason = "explicit backend/profile selection"
     if backend == "auto":
-        if requirements.gpus_per_worker or requirements.cluster or settings.options:
-            backend, reason = "ray", "component requests GPU/cluster resources or worker options"
+        if requirements.cluster or settings.options:
+            backend, reason = "ray", "component requests cluster resources or worker options"
+        elif requirements.workers > 1 and in_ray_placement_group():
+            backend, reason = "ray", "multiple workers inside a Ray placement group"
         elif requirements.workers == 1:
-            backend, reason = "uni", "one CPU worker; model inference is external to this worker"
+            backend, reason = "uni", "one local worker"
         else:
-            backend, reason = "mp", "multiple CPU workers on one host"
-    if backend in ("uni", "mp", "local", "ray") and backend not in requirements.supported_backends:
+            backend, reason = "mp", "multiple workers on one host"
+    if backend in ("uni", "mp", "ray") and backend not in requirements.supported_backends:
         raise ValueError(f"component does not support executor {backend!r}")
-    if backend in ("uni", "mp", "local") and (
-        requirements.gpus_per_worker or requirements.cluster or settings.options
-    ):
-        raise ValueError(f"executor {backend!r} cannot reserve GPU/cluster resources or accept worker options")
+    if backend in ("uni", "mp") and (requirements.cluster or settings.options):
+        raise ValueError(f"executor {backend!r} cannot reserve cluster resources or accept worker options")
     if backend == "uni" and requirements.workers != 1:
         raise ValueError("uni requires exactly one worker; reduce execution workers or select mp")
+    if backend in ("uni", "mp") and requirements.gpus_per_worker:
+        local_gpu_assignments(requirements)
     return ExecutorSelection(replace(settings, backend=backend), reason)
+
+
+def in_ray_placement_group() -> bool:
+    """Inspect an existing runtime without importing or initializing Ray."""
+    ray = sys.modules.get("ray")
+    initialized = getattr(ray, "is_initialized", None)
+    if not callable(initialized) or not initialized():
+        return False
+    from ray.util import get_current_placement_group
+
+    return get_current_placement_group() is not None
+
+
+def visible_cuda_devices() -> tuple[str, ...]:
+    """CUDA identities after the caller's visibility mask; CPU paths never call this."""
+    try:
+        import torch
+    except ImportError:
+        raise ValueError("local GPU workers require PyTorch; install it or explicitly select ray") from None
+    count = torch.cuda.device_count()
+    visibility = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visibility is None:
+        return tuple(str(index) for index in range(count))
+    return tuple(device.strip() for device in visibility.split(",") if device.strip())[:count]
+
+
+def local_gpu_assignments(requirements: ExecutionRequirements) -> tuple[tuple[str, ...], ...]:
+    """Disjoint CUDA masks for spawned workers; not cluster-wide reservations."""
+    count = requirements.gpus_per_worker
+    if count != int(count):
+        raise ValueError("local GPU workers require whole GPUs; explicitly select ray for fractional reservations")
+    count = int(count)
+    devices = visible_cuda_devices()
+    required = requirements.workers * count
+    if required > len(devices):
+        raise ValueError(
+            f"workers require {required} GPUs, but only {len(devices)} are visible on this host; "
+            "reduce workers/GPU requirements or explicitly select ray for a cluster"
+        )
+    return tuple(devices[rank * count : (rank + 1) * count] for rank in range(requirements.workers))
 
 
 def executor_settings(config: Mapping[str, Any], selection: Any) -> ExecutorSettings:

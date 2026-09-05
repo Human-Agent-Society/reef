@@ -8,7 +8,7 @@ ready_timeout: 3600
 
 # Service processes launch locally; Slime owns distributed GPU model workers.
 execution:
-  services: local
+  services: auto
   training: ray
   rollout: ray
 

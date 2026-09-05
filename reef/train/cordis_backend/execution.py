@@ -7,7 +7,13 @@ from dataclasses import replace
 from threading import Lock
 
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import ExecutorSelection, ExecutorSettings, select_executor, worker_requirements
+from reef.runtime.executor.config import (
+    ExecutorSelection,
+    ExecutorSettings,
+    local_gpu_assignments,
+    select_executor,
+    worker_requirements,
+)
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.strategies import EpisodeScorer
@@ -135,7 +141,7 @@ def evaluation_executor_config(
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
     if issubclass(backend, RayExecutor) or (
-        selection.settings.backend not in ("uni", "mp", "local")
+        selection.settings.backend not in ("uni", "mp")
         and (requirements.gpus_per_worker or selection.settings.resources.cpus_per_worker is not None)
     ):
         options = {**options, "num_cpus": requirements.cpus_per_worker, "num_gpus": requirements.gpus_per_worker}
@@ -146,4 +152,10 @@ def evaluation_executor_config(
         requirements.gpus_per_worker,
         selection.reason,
     )
-    return ExecutorConfig(backend=backend, options=options, workers=(worker,) * count)
+    workers = (worker,) * count
+    if selection.settings.backend == "mp" and requirements.gpus_per_worker:
+        workers = tuple(
+            replace(worker, options={"cuda_visible_devices": ",".join(devices)})
+            for devices in local_gpu_assignments(requirements)
+        )
+    return ExecutorConfig(backend=backend, options=options, workers=workers)

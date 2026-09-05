@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.local import LocalExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 
 torch = pytest.importorskip("torch")
 
@@ -160,7 +160,7 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
             def shutdown(self):
                 executor.closed = True
 
-        self._rpc = LocalExecutor.from_workers([Worker()], owned=True)
+        self._rpc = UniProcExecutor.from_workers([Worker()], owned=True)
 
 
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
@@ -193,10 +193,10 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
     assert executor.closed
 
 
-def test_rollout_executor_rejects_local_before_gpu_startup(monkeypatch):
+def test_rollout_executor_rejects_uni_before_gpu_startup(monkeypatch):
     _, module = _load_manager_module(monkeypatch)
     with pytest.raises(ValueError, match="Slime-compatible"):
-        module.ReefRolloutManagerImpl(types.SimpleNamespace(reef_rollout_executor_backend="local"), None)
+        module.ReefRolloutManagerImpl(types.SimpleNamespace(reef_rollout_executor_backend="uni"), None)
 
 
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):

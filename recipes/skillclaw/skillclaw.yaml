@@ -17,11 +17,7 @@ model:
 
 execution:
   evolution:
-    backend: auto  # uni for one CPU worker, mp for multiple workers.
-    workers: 1
-    resources:
-      cpus_per_worker: 1
-      gpus_per_worker: 0
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
 
 evolution:
   adapter: pi
