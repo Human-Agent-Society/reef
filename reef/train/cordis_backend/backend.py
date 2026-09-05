@@ -14,18 +14,19 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
-from reef.harness.executor import EpisodeExecutor, LocalExecutor
+from reef.harness.executor import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
+from reef.harness.vendor_install import install_prefix, resolve_binary
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
@@ -570,7 +571,6 @@ class CordisBackend(TrainingBackend):
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
-        self._binary = binary
         self._episode_workers = episode_workers
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
@@ -612,6 +612,14 @@ class CordisBackend(TrainingBackend):
             except OSError as exc:
                 raise ValueError(f"step_record_dir {self._step_record_dir} cannot be created: {exc}") from exc
         self._validate_seed()
+        # Evolution needs the binary at boot, just like the model binding.
+        # Install failures propagate with the missing tool or vendor error.
+        prefix = install_prefix(descriptor)
+        self._binary = binary if binary is not None else resolve_binary(descriptor, prefix=prefix)
+        if binary is None and descriptor.install is not None and isinstance(self._executor, SandboxExecutor):
+            # Bind the whole install: npm launchers are symlinks into packages,
+            # and git installs need both their editable source and their venv.
+            self._executor = replace(self._executor, base_paths=(*self._executor.base_paths, str(prefix)))
 
     @property
     def descriptor(self) -> AdapterDescriptor:
