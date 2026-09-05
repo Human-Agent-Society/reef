@@ -20,10 +20,11 @@ from reef.harness.native import ToolModule
 from reef.harness.native.enforce import ToolFailed
 from reef.harness.native.release_client import ReleaseClient
 from reef.harness.native.seed import SEED_GRAPH
+from reef.harness.nodes import NATIVE_RESERVED_TOOL_NAMES
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 #: The names the host plane owns; a tree entry that takes one fails to mount.
-RESERVED_NAMES = ("harness_inspect", "harness_propose", "harness_try")
+RESERVED_NAMES = NATIVE_RESERVED_TOOL_NAMES
 #: How many catalog rows ``harness_inspect("verdicts")`` returns, newest first.
 VERDICT_ROWS = 20
 

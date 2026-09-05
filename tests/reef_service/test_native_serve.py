@@ -513,6 +513,7 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
             "parent_release_id": None,
             "follow": "head",
             "entries": 2,
+            "degraded": [],
             "pending_mount": None,
             "sessions": 0,
             "socket": str(socket_path),
@@ -666,6 +667,7 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_verdicts_and_the_status(
         "parent_release_id": None,
         "follow": "head",
         "entries": 2,
+        "degraded": [],
         "pending_mount": None,
         "sessions": 1,
         "socket": str(socket_path),
@@ -811,3 +813,133 @@ def test_the_capture_proxy_tags_calls_live_and_publishes_per_turn(
     harness_wrapper.report(SCENARIO, "native", 0.5, "first turn")
     harness_wrapper.report(SCENARIO, "native", 0.5, "second turn")
     assert [report["references"] for report in reef.reports] == [["r-1"], ["r-3"]]
+
+
+# -- what the refuter pass found -----------------------------------------------------------------------------
+
+
+def test_a_mount_that_orphans_the_pinned_graph_closes_the_turn_with_an_error(tmp_path: Path, reef: _FakeReef) -> None:
+    helper = _entry("helper", "native_agent", name="helper", prompt="You help.", max_steps=1)
+    stages = {
+        "think": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "delegate": {"kind": "subagent", "agent": "helper"},
+        "done": {"kind": "end", "reason": "completed"},
+    }
+    edges = [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "delegate"},
+        {"from": "act", "when": "done", "to": "think"},
+        *(
+            {"from": "delegate", "when": outcome, "to": "done"}
+            for outcome in ("completed", "gave_up", "budget", "ask")
+        ),
+    ]
+    reef.release("r1", [_tool("shout", "    return 'LOUD'"), helper, _graph(stages, edges)])
+    dest = _tree(tmp_path, reef, "r1")
+    # The first answer names r2, which drops the helper and the delegate stage; the graph this turn walks is r1's.
+    reef.replies = [_reply(tool_calls=[_call("shout", {}, "c1")]), _reply("thinking done"), _reply("helper")]
+    with _running(dest) as server:
+        _wait(lambda: reef.polls >= 1)
+        reef.release("r2", [_tool("shout", "    return 'LOUD'"), _graph(SEED_STAGES, SEED_EDGES)], parent="r1")
+        result, streamed = _turn(server, "go")
+        assert result["exit"] == 1 and result["text"] == ""
+        ended = _typed(streamed, "turn/end")[-1]
+        assert ended["reason"]["kind"] == "error" and ended["reason"]["error"]["code"] == "TURN_ERROR"
+        assert "helper" in ended["reason"]["error"]["message"]
+        assert server.status()["release_id"] == "r2"
+        # The process and the session both survive: the next turn runs the mounted graph.
+        reef.replies = [_reply("second")]
+        again, _ = _turn(server, "again", session=result["session"])
+        assert again["exit"] == 0 and again["text"] == "second" and again["turn"] == 2
+
+
+def test_a_rollback_that_cannot_reimport_is_logged_and_named_by_status(
+    tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "once.marker"
+    monkeypatch.setenv("ONCE_MARKER", str(marker))
+    once = _tool("once", "    return 'once'")
+    # An import that is not idempotent: the second import of the same module fails on the marker it left.
+    once["config"][
+        "code"
+    ] = "import os\nopen(os.environ['ONCE_MARKER'], 'x').close()\n\n\ndef run(args, workdir):\n    return 'once'\n"
+    reef.release("r1", [once, _tool("other")])
+    dest = _tree(tmp_path, reef, "r1")
+    with _running(dest, poll_interval_s=0.1) as server:
+        assert sorted(server.host.tools) == ["once", "other"] and marker.exists()
+        broken = _tool("broken")
+        broken["config"]["code"] = "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n"
+        reef.release("r2", [broken], parent="r1")
+        log = server.sessions_dir / serve.SERVE_LOG
+        _wait(lambda: bool(_typed(_events(log), "harness/rollback-failed")))
+        failed = _typed(_events(log), "harness/rollback-failed")[0]
+        assert failed["entry"] == "once" and "FileExistsError" in failed["error"] and failed["release_id"] == "r1"
+        assert server.status()["degraded"] == ["once"] and sorted(server.host.tools) == ["other"]
+        # A mount that lands clears the mark: the composition is again what the release says.
+        marker.unlink()
+        reef.release("r3", [once, _tool("other")], parent="r1")
+        _wait(lambda: server.status()["release_id"] == "r3")
+        assert server.status()["degraded"] == [] and sorted(server.host.tools) == ["once", "other"]
+
+
+def test_a_session_from_a_previous_process_is_not_silently_resumed(tmp_path: Path, reef: _FakeReef) -> None:
+    reef.release("r1", [_graph(SEED_STAGES, SEED_EDGES)])
+    dest = _tree(tmp_path, reef, "r1")
+    reef.replies = [_reply("first")]
+    with _running(dest) as server:
+        first, _ = _turn(server, "one", session="abc123")
+        assert first["turn"] == 1
+    reef.replies = [_reply("second")]
+    with _running(dest) as server:
+        payload = {"turn": {"prompt": "two", "session": "abc123", "workdir": str(dest)}}
+        reply = serve.request(server.socket_path, payload, _Lines())
+        assert reply["type"] == "error" and "predates this process" in reply["data"]["message"]
+        fresh, _ = _turn(server, "two")
+        assert fresh["turn"] == 1 and fresh["session"] != "abc123"
+    events = _events(_session_file(server, "abc123"))
+    assert [e["data"]["turn"] for e in events if e["type"] == "turn/start"] == [1]
+
+
+def test_the_release_client_poll_skips_rows_pending_review() -> None:
+    class _Catalog(serve.ReleaseClient):
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            super().__init__("http://127.0.0.1:9", "tok", SCENARIO)
+            self._rows = rows
+
+        def releases(self) -> list[dict[str, Any]]:
+            return list(self._rows)
+
+    assert _Catalog([]).poll() is None
+    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": True}]).poll() == "r1"
+    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": False}]).poll() == "r2"
+    assert _Catalog([{"release_id": "r1", "pending": True}]).poll() is None
+
+
+def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:
+    from reef.harness.nodes import NODE_KINDS
+
+    for name in RESERVED_NAMES:
+        config = {**_tool(name)["config"]}
+        with pytest.raises(ValueError, match="reserved for the host plane"):
+            NODE_KINDS["native_tool"](None, config)
+
+
+def test_the_self_tools_run_in_process_when_the_environment_names_bwrap(
+    tmp_path: Path, reef: _FakeReef, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "bwrap").write_text("#!/bin/sh\necho 'bwrap: must not run for a host plane tool' >&2\nexit 1\n")
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+    reef.release("r1", [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)])
+    reef.replies = [_reply(tool_calls=[_call("harness_inspect", {"what": "status"}, "c1")]), _reply("seen")]
+    with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
+        result, streamed = _turn(server, "look")
+    assert result["text"] == "seen"
+    status = _typed(streamed, "tool/result")[0]
+    assert status["is_error"] is False and json.loads(status["content"])["release_id"] == "r1"
+    assert status["enforcement"] == {"mode": "none", "denied": []}
+    assert _typed(streamed, "session")[0]["enforcement"] == "bwrap"

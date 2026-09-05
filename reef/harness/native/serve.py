@@ -276,12 +276,12 @@ class _Conversation:
 
 
 class _Pending:
-    """One queued release mount and the answer whoever queued it waits for."""
+    """One queued release mount and the answer whoever queued it waits for; the manifest is fetched when it lands."""
 
-    def __init__(self, manifest: Mapping[str, Any], source: str) -> None:
-        self.manifest = dict(manifest)
+    def __init__(self, release_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
+        self.manifest: dict[str, Any] | None = None if manifest is None else dict(manifest)
         self.source = source
-        self.release_id = str(manifest.get("release_id") or "")
+        self.release_id = release_id
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
 
@@ -344,6 +344,8 @@ class Server:
         self._parent_release_id: str | None = None
         self._pending: _Pending | None = None
         self._trial: str | None = None
+        #: Entries a rollback could not bring back; empty while the composition is what the release says.
+        self._degraded: list[str] = []
         self._conversations: dict[str, _Conversation] = {}
         self._current: _Conversation | None = None
         self._deadline = 0.0
@@ -388,6 +390,7 @@ class Server:
                 "parent_release_id": self._parent_release_id,
                 "follow": self.follow,
                 "entries": len(self._served),
+                "degraded": list(self._degraded),
                 "pending_mount": None if self._pending is None else self._pending.release_id,
                 "sessions": len(self._conversations),
                 "socket": str(self.socket_path),
@@ -520,12 +523,8 @@ class Server:
         return _error("request must carry turn or control")
 
     def mount(self, release_id: str) -> dict[str, Any]:
-        """A manual mount: fetch the release, queue it, and answer once it landed or failed."""
-        try:
-            manifest = self.client.fetch(release_id)
-        except ReleaseClientError as exc:
-            return {"mounted": False, "release_id": release_id, "error": str(exc)}
-        pending = self._enqueue(manifest, "release")
+        """A manual mount: queue the release and answer once it landed or failed."""
+        pending = self._enqueue(release_id, "release")
         self._drain_if_idle()
         return pending.wait(self.turn_timeout_s + 5.0)
 
@@ -536,11 +535,13 @@ class Server:
         if self.follow == "pinned":
             self._log.write("release/available", {"release_id": release_id})
             return
-        self._enqueue(self.client.fetch(release_id), "release")
+        # Only the id is queued here: the caller may be the proxy's relay thread, and the manifest fetch belongs
+        # to the thread that mounts, so an inference answer is never held behind a round trip to reef.
+        self._enqueue(release_id, "release")
         self._drain_if_idle()
 
-    def _enqueue(self, manifest: Mapping[str, Any], source: str) -> _Pending:
-        pending = _Pending(manifest, source)
+    def _enqueue(self, release_id: str, source: str) -> _Pending:
+        pending = _Pending(release_id, source)
         with self._state_lock:
             previous, self._pending = self._pending, pending
         if previous is not None:
@@ -567,10 +568,10 @@ class Server:
             pending.settle(self._mount_manifest(pending))
 
     def _mount_manifest(self, pending: _Pending) -> dict[str, Any]:
-        manifest = pending.manifest
         try:
+            manifest = pending.manifest if pending.manifest is not None else self.client.fetch(pending.release_id)
             entries = _entries_from_manifest(manifest)
-        except ServeError as exc:
+        except (ServeError, ReleaseClientError) as exc:
             self._log.write(
                 "harness/mount-failed",
                 {"release_id": pending.release_id, "source": pending.source, "entry": None, "error": str(exc)},
@@ -608,6 +609,10 @@ class Server:
         previous = self.served_entries()
         failures = self._reserved(entries)
         if not failures:
+            if self._degraded:
+                # A FAILED entry whose options did not change never retries on its own (only update() does), so a
+                # composition a rollback left degraded is reloaded clean under the next mount.
+                self._loader.root.update([])
             self._loader.root.update([copy.deepcopy(dict(entry)) for entry in entries])
             failures = _failures(self._loader)
         if failures:
@@ -618,6 +623,8 @@ class Server:
                 {"release_id": release_id, "source": source, "entry": entry, "kind": kind, "error": error},
             )
             return {"entry": entry, "error": error}
+        with self._state_lock:
+            self._degraded = []
         if source in ("boot", "release"):
             with self._state_lock:
                 self._served = [copy.deepcopy(dict(entry)) for entry in entries]
@@ -660,11 +667,22 @@ class Server:
         return failures
 
     def _restore(self, previous: Sequence[Mapping[str, Any]]) -> None:
+        """Mount ``previous`` back; what still fails after a clean reload is logged and named by ``status``."""
         self._loader.root.update([copy.deepcopy(dict(entry)) for entry in previous])
-        if _failures(self._loader):
+        left = _failures(self._loader)
+        if left:
             # An in place rollback can trip on a name two entries swapped; a clean reload restores the composition exactly.
             self._loader.root.update([])
             self._loader.root.update([copy.deepcopy(dict(entry)) for entry in previous])
+            left = _failures(self._loader)
+        with self._state_lock:
+            self._degraded = [entry for entry, _, _ in left]
+        for entry, kind, error in left:
+            # A module whose import is not idempotent cannot come back; the log and the status say so, loudly.
+            self._log.write(
+                "harness/rollback-failed",
+                {"release_id": self._release_id, "entry": entry, "kind": kind, "error": error},
+            )
 
     def _install(self, manifest: Mapping[str, Any]) -> None:
         """What a restart boots from: the mounted release's tree file and the sidecar naming it."""
@@ -672,10 +690,12 @@ class Server:
         text = files.get(f"native/{TREE_FILE}") if isinstance(files, Mapping) else None
         if isinstance(text, str):
             (self.native / TREE_FILE).write_text(text, encoding="utf-8")
+        # The same fields the install script writes (``files`` is what a rerun prunes by), plus the parent and the time.
         record = {
             "release_id": manifest.get("release_id"),
-            "parent_release_id": manifest.get("parent_release_id"),
             "content_id": manifest.get("content_id"),
+            "files": sorted(files) if isinstance(files, Mapping) else [],
+            "parent_release_id": manifest.get("parent_release_id"),
             "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
         (self.dest / HARNESS_RELEASE_SIDECAR).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -732,6 +752,11 @@ class Server:
                     session_id = secrets.token_hex(6)
             conversation = self._conversations.get(session_id)
             if conversation is None:
+                if (self.sessions_dir / session_id / "session.jsonl").exists():
+                    # The history is on disk but not in this process; resuming as turn 1 would hide that.
+                    raise ServeError(
+                        f"session {session_id!r} predates this process and cannot be continued; start a new session"
+                    )
                 conversation = self._conversations[session_id] = _Conversation(
                     session_id, self.sessions_dir / session_id
                 )
@@ -749,6 +774,7 @@ class Server:
             self._current = conversation
             self._log.bind(session)
             self._deadline = time.monotonic() + self.turn_timeout_s
+            run: Run | None = None
             try:
                 run = self._begin_turn(conversation, prompt, workdir, session)
                 exit_code = run_graph(run, self._host.graph("main"))
@@ -758,6 +784,13 @@ class Server:
                     "turn": run.turn,
                     "text": _last_text(run.messages),
                 }
+            except Exception as exc:
+                # The host changes under a graph pinned at turn start (a mount that dropped an agent the graph
+                # names), so the turn ends in the log with the failure instead of the connection dying on it.
+                failure = {"code": "TURN_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600]}
+                turn_number = run.turn if run is not None else 1
+                session.write("turn/end", {"turn": turn_number, "reason": {"kind": "error", "error": failure}})
+                result = {"exit": 1, "session": conversation.id, "turn": turn_number, "text": ""}
             finally:
                 self._unmount_trial()
                 self._proxy.publish_turn()

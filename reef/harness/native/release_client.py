@@ -77,12 +77,13 @@ class ReleaseClient:
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:
-        """The head: the last catalog row's release id, or None while the scenario has no release."""
-        rows = self.releases()
-        if not rows:
-            return None
-        release = rows[-1].get("release_id")
-        return str(release) if release else None
+        """The head: the last catalog row that is not pending review, or None while the scenario has no release."""
+        for row in reversed(self.releases()):
+            if row.get("pending"):
+                continue  # a release held for review is not served yet, so it is not the head
+            release = row.get("release_id")
+            return str(release) if release else None
+        return None
 
     def fetch(self, release_id: str) -> dict[str, Any]:
         """One release's manifest; its ``files`` carry ``native/tree.json`` and ``gate`` the verdict."""
