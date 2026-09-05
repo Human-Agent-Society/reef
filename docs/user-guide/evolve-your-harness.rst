@@ -467,7 +467,13 @@ new head and waits for a person. ``reef-native mount <release_id> --tree
 rolls the process back locally; under ``head`` too, a release mounted by
 hand stands until the head moves again. A Reef that does not answer logs
 ``release/poll-failed`` with the error and the next retry, doubling up to
-ten minutes, and the process keeps serving.
+ten minutes, and the process keeps serving. A Reef that is busy is polled
+again at the interval: a catalog read waits behind a running evolve step,
+so a poll that times out during one retries at the interval and the head
+lands as soon as the step ends. A manifest read that times out the same way
+logs ``harness/mount-failed`` and is retried by the next poll that names
+the head, so a release published between two steps mounts once the steps
+are over.
 
 ``--self-tools`` gives the model three host plane tools. The tree cannot
 remove them or take their names, and they are absent in the episode form,

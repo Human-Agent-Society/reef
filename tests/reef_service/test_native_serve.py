@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -26,6 +27,7 @@ import pytest
 from reef.harness import harness_wrapper
 from reef.harness.harness_wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy
 from reef.harness.native import serve
+from reef.harness.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.native.selftools import RESERVED_NAMES
 from reef.harness.native.serve import ServeError, Server, admit_mutations
 from reef.train.cordis_backend.strategies import Mutation
@@ -90,6 +92,7 @@ class _FakeReef(ThreadingHTTPServer):
         self.proposals_route = True
         self.fail_releases = False
         self.delay_s = 0.0
+        self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -139,6 +142,9 @@ class _Handler(BaseHTTPRequestHandler):
                 row["current"] = row["release_id"] == reef.head
             self._json(200, {"scenario": SCENARIO, "releases": rows})
         elif split.path == "/reef/harness":
+            if reef.hang_manifest_s:
+                hang, reef.hang_manifest_s = reef.hang_manifest_s, 0.0
+                time.sleep(hang)
             release_id = parse_qs(split.query).get("release_id", [reef.head])[0]
             row = reef.releases.get(release_id)
             if row is None:
@@ -423,6 +429,79 @@ def test_a_poll_failure_is_logged_with_backoff_and_the_process_keeps_serving(tmp
         reef.fail_releases = False
         reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
         _wait(lambda: server.status()["release_id"] == "r2")
+
+
+def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_backs_off() -> None:
+    """A catalog read that waits behind a running evolve step's lock times out: a busy Reef, polled again at
+    the interval so the head lands as soon as the step ends. Only a Reef that does not answer at all backs off."""
+
+    class _Client:
+        def __init__(self, outcomes: list[Any]) -> None:
+            self.outcomes = outcomes
+
+        def poll(self) -> str | None:
+            outcome = self.outcomes.pop(0) if self.outcomes else "r1"
+            if isinstance(outcome, Exception):
+                raise outcome
+            return str(outcome)
+
+    class _Sink:
+        def __init__(self) -> None:
+            self.heads: list[tuple[str, str]] = []
+
+        def new_head(self, release_id: str, source: str) -> None:
+            self.heads.append((release_id, source))
+
+    events: list[dict[str, Any]] = []
+
+    class _Log:
+        def write(self, type_: str, data: Any) -> None:
+            events.append({"type": type_, **data})
+
+    busy = ReleaseClientError("GET /reef/harness/releases failed: TimeoutError: timed out", timed_out=True)
+    down = ReleaseClientError("GET /reef/harness/releases failed: URLError: Connection refused")
+    sink = _Sink()
+    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), sink, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
+    watch.start()
+    try:
+        _wait(lambda: sink.heads == [("r2", "poll")])
+    finally:
+        watch.stop()
+    assert [event["type"] for event in events] == ["release/poll-failed"] * 5
+    assert [event["retry_in_s"] for event in events] == [0.01, 0.01, 0.01, 0.01, 0.02]
+
+
+def test_a_manifest_fetch_that_times_out_is_retried_by_the_next_poll(tmp_path: Path, reef: _FakeReef) -> None:
+    """The head moved, the poll saw it, and the manifest read then waited behind the next step's lock: the mount
+    fails on the timeout, and the next poll that names the head announces it again instead of leaving it."""
+    reef.release("r1", [_tool("one")])
+    with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1, release_timeout_s=0.2) as server:
+        log = server.sessions_dir / serve.SERVE_LOG
+        reef.hang_manifest_s = 0.6
+        reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
+        _wait(lambda: server.status()["release_id"] == "r2", timeout_s=10.0)
+        failed = _typed(_events(log), "harness/mount-failed")
+        assert [f["release_id"] for f in failed] == ["r2"] and "timed out" in failed[0]["error"]
+        assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1", "r2"]
+
+
+def test_a_release_request_that_times_out_is_marked_busy_and_a_refused_one_is_not() -> None:
+    listener = socket.socket()
+    try:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        # A port that accepts the connection and never answers: the read times out, as behind a step's lock.
+        client = ReleaseClient(f"http://127.0.0.1:{listener.getsockname()[1]}", None, "s", timeout_s=0.05)
+        with pytest.raises(ReleaseClientError) as busy:
+            client.releases()
+        assert busy.value.timed_out is True and "timed out" in str(busy.value)
+        listener.close()
+        with pytest.raises(ReleaseClientError) as refused:
+            client.releases()
+        assert refused.value.timed_out is False and refused.value.status is None
+    finally:
+        with contextlib.suppress(OSError):
+            listener.close()
 
 
 def test_the_turn_timeout_ends_the_turn_before_the_next_step(tmp_path: Path, reef: _FakeReef) -> None:
