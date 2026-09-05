@@ -328,14 +328,8 @@ does not contain local process or Ray placement operations.
 
 Omitted selectors (or YAML ``null``) use ``auto``. Existing YAML without
 resource reservations or a Ray placement-group context continues to launch
-services locally and Slime workers through Ray:
-
-.. code:: yaml
-
-   execution:
-     services: auto
-     training: auto
-     rollout: auto
+services locally and Slime workers through Ray. No ``execution`` block is
+needed unless overriding those defaults.
 
 Selection happens before the Executor factory imports the chosen class.
 Service startup and the Slime driver log the selected backend and reason.
@@ -375,7 +369,6 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
 .. code:: yaml
 
    execution:
-     services: auto
      training: ray
      rollout: ray
 

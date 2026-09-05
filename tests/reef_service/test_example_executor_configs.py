@@ -1,4 +1,4 @@
-"""Shipped example placement stays explicit without starting any services."""
+"""Shipped examples use service defaults and explicit worker placement overrides."""
 
 from pathlib import Path
 
@@ -32,7 +32,9 @@ EVOLUTION_CONFIGS = (
 @pytest.mark.parametrize("relative", SERVICE_CONFIGS)
 def test_examples_keep_service_processes_local_and_slime_workers_on_ray(relative):
     config = yaml.safe_load((ROOT / relative).read_text())
-    assert config["execution"]["services"] == "auto"
+    assert "services" not in config.get("execution", {})
+    assert "execution" not in config or config["execution"]
+    assert role_executor_settings(config, "services").backend == "auto"
     services = validate_services(config, relative)
     for service in services:
         assert service_executor_selection(config, service).settings.backend == "uni"

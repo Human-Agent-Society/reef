@@ -29,7 +29,6 @@
 #   directly; no torch_dist conversion needed).
 
 execution:
-  services: auto
   training: ray
   rollout: ray
 

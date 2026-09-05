@@ -5,7 +5,6 @@
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
 execution:
-  services: auto
   evolution:
     workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
 
