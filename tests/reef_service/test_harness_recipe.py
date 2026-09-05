@@ -628,6 +628,26 @@ def test_recovered_state_wins_over_the_seed(tmp_path: Path) -> None:
     assert seen == [(("rules", {"text": "Answer briefly."}),)]
 
 
+def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not_run(tmp_path: Path) -> None:
+    """A tree that cannot load or a graph that cannot run writes no answer; it ranks below every real score
+    instead of tying a current tree that also scored nothing. Any other nonzero exit still scores."""
+    b = backend(tmp_path, lambda n, s, m: None)
+    session = {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root"}}
+
+    def result(reason: dict, exit_code: int) -> EpisodeResult:
+        end = {"type": "turn/end", "seq": 2, "time": 0, "data": {"turn": 1, "reason": reason}, "rules": "marker"}
+        return EpisodeResult(exit_code=exit_code, stdout="", stderr="boom", trajectory=(session, end), residue=())
+
+    error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
+    errored = b._score_result(result({"kind": "error", "error": error}, 1), "task one")
+    assert errored.score is None and errored.failure is not None
+    assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
+    assert errored.path == {"stages": [], "reason": "error", "error": error}
+    crashed = b._score_result(result({"kind": "completed"}, 1), "task one")
+    assert crashed.score == 1.0 and crashed.failure is not None and crashed.failure.stage == "exit"
+    assert crashed.path == {"stages": [], "reason": "completed"}
+
+
 def test_invalid_seed_refuses_boot_naming_the_entry(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"seed entry 'r1' rejected: .*'text'"):
         backend(tmp_path, lambda n, s, m: None, seed=({"id": "r1", "name": "rules", "config": {}},))

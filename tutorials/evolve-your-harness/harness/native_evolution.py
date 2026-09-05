@@ -5,7 +5,8 @@ one mutation on a skill, a ``native_tool`` (a schema plus a module defining
 ``run(args, workdir) -> str``), a ``native_hook`` (a module defining
 ``listen(payload, next) -> decision`` at one loop event), a ``native_agent``
 (a helper with its own prompt, tools and budget that a graph's subagent stage
-calls) or the ``native_graph`` that is the loop's own control flow. ``evaluate`` reads
+calls; the proposal then also carries the graph edit that reaches it) or the
+``native_graph`` that is the loop's own control flow. ``evaluate`` reads
 the native-jsonl trajectory. The grader and the answer table are shared with
 ``evolution.py``, so ``run.py`` scores recorded traffic the same way for
 both variants.
@@ -17,7 +18,7 @@ import logging
 from harness.evolution import _ENTRY_NAME, grade_text
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")
-EVENTS = ("pre_step", "request_error", "post_execute")
+EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 
 #: The one JSON object the model answers with, per kind.
 SHAPES = (
@@ -100,7 +101,47 @@ def propose(nodes, samples, models):
     # Convention: a node's entry id is its name, so an id matching a node of
     # the same kind updates it and a new id creates a sibling.
     op = "update" if any(k == kind and c.get("name") == entry_id for k, c in nodes) else "create"
-    return Mutation(op, entry_id, {"name": kind, "config": config})
+    mutation = Mutation(op, entry_id, {"name": kind, "config": config})
+    if kind != "native_agent":
+        return mutation
+    # An agent alone changes nothing: only a subagent stage runs one. The proposal carries the graph edit too.
+    route = _route_through_agent(nodes, entry_id)
+    return mutation if route is None else [mutation, route]
+
+
+def _route_through_agent(nodes, name):
+    """The graph mutation that makes a proposed agent reachable: the main graph's model stage hands its text to
+    a new subagent stage for ``name`` and the agent's outcomes go where the text went; ``None`` when the main
+    graph has no such edge or already routes through the agent."""
+    from reef.train.cordis_backend import Mutation  # lazy: keeps run.py reef-free
+
+    graph = next(
+        (dict(config) for kind, config in nodes if kind == "native_graph" and config.get("name") == "main"), None
+    )
+    if graph is None:
+        return None
+    stages = {key: dict(value) for key, value in (graph.get("stages") or {}).items()}
+    edges = [dict(edge) for edge in graph.get("edges") or ()]
+    stage = f"ask-{name}"
+    if stage in stages:
+        return None
+    text_edge = next(
+        (
+            edge
+            for edge in edges
+            if edge.get("when") == "text" and stages.get(edge.get("from"), {}).get("kind") == "model"
+        ),
+        None,
+    )
+    if text_edge is None:
+        return None
+    target = text_edge["to"]
+    text_edge["to"] = stage
+    stages[stage] = {"kind": "subagent", "agent": name}
+    edges.extend(
+        {"from": stage, "when": outcome, "to": target} for outcome in ("completed", "gave_up", "budget", "ask")
+    )
+    return Mutation("update", "main", {"name": "native_graph", "config": {**graph, "stages": stages, "edges": edges}})
 
 
 def evaluate(task: str, result) -> float:

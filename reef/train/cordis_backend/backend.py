@@ -1044,8 +1044,9 @@ class CordisBackend(TrainingBackend):
     def _run_and_score(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
-        would otherwise discard: the failure's stage and cause. A nonzero
-        exit still scores, as before, and is observed alongside the score.
+        would otherwise discard: the failure's stage and cause. A native turn
+        that ended on an error could not run either; any other nonzero exit
+        still scores, as before, and is observed alongside the score.
         The residue counts files the episode left outside the cleanup
         whitelist; with ``forbid_residue`` a littering episode scores as one
         that could not run. ``keep_dir`` receives the episode's trajectory
@@ -1083,6 +1084,14 @@ class CordisBackend(TrainingBackend):
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return _ScoredEpisode(
                 None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+            )
+        if path.get("error") is not None:
+            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run):
+            # nothing it wrote is an answer, so it ranks below every real score instead of tying a zero.
+            error = path["error"]
+            cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
+            return _ScoredEpisode(
+                None, FailureObservation(task=task, stage="graph", cause=cause), residue, agents, path
             )
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
@@ -1220,6 +1229,7 @@ def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
     stages: list[str] = []
     reason: str | None = None
+    error: Mapping[str, Any] | None = None
     agent: str | None = None
     for event in trajectory:
         type_, data = event.get("type"), event.get("data") or {}
@@ -1230,9 +1240,14 @@ def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         elif type_ == "stage/exit":
             stages.append(str(data.get("stage")))
         elif type_ == "turn/end":
-            kind = (data.get("reason") or {}).get("kind")
+            details = data.get("reason") or {}
+            kind = details.get("kind")
             reason = None if kind is None else str(kind)
-    return {"stages": stages, "reason": reason}
+            error = details.get("error") if kind == "error" and isinstance(details.get("error"), Mapping) else None
+    path: dict[str, Any] = {"stages": stages, "reason": reason}
+    if error is not None:
+        path["error"] = dict(error)
+    return path
 
 
 def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:

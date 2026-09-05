@@ -116,9 +116,32 @@ def main():
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
     print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
-        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/")):
+        if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/", "/agents/")):
             print(f"--- {path} ---")
             print(text)
+    _wait_for_steps(client, failures, deadline)
+
+
+def _wait_for_steps(client, expected, deadline):
+    """Every batched report runs one step; wait for the rest so each verdict is on the record before run.sh
+    stops the service, and print the later verdicts as the catalog lists them."""
+    shown = 0
+    while time.monotonic() < deadline:
+        try:
+            rows = client.get("/reef/harness/releases", extra_headers={"x-reef-scenario": SCENARIO})["releases"]
+        except (ReefClientError, TimeoutError, OSError):
+            time.sleep(2.0)  # a step in flight holds the catalog; ask again
+            continue
+        steps = [row for row in rows if row.get("operation") == "training"]
+        for row in steps[shown:]:
+            metrics = row.get("metrics") or {}
+            verdict = "published" if metrics.get("published") else metrics.get("skipped") or "rejected"
+            print(f"step {metrics.get('steps', '?')}: {verdict} (release {row['release_id'][:12]})")
+        shown = len(steps)
+        if shown >= expected:
+            return
+        time.sleep(2.0)
+    print(f"{expected - shown} step(s) still pending at the deadline; their verdicts land in the commit log")
 
 
 # -- the native variant: the serve form ----------------------------------------------------------------------

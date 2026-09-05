@@ -19,7 +19,7 @@ from typing import Any, NoReturn, Protocol
 
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native.seed import SEED_GRAPH
-from reef.harness.nodes import validate_native_graph
+from reef.harness.nodes import NATIVE_MATCH_WINDOW, validate_native_graph
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
 TRANSITIONS_PER_STEP = 16
@@ -370,7 +370,8 @@ class Run:
             elif when == "tool_errors_at_least":
                 hit = self.tool_errors >= int(value)
             else:
-                hit = re.search(str(value), text) is not None
+                # Admission refused nested quantifiers; the window bounds what a pattern can still cost.
+                hit = re.search(str(value), text[-NATIVE_MATCH_WINDOW:]) is not None
             if hit:
                 return str(case["outcome"]), {"case": when, "value": value}
         return "else", {"case": "else"}

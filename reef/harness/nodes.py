@@ -69,6 +69,12 @@ NATIVE_GRAPH_MAX_STEPS = 32
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
+#: A proposed pattern's length limit, and how much of the last assistant text a branch matches against.
+NATIVE_PATTERN_MAX_LENGTH = 200
+NATIVE_MATCH_WINDOW = 4096
+#: A quantified group that itself holds a quantifier: (a+)+, (?:x*y)*, (a{2}){3}; the shape that backtracks
+#: exponentially. Escaped characters are skipped so \( and \+ do not count.
+_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)(?:[+*{]|\?)")
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -305,13 +311,7 @@ def _graph_stage(name: str, stage: Any) -> str:
                 f"native_graph stage {name!r} takes 'pattern' exactly when its check is last_line_matches"
             )
         if "pattern" in stage:
-            pattern = stage["pattern"]
-            if not isinstance(pattern, str) or not pattern:
-                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression")
-            try:
-                re.compile(pattern)
-            except re.error as exc:
-                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression: {exc}") from exc
+            _admit_pattern(stage["pattern"], f"native_graph stage {name!r} 'pattern'")
         if "message" in stage:
             _reject_secret_shaped_text(_require_text(stage, "message"), f"native_graph stage {name!r} 'message'")
     elif kind == "message":
@@ -329,6 +329,25 @@ def _graph_stage(name: str, stage: Any) -> str:
     return kind
 
 
+def _admit_pattern(value: Any, where: str) -> None:
+    """A proposed regular expression the loop may run: it compiles, it is short, and it nests no quantifier.
+
+    Python's matcher has no step budget, so a pattern such as ``(a+)+b`` from
+    a proposer would hold the interpreter until the episode's wall clock; the
+    nested quantifier rule refuses the shape at admission and the window in
+    the interpreter bounds the rest."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where} must be a regular expression")
+    if len(value) > NATIVE_PATTERN_MAX_LENGTH:
+        raise ValueError(f"{where} must be at most {NATIVE_PATTERN_MAX_LENGTH} characters")
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"{where} must be a regular expression: {exc}") from exc
+    if _NESTED_QUANTIFIER.search(value):
+        raise ValueError(f"{where} must not repeat a group that repeats (a pattern like (a+)+ never finishes)")
+
+
 def _branch_cases(name: str, cases: Any) -> None:
     """A branch's cases: a closed predicate each, a value of that predicate's type, and a distinct outcome."""
     if not isinstance(cases, Sequence) or isinstance(cases, str) or not 1 <= len(cases) <= NATIVE_GRAPH_MAX_CASES:
@@ -343,14 +362,7 @@ def _branch_cases(name: str, cases: Any) -> None:
                 f"native_graph stage {name!r} case 'when' must be one of {', '.join(NATIVE_BRANCH_PREDICATES)}"
             )
         if when == "last_text_matches":
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"native_graph stage {name!r} case 'value' must be a regular expression")
-            try:
-                re.compile(value)
-            except re.error as exc:
-                raise ValueError(
-                    f"native_graph stage {name!r} case 'value' must be a regular expression: {exc}"
-                ) from exc
+            _admit_pattern(value, f"native_graph stage {name!r} case 'value'")
         elif isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= NATIVE_GRAPH_MAX_STEPS:
             raise ValueError(
                 f"native_graph stage {name!r} case 'value' must be an integer from 0 to {NATIVE_GRAPH_MAX_STEPS}"

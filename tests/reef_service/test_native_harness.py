@@ -1120,6 +1120,14 @@ def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> Non
         ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
         ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
+        # A proposer's pattern runs in the loop with no step budget: the shapes that never finish are refused.
+        ({**route, "cases": [{"when": "last_text_matches", "value": "(a+)+b", "outcome": "x"}]}, "never finishes"),
+        (
+            {**route, "cases": [{"when": "last_text_matches", "value": r"(?:\d*x)*y", "outcome": "x"}]},
+            "never finishes",
+        ),
+        ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
+        ({"kind": "verify", "check": "last_line_matches", "pattern": "(a*)*$"}, "never finishes"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": 2, "outcome": "else"}]}, "other than else"),
         (
             {**route, "cases": [{"when": "steps_used_at_least", "value": 1, "outcome": "x"}] * 2},

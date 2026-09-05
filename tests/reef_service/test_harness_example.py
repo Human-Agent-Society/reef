@@ -267,6 +267,63 @@ def test_native_propose_refuses_malformed_shapes(native_evolution) -> None:
         assert native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply)) is None
 
 
+def test_native_propose_accepts_every_event_the_shape_offers(native_evolution) -> None:
+    for event in ("pre_step", "pre_execute", "request_error", "post_execute"):
+        reply = native_proposal(
+            "native_hook", "guard", event=event, code="def listen(payload, next):\n    return next()\n"
+        )
+        mutation = native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply))
+        assert isinstance(mutation, Mutation) and mutation.options["config"]["event"] == event
+
+
+MAIN_GRAPH = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {
+        "think": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "check": {"kind": "verify", "check": "last_line_integer"},
+        "done": {"kind": "end", "reason": "completed"},
+    },
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "check"},
+        {"from": "act", "when": "done", "to": "think"},
+        {"from": "check", "when": "pass", "to": "done"},
+        {"from": "check", "when": "fail", "to": "think"},
+    ],
+}
+
+
+def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_evolution) -> None:
+    """An agent alone can never win: only a subagent stage runs one. The proposal carries the graph edit, and
+    the edited graph passes admission, so one step can add the agent and use it."""
+    from reef.harness.nodes import NODE_KINDS
+
+    reply = native_proposal("native_agent", "helper", prompt="Solve the task alone.", tools=["read_file"])
+    nodes = (*NATIVE_NODES, ("native_graph", MAIN_GRAPH))
+    proposal = native_evolution.propose(nodes, SAMPLES, canned(reply))
+    assert isinstance(proposal, list) and [m.op for m in proposal] == ["create", "update"]
+    agent, route = proposal
+    assert agent.id == "helper" and agent.options["config"]["prompt"] == "Solve the task alone."
+    graph = route.options["config"]
+    assert route.id == "main" and graph["stages"]["ask-helper"] == {"kind": "subagent", "agent": "helper"}
+    assert {"from": "think", "when": "text", "to": "ask-helper"} in graph["edges"]
+    assert [e["to"] for e in graph["edges"] if e["from"] == "ask-helper"] == ["check"] * 4
+    assert [e["when"] for e in graph["edges"] if e["from"] == "ask-helper"] == [
+        "completed",
+        "gave_up",
+        "budget",
+        "ask",
+    ]
+    NODE_KINDS["native_graph"](None, graph)
+    # Without a main graph to route through, or when the graph already asks the agent, the agent stands alone.
+    assert isinstance(native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply)), Mutation)
+    routed = (*NATIVE_NODES, ("native_graph", graph))
+    assert isinstance(native_evolution.propose(routed, SAMPLES, canned(reply)), Mutation)
+
+
 def test_native_evaluate_reads_the_last_assistant_message_with_content(native_evolution) -> None:
     task = "[sieve] count the primes below 100000"
     call = {

@@ -214,7 +214,9 @@ the comparison and publishes nothing.
 
 The edge cases resolve conservatively. A ``None`` proposal skips the step. An
 episode that could not run ranks below every real score, so a candidate
-cannot win on a crash, and when both sides fail the step is a tie. When the
+cannot win on a crash, and when both sides fail the step is a tie; a native
+episode whose turn ended on an error (a tree that cannot load, a graph that
+cannot run) counts as one that could not run, whatever its text. When the
 verdict is a rejection, Reef restores the snapshot it took before the
 mutation. Every verdict is recorded in the scenario's commit log together
 with its mutation (op, id and the full options, so a rejected rewrite is
