@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -597,7 +598,22 @@ def _install_fixture(
         _write_executable(prefix / "node_modules/.bin/pi", f"#!/bin/sh\necho {binary_version}\n")
     shim = tmp_path / "shim"
     _write_executable(shim / "npm", npm)
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    # The script's own python3: the interpreter running the tests, so its
+    # reef bootstrap sees an environment where reef is already importable and
+    # never shells out to `pip install --user` from GitHub, which would install
+    # reef-infra into user site-packages and change what every later
+    # subprocess reports as the reef version.
+    _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    # ... and the checkout on its path, so the bootstrap's import check passes
+    # from any cwd. CI runs the suite against the source tree rather than an
+    # installed reef-infra, so without this a test that runs the script from a
+    # temp cwd reaches the pip branch.
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env = {
+        **os.environ,
+        "PATH": f"{shim}:{os.environ['PATH']}",
+        "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
+    }
     return script, tmp_path / "dest", prefix, env
 
 
@@ -892,6 +908,7 @@ def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
+    assert "not importable by python3" not in result.stderr  # the bootstrap short-circuited
     link = Path.home() / ".local" / "bin" / "reef-pi"
     try:
         assert link.is_symlink()
