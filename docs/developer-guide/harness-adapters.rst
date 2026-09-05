@@ -180,6 +180,7 @@ tool the tree lacks fails at render. The stages:
    verify | reads the last assistant text: ``check`` is ``last_line_integer``, ``last_line_matches`` with a ``pattern``, or ``nonempty``; an optional ``message`` is appended as a user message on failure; outcomes ``pass``, ``fail``
    message | appends ``text`` as a user message; outcome ``done``
    branch | routes on the run so far: ``cases`` is a list of ``{when, value, outcome}`` (at most 8) where ``when`` is ``steps_used_at_least`` or ``tool_errors_at_least`` with an integer ``value``, or ``last_text_matches`` with a regular expression; the first case that holds names the outcome, none names ``else``; every case outcome and ``else`` need an edge
+   subagent | hands the last assistant text (or the task) to the ``native_agent`` named by ``agent``, then down that agent's ``then`` pipeline; the last agent's text comes back as a user message with ``source.kind`` ``agent``; outcomes ``completed``, ``gave_up``, ``budget`` (the agent spent its steps or tool calls), ``ask`` (a ``pre_execute`` hook asked inside the agent's turn, and the reason is what comes back)
    compact | when the messages pass ``fire_ratio`` of the model's context window, one model call summarizes the older span into a user message and the last ``keep_ratio`` of the window stays verbatim (a tool result never opens the kept tail without its call); ``0 < keep_ratio < fire_ratio <= 1``; the window is ``context_window`` in ``models.json`` (a ``config`` node with target ``models`` sets it), 32,768 tokens when unset, at four characters a token; the summary call is not a step, and a cycle must pass a model stage, so a run spends at most one per step; outcome ``done``
    end | ends the turn with ``reason`` ``completed`` or ``gave_up``
 
@@ -200,6 +201,27 @@ text a stage injects is a ``user/message`` with
 ``LOAD_ERROR`` like a tool. A run that somehow exceeds
 ``(max_steps + 1) * 16`` transitions ends with ``GRAPH_ERROR``; admission
 proves that cannot happen, the guard is the backstop.
+
+A ``native_agent`` node is one more agent inside the same tree, rendered to
+``native/agents/<name>.json``: its own ``prompt`` (appended to the rules and
+skills as its system prompt), the ``graph`` it runs (``seed``, the built in
+loop, by default; ``main`` or any graph node by name), the ``tools`` and
+``skills`` it alone sees (all of the tree's when unset), ``max_steps`` and
+``max_tool_calls``, and ``then``, the agents its final text is handed to in
+order, each receiving the previous one's text. A graph calls an agent from a
+``subagent`` stage; the tree stays flat, agents are root entries, and render
+refuses a name the tree lacks and any cycle through ``then`` lists and
+subagent stages, so every delegation is a finite tree. An agent's turn runs
+on the parent's remaining step budget (its steps come out of the episode
+total) in its own session file under ``sessions/agents/``, numbered in run
+order and sorting before the root's ``session.jsonl``, so the trajectory's
+last assistant text stays the root's answer and which agent did what is read
+off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
+``pre_execute`` hook that answers ``ask`` inside an agent's turn ends the
+turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
+the parent graph is the one that can answer. The gate's verdict carries
+``candidate_agents`` and ``current_agents``, the turns, steps, tool calls and
+tool errors per agent summed over each side's episodes.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A

@@ -172,11 +172,30 @@ def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
     return hooks
 
 
-def system_prompt(root: Path) -> str:
-    """Rules first, then every skill, in path order."""
-    files = [root / "RULES.md", *sorted((root / "skills").glob("*/SKILL.md"))]
+def system_prompt(root: Path, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str:
+    """Rules first, then every skill in path order (or the named ones), then an agent's own prompt."""
+    skill_files = sorted((root / "skills").glob("*/SKILL.md"))
+    if skills is not None:
+        skill_files = [path for path in skill_files if path.parent.name in skills]
+    files = [root / "RULES.md", *skill_files]
     parts = [path.read_text(encoding="utf-8").strip() for path in files if path.exists()]
+    if prompt:
+        parts.append(prompt.strip())
     return "\n\n".join(part for part in parts if part) or DEFAULT_SYSTEM_PROMPT
+
+
+def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
+    """Every ``*.json`` under ``agents/`` by name, admitted again here so a hand edited file cannot run unchecked."""
+    from reef.harness.nodes import validate_native_agent
+
+    agents: dict[str, Mapping[str, Any]] = {}
+    for path in sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []:
+        try:
+            options = validate_native_agent(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise LoadError(f"agent {path.name} cannot run: {exc}") from exc
+        agents[str(options["name"])] = options
+    return agents
 
 
 def binding_from(models_path: Path) -> ModelBinding:
@@ -384,6 +403,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         try:
             tools = load_tools(root / "tools")
             hooks = load_hooks(root / "hooks")
+            agents = load_agents(root / "agents")
             graph = graphs.load_graph(root)
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
@@ -393,16 +413,20 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             "session",
             {
                 **header,
+                "agent": "root",
+                "turn": 1,
                 "tools": sorted(tools),
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                 "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
                 "graph": graph.source,
+                "agents": sorted(agents),
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root)
+        loop = _Loop(session, root, session_dir, header)
         window = context_window_from(root / "models.json")
-        return graphs.run_graph(graphs.Run(loop, prompt, binding, tools, hooks, workdir, context_window=window), graph)
+        run = graphs.Run(loop, prompt, binding, tools, hooks, workdir, context_window=window, agents=agents)
+        return graphs.run_graph(run, graph)
     finally:
         session.close()
 
@@ -502,9 +526,20 @@ class _Loop:
     SPILL_DIR = SPILL_DIR
     MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
-    def __init__(self, session: Session, root: Path) -> None:
+    def __init__(self, session: Session, root: Path, session_dir: Path, header: Mapping[str, Any] = {}) -> None:
         self.session = session
         self.root = root
+        self.session_dir = session_dir
+        self.header = dict(header)
+        self.turns = 1
+        self.open: list[Session] = []
+
+    def open_turn(self, agent: str) -> tuple[Session, int]:
+        """A session file for one agent turn, numbered in run order under ``agents/``; the root's file sorts last."""
+        self.turns += 1
+        session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
+        self.open.append(session)
+        return session, self.turns
 
     system_prompt = staticmethod(system_prompt)
     _decide = staticmethod(_decide)
