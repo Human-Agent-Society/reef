@@ -46,6 +46,39 @@ def test_git_lfs_repository_initializes_default_local_repository(
 
 
 @pytest.mark.integration
+def test_local_repository_base_carries_the_bootstrap_files_and_an_existing_base_wins(
+    tmp_path: Path,
+    fake_git_lfs: None,
+) -> None:
+    """A recipe's seed lands in the base artifact of a new local repository, so a fresh scenario
+    forks a tree with files; a later constructor with a different seed keeps the base that exists."""
+    remote = tmp_path / "artifacts.git"
+    seeded = GitLFSRepositoryBackend(
+        "first",
+        remote,
+        work_dir=tmp_path / "work-first",
+        cache_dir=tmp_path / "cache",
+        bootstrap_files={"pi-agent/AGENTS.md": "seed rules\n", "pi-agent/skills/a/SKILL.md": "# a\n"},
+    )
+    base = seeded.resolve_release()
+    tree = seeded.materialize(base).local_path
+    assert tree is not None
+    assert (tree / "pi-agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
+    assert (tree / "pi-agent" / "skills" / "a" / "SKILL.md").read_text(encoding="utf-8") == "# a\n"
+    later = GitLFSRepositoryBackend(
+        "second",
+        remote,
+        work_dir=tmp_path / "work-second",
+        cache_dir=tmp_path / "cache",
+        bootstrap_files={"pi-agent/AGENTS.md": "other rules\n"},
+    )
+    assert later.resolve_release().release_id == base.release_id
+    kept = later.materialize(later.resolve_release()).local_path
+    assert kept is not None
+    assert (kept / "pi-agent" / "AGENTS.md").read_text(encoding="utf-8") == "seed rules\n"
+
+
+@pytest.mark.integration
 def test_local_repository_bootstrap_recovers_after_missing_git_lfs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

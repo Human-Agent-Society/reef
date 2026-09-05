@@ -309,7 +309,9 @@ happens.
 Install the published tree
 --------------------------
 
-Clients pull an evolved harness the way they install any coding agent:
+Clients pull an evolved harness the way they install any coding agent. A
+fresh scenario already serves the recipe's seed as its first release, so
+the install works before any step has run:
 
 .. code:: bash
 
@@ -320,7 +322,10 @@ Clients pull an evolved harness the way they install any coding agent:
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
 
-The script installs the pinned agent, writes the tree, and puts a
+The script installs the pinned agent, writes the tree, writes the agent's
+model binding pointed at the Reef the script came from (the served tree
+itself carries no endpoint or credential; the binding takes its token from
+``REEF_TOKEN`` in your shell when the script runs), and puts a
 ``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH. The wrapper keeps
 the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API

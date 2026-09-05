@@ -28,12 +28,18 @@ from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError, load_descriptor
 from reef.harness.episode import EpisodeResult
+from reef.harness.model_binding import ModelBinding
 from reef.harness.render import render_composition
 from reef.recipe import Recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.service.install_script import HARNESS_RELEASE_SIDECAR, composition_checksum, render_install_script
+from reef.service.install_script import (
+    HARNESS_RELEASE_SIDECAR,
+    TOKEN_PLACEHOLDER,
+    composition_checksum,
+    render_install_script,
+)
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
@@ -139,6 +145,7 @@ def _dispatcher(
     bootstrap_files: dict[str, str] | None = None,
     batch_policy: str = "reports",
     batch_size: int = 1,
+    seed: tuple[dict, ...] = (),
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -152,10 +159,12 @@ def _dispatcher(
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
         batch_policy=batch_policy,
         batch_size=batch_size,
+        seed=seed,
     )
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
-    for relative, text in (bootstrap_files or {}).items():
+    # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
+    for relative, text in {**(recipe.base_artifact_files() or {}), **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -559,7 +568,12 @@ def _write_executable(path: Path, text: str) -> None:
 
 
 def _install_fixture(
-    tmp_path: Path, *, binary_version: str | None, npm: str, scenario: str = ""
+    tmp_path: Path,
+    *,
+    binary_version: str | None,
+    npm: str,
+    scenario: str = "",
+    binding_files: dict[str, str] | None = None,
 ) -> tuple[Path, Path, Path, dict]:
     """A rendered script, a PATH shim dir, and an install prefix.
 
@@ -575,6 +589,7 @@ def _install_fixture(
             release_id="v-test",
             content_id="content-test",
             scenario=scenario,
+            binding_files=binding_files,
         )
     )
     prefix = tmp_path / "prefix"
@@ -590,6 +605,41 @@ def _run_install(script: Path, dest: Path, prefix: Path, env: dict) -> subproces
     return subprocess.run(
         ["sh", str(script), str(dest), str(prefix)], env=env, capture_output=True, text=True, timeout=60
     )
+
+
+@pytest.mark.unit
+def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path) -> None:
+    """The served composition carries no endpoint; the script writes the adapter's binding at the Reef it
+    came from, fills the token from REEF_TOKEN at install time, and the wrapper reads the URL back."""
+    from reef.harness.harness_wrapper import _extract_reef_url
+
+    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
+    bound = render_composition(
+        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
+    )
+    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
+    assert TOKEN_PLACEHOLDER in binding_files["pi-agent/models.json"]
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", binding_files=binding_files
+    )
+    result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
+    assert result.returncode == 0, result.stderr
+    models = json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))
+    assert models["providers"]["reef"] == {
+        "api": "openai-completions",
+        "apiKey": "tok-123",
+        "baseUrl": "http://reef.test:8901/v1",
+        "models": [{"id": "qwen3-8b"}],
+    }
+    assert TOKEN_PLACEHOLDER not in (dest / "pi-agent/models.json").read_text(encoding="utf-8")
+    assert _extract_reef_url("pi", dest / "pi-agent") == "http://reef.test:8901"
+    # The composition files and the sidecar are what the manifest served; the binding rides beside them.
+    assert (dest / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == HOSTILE_FILES["pi-agent/AGENTS.md"]
+    # A rerun re-points the tree and exits clean; without a token the script says so and still installs.
+    again = _run_install(script, dest, prefix, {k: v for k, v in env.items() if k != "REEF_TOKEN"})
+    assert again.returncode == 0, again.stderr
+    assert "REEF_TOKEN is not set" in again.stderr
+    assert json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))["providers"]["reef"]["apiKey"] == ""
 
 
 @pytest.mark.unit
@@ -959,6 +1009,38 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
 
 
 @pytest.mark.unit
+def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tmp_path) -> None:
+    """The README flow: a fresh scenario against a recipe with a seed answers the manifest and the
+    install script at once, with the seed's files and a binding at the served model, no step needed."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert manifest.status == 200
+            files = (await manifest.json())["files"]
+            assert files["pi-agent/skills/answer-style/SKILL.md"] == "# seed skill\n"
+            assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
+            response = await client.get(
+                "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}
+            )
+            assert response.status == 200
+            script = await response.text()
+            assert "# seed skill" in script
+            host = f"{client.host}:{client.port}"
+            assert f'"baseUrl": "http://{host}/v1"' in script
+            assert '"id": "demo-model"' in script  # the recipe's runtime model, since no gate ran yet
+            assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
@@ -975,6 +1057,11 @@ def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) 
             assert "npm install --prefix \"$PREFIX\" '@earendil-works/pi-coding-agent@0.84.2'" in script
             assert composition_checksum(second["files"]) in script  # head by default
             assert "marker marker rules" in script  # the composition rides inline
+            # The binding at the Reef this request reached, the token left for the client's environment.
+            host = f"{client.host}:{client.port}"
+            assert f'"baseUrl": "http://{host}/v1"' in script
+            assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
+            assert 'os.environ.get("REEF_TOKEN", "")' in script
             response = await client.get(
                 "/reef/harness/install",
                 params={"adapter": "pi", "release_id": first["release_id"]},
