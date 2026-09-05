@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from reef_service.test_native_enforce import PROBE
+from reef_service.test_native_enforce import PROBE, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episode import run_episode
@@ -1453,8 +1452,8 @@ class _ProbingModel(_FakeModel):
         return _reply(content=f"done: {body['messages'][-1]['content']}")
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap (bwrap) is not on PATH")
 def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+    require_nested_jail()
     model = _ProbingModel()
     try:
         descriptor = get_adapter("native")

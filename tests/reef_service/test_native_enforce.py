@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness.executor import SandboxExecutor, SandboxUnavailable
 from reef.harness.native import ToolModule, _invoke, load_tools
 from reef.harness.native.enforce import (
     CHILD,
@@ -190,8 +191,18 @@ def test_a_sandboxed_call_runs_the_child_protocol_and_keeps_the_error_codes(tmp_
     assert broken["error"]["message"] == "tool process exited 1: bwrap: No permissions to create a new namespace"
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap (bwrap) is not on PATH")
+def require_nested_jail() -> None:
+    """A live jail test runs where two bubblewrap jails nest; elsewhere it skips with the preflight's own reason."""
+    if shutil.which("bwrap") is None:
+        pytest.skip("bubblewrap (bwrap) is not on PATH")
+    try:
+        SandboxExecutor().preflight()
+    except SandboxUnavailable as exc:
+        pytest.skip(str(exc))
+
+
 def test_bwrap_denies_what_the_declaration_withholds(tmp_path: Path) -> None:
+    require_nested_jail()
     work = tmp_path / "work"
     work.mkdir()
     bare = _invoke(_tools(tmp_path, []), "probe", "{}", work, enforcer=BwrapEnforcer())
