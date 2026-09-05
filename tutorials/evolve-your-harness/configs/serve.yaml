@@ -4,14 +4,21 @@
 # This file also carries the harness_evolve recipe sections (implementation, model,
 # evolution, data). The recipe registry reads named recipe configs from
 # REEF_RECIPE_CONFIG_DIR, so run.sh copies those four sections into
-# work/recipes/harness_evolve.yaml.
+# work/recipes/harness_evolve.yaml, together with optional execution/executors sections.
 
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
+
+execution:
+  services: local
 
 model:
   path: qwen3-8b
 
 evolution:
+  # CPU scoring: auto selects uni for one worker, mp for multiple workers.
+  # Workers persist between evaluations; each episode still has its own directory.
+  worker_executor: auto
+  episode_workers: 1
   adapter: pi
   # The method package beside this file (harness/): the reef service resolves
   # these dotted references because run.sh starts it with this cwd.

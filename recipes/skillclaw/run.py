@@ -102,6 +102,7 @@ def load_recipe() -> Any:
     """
     config = load_config(HERE / "skillclaw.yaml")
     sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    sections.update({key: config[key] for key in ("execution", "executors") if key in config})
     runtime = InferenceProxyRuntime(
         model_path=AGENT_MODEL,
         base_url=UPSTREAM_BASE,

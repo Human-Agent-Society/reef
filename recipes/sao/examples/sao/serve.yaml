@@ -23,6 +23,12 @@
 # /tmp/reef-stack, beside every other example's.
 run_dir: work/stack
 
+# Service processes launch locally; Slime owns distributed GPU model workers.
+execution:
+  services: local
+  training: ray
+  rollout: ray
+
 reef:
   host: 127.0.0.1
   model_path: ~/models/Qwen2.5-1.5B-Instruct

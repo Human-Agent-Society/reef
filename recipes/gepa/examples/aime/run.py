@@ -93,6 +93,7 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     """
     config = load_config(HERE / "gepa.yaml")
     sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    sections.update({key: config[key] for key in ("execution", "executors") if key in config})
     evolution = dict(sections["evolution"])
     evolution["tasks"] = tasks
     # One --seed drives both random draws: the proposer's parent sampling
