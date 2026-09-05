@@ -256,7 +256,7 @@ tool the tree lacks fails at render. The stages:
    tools | runs the pending calls of the last assistant message, each behind ``pre_execute`` then ``post_execute``; optional ``allow`` restricts them to named tools; outcome ``done``
    verify | reads the last assistant text: ``check`` is ``last_line_integer``, ``last_line_matches`` with a ``pattern``, or ``nonempty``; an optional ``message`` is appended as a user message on failure; outcomes ``pass``, ``fail``
    message | appends ``text`` as a user message; outcome ``done``
-   branch | routes on the run so far: ``cases`` is a list of ``{when, value, outcome}`` (at most 8) where ``when`` is ``steps_used_at_least`` or ``tool_errors_at_least`` with an integer ``value``, or ``last_text_matches`` with a regular expression; the first case that holds names the outcome, none names ``else``; every case outcome and ``else`` need an edge
+   branch | routes on the run so far: ``cases`` is a list of ``{when, value, outcome}`` (at most 8) where ``when`` is ``steps_used_at_least`` or ``tool_errors_at_least`` with an integer ``value``, or ``last_text_matches`` with a regular expression; the first case that holds names the outcome, none names ``else``; every case outcome and ``else`` need an edge. A pattern, here or in ``verify``, is at most 200 characters and runs in a child process with one second of wall clock, since no static rule tells a pattern that finishes from one that never does; a search that outlives the clock is a case that does not hold or a check that failed, named ``timeout`` in the stage's detail, and a branch matches the last 4096 characters of the text
    subagent | hands the last assistant text (or the task) to the ``native_agent`` named by ``agent``, then down that agent's ``then`` pipeline; the last agent's text comes back as a user message with ``source.kind`` ``agent``; outcomes ``completed``, ``gave_up``, ``budget`` (the agent spent its steps or tool calls), ``ask`` (a ``pre_execute`` hook asked inside the agent's turn, and the reason is what comes back)
    compact | when the messages pass ``fire_ratio`` of the model's context window, one model call summarizes the older span into a user message and the last ``keep_ratio`` of the window stays verbatim (a tool result never opens the kept tail without its call); ``0 < keep_ratio < fire_ratio <= 1``; the window is ``context_window`` in ``models.json`` (a ``config`` node with target ``models`` sets it), 32,768 tokens when unset, at four characters a token; the summary call is not a step, and a cycle must pass a model stage, so a run spends at most one per step; outcome ``done``
    end | ends the turn with ``reason`` ``completed`` or ``gave_up``
@@ -301,10 +301,12 @@ the parent graph is the one that can answer. The gate's verdict carries
 tool errors per agent summed over each side's episodes. It also carries
 ``candidate_paths`` and ``current_paths``, one entry per episode in pairing
 order (task by task, then repeat by repeat): the root session's
-``stage/exit`` stage names in order and the ``turn/end`` reason kind; a
-delegated agent's stages under ``agents/`` stay out of it; an episode that
-could not run is ``None`` and a format without stage events gives an empty
-list and a ``None`` reason.
+``stage/exit`` stage names in order and the ``turn/end`` reason kind, plus
+``error`` when the turn ended on one and ``errored_agent`` when a delegated
+agent's error ended the run before the root wrote its end; a delegated
+agent's stages under ``agents/`` stay out of it; an episode that could not
+run is ``None`` and a format without stage events gives an empty list and a
+``None`` reason.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A

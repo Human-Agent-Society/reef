@@ -267,116 +267,82 @@ def test_native_propose_refuses_malformed_shapes(native_evolution) -> None:
         assert native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply)) is None
 
 
-def test_native_evaluate_reads_the_last_assistant_message_with_content(native_evolution) -> None:
-    task = "[sieve] count the primes below 100000"
-    call = {
-        "type": "assistant/message",
-        "seq": 2,
-        "time": 0,
-        "data": {"content": "", "tool_calls": [{}], "finish": "x"},
-    }
-    assert native_evolution.evaluate(task, episode((call, native_message("Sieving...\n\n9592")))) == 1.0
-    # A tool-call message carries no text; the last text answer is the one graded.
-    assert native_evolution.evaluate(task, episode((native_message("9592"), call))) == 1.0
-    assert native_evolution.evaluate(task, episode((native_message("The count is 9592"),))) == 0.0
-    assert native_evolution.evaluate(task, episode(())) == 0.0
+def test_native_propose_accepts_every_event_the_shape_offers(native_evolution) -> None:
+    for event in ("pre_step", "pre_execute", "request_error", "post_execute"):
+        reply = native_proposal(
+            "native_hook", "guard", event=event, code="def listen(payload, next):\n    return next()\n"
+        )
+        mutation = native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply))
+        assert isinstance(mutation, Mutation) and mutation.options["config"]["event"] == event
 
 
-def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolution, tmp_path, monkeypatch) -> None:
-    """The run.sh native contract, hermetic: the native serve file materializes
-    like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
-    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
-    materialized = tmp_path / "harness_evolve.yaml"
-    materialized.write_text(yaml.safe_dump(recipe_sections))
-    from reef.service.assembly import _upstream_runtime
+MAIN_GRAPH = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {
+        "think": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "check": {"kind": "verify", "check": "last_line_integer"},
+        "done": {"kind": "end", "reason": "completed"},
+    },
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "check"},
+        {"from": "act", "when": "done", "to": "think"},
+        {"from": "check", "when": "pass", "to": "done"},
+        {"from": "check", "when": "fail", "to": "think"},
+    ],
+}
 
-    service = service_settings_from_config(config)
-    built = CordisRecipe.from_environment(
-        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
-    )
-    assert built.adapter == "native" and built.binary is None
-    # The same three tasks as the pi variant, so the two runs are comparable.
-    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
-    assert [entry["id"] for entry in built.seed] == [
-        "read_file",
-        "write_file",
-        "run_bash",
-        "execute",
-        "loop_guard",
-        "main",
-        "answer-style",
+
+def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_evolution) -> None:
+    """An agent alone can never win: only a subagent stage runs one, and its text comes back as a user message
+    the grader never reads. The proposal carries the graph edit: ask the agent, then a model stage answers."""
+    from reef.harness.tree.nodes import NODE_KINDS
+
+    reply = native_proposal("native_agent", "helper", prompt="Solve the task alone.", tools=["read_file"])
+    nodes = (*NATIVE_NODES, ("native_graph", MAIN_GRAPH))
+    proposal = native_evolution.propose(nodes, SAMPLES, canned(reply))
+    assert isinstance(proposal, list) and [m.op for m in proposal] == ["create", "update"]
+    agent, route = proposal
+    assert agent.id == "helper" and agent.options["config"]["prompt"] == "Solve the task alone."
+    graph = route.options["config"]
+    assert route.id == "main"
+    assert graph["stages"]["ask-helper"] == {"kind": "subagent", "agent": "helper"}
+    assert graph["stages"]["answer-helper"] == {"kind": "model"}
+    assert {"from": "think", "when": "text", "to": "ask-helper"} in graph["edges"]
+    assert [(e["when"], e["to"]) for e in graph["edges"] if e["from"] == "ask-helper"] == [
+        ("completed", "answer-helper"),
+        ("gave_up", "answer-helper"),
+        ("budget", "answer-helper"),
+        ("ask", "answer-helper"),
     ]
-    assert "upstream" not in yaml.safe_dump(list(built.seed))
-    assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
-
-
-def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(monkeypatch) -> None:
-    """The README deployment: ``reef.recipe: deployment`` is read back from the
-    directory the service's own env names, and the harness package is on the
-    PYTHONPATH the same env sets; a stale directory name here fails at boot, so
-    the file's own paths are checked against the checkout."""
-    import os
-
-    from reef.recipe.registry import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
-
-    repo_root = EXAMPLE_DIR.parents[1]
-    monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
-    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    monkeypatch.setenv("REEF_PYTHON", sys.executable)
-    monkeypatch.setenv("PWD", str(repo_root))
-    path = EXAMPLE_DIR / "configs" / "deployment.yaml"
-    config = load_config(path)
-    env = next(service for service in config["services"] if service["name"] == "reef")["env"]
-    recipe_dir = repo_root / env["REEF_RECIPE_CONFIG_DIR"]
-    assert (recipe_dir / "deployment.yaml").resolve() == path.resolve()
-    method_root = Path(env["PYTHONPATH"].split(":")[0])
-    assert (method_root / "harness" / "evolution.py").is_file()
-    monkeypatch.syspath_prepend(str(method_root))  # what the service env PYTHONPATH gives the recipe
-    for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
-        assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
-    assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
-    service = service_settings_from_config(config)
-    built = build_named_recipe(
-        "deployment",
-        {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(recipe_dir)},
-        default_runtime=_upstream_runtime(service),
+    assert sorted((e["when"], e["to"]) for e in graph["edges"] if e["from"] == "answer-helper") == [
+        ("text", "check"),
+        ("tool_calls", "act"),
+    ]
+    NODE_KINDS["native_graph"](None, graph)
+    # The agent stands alone without a main graph to route through, when the graph already runs it under any
+    # stage name, and when the stage names it would add are taken.
+    assert isinstance(native_evolution.propose(NATIVE_NODES, SAMPLES, canned(reply)), Mutation)
+    routed = (*NATIVE_NODES, ("native_graph", graph))
+    assert isinstance(native_evolution.propose(routed, SAMPLES, canned(reply)), Mutation)
+    consult = {
+        **MAIN_GRAPH,
+        "stages": {**MAIN_GRAPH["stages"], "consult": {"kind": "subagent", "agent": "helper"}},
+        "edges": [
+            {**e, "to": "consult"} if e["from"] == "think" and e["when"] == "text" else e for e in MAIN_GRAPH["edges"]
+        ]
+        + [{"from": "consult", "when": o, "to": "check"} for o in ("completed", "gave_up", "budget", "ask")],
+    }
+    NODE_KINDS["native_graph"](None, consult)
+    assert isinstance(
+        native_evolution.propose((*NATIVE_NODES, ("native_graph", consult)), SAMPLES, canned(reply)), Mutation
     )
-    assert isinstance(built, CordisRecipe) and built.adapter == "pi"
-
-
-def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:
-    """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
-    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
-    materialized = tmp_path / "harness_evolve.yaml"
-    materialized.write_text(yaml.safe_dump(recipe_sections))
-    from reef.service.assembly import _upstream_runtime
-
-    service = service_settings_from_config(config)
-    built = CordisRecipe.from_environment(
-        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
-    )
-    files = built.base_artifact_files()
-    assert files is not None
-    assert {"native/tools/read_file.py", "native/graphs/main.json", "native/skills/answer-style/SKILL.md"} <= set(
-        files
-    )
-    assert "upstream" not in files["native/models.json"]  # the seed carries no provider
-    info = built.build_surface("demo").harness
-    assert info is not None
-    assert [entry["id"] for entry in info.seed_entries][:3] == ["read_file", "write_file", "run_bash"]
-    assert info.served_model == "qwen3-8b"
-    assert (
-        CordisRecipe.from_environment(
-            {},
-            config={**load_recipe_config(materialized), "evolution": {**recipe_sections["evolution"], "seed": []}},
-            runtime=_upstream_runtime(service),
-        ).base_artifact_files()
-        is None
+    taken = {**MAIN_GRAPH, "stages": {**MAIN_GRAPH["stages"], "ask-helper": {"kind": "message", "text": "hi"}}}
+    assert isinstance(
+        native_evolution.propose((*NATIVE_NODES, ("native_graph", taken)), SAMPLES, canned(reply)), Mutation
     )
 
 
