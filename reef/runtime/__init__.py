@@ -10,10 +10,10 @@ evaluates it before choosing activation or rejection.
 Boundaries this package holds:
 
 - No concrete training backend is imported here. Backends implement
-  ``RayTrainGroupHandle`` around their own actor groups and ``RayRuntime``
-  drives only the handle; ``reef.train.slime`` never appears at module scope.
+  ``TrainingGroupHandle`` and ``ExecutorTrainingRuntime`` drives only the
+  handle; ``reef.train.slime`` never appears at module scope.
 - Malformed results and missing capabilities surface as contract errors
-  (``RuntimeContractError``, ``RayRuntimeError``), never as silent fallbacks.
+  (``RuntimeContractError``, ``TrainingRuntimeError``), never as silent fallbacks.
   The default ``restore_checkpoint`` refuses rather than moving the artifact
   head under an engine that kept newer weights.
 - Surfaces see runtimes only structurally, through ``ServingRuntime`` and
@@ -26,6 +26,7 @@ boot. Or set the config ``type`` to a dotted ``package.module:factory_name``
 reference, which ``runtime_factory_for`` imports on resolution.
 """
 
+from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.adapters.ray_runtime import (
     RayRuntime,
@@ -36,6 +37,7 @@ from reef.runtime.adapters.ray_runtime import (
 )
 from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
+from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
 from reef.runtime.proxy import resolve_proxy_runtime
 from reef.runtime.registry import (
     RuntimeConfigError,
@@ -45,9 +47,15 @@ from reef.runtime.registry import (
     runtime_factory_for,
     runtime_kinds,
 )
+from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
 __all__ = [
     "ActivatedModel",
+    "Executor",
+    "ExecutorConfig",
+    "ExecutorFuture",
+    "ExecutorTrainGroupHandle",
+    "ExecutorTrainingRuntime",
     "InferenceProxyRuntime",
     "InferenceRuntime",
     "ModelCandidate",
@@ -59,8 +67,11 @@ __all__ = [
     "RuntimeConfigError",
     "RuntimeFactory",
     "RuntimeRegistry",
+    "TrainingGroupHandle",
     "TrainingJobResult",
     "TrainingRuntime",
+    "TrainingRuntimeError",
+    "WorkerSpec",
     "connect_ray_runtime",
     "register_runtime_kind",
     "resolve_proxy_runtime",

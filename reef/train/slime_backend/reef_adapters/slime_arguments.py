@@ -16,6 +16,16 @@ REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.mode
 def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Register options implemented by Reef rather than the runtime."""
     parser.add_argument(
+        "--reef-executor-backend",
+        default="auto",
+        help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
+    )
+    parser.add_argument(
+        "--reef-rollout-executor-backend",
+        default="auto",
+        help="SGLang rollout executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
+    )
+    parser.add_argument(
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
