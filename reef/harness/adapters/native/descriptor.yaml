@@ -23,9 +23,13 @@ files:
   native_tool: "native/tools/{name}.py"
   native_hook: "native/hooks/{name}.py"
   native_graph: "native/graphs/{name}.json"
+  native_agent: "native/agents/{name}.json"
 trajectory:
   format: native-jsonl
   path: "native/sessions"
+# The loop writes its session here, so the sandbox executor opens it while the rest of the root stays read only.
+writable_paths:
+  - "native/sessions"
 cleanup_whitelist:
   - "native/sessions/**"
   - "native/tools/__pycache__/**"

@@ -988,6 +988,7 @@ class _HarnessEvolveTestRecipe(Recipe):
             propose=resolve_proposer(self.propose),
             score_episode=resolve_episode_scorer(self.evaluate),
             tasks=self.tasks,
+            binary="fake-pi",
             models=ModelBinding(base_url="http://localhost:8000", model="qwen3-8b"),
         )
         return Trainer.build(

@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
@@ -597,7 +598,22 @@ def _install_fixture(
         _write_executable(prefix / "node_modules/.bin/pi", f"#!/bin/sh\necho {binary_version}\n")
     shim = tmp_path / "shim"
     _write_executable(shim / "npm", npm)
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    # The script's own python3: the interpreter running the tests, so its
+    # reef bootstrap sees an environment where reef is already importable and
+    # never shells out to `pip install --user` from GitHub, which would install
+    # reef-infra into user site-packages and change what every later
+    # subprocess reports as the reef version.
+    _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    # ... and the checkout on its path, so the bootstrap's import check passes
+    # from any cwd. CI runs the suite against the source tree rather than an
+    # installed reef-infra, so without this a test that runs the script from a
+    # temp cwd reaches the pip branch.
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env = {
+        **os.environ,
+        "PATH": f"{shim}:{os.environ['PATH']}",
+        "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
+    }
     return script, tmp_path / "dest", prefix, env
 
 
@@ -682,7 +698,7 @@ fi
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
 installed=""
 if [ -x "$BINARY" ]; then
-    installed="$("$BINARY" --version 2>/dev/null || true)"
+    installed="$(PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
 fi
 case " $installed " in
     *" 0.84.2 "*)
@@ -695,7 +711,8 @@ case " $installed " in
 esac
 
 # Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.
-python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || python3 -m pip install --quiet --user reef-client "reef @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true
+python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true
+python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
 
 # The checksum stream, as baked into CHECKSUM: each sorted relative path,
 # its byte length, then its bytes, newline separated. The unquoted wc
@@ -758,9 +775,13 @@ export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
 exec python3 -m reef.harness.harness_wrapper "\$@"
 REEF_WRAPPER_EOF
     chmod +x "$DEST/reef-pi"
-    # Symlink into ~/.local/bin so reef-pi is on PATH.
+    # Symlink into ~/.local/bin so reef-pi is on PATH. The link target
+    # must be absolute: DEST defaults to the relative ./reef-harness, and a
+    # relative target resolves against the link's own directory, so the link
+    # dangles and reef-pi is not runnable from anywhere.
+    DEST_ABS="$(cd "$DEST" && pwd)"
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$DEST/reef-pi" "$HOME/.local/bin/reef-pi"
+    ln -sf "$DEST_ABS/reef-pi" "$HOME/.local/bin/reef-pi"
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
@@ -825,6 +846,25 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
 
 
 @pytest.mark.unit
+def test_install_script_version_probe_disables_network_and_updates(tmp_path) -> None:
+    npm_log = tmp_path / "npm.log"
+    script, dest, prefix, env = _install_fixture(
+        tmp_path,
+        binary_version="0.84.2",
+        npm=f'#!/bin/sh\nprintf called > "{npm_log}"\nexit 1\n',
+    )
+    _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\n[ "$PI_SKIP_VERSION_CHECK" = 1 ] && [ "$PI_OFFLINE" = 1 ] && echo 0.84.2\n',
+    )
+    env.update(PI_SKIP_VERSION_CHECK="0", PI_OFFLINE="0")
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "0.84.2 already installed" in result.stdout
+    assert not npm_log.exists()
+
+
+@pytest.mark.unit
 def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> None:
     """The reef-<adapter> wrapper is executable, bakes binary/compose/scenario
     as absolute paths, calls the harness_wrapper module, and is symlinked."""
@@ -864,6 +904,38 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     assert "reef-pi" in result.stdout
     # clean up the symlink so it doesn't leak between tests
     link.unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -> None:
+    """The README installs into the default relative ./reef-harness.
+
+    ``ln -s`` reads a relative target against the link's own directory, so
+    linking "$DEST/reef-pi" from ~/.local/bin left a dangling link pointing at
+    ~/.local/bin/reef-harness/reef-pi and ``reef-pi`` was not on PATH at all.
+    Every other install test passes an absolute DEST and cannot see it.
+    """
+    script, _, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    result = subprocess.run(
+        ["sh", str(script), "./reef-harness", str(prefix)],
+        cwd=workdir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "not importable by python3" not in result.stderr  # the bootstrap short-circuited
+    link = Path.home() / ".local" / "bin" / "reef-pi"
+    try:
+        assert link.is_symlink()
+        assert Path(os.readlink(link)).is_absolute()
+        assert link.resolve() == (workdir / "reef-harness" / "reef-pi").resolve()
+        assert link.exists()  # not dangling
+    finally:
+        link.unlink(missing_ok=True)
 
 
 @pytest.mark.unit

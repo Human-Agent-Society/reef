@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
+from reef.harness.executor import LocalExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
@@ -25,10 +26,10 @@ from reef.harness.vendor_install import (
     resolve_binary,
 )
 from reef.service.install_script import render_install_script
-from reef.train.cordis_backend import CordisBackend, FailureManifest, Mutation
+from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
-from .test_harness_recipe import MODEL, RULES, batch, evaluate, make_binary, run_backend_step
+from .test_harness_recipe import MODEL, PI_FAKE, RULES, batch, evaluate, make_binary, run_backend_step
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
 
@@ -208,7 +209,7 @@ def _counting_resolver(monkeypatch, result):
     return calls
 
 
-def _backend(binary, propose):
+def _backend(binary, propose, *, executor=None):
     return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
@@ -216,6 +217,7 @@ def _backend(binary, propose):
         tasks=("task one",),
         models=MODEL,
         binary=binary,
+        executor=executor,
     )
 
 
@@ -229,13 +231,12 @@ def _propose(nodes, samples, models):
 
 
 @pytest.mark.unit
-def test_an_unset_binary_resolves_once_at_the_first_episode_and_is_reused(monkeypatch, tmp_path) -> None:
-    """A deployment boots before the agent is installed: resolution waits for
-    the first episode, and the step's two sides share the one result."""
+def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path) -> None:
+    """Startup resolves the agent, and every episode reuses that result."""
     calls = _counting_resolver(monkeypatch, str(make_binary(tmp_path)))
 
     backend = _backend(None, _propose)
-    assert calls == []
+    assert calls == ["pi"]
 
     result = _step(backend)
     assert calls == ["pi"]
@@ -254,20 +255,119 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
 
 
 @pytest.mark.unit
-def test_a_vendor_install_failure_is_a_launch_failure_and_is_retried_next_step(monkeypatch) -> None:
-    """A machine without npm records why the episode could not run rather than
-    crashing the deployment, and the next step tries the install again."""
-    calls = _counting_resolver(monkeypatch, VendorInstallError("npm is required ... but is not on PATH"))
+def test_a_vendor_install_failure_refuses_construction(monkeypatch) -> None:
+    calls = _counting_resolver(monkeypatch, VendorInstallError("npm exited 1: ERR! 404 not found"))
+    with pytest.raises(VendorInstallError, match="npm exited 1: ERR! 404 not found"):
+        _backend(None, _propose)
+    assert calls == ["pi"]
 
-    backend = _backend(None, _propose)
+
+@pytest.mark.unit
+def test_missing_npm_refuses_backend_construction(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "install"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    with pytest.raises(VendorInstallError, match=r"npm.*not on PATH"):
+        _backend(None, _propose)
+
+
+@pytest.mark.unit
+def test_version_probe_uses_the_adapters_offline_and_update_guards(monkeypatch, tmp_path, on_path) -> None:
+    monkeypatch.setenv("PI_SKIP_VERSION_CHECK", "0")
+    monkeypatch.setenv("PI_OFFLINE", "0")
+    prefix = tmp_path / "prefix"
+    binary = _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\n[ "$PI_SKIP_VERSION_CHECK" = 1 ] && [ "$PI_OFFLINE" = 1 ] && echo 0.84.2\n',
+    )
+    log = tmp_path / "npm.log"
+    on_path(_npm_shim(tmp_path, log))
+    assert resolve_binary(get_adapter("pi"), prefix=prefix) == str(binary)
+    assert not log.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("custom_prefix", [False, True])
+def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path, custom_prefix) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv(PREFIX_ENV, raising=False)
+    if custom_prefix:
+        monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "custom-install"))
+    prefix = install_prefix(get_adapter("pi"))
+    # Match an npm install's symlink: mounting only .bin cannot resolve it.
+    source = _write_executable(
+        prefix / "node_modules/package/cli.py",
+        PI_FAKE.replace(
+            "prompt = ",
+            'if "--version" in sys.argv:\n    print("0.84.2")\n    sys.exit(0)\nprompt = ',
+            1,
+        ),
+    )
+    binary = prefix / "node_modules/.bin/pi"
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to("../package/cli.py")
+    seen = []
+
+    def launch(executor, argv, **kwargs):
+        seen.append(executor._bwrap_argv(argv, **{k: v for k, v in kwargs.items() if k != "timeout"}))
+        return LocalExecutor().launch(argv, **kwargs)
+
+    monkeypatch.setattr(SandboxExecutor, "launch", launch)
+    original = SandboxExecutor(egress_hosts=("localhost",))
+    backend = _backend(None, _propose, executor=original)
     result = _step(backend)
+    assert result.metrics["failures"] == {"new": 0, "persisting": 0, "fixed": 0}
+    assert len(seen) == 2
+    assert binary.resolve() == source.resolve()
+    assert str(prefix) not in original.base_paths
+    for argv in seen:
+        mounts = [(argv[i], argv[i + 1], argv[i + 2]) for i in range(len(argv)) if argv[i] in ("--bind", "--ro-bind")]
+        assert ("--ro-bind", str(prefix), str(prefix)) in mounts
+        assert not any(kind == "--bind" and path == str(prefix) for kind, path, _ in mounts)
+        assert not any(path == str(prefix.parent) or path == str(Path.home()) for _, path, _ in mounts)
+        assert argv[argv.index("--") + 1] == str(binary)
+        assert "--unshare-net" not in argv
 
-    assert result.metrics["failures"] == {"new": 1, "persisting": 0, "fixed": 0}
-    entry = FailureManifest.from_state(result.state["failure_manifest"]).entries[0]
-    assert entry.stage == "launch"
-    assert "npm is required" in entry.cause
-    # One resolution per side, and the next step tries again: a transient
-    # vendor failure is not remembered.
-    assert calls == ["pi", "pi"]
-    _step(backend)
-    assert len(calls) > 2
+
+@pytest.mark.unit
+def test_an_explicit_binary_does_not_add_a_vendor_mount(monkeypatch, tmp_path) -> None:
+    calls = _counting_resolver(monkeypatch, "/should/not/be/used")
+    sandbox = SandboxExecutor()
+    backend = _backend(str(make_binary(tmp_path)), _propose, executor=sandbox)
+    assert calls == []
+    assert backend._executor is sandbox
+
+
+@pytest.mark.integration
+def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatch, tmp_path) -> None:
+    sandbox = SandboxExecutor()
+    try:
+        sandbox.preflight()
+    except SandboxUnavailable as error:
+        pytest.skip(str(error))
+    monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "install"))
+    prefix = install_prefix(get_adapter("pi"))
+    _write_executable(
+        prefix / "node_modules/package/cli.sh",
+        "#!/bin/sh\n"
+        'if [ "$1" = --version ]; then echo 0.84.2; exit 0; fi\n'
+        'if touch "$1/vendor-write" 2>/dev/null; then exit 1; fi\n'
+        "touch workspace-write && echo readonly-install\n",
+    )
+    binary = prefix / "node_modules/.bin/pi"
+    binary.parent.mkdir(parents=True)
+    binary.symlink_to("../package/cli.sh")
+    backend = _backend(None, _propose, executor=sandbox)
+    root = tmp_path / "episode"
+    workspace = root / "workspace"
+    workspace.mkdir(parents=True)
+    outcome = backend._executor.launch(
+        [backend._binary, str(prefix)],
+        root=root,
+        workspace=workspace,
+        env={},
+        timeout=10,
+    )
+    assert outcome.exit_code == 0, outcome.stderr
+    assert outcome.stdout.strip() == "readonly-install"
+    assert (workspace / "workspace-write").exists()
+    assert not (prefix / "vendor-write").exists()

@@ -23,6 +23,9 @@ native harness adds kinds only it renders:
   defining ``listen(payload, next)`` (``native/hooks/``).
 - ``native_graph``: the native loop's control flow as data, stages from a
   closed vocabulary joined by edges keyed by outcome (``native/graphs/``).
+- ``native_agent``: one agent of the native loop as data, its own prompt,
+  graph, tools, skills, budget, and the agents its text is handed to
+  (``native/agents/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.render`` reads it back out per adapter.
@@ -48,8 +51,13 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "message": (("text",), ("done",)),
     "branch": (("cases",), ("else",)),
     "compact": (("fire_ratio", "keep_ratio"), ("done",)),
+    "subagent": (("agent",), ("completed", "gave_up", "budget", "ask")),
     "end": (("reason",), ()),
 }
+#: What one native_agent node may carry beside its name.
+NATIVE_AGENT_KEYS = ("prompt", "graph", "tools", "skills", "max_steps", "max_tool_calls", "then")
+NATIVE_AGENT_MAX_TOOL_CALLS = 256
+NATIVE_AGENT_MAX_THEN = 8
 NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
 #: What a branch case may test: the run's own counters, or the last assistant text against a pattern.
 NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "last_text_matches")
@@ -302,6 +310,10 @@ def _graph_stage(name: str, stage: Any) -> str:
         _branch_cases(name, stage.get("cases"))
     elif kind == "compact":
         _compact_ratios(name, stage)
+    elif kind == "subagent":
+        agent = stage.get("agent")
+        if not isinstance(agent, str) or not _NAME.fullmatch(agent):
+            raise ValueError(f"native_graph stage {name!r} 'agent' must name an agent")
     elif kind == "end" and stage.get("reason", "completed") not in NATIVE_END_REASONS:
         raise ValueError(f"native_graph stage {name!r} 'reason' must be one of {', '.join(NATIVE_END_REASONS)}")
     return kind
@@ -460,6 +472,52 @@ def native_graph_node(ctx: Any, config: Any) -> None:
     validate_native_graph(config)
 
 
+def _distinct_names(options: Mapping[str, Any], key: str, where: str, limit: int | None = None) -> None:
+    value = options.get(key, [])
+    if not isinstance(value, Sequence) or isinstance(value, str) or len(set(value)) < len(value):
+        raise ValueError(f"{where} '{key}' must be a list of distinct names")
+    if any(not isinstance(item, str) or not _NAME.fullmatch(item) for item in value):
+        raise ValueError(f"{where} '{key}' must be a list of distinct names")
+    if limit is not None and len(value) > limit:
+        raise ValueError(f"{where} '{key}' takes at most {limit} names")
+
+
+def validate_native_agent(config: Any) -> Mapping[str, Any]:
+    """The admission rules of a native_agent, shared by the tree boundary and the loop's loader.
+
+    An agent is a root entry: its own prompt, the graph it runs, the tools and
+    skills it alone sees (all of the tree's when unset), its step and tool
+    call budget, and ``then``, the agents its final text is handed to in
+    order. Whether the names it uses exist is checked at render, where the
+    whole tree is in view."""
+    options = _require_mapping(config)
+    name = _require_name(options)
+    extra = sorted(set(options) - {"name", *NATIVE_AGENT_KEYS})
+    if extra:
+        raise ValueError(f"native_agent node does not take {', '.join(extra)}")
+    _reject_secret_shaped_text(_require_text(options, "prompt"), "native_agent node 'prompt'")
+    # The default is the built in seed loop, never the root's main graph: a main graph that calls this agent
+    # would otherwise call it again from inside its turn.
+    graph = options.get("graph", "seed")
+    if not isinstance(graph, str) or not _NAME.fullmatch(graph):
+        raise ValueError("native_agent node 'graph' must name a graph")
+    _distinct_names(options, "tools", "native_agent node")
+    _distinct_names(options, "skills", "native_agent node")
+    _distinct_names(options, "then", "native_agent node", NATIVE_AGENT_MAX_THEN)
+    if name in options.get("then", []):
+        raise ValueError(f"native_agent node {name!r} cannot hand its text to itself")
+    for key, cap in (("max_steps", NATIVE_GRAPH_MAX_STEPS), ("max_tool_calls", NATIVE_AGENT_MAX_TOOL_CALLS)):
+        value = options.get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= cap):
+            raise ValueError(f"native_agent node '{key}' must be an integer from 1 to {cap}")
+    return options
+
+
+def native_agent_node(ctx: Any, config: Any) -> None:
+    """One agent of the native loop as data: its prompt, its graph, what it sees, its budget, and ``then``."""
+    validate_native_agent(config)
+
+
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "config": config_node,
     "rules": rules_node,
@@ -469,5 +527,6 @@ NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "native_tool": native_tool_node,
     "native_hook": native_hook_node,
     "native_graph": native_graph_node,
+    "native_agent": native_agent_node,
 }
 """Entry ``name`` to node plugin; the resolver of the composition loader."""

@@ -20,7 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.errors import ReefError
@@ -52,7 +52,7 @@ class VendorInstallError(ReefError):
 def install_prefix(descriptor: AdapterDescriptor) -> Path:
     """The install prefix this adapter's binary lives under."""
     root = os.environ.get(PREFIX_ENV, "").strip() or DEFAULT_PREFIX_ROOT
-    return Path(root).expanduser() / descriptor.name
+    return Path(root).expanduser().absolute() / descriptor.name
 
 
 def resolve_binary(descriptor: AdapterDescriptor, *, prefix: Path | None = None) -> str:
@@ -68,7 +68,9 @@ def resolve_binary(descriptor: AdapterDescriptor, *, prefix: Path | None = None)
         return descriptor.binary
     root = prefix if prefix is not None else install_prefix(descriptor)
     binary = root / install.binary_path
-    if _is_pinned(install, binary, root):
+    # Use the adapter's offline/update guards without its episode-root paths.
+    probe_env = {key: value for key, value in descriptor.env.items() if "{root}" not in value}
+    if _is_pinned(install, binary, root, env=probe_env):
         return str(binary)
     root.mkdir(parents=True, exist_ok=True)
     _install(install, root)
@@ -87,7 +89,7 @@ def _pin(install: InstallSpec) -> str:
     return f"{install.package}@{install.version}"
 
 
-def _is_pinned(install: InstallSpec, binary: Path, prefix: Path) -> bool:
+def _is_pinned(install: InstallSpec, binary: Path, prefix: Path, *, env: Mapping[str, str]) -> bool:
     """Whether the installed binary already answers the descriptor's pin.
 
     The same gate the install script applies: an executable at the expected
@@ -98,7 +100,7 @@ def _is_pinned(install: InstallSpec, binary: Path, prefix: Path) -> bool:
         return False
     if install.kind == "git" and _installed_ref(prefix) != _pin(install):
         return False
-    reported = f" {_reported_version(binary)} "
+    reported = f" {_reported_version(binary, env=env)} "
     if install.kind == "git":
         # A Python CLI prints its version inside a label ("Hermes Agent
         # v0.21.0"), so the match is a substring, as in the install script.
@@ -113,11 +115,12 @@ def _installed_ref(prefix: Path) -> str:
         return ""
 
 
-def _reported_version(binary: Path) -> str:
+def _reported_version(binary: Path, *, env: Mapping[str, str]) -> str:
     """What ``--version`` prints, or ``""`` when the binary cannot answer."""
     try:
         completed = subprocess.run(
             [str(binary), "--version"],
+            env={**os.environ, **env},
             capture_output=True,
             text=True,
             timeout=VERSION_TIMEOUT_S,
