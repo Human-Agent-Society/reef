@@ -190,6 +190,11 @@ def secret_shaped(text: str) -> bool:
     return _SECRET_TEXT.search(text) is not None
 
 
+def redact_secret_shaped(text: str) -> str:
+    """``text`` with every credential-shaped literal replaced; for records that persist model traffic the tree boundary never saw."""
+    return _SECRET_TEXT.sub("[redacted credential]", text)
+
+
 def directive_shaped(text: str) -> bool:
     """Whether free text carries an instruction-override phrasing or a chat-template control token; the task ledger's second tripwire."""
     return _DIRECTIVE_TEXT.search(text) is not None

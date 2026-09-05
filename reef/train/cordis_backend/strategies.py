@@ -75,7 +75,8 @@ class Proposer(ABC):
     :class:`~reef.train.cordis_backend.FailureManifest`, or ``None`` when
     no step has settled one yet. ``rejected`` is the recent rejected
     proposals, oldest first, each a mapping of ``step``, ``mutations``
-    (``{"op", "id"}`` pairs) and the selector's ``reason``. ``sources`` is
+    (``{"op", "id", "options"}`` records, the options as proposed) and the
+    selector's ``reason``. ``sources`` is
     one mapping per sample, in sample order: ``record`` (the agent record
     id the sample came from), ``client`` (the ``x-reef-tag-client`` header's
     value, else the session tag, else ``untagged``) and ``untrusted``

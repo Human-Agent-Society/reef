@@ -171,9 +171,10 @@ Two more settings shape the search itself. ``evolution.min_win_margin: M``
 than ``M`` task pairings beyond its losses, so on a stochastic episode a
 single lucky flip does not publish. ``evolution.max_rejected_history: N``
 (25 by default, 0 off) keeps the last ``N`` rejected proposals in the
-scenario state, each with its step, its mutations, and the verdict's reason;
-a ``propose`` whose signature names ``rejected`` receives them and can stop
-re-proposing what the gate already refused.
+scenario state, each with its step, its mutations with the options they
+carried, and the verdict's reason; a ``propose`` whose signature names
+``rejected`` receives them and can stop re-proposing what the gate already
+refused.
 
 By default a gate win is served at once. ``evolution.publish: review`` holds
 every win as a pending release instead, and ``evolution.review_kinds`` (a
@@ -216,7 +217,41 @@ episode that could not run ranks below every real score, so a candidate
 cannot win on a crash, and when both sides fail the step is a tie. When the
 verdict is a rejection, Reef restores the snapshot it took before the
 mutation. Every verdict is recorded in the scenario's commit log together
-with its mutation and both score vectors.
+with its mutation (op, id and the full options, so a rejected rewrite is
+readable too), both score vectors, how many model calls the proposer made
+and the seconds they took (``proposer_calls``, ``proposer_seconds``), and per
+side and task the path each episode took: on the native harness the stage
+names the loop exited in order and the reason its turn ended
+(``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
+episode, beside ``candidate_agents``).
+
+The commit log holds the verdict; the step record holds what decided it.
+``evolution.step_record_dir`` (off by default) names a directory, made
+absolute at build, under which each scenario's steps write
+``<scenario>/<step>/proposer.json``, one entry per model call the proposer
+made: the ``model``, the ``messages`` and ``params`` of a ``chat`` or the
+``body`` of a ``complete``, then the ``reply`` or ``response`` or the
+``error``, and the ``seconds`` it took; ``<scenario>/<step>/mutations.json``,
+the parsed proposal with its options, written before admission so a refused
+proposal is on file; and ``<scenario>/<step>/episodes/<side>-<task index>/``,
+each gate episode's trajectory files as the adapter writes them
+(``session.jsonl`` and ``agents/*.jsonl`` on native, the vendor's own session
+tree on pi and the others) copied out of the throwaway root before it is
+removed, beside an ``episode.json`` with the task, the exit code, stdout and
+stderr, the residue, the score, the failure and the stage path, so a scorer
+can be replayed from the record alone. Long text is clipped with a marker
+naming what was dropped, and a credential shaped literal anywhere in the
+record is replaced by ``[redacted credential]``: the record holds what the
+tree boundary has not seen yet. A recheck step asks the proposer nothing, so
+it writes ``episodes/`` only and counts zero proposer calls; a step skipped
+on the step cap or the failure streak writes nothing and names no
+``step_record``. A step directory is never reused: a step retried after a
+crash lands in ``<step>-2``, so the earlier attempt stays on file, and
+nothing prunes the directory. A reader can rebuild why the tree changed, or
+did not, from those files and the commit record, which names the step's
+directory as ``step_record``. The record is the proposer's raw traffic and
+the episodes' full logs, so keep the directory where the commit log lives; a
+copy that fails (a full disk) aborts the step rather than scoring it.
 
 When it fits
 ------------

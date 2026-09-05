@@ -319,7 +319,10 @@ def test_composite_proposal_settles_under_one_selection_decision(tmp_path: Path)
     b = backend(tmp_path, propose)
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["published"] is True
-    assert result.metrics["mutations"] == [{"op": "create", "id": "r1"}, {"op": "create", "id": "r2"}]
+    assert result.metrics["mutations"] == [
+        {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}},
+        {"op": "create", "id": "r2", "options": {"name": "rules", "config": {"text": "more rules"}}},
+    ]
     assert "mutation" not in result.metrics
     assert isinstance(result.publication, SavedArtifactPublication)
     assert [entry["id"] for entry in result.state["entries"]] == ["r1", "r2"]
@@ -366,7 +369,11 @@ def test_single_mutation_metrics_are_unchanged_by_the_composite_seam(tmp_path: P
 
     b = backend(tmp_path, propose)
     result = run_backend_step(b, batch(), b.initial_state())
-    assert result.metrics["mutation"] == {"op": "create", "id": "r1"}
+    assert result.metrics["mutation"] == {
+        "op": "create",
+        "id": "r1",
+        "options": {"name": "rules", "config": {"text": "marker rules"}},
+    }
     assert "mutations" not in result.metrics
 
 
@@ -964,7 +971,15 @@ def test_propose_receives_the_model_binding(tmp_path: Path) -> None:
 
     b = backend(tmp_path, propose)
     run_backend_step(b, batch(), b.initial_state())
-    assert [models.served for models in received] == [MODEL]
+    # The proposer sees the served binding through the recording seam: the same endpoint, model and key.
+    served = received[0].served
+    assert isinstance(served, ModelBinding)
+    assert (served.base_url, served.model, served.api_key, served.api) == (
+        MODEL.base_url,
+        MODEL.model,
+        MODEL.api_key,
+        MODEL.api,
+    )
     assert list(received[0]) == ["served"]
 
 
@@ -1881,13 +1896,14 @@ def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path:
         max_rejected_history=1,
     )
     first = run_backend_step(b, batch(), b.initial_state())
-    # A tie is a rejection, and it is recorded with its step, mutation, and reason.
+    # A tie is a rejection, and it is recorded with its step, mutation (options included), and reason.
     assert first.metrics["selected"] is False
+    r1 = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "no signal here"}}}
     assert first.state["rejected_proposals"] == [
-        {"step": 1, "mutations": [{"op": "create", "id": "r1"}], "reason": first.metrics["selection"]["reason"]}
+        {"step": 1, "mutations": [r1], "reason": first.metrics["selection"]["reason"]}
     ]
     second = run_backend_step(b, batch(), first.state)
-    assert seen[0] == () and seen[1][0]["mutations"] == [{"op": "create", "id": "r1"}]
+    assert seen[0] == () and seen[1][0]["mutations"] == [r1]
     # The cap keeps only the latest rejection.
     assert [entry["step"] for entry in second.state["rejected_proposals"]] == [2]
     third = run_backend_step(backend(tmp_path, lambda n, s, m: None), batch(), second.state)

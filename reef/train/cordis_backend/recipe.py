@@ -117,7 +117,11 @@ class CordisRecipe(Recipe):
     or a dotted reference to an object implementing ``decide``), optional
     ``episode_workers`` (how many evaluation episodes run at once, default
     one; a large task set is one wave instead of a long turn-taking pass),
-    optional ``version_check``
+    optional ``step_record_dir`` (a directory under which every scenario's
+    steps write the proposer's model calls, the parsed proposal and each gate
+    episode's trajectory files, so the decision is reconstructible; off by
+    default),
+    and optional ``version_check``
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
     the channel head; adapters without a shipped extension refuse boot),
@@ -186,6 +190,7 @@ class CordisRecipe(Recipe):
     episode_workers: int = 1
     proposals_dir: str = DEFAULT_PROPOSALS_DIR
     max_pending_proposals: int = 8
+    step_record_dir: str | None = None
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
@@ -230,6 +235,10 @@ class CordisRecipe(Recipe):
             raise ValueError("proposals_dir must be a non-empty path")
         if isinstance(self.max_pending_proposals, bool) or self.max_pending_proposals < 1:
             raise ValueError("max_pending_proposals must be an integer of at least 1")
+        if self.step_record_dir is not None and (
+            not isinstance(self.step_record_dir, str) or not self.step_record_dir
+        ):
+            raise ValueError("step_record_dir must be a non-empty path when set")
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
@@ -348,6 +357,9 @@ class CordisRecipe(Recipe):
         max_pending = evolution.get("max_pending_proposals", 8)
         if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
             raise RecipeConfigError("evolution.max_pending_proposals must be an integer of at least 1")
+        step_record_dir = evolution.get("step_record_dir")
+        if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
+            raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         return {
             "proposals_dir": proposals_dir.strip(),
             "max_pending_proposals": max_pending,
@@ -372,6 +384,7 @@ class CordisRecipe(Recipe):
             "models": models,
             "candidate_selector": candidate_selector,
             "episode_workers": episode_workers,
+            "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
     def model_binding(self) -> ModelBinding:
@@ -417,7 +430,12 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = CordisBackend(**self._backend_kwargs(), proposals_dir=self.proposals_path(scenario))
+        kwargs = self._backend_kwargs()
+        # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
+        # so the path a commit record names resolves from any working directory.
+        if kwargs["step_record_dir"] is not None:
+            kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
+        training_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
             records,
@@ -453,6 +471,7 @@ class CordisRecipe(Recipe):
             "seed": self.seed,
             "episode_workers": self.episode_workers,
             "max_pending_proposals": self.max_pending_proposals,
+            "step_record_dir": self.step_record_dir,
         }
 
     def _build_trainer(
