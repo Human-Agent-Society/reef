@@ -130,14 +130,13 @@ class HeadWatch:
         with self._lock:
             if not release_id:
                 return
-            if release_id == self._mounted:
-                # The head is what runs here; a later move away from it is news again.
-                self._announced = None
-                return
-            # Announced once per head: a mount that failed, or one the operator moved off, is not redone every poll.
+            # Announced once per head: a mount that failed, or one the operator moved off, is not redone every
+            # poll; a head that runs here is announced too, so moving off it later is not news either.
             if release_id == self._announced:
                 return
             self._announced = release_id
+            if release_id == self._mounted:
+                return
         try:
             # Outside the lock: the sink may mount at once, and a mount reports back through ``mounted``.
             self._sink.new_head(release_id, source)

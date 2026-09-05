@@ -385,9 +385,9 @@ def _request(
     return None
 
 
-def _abort(session: Session, failure: Mapping[str, Any], **detail: Any) -> int:
+def _abort(session: Session, failure: Mapping[str, Any], turn: int = 1, **detail: Any) -> int:
     """End the turn in error: the closed failure in the log, its message on stderr, exit status 1."""
-    session.write("turn/end", {"turn": 1, "reason": {"kind": "error", "error": dict(failure), **detail}})
+    session.write("turn/end", {"turn": turn, "reason": {"kind": "error", "error": dict(failure), **detail}})
     print(f"[reef-native] {failure['message']}", file=sys.stderr)
     return 1
 
@@ -594,6 +594,7 @@ class _Loop:
     _complete = staticmethod(_complete)
     _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
+    enforcer_for = staticmethod(enforcer_for)
     _judged = staticmethod(_judged)
     _texts = staticmethod(_texts)
     _abort = staticmethod(_abort)

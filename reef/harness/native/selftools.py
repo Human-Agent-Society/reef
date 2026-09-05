@@ -92,8 +92,9 @@ class ServeState(Protocol):
 class HostTool(ToolModule):
     """A tool of the host plane: built in code, run in process whatever the enforcer, its name reserved."""
 
-    # integrator: ToolModule.host_plane (part C4) makes this class attribute the base class's field.
-    host_plane = True
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs["host_plane"] = True
+        super().__init__(*args, **kwargs)
 
 
 def _mutations(raw: Any) -> list[Mutation]:

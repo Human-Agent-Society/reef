@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from reef.harness.adapters import get_adapter
-from reef.harness.descriptor import AdapterDescriptor
 from reef.harness.harness_wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy, WrapperError
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native import SESSION_VERSION, SPILL_DIR, Session, _Loop, binding_from
@@ -44,11 +43,10 @@ from reef.harness.native.host import NativeHost
 from reef.harness.native.plugins import NATIVE_PLUGINS
 from reef.harness.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.native.selftools import RESERVED_NAMES, self_tools
-from reef.harness.nodes import NODE_KINDS
-from reef.harness.render import RenderError, render_composition
+from reef.train.cordis_backend.backend import admit_mutations
 from reef.train.cordis_backend.compose import Context, FiberState
 from reef.train.cordis_backend.compose.loader import Loader
-from reef.train.cordis_backend.strategies import Mutation, MutationError
+from reef.train.cordis_backend.strategies import Mutation
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
@@ -179,85 +177,6 @@ def _failures(loader: Loader) -> list[tuple[str, str, str]]:
         elif fiber.state is not FiberState.ACTIVE:
             failures.append((id_, kind, f"node fiber is {fiber.state.name}"))
     return failures
-
-
-def _renders(descriptor: AdapterDescriptor, kind: str) -> bool:
-    return kind in ("config", "rules") or kind in descriptor.node_paths
-
-
-def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
-    """One mutation on an admission loader, under the backend's rules."""
-
-    def resolve(id_: str) -> Any:
-        try:
-            return loader.resolve(id_)
-        except LookupError as exc:
-            raise MutationError(str(exc)) from exc
-
-    if mutation.op == "create":
-        try:
-            loader.resolve(mutation.id)
-        except LookupError:
-            pass
-        else:
-            raise MutationError(f"entry {mutation.id!r} already exists")
-        loader.create({**dict(mutation.options or {}), "id": mutation.id})
-    elif mutation.op == "update":
-        entry = resolve(mutation.id)
-        kind = (mutation.options or {}).get("name")
-        if kind is not None and str(kind) != str(entry.options.get("name")):
-            raise MutationError(
-                f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
-                f"to {kind!r}; remove the entry and create it under the new kind"
-            )
-        loader.update(mutation.id, dict(mutation.options or {}))
-    else:
-        resolve(mutation.id)
-        loader.remove(mutation.id)
-        loader.root.data[:] = [options for options in loader.root.data if str(options.get("id")) != mutation.id]
-    if mutation.op != "remove":
-        entry = loader.resolve(mutation.id)
-        fiber = entry.fiber
-        error = None
-        if fiber is None:
-            error = f"unknown node kind {entry.options.get('name')!r}"
-        elif fiber.error is not None:
-            error = str(fiber.error)
-        elif fiber.state is not FiberState.ACTIVE:
-            error = f"node fiber is {fiber.state.name}"
-        if error is not None:
-            raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
-
-
-def admit_mutations(
-    entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation], descriptor: AdapterDescriptor
-) -> tuple[list[dict[str, Any]], str | None]:
-    """The entries after ``mutations`` and None, or the entries as given and the refusal.
-
-    A fresh admission loader over the entries, each mutation under the rules
-    the backend applies, every kind one the descriptor renders, and the
-    render tried."""
-    # integrator: swap for reef.train.cordis_backend.backend.admit_mutations (part C1) once it lands.
-    before = [copy.deepcopy(dict(entry)) for entry in entries]
-    loader = Loader(Context(), NODE_KINDS.get)
-    loader.root.update([copy.deepcopy(entry) for entry in before])
-    try:
-        for mutation in mutations:
-            _apply_mutation(loader, mutation)
-    except MutationError as exc:
-        return before, str(exc)
-    after = _entries_of(loader)
-    for entry in after:
-        kind = str(entry.get("name"))
-        if not _renders(descriptor, kind):
-            return before, f"adapter {descriptor.name!r} does not render {kind} nodes"
-    try:
-        render_composition(
-            [(str(entry["name"]), entry.get("config")) for entry in after if not entry.get("disabled")], descriptor
-        )
-    except RenderError as exc:
-        return before, str(exc)
-    return after, None
 
 
 # -- sessions and the log ----------------------------------------------------------------------------------
