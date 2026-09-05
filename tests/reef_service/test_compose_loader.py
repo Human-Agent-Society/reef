@@ -189,6 +189,7 @@ def test_move_entry_between_groups() -> None:
     loader.create({"id": "g", "group": True, "config": []})
     loader.create({"id": "a", "name": "alpha", "config": {"n": 1}})
     loader.update("a", {}, parent="g", move=True)
+    assert [options["id"] for options in loader.root.data] == ["g"]
     entry = loader.resolve("a")
     assert entry.parent is loader.resolve("g").subgroup
     assert entry.fiber.state is FiberState.ACTIVE

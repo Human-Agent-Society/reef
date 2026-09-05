@@ -208,7 +208,7 @@ class EntryGroup:
 
     def unlink(self, options: EntryOptions) -> None:
         for index, existing in enumerate(self.data):
-            if existing is options:
+            if existing.get("id") == options.get("id"):
                 self.data.pop(index)
                 return
 
