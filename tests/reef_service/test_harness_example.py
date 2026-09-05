@@ -149,13 +149,56 @@ def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
 # -- serve.yaml boots the recipe ------------------------------------------
 
 
+@pytest.mark.parametrize("filename", ["serve.yaml", "serve-native.yaml", "deployment.yaml"])
+@pytest.mark.parametrize("selector", ["role", "worker"])
+def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypatch, tmp_path, filename, selector):
+    materializer = _method(monkeypatch, "materialize_recipe")
+    config = yaml.safe_load((EXAMPLE_DIR / "configs" / filename).read_text())
+    config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2, "resources": {"cpus_per_worker": 2}}}
+    config["execution"] = {"services": "local", "evolution": "cpu-pool"}
+    if selector == "worker":
+        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["execution"]["evolution"] = "uni"  # The explicit worker profile must win.
+    serve = tmp_path / "serve.yaml"
+    serve.write_text(yaml.safe_dump(config))
+    materializer.materialize(serve, tmp_path / "work")
+    settings = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
+    assert settings["execution"] == config["execution"]
+    assert settings["executors"] == config["executors"]
+    assert "reef" not in settings and "services" not in settings
+    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["evolution"]["tasks"]
+    # Boot the real recipe; a retained selector without its profile would fail here.
+    from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+
+    recipe = CordisRecipe.from_environment(
+        {},
+        config=settings,
+        runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
+    )
+    assert recipe.worker_executor.backend == "mp"
+    assert recipe.episode_workers == 2
+    assert recipe.worker_executor.workers == 2
+    assert recipe.worker_executor.resources.cpus_per_worker == 2
+
+
+def test_materializer_accepts_legacy_config_without_execution_sections(monkeypatch, tmp_path):
+    materializer = _method(monkeypatch, "materialize_recipe")
+    config = yaml.safe_load((EXAMPLE_DIR / "configs/serve.yaml").read_text())
+    config.pop("execution")
+    serve = tmp_path / "serve.yaml"
+    serve.write_text(yaml.safe_dump(config))
+    materializer.materialize(serve, tmp_path / "work")
+    result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
+    assert set(result) == {"implementation", "model", "evolution", "data"}
+
+
 def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_path, monkeypatch) -> None:
     """The run.sh contract, hermetic: interpolate serve.yaml through reef's
     config loader, materialize the recipe sections as a named config, and
     boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
     # serve.yaml names the real binary; this run has no pi on PATH.
     recipe_sections["evolution"] = {**recipe_sections["evolution"], "binary": str(tmp_path / "fake-pi")}
     materialized = tmp_path / "harness_evolve.yaml"
@@ -287,7 +330,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
@@ -351,7 +394,7 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
-    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime

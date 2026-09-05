@@ -110,6 +110,10 @@ class TrainingBackend(CandidateEvaluator, ABC):
     @abstractmethod
     def initial_state(self) -> Mapping[str, Any]: ...
 
+    def close(self) -> None:
+        """Release resources owned by this backend; safe to call repeatedly."""
+        return
+
     @property
     def dispatched(self) -> bool:
         """Whether the dispatcher must run this backend outside scenario locks."""

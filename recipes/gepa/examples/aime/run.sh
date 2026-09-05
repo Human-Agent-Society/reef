@@ -13,7 +13,8 @@ mkdir -p work
 : "${REEF_MODEL:=gpt-4.1-mini-2025-04-14}"
 : "${REEF_PI_BINARY:=pi}"
 : "${REEF_GEPA_WORKERS:=128}"
-export REEF_WORK REEF_MODEL REEF_PI_BINARY REEF_GEPA_WORKERS
+: "${REEF_GEPA_EXECUTOR:=auto}"
+export REEF_WORK REEF_MODEL REEF_PI_BINARY REEF_GEPA_WORKERS REEF_GEPA_EXECUTOR
 
 # The driver owns the whole run: it embeds the Reef service (gepa.yaml's
 # recipe on an ephemeral port), runs the minibatch episodes against it,

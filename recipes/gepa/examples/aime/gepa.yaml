@@ -14,16 +14,20 @@ implementation: recipes.gepa.recipe:GEPARecipe
 model:
   path: ${REEF_MODEL}
 
+execution:
+  evolution:
+    # auto selects uni for one worker, mp for multiple workers; ray is explicit.
+    backend: ${REEF_GEPA_EXECUTOR}
+    workers: ${REEF_GEPA_WORKERS}  # Default 128; override to fit host memory or Ray cluster capacity.
+
 evolution:
   adapter: pi
   # The harness binary the evaluation episodes run headless, from the environment.
   binary: ${REEF_PI_BINARY}
-  # The validation pass is 45 episodes a side; they are independent, so they
-  # run this many at once. run.sh defaults it to 128.
-  episode_workers: ${REEF_GEPA_WORKERS}
   # The task side, in the harness/ package: evaluate is the quickstart's
   # containment score over one episode, feedback is the wording GEPA's own
-  # default evaluator writes into the reflective records.
+  # default evaluator writes into the reflective records. run.py binds these
+  # hooks to a serializable answer/context snapshot before building the recipe.
   evaluate: harness.aime:evaluate
   feedback: harness.aime:feedback
   # The validation set, which is what the mechanism scores every candidate on.

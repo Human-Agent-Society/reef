@@ -214,6 +214,14 @@ class InferenceRuntime(ABC):
     def inference_backend(self) -> InferenceBackend:
         """The inference backend owned by this runtime."""
 
+    def shutdown(self) -> None:
+        """Release owned resources after all users of this runtime have stopped.
+
+        Shared or injected runtimes are closed by their owner, never by an
+        individual scenario. Proxy-only runtimes have no local resources.
+        """
+        return
+
 
 class TrainingRuntime(InferenceRuntime, ABC):
     """A runtime that produces selectable model candidates."""

@@ -98,6 +98,7 @@ class _TrainingState:
 class _LifecycleState:
     closed: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
+    owns_runtime: bool = False
 
 
 class Dispatcher:
@@ -119,6 +120,7 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        owns_runtime: bool = False,
     ) -> None:
         self._recipe = recipe
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -133,7 +135,7 @@ class Dispatcher:
         self._registry.set_training_scenario_callback(self._start_training)
         self._publication = _PublicationState()
         self._training = _TrainingState()
-        self._lifecycle = _LifecycleState()
+        self._lifecycle = _LifecycleState(owns_runtime=owns_runtime)
         if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self._lifecycle.preload_thread = Thread(
                 target=self._preload_scenarios,
@@ -706,6 +708,7 @@ class Dispatcher:
     # -- Lifecycle -------------------------------------------------------
 
     def close(self) -> None:
+        """Close scenarios, then the shared runtime when ownership was transferred."""
         if self._lifecycle.closed.is_set():
             return
         self._lifecycle.closed.set()
@@ -720,15 +723,26 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         for scenario in self._registry.close_all():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
-            scenario.close()
+            try:
+                scenario.close()
+            except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
+                errors.append(exc)
+        if self._lifecycle.owns_runtime and self._recipe.runtime is not None:
+            try:
+                self._recipe.runtime.shutdown()
+            except BaseException as exc:
+                errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        if errors:
+            raise errors[0]
 
 
 def build_default_dispatcher(

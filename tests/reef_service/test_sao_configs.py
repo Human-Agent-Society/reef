@@ -56,7 +56,15 @@ SLIME_DRIVER_MODULE = "reef.train.slime_backend.reef_adapters.driver"
 
 
 def _iter_config_files() -> list[Path]:
-    return [path for root in CONFIG_ROOTS if root.is_dir() for path in root.rglob("*.yaml")]
+    # Running an example materializes runtime YAML under its ignored work/.
+    # Those are local deployment state, not shipped configuration contracts.
+    return [
+        path
+        for root in CONFIG_ROOTS
+        if root.is_dir()
+        for path in root.rglob("*.yaml")
+        if "work" not in path.relative_to(root).parts
+    ]
 
 
 def _discover_training_configs() -> list[Path]:
@@ -307,6 +315,17 @@ def _apply_validation_derivations(args) -> None:
             args.offload_train = False
         if args.offload_rollout is None:
             args.offload_rollout = False
+
+
+@pytest.mark.unit
+def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypatch):
+    shipped = tmp_path / "example" / "serve.yaml"
+    generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
+    for path in (shipped, generated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("reef: {}\nservices: []\n")
+    monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
+    assert _discover_example_deployments() == [shipped]
 
 
 @pytest.mark.unit

@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from reef.runtime.executor.delegating import DelegatingExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
+
 torch = pytest.importorskip("torch")
 
 
@@ -126,9 +129,11 @@ def _load_rollout_module(monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-def _load_manager_module(monkeypatch: pytest.MonkeyPatch):
+def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = False):
     raw_rollout = _load_rollout_module(monkeypatch)
     path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "rollout" / "manager.py"
+    if serving:
+        path = path.parent.parent / "executors" / "rollout_worker.py"
     name = "reef.train.slime_backend.reef_adapters._rollout_manager_recovery_test"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -136,6 +141,97 @@ def _load_manager_module(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
     return raw_rollout, module
+
+
+class _RecordingRolloutExecutor(DelegatingExecutor):
+    def _init_executor(self):
+        self.calls = []
+        self.closed = False
+        executor = self
+
+        class Worker:
+            def __getattr__(self, name):
+                def invoke(*args, **kwargs):
+                    executor.calls.append((name, args, kwargs))
+                    return name
+
+                return invoke
+
+            def shutdown(self):
+                executor.closed = True
+
+        self._rpc = UniProcExecutor.from_workers([Worker()], owned=True)
+
+
+def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
+    _, module = _load_manager_module(monkeypatch)
+    args = types.SimpleNamespace(reef_rollout_executor_backend=_RecordingRolloutExecutor)
+    manager = module.ReefRolloutManagerImpl(args, "placement")
+    executor = manager._serving
+    assert executor.config.options == {"args": args, "pg": "placement"}
+    methods = [
+        "inference_url",
+        "get_runtime_load_ids",
+        "pause_generation_for_update",
+        "continue_generation_after_update",
+        "terminate_updatable_engines",
+        "get_updatable_engines_and_lock",
+        "offload",
+        "onload_weights",
+        "onload_kv",
+        "recover_updatable_engines",
+        "clear_updatable_num_new_engines",
+        "health_monitoring_pause",
+        "health_monitoring_resume",
+    ]
+    for method in methods:
+        assert getattr(manager, method)() == method
+    assert manager.onload(["weights"]) == "onload"
+    assert manager.check_weights("snapshot") == "check_weights"
+    assert executor.calls[-2:] == [("onload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
+    manager.dispose()
+    assert executor.closed
+
+
+def test_rollout_executor_rejects_uni_before_gpu_startup(monkeypatch):
+    _, module = _load_manager_module(monkeypatch)
+    with pytest.raises(ValueError, match="Slime-compatible"):
+        module.ReefRolloutManagerImpl(types.SimpleNamespace(reef_rollout_executor_backend="uni"), None)
+
+
+def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
+    server = types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])
+    monkeypatch.setattr(module, "install_sglang_extensions", lambda: None)
+    monkeypatch.setattr(module, "start_rollout_servers", lambda args, pg: ({"actor": server}, ["init"]))
+    monkeypatch.setattr(
+        module.ray, "get", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("failed init"))
+    )
+    killed = []
+    monkeypatch.setattr(module.ray, "kill", lambda worker, **kwargs: killed.append(worker))
+    args = types.SimpleNamespace(debug_train_only=False, rollout_external=False)
+    with pytest.raises(RuntimeError, match="failed init"):
+        module.SlimeRayRolloutWorker(args, "borrowed-placement")
+    assert killed == [engine]
+
+
+def test_rollout_shutdown_keeps_external_engines_and_releases_owned_lock(monkeypatch):
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    worker = object.__new__(module.SlimeRayRolloutWorker)
+    worker.args = types.SimpleNamespace(rollout_external=True)
+    worker._closed = False
+    worker._health_monitors = []
+    worker._routers = []
+    worker.servers = {"borrowed": object()}
+    lock = object()
+    worker.rollout_engine_lock = lock
+    killed = []
+    monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: killed.append(target))
+    worker.shutdown()
+    worker.shutdown()
+    assert killed == [lock]
+    assert "borrowed" in worker.servers
 
 
 class _ServerGroup:
@@ -175,7 +271,7 @@ class _RemoteMethod:
 @pytest.mark.unit
 def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.train.slime_backend.reef_adapters.rollout.manager import recover_server
+    from reef.train.slime_backend.reef_adapters.executors.rollout_worker import recover_server
 
     group = _ServerGroup([object(), object()], num_new_engines=2)
     server = module.RolloutServer(server_groups=[group])
@@ -189,7 +285,7 @@ def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: py
 @pytest.mark.unit
 def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.train.slime_backend.reef_adapters.rollout.manager import recover_server
+    from reef.train.slime_backend.reef_adapters.executors.rollout_worker import recover_server
 
     group = _ServerGroup([object(), None], num_new_engines=0)
     server = module.RolloutServer(server_groups=[group])
@@ -233,7 +329,7 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
 def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch)
+    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     engines = [
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-0")),
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-1")),
@@ -241,7 +337,7 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     group = _ServerGroup(list(engines), num_new_engines=0)
     server = raw_rollout.RolloutServer(server_groups=[group])
     pauses: list[str] = []
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.servers = {"actor": server}
     manager._health_monitors = [types.SimpleNamespace(pause=lambda: pauses.append("pause"))]
     killed = []
@@ -258,10 +354,10 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
 def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, module = _load_manager_module(monkeypatch)
+    _, module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     server = types.SimpleNamespace(update_weights=True, server_groups=[], engines=[engine])
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.servers = {"actor": server}
     manager._health_monitors = []
     killed = []
@@ -276,7 +372,7 @@ def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
 def test_recovered_engine_is_paused_before_an_in_place_update_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch)
+    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     lifecycle: list[str] = []
 
     class RecordingRemote:
@@ -294,7 +390,7 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
         pause=lambda: lifecycle.append("monitor_pause"),
         resume=lambda: lifecycle.append("monitor_resume"),
     )
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.args = types.SimpleNamespace(weight_update_pause_mode="in_place", rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": False, "poisoned": False}))
@@ -311,12 +407,12 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
 def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch)
+    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     lifecycle: list[str] = []
     old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.args = types.SimpleNamespace(rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock
@@ -345,9 +441,9 @@ def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
 def test_poisoned_external_update_requires_deployment_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch)
+    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.args = types.SimpleNamespace(rollout_external=True)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
@@ -362,11 +458,11 @@ def test_poisoned_external_update_requires_deployment_restart(
 def test_recovery_replaces_an_orphaned_locked_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch)
+    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": False}))
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.SlimeRayRolloutWorker)
     manager.args = types.SimpleNamespace(rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock

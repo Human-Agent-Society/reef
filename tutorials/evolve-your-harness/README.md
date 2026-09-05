@@ -58,6 +58,39 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
+## Worker execution
+
+The configs default to `auto`; the single service controller resolves to `uni`.
+Worker placement defaults to `execution.evolution.backend: auto` with
+`execution.evolution.workers: 1`: one CPU worker uses `uni`; increasing the count selects
+spawned `mp` workers. Model inference still runs at the configured upstream
+endpoint, so these scorers do not reserve GPUs.
+
+The YAML only needs the worker count; `backend: auto` and resource requests
+can be omitted. Local workers are not pinned or limited to one CPU core.
+
+The worker/scorer pool is reused across evaluations and released when its
+scenario closes. Each episode still starts a separate harness process in a
+fresh temporary directory. This is a fixed-size pool, not autoscaling.
+`evolution.executor` is a separate episode-isolation option (`local` or
+`sandbox`), not a worker backend selector.
+
+The demo's materializer also preserves optional top-level `execution` and
+`executors` sections. For example, choose a reusable worker/resource profile:
+
+```yaml
+execution:
+  evolution: cpu-pool
+executors:
+  cpu-pool:
+    workers: 8
+```
+
+CPU requests do not enforce core limits on local workers. Ray uses CPU/GPU
+requests as per-worker scheduling reservations. The old `episode_workers`,
+`worker_executor` and `worker_resources` fields are deprecated; remove them
+when migrating to the new structure. Conflicting resource values are rejected.
+
 ## Keep a deployment running
 
 Set `model.path` in [deployment.yaml](configs/deployment.yaml) to your provider's model

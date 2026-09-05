@@ -1686,37 +1686,51 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
     assert CordisRecipe.from_environment({}, config=config()).promote is None
 
 
-def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path, monkeypatch) -> None:
+def _task_order_score(task, result):
+    assert result.exit_code == 0, result.stderr
+    return float(task == "task two")
+
+
+def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
     """With more than one worker, evaluation episodes of the candidate and
     the current composition run at once and still report in task order."""
-    import threading
+    from reef.runtime.executor.config import ExecutorSettings
 
-    barrier = threading.Barrier(4, timeout=10)  # two sides times two tasks, all in flight together
-    started: list[str] = []
-
-    def concurrent_episode(descriptor, files, prompt, **kwargs):
-        started.append(prompt)
-        barrier.wait()
-        return EpisodeResult(0, "", "", ({"rules": files.get("pi-agent/AGENTS.md", "")},), ())
-
-    monkeypatch.setattr(reef_cordis_backend, "run_episode", concurrent_episode)
+    barrier = tmp_path / "barrier"
+    barrier.mkdir()
+    binary = tmp_path / "fake-pi"
+    binary.write_text(
+        "#!/usr/bin/env python3\nimport os,time\nfrom pathlib import Path\n"
+        f"barrier=Path({str(barrier)!r})\n"
+        "(barrier / str(os.getpid())).touch()\n"
+        "deadline=time.monotonic()+10\n"
+        "while len(list(barrier.iterdir())) < 4:\n"
+        "    if time.monotonic() > deadline: raise RuntimeError('workers did not overlap')\n"
+        "    time.sleep(0.01)\n"
+        "session=Path(os.environ['PI_CODING_AGENT_SESSION_DIR'])\n"
+        "session.mkdir(parents=True,exist_ok=True)\n"
+        "(session/'session.jsonl').write_text('{\"type\":\"agent_end\"}\\n')\n"
+    )
+    binary.chmod(0o755)
     b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "x"}})),
-        score_episode=resolve_episode_scorer(lambda task, result: float(task == "task two")),
+        score_episode=resolve_episode_scorer(_task_order_score),
         tasks=("task one", "task two"),
         models=MODEL,
-        episode_workers=4,
-        binary="fake-pi",
+        binary=str(binary),
+        worker_executor=ExecutorSettings(workers=4),
     )
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     assert prepared.candidate is not None
 
-    evaluation = b.evaluate(prepared.candidate)
-
-    assert sorted(started) == ["task one", "task one", "task two", "task two"]
-    assert evaluation.metrics["candidate_scores"] == (0.0, 1.0)
-    assert evaluation.metrics["current_scores"] == (0.0, 1.0)
+    try:
+        evaluation = b.evaluate(prepared.candidate)
+        assert len(list(barrier.iterdir())) == 4
+        assert evaluation.metrics["candidate_scores"] == (0.0, 1.0)
+        assert evaluation.metrics["current_scores"] == (0.0, 1.0)
+    finally:
+        b.close()
 
 
 def test_episode_workers_config_is_a_positive_integer(tmp_path: Path) -> None:
@@ -1729,6 +1743,72 @@ def test_episode_workers_config_is_a_positive_integer(tmp_path: Path) -> None:
     for bad in (0, "many", True):
         with pytest.raises(RecipeConfigError, match="episode_workers"):
             CordisRecipe.from_environment({}, config=config(episode_workers=bad))
+
+
+@pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
+def test_harness_evolve_auto_runs_real_episodes_on_selected_backend(tmp_path, workers, expected, caplog):
+    from reef.runtime.executor.config import ExecutorSettings
+
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(
+            lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+        ),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one", "task two"),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+        worker_executor=ExecutorSettings(workers=workers),
+    )
+    assert b._worker_selection.settings.backend == expected
+    assert b._worker_requirements.gpus_per_worker == 0
+    prepared = b.prepare_step(batch(), b.initial_state(), 0)
+    with caplog.at_level("INFO"):
+        result = b.evaluate(prepared.candidate)
+    assert result.metrics["candidate_scores"] == (1.0, 1.0)
+    assert result.metrics["current_scores"] == (0.0, 0.0)
+    assert f"executor={expected}" in caplog.text
+    b.close()
+
+
+def test_evolution_worker_selector_is_independent_of_sandbox_selector():
+    from reef.runtime.executor.config import ExecutorSettings
+
+    config = {
+        "execution": {"evolution": "mp"},
+        "evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], "episode_workers": 2},
+    }
+    recipe = CordisRecipe.from_environment({}, config=config)
+    assert recipe.worker_executor == ExecutorSettings("mp", workers=2)
+    assert type(recipe.executor).__name__ == "LocalExecutor"
+    config["evolution"]["worker_executor"] = "auto"
+    recipe = CordisRecipe.from_environment({}, config=config)
+    assert recipe.worker_executor.backend == "auto"
+    config["evolution"]["worker_executor"] = "uni"
+    with pytest.raises(RecipeConfigError, match="exactly one"):
+        CordisRecipe.from_environment({}, config=config)
+
+
+def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch):
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ())
+    config = {
+        "evolution": {
+            "propose": lambda n, s, m: None,
+            "evaluate": evaluate,
+            "tasks": ["one"],
+            "worker_resources": {"num_gpus": 1},
+            "worker_executor": "ray",
+        }
+    }
+    recipe = CordisRecipe.from_environment({}, config=config)
+    from reef.train.cordis_backend.execution import evaluation_selection
+
+    selected, requirements = evaluation_selection(recipe.score_episode, 1, recipe.worker_executor, recipe.worker_gpus)
+    assert selected.settings.backend == "ray"
+    assert requirements.gpus_per_worker == 1
+    config["evolution"]["worker_executor"] = "mp"
+    with pytest.raises(RecipeConfigError, match="visible on this host"):
+        CordisRecipe.from_environment({}, config=config)
 
 
 def test_recheck_stores_the_last_good_tree_on_publish(tmp_path: Path) -> None:

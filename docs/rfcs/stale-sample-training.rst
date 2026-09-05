@@ -24,7 +24,7 @@ Bounded stale-sample training without giving up the version fence
 Three independently reasonable mechanisms combine to produce this behavior:
 
 1. **Provenance becomes the fence.**
-   `ray_runtime.prepare_training_step <../../reef/runtime/adapters/ray_runtime.py>`__
+   `executor_runtime.prepare_training_step <../../reef/runtime/adapters/executor_runtime.py>`__
    collects the batch's producing runtime load IDs, requires exactly one, and
    stamps it as the job's ``expected_runtime_load_id``. The samples' *provenance*
    is promoted into the job's *identity*.
