@@ -115,9 +115,35 @@ defines ``run(args, workdir) -> str``, and after it ``NAME``,
 the tree's values are what the module ends with whatever the code assigned.
 ``capabilities`` is optional: distinct names from ``read``, ``write``,
 ``exec`` and ``network`` that say what the tool does. The loop reports them
-in the session header and hands them to ``pre_execute`` hooks, and the
-sandbox will read them when it enforces policy per tool. The seed tools
-declare theirs; ``run_bash`` declares all three a shell can do.
+in the session header and hands them to ``pre_execute`` hooks. Under the
+``local`` executor nothing enforces them: the tool runs in the loop's own
+process. Under the ``sandbox`` executor, which sets
+``REEF_NATIVE_ENFORCE=bwrap`` for the episodes it launches, the loop runs
+each call in a child process under a bubblewrap profile derived from the
+declaration (it binds the episode's ``/proc`` read only, since a jail inside
+the episode's cannot mount a fresh one): without ``network`` the call gets an
+empty network namespace;
+without ``write`` the workspace is bound read only; without ``exec`` only
+library directories, the interpreter file running the tool and its prefixes
+are bound, so no directory that holds a shell (``/bin``, ``/usr/bin``,
+``/usr/local/bin``) exists in the jail, and ``PATH`` is unset besides.
+``subprocess.run(["bash", ...])`` then fails with a missing file: Python
+falls back to searching ``/bin:/usr/bin`` when ``PATH`` is absent, and
+those directories are not there. The absent directories are the denial;
+binding one of them for any reason reopens ``exec``. bwrap
+cannot deny the rest: the tool can still start ``sys.executable``, run an
+executable installed under a library directory or under a path it can write
+(``/tmp`` inside the jail is a private tmpfs), and read the workspace, so
+``read`` is never withheld. The loop refuses to start when the variable
+names ``bwrap`` and no ``bwrap`` is on ``PATH``, and a call the jail could
+not run at all ends in ``SANDBOX_FAILED`` rather than passing as a tool
+failure; the sandbox executor's preflight runs one jail inside another, so
+a host that cannot nest them fails at build, not at the first call. Every
+``tool/result`` event carries ``enforcement`` with the
+``mode`` (``none`` or ``bwrap``) and ``denied``, the declaration's
+complement over ``write``, ``exec`` and ``network`` (empty under ``none``).
+The seed tools declare theirs; ``run_bash`` declares all three a shell can
+do.
 ``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, ``run_bash``, and ``execute`` tools as entries a recipe can
 seed and the loop can then evolve; ``execute`` runs a Python block in the
@@ -225,14 +251,15 @@ tool errors per agent summed over each side's episodes.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
-``session`` header line names the task, model, tools, and hooks (name to
-event); then ``turn/start``, per step ``step/start``, ``request/header`` (the
+``session`` header line names the task, model, tools, hooks (name to
+event), and the ``enforcement`` mode; then ``turn/start``, per step
+``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
 ``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
-``tool/result`` (``content``, ``is_error``, and on error a closed ``code``:
-``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_DENIED``,
-``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
+``tool/result`` (``content``, ``is_error``, ``enforcement``, and on error a
+closed ``code``: ``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``,
+``SANDBOX_FAILED``, ``HOOK_DENIED``, ``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
 ``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
 or ``LOAD_ERROR``). Arguments are validated against the tool's declared
