@@ -199,7 +199,7 @@ defines no ``listen``, or names an unknown event ends the episode with
 ``loop_guard`` at ``post_execute``, which reminds the model when the same call
 repeats three, five, or eight times in a row; it is a node, so a tree can
 retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
-``tutorials/harness_evolve/serve-native.yaml`` seeds them by reference to
+``tutorials/evolve-your-harness/configs/serve-native.yaml`` seeds them by reference to
 run the tutorial on this adapter.
 
 The loop's own control flow is a ``native_graph`` node, rendered to

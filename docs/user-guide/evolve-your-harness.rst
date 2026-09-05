@@ -246,7 +246,7 @@ From a Reef checkout:
 .. code:: bash
 
    export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
-   cd tutorials/harness_evolve
+   cd tutorials/evolve-your-harness
    ./run.sh
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
@@ -258,8 +258,8 @@ them there to point at your own. The model name appears twice, as
 the step records ``skipped: no proposal``. The provider key is the one value
 ``serve.yaml`` does not hold.
 
-`1_evolve_your_harness.ipynb
-<../../tutorials/harness_evolve/1_evolve_your_harness.ipynb>`__ is the same
+`evolve-your-harness.ipynb
+<../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ is the same
 pass as a notebook, cell by cell, with the service managed as a subprocess;
 its committed outputs are a full local run on ollama with no GPU.
 

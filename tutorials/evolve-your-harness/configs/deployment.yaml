@@ -1,5 +1,5 @@
 # Run from the repository root:
-# reef serve -c tutorials/harness_evolve/deployment.yaml
+# reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 # This is the long-running pi deployment used by the root README. The separate
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
@@ -65,17 +65,17 @@ reef:
   upstream_url: ${REEF_UPSTREAM_URL}
   upstream_model: *model
   upstream_api_key: ${REEF_UPSTREAM_API_KEY}
-  agent_record_dir: tutorials/harness_evolve/work/deployment/agent-record
-  artifact_repository: tutorials/harness_evolve/work/deployment/artifacts.git
-  artifact_work_dir: tutorials/harness_evolve/work/deployment/artifact-work
-  artifact_cache_dir: tutorials/harness_evolve/work/deployment/artifact-cache
+  agent_record_dir: tutorials/evolve-your-harness/work/deployment/agent-record
+  artifact_repository: tutorials/evolve-your-harness/work/deployment/artifacts.git
+  artifact_work_dir: tutorials/evolve-your-harness/work/deployment/artifact-work
+  artifact_cache_dir: tutorials/evolve-your-harness/work/deployment/artifact-cache
 
-run_dir: tutorials/harness_evolve/work/deployment/stack
+run_dir: tutorials/evolve-your-harness/work/deployment/stack
 
 services:
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     env:
-      REEF_RECIPE_CONFIG_DIR: tutorials/harness_evolve
-      PYTHONPATH: "${PWD}/tutorials/harness_evolve:${PWD}"
+      REEF_RECIPE_CONFIG_DIR: tutorials/evolve-your-harness/configs
+      PYTHONPATH: "${PWD}/tutorials/evolve-your-harness:${PWD}"
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz

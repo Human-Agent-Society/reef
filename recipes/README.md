@@ -66,7 +66,7 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-[Harness-Evolve quickstart](../tutorials/harness_evolve/README.md) runs the smallest skill
+[Harness-Evolve quickstart](../tutorials/evolve-your-harness/README.md) runs the smallest skill
 evolution on the harness evolution mechanism: the served model proposes one
 skill mutation over its own failing traffic, gated real episodes on three
 exact-answer coding tasks decide it, and the winning composition publishes

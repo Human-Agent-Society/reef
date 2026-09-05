@@ -1,4 +1,4 @@
-"""Guarantees of the tutorials/harness_evolve cookbook example, hermetic: the
+"""Guarantees of the tutorials/evolve-your-harness cookbook example, hermetic: the
 model binding is stubbed, episodes never run, and the boot test drives the
 same serve.yaml materialization run.sh performs."""
 
@@ -23,7 +23,7 @@ from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "harness_evolve"
+EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
 
 #: The composition the proposer sees: the starter skill, as (kind, config)
 #: pairs exactly like the backend passes. No provider node: the model binding
@@ -154,7 +154,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     config loader, materialize the recipe sections as a named config, and
     boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "serve.yaml")
+    config = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     # serve.yaml names the real binary; this run has no pi on PATH.
     recipe_sections["evolution"] = {**recipe_sections["evolution"], "binary": str(tmp_path / "fake-pi")}
@@ -286,7 +286,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     """The run.sh native contract, hermetic: the native serve file materializes
     like serve.yaml and boots with the loop's own tools and hook seeded by reference."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "serve-native.yaml")
+    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
@@ -298,7 +298,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     )
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
-    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "serve.yaml")["evolution"]["tasks"])
+    assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",
@@ -312,10 +312,45 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
 
 
+def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(monkeypatch) -> None:
+    """The README deployment: ``reef.recipe: deployment`` is read back from the
+    directory the service's own env names, and the harness package is on the
+    PYTHONPATH the same env sets; a stale directory name here fails at boot, so
+    the file's own paths are checked against the checkout."""
+    import os
+
+    from reef.recipe.registry import build_named_recipe
+    from reef.service.assembly import _upstream_runtime
+
+    repo_root = EXAMPLE_DIR.parents[1]
+    monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
+    monkeypatch.setenv("REEF_PYTHON", sys.executable)
+    monkeypatch.setenv("PWD", str(repo_root))
+    path = EXAMPLE_DIR / "configs" / "deployment.yaml"
+    config = load_config(path)
+    env = next(service for service in config["services"] if service["name"] == "reef")["env"]
+    recipe_dir = repo_root / env["REEF_RECIPE_CONFIG_DIR"]
+    assert (recipe_dir / "deployment.yaml").resolve() == path.resolve()
+    method_root = Path(env["PYTHONPATH"].split(":")[0])
+    assert (method_root / "harness" / "evolution.py").is_file()
+    monkeypatch.syspath_prepend(str(method_root))  # what the service env PYTHONPATH gives the recipe
+    for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
+        assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
+    assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
+    service = service_settings_from_config(config)
+    built = build_named_recipe(
+        "deployment",
+        {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(recipe_dir)},
+        default_runtime=_upstream_runtime(service),
+    )
+    assert isinstance(built, CordisRecipe) and built.adapter == "pi"
+
+
 def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:
     """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
-    config = load_config(EXAMPLE_DIR / "serve-native.yaml")
+    config = load_config(EXAMPLE_DIR / "configs" / "serve-native.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
     materialized = tmp_path / "harness_evolve.yaml"
     materialized.write_text(yaml.safe_dump(recipe_sections))
