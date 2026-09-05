@@ -68,6 +68,11 @@ class ScenarioCommitProtocol:
         self._commit_log = commit_log
         self._creation_artifact = self._resolve_creation_artifact()
         self._lock = RLock()
+        # Preparation holds the operation lock across proposer calls and
+        # evaluation episodes, neither of which changes committed releases.
+        # Readers share only the publication lock with commit and rollback.
+        # Writers must acquire the operation lock first; readers never take it.
+        self._publication_lock = RLock()
         records = (
             (() if recovered_head_record is None else (recovered_head_record,))
             if commit_log is None
@@ -124,7 +129,7 @@ class ScenarioCommitProtocol:
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
-        with self._lock:
+        with self._publication_lock:
             records = () if self._commit_log is None else self._commit_log.records()
             rows = [
                 self._release_row(
@@ -167,7 +172,7 @@ class ScenarioCommitProtocol:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._lock:
+        with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if current_ref.release_id == release_id:
                 return current_ref
@@ -236,7 +241,7 @@ class ScenarioCommitProtocol:
 
     def commit(self, result: TrainStepResult) -> Any:
         """Commit a pending training result as one atomic version record."""
-        with self._lock:
+        with self._lock, self._publication_lock:
             next_step = self._step + 1
             prepared = self._trainer.prepare_commit(result)
             recorded = self._recorded_training_retry(prepared, result, next_step)
@@ -554,7 +559,7 @@ class ScenarioCommitProtocol:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._lock:
+        with self._publication_lock:
             found = self._find_release_id(release_id)
         if found is None:
             raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
@@ -567,6 +572,20 @@ class ScenarioCommitProtocol:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
             raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}") from exc
+
+    def artifact_snapshot(
+        self,
+        release_id: str | None = None,
+    ) -> tuple[Artifact, Mapping[str, Any] | None]:
+        """Capture one artifact and its metrics without waiting for preparation."""
+        with self._publication_lock:
+            artifact = (
+                Artifact(self._artifacts.current, self._artifacts.repository)
+                if release_id is None
+                else self.artifact_for_version(release_id)
+            )
+            metrics = self.metrics_for_version(artifact.ref.release_id)
+            return artifact, metrics
 
     @staticmethod
     def _release_row(

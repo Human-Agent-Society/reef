@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
+from threading import Event
 from urllib.parse import quote
 
 import pytest
@@ -43,6 +44,7 @@ from reef.service.install_script import (
 )
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -448,6 +450,81 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
             puller = _ReleaseClient(str(client.server.make_url("")))
             assert await asyncio.to_thread(puller.harness_releases, "delivery") == rows
         finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) -> None:
+    evaluation_started = Event()
+    finish_evaluation = Event()
+
+    async def run() -> None:
+        dispatcher = _dispatcher(tmp_path, MUTATIONS)
+        scenario = dispatcher.get_or_create_scenario("delivery")
+        assert scenario is not None
+        backend = scenario.trainer.training_backend
+        assert backend is not None
+        evaluate_candidate = backend.evaluate
+
+        def blocked_evaluate(candidate: UpdateCandidate) -> EvaluationResult:
+            result = evaluate_candidate(candidate)
+            evaluation_started.set()
+            assert finish_evaluation.wait(_ASYNC_UPDATE_TIMEOUT_S), "evaluation was not released"
+            return result
+
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        second_step = None
+        try:
+            first = await _gate_step(client)
+            monkeypatch.setattr(backend, "evaluate", blocked_evaluate)
+            second_step = asyncio.create_task(_gate_step(client))
+            assert await asyncio.to_thread(evaluation_started.wait, _ASYNC_UPDATE_TIMEOUT_S)
+
+            async def read_release(path: str, release_id: str | None = None) -> dict:
+                response = await client.get(
+                    path,
+                    params={} if release_id is None else {"release_id": release_id},
+                    headers={"x-reef-scenario": "delivery"},
+                )
+                assert response.status == 200
+                return await response.json()
+
+            # A resident client must keep seeing the committed tree and its
+            # matching gate metrics while the next candidate is being evaluated.
+            catalog, current, pinned = await asyncio.wait_for(
+                asyncio.gather(
+                    read_release("/reef/harness/releases"),
+                    read_release("/reef/harness"),
+                    read_release("/reef/harness", first["release_id"]),
+                ),
+                timeout=1.0,
+            )
+            assert current == pinned == first
+            head = catalog["releases"][-1]
+            assert head["current"] is True
+            assert head["release_id"] == first["release_id"]
+            assert head["content_id"] == first["content_id"]
+            assert head["metrics"] == first["gate"]
+
+            finish_evaluation.set()
+            second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
+            updated = await read_release("/reef/harness/releases")
+            assert len(updated["releases"]) == len(catalog["releases"]) + 1
+            assert updated["releases"][-2]["current"] is False
+            head = updated["releases"][-1]
+            assert head["current"] is True
+            assert head["release_id"] == second["release_id"] != first["release_id"]
+            assert head["content_id"] == second["content_id"]
+            assert head["metrics"] == second["gate"]
+            assert second["files"] == render_composition(NODES_V2, get_adapter("pi"))
+            assert await read_release("/reef/harness", first["release_id"]) == first
+        finally:
+            finish_evaluation.set()
+            if second_step is not None:
+                await asyncio.gather(second_step, return_exceptions=True)
             await client.close()
 
     asyncio.run(run())
