@@ -190,12 +190,14 @@ def build_dispatcher(
 ) -> Dispatcher:
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
+    recipe = _serving_recipe(selected_recipe, settings, env, connector)
+    # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
     backend_factory = GitLFSRepositoryBackend.factory(
         _repository_location(settings.artifact_repository),
         work_dir=Path(settings.artifact_work_dir),
         cache_dir=Path(settings.artifact_cache_dir),
+        bootstrap_files=recipe.seed_files(),
     )
-    recipe = _serving_recipe(selected_recipe, settings, env, connector)
     if not isinstance(settings.training_settings, Mapping):
         raise ValueError("training must be an object")
     experiment_tracker = build_experiment_tracker(

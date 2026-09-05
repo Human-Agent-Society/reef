@@ -145,6 +145,7 @@ def _dispatcher(
     bootstrap_files: dict[str, str] | None = None,
     batch_policy: str = "reports",
     batch_size: int = 1,
+    seed: tuple[dict, ...] = (),
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -158,10 +159,12 @@ def _dispatcher(
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000"),
         batch_policy=batch_policy,
         batch_size=batch_size,
+        seed=seed,
     )
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
-    for relative, text in (bootstrap_files or {}).items():
+    # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
+    for relative, text in {**(recipe.seed_files() or {}), **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
@@ -1003,6 +1006,38 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
         load_descriptor(target)
+
+
+@pytest.mark.unit
+def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tmp_path) -> None:
+    """The README flow: a fresh scenario against a recipe with a seed answers the manifest and the
+    install script at once, with the seed's files and a binding at the served model, no step needed."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert manifest.status == 200
+            files = (await manifest.json())["files"]
+            assert files["pi-agent/skills/answer-style/SKILL.md"] == "# seed skill\n"
+            assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
+            response = await client.get(
+                "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}
+            )
+            assert response.status == 200
+            script = await response.text()
+            assert "# seed skill" in script
+            host = f"{client.host}:{client.port}"
+            assert f'"baseUrl": "http://{host}/v1"' in script
+            assert '"id": "demo-model"' in script  # the recipe's runtime model, since no gate ran yet
+            assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit

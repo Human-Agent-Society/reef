@@ -174,6 +174,17 @@ class Dispatcher:
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
 
+    def seed_entries(self) -> tuple[Mapping[str, Any], ...]:
+        """The recipe's seed composition entries, empty for a recipe without one."""
+        return tuple(dict(entry) for entry in getattr(self._recipe, "seed", ()))
+
+    def served_model_name(self) -> str | None:
+        """The model the recipe serves and gates against: its own name, else its runtime's model path."""
+        name = getattr(self._recipe, "model_name", None)
+        if not isinstance(name, str) or not name:
+            name = getattr(getattr(self._recipe, "runtime", None), "model_path", None)
+        return name if isinstance(name, str) and name else None
+
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()

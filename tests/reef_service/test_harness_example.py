@@ -309,3 +309,32 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     ]
     assert "upstream" not in yaml.safe_dump(list(built.seed))
     assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
+
+
+def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:
+    """The seed a deployment ships is what a fresh scenario serves, rendered once by the recipe."""
+    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
+    config = load_config(EXAMPLE_DIR / "serve-native.yaml")
+    recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    materialized = tmp_path / "harness_evolve.yaml"
+    materialized.write_text(yaml.safe_dump(recipe_sections))
+    from reef.service.assembly import _upstream_runtime
+
+    service = service_settings_from_config(config)
+    built = CordisRecipe.from_environment(
+        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
+    )
+    files = built.seed_files()
+    assert files is not None
+    assert {"native/tools/read_file.py", "native/graphs/main.json", "native/skills/answer-style/SKILL.md"} <= set(
+        files
+    )
+    assert "upstream" not in files["native/models.json"]  # the seed carries no provider
+    assert (
+        CordisRecipe.from_environment(
+            {},
+            config={**load_recipe_config(materialized), "evolution": {**recipe_sections["evolution"], "seed": []}},
+            runtime=_upstream_runtime(service),
+        ).seed_files()
+        is None
+    )

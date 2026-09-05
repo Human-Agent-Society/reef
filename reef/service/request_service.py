@@ -520,26 +520,31 @@ class RequestService:
             binding_files=self._install_binding(scenario, manifest, descriptor, headers),
         )
 
-    @staticmethod
     def _install_binding(
-        scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
+        self, scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
     ) -> dict[str, str]:
         """The adapter's config targets re-rendered with a binding at the Reef this request reached.
 
         The served composition never carries an endpoint or a credential, so
         an installed tree needs one written beside it: the release's own
-        entries plus the descriptor's binding template, the base URL taken
-        from the request's Host, the model from the gate the release ran
-        against, and the token left as a placeholder the script fills from
-        the client's environment. Empty when any of those is unknown, and
-        the script then installs the composition as before.
+        entries (the recipe's seed for the base release no step published)
+        plus the descriptor's binding template, the base URL taken from the
+        request's Host, the model from the gate the release ran against (the
+        recipe's served model for the base release), and the token left as a
+        placeholder the script fills from the client's environment. Empty
+        when any of those is unknown, and the script then installs the
+        composition as before.
         """
         normalized = {key.lower(): value.strip() for key, value in headers.items()}
         host = normalized.get("host")
         gate = manifest.get("gate") or {}
         model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        if not isinstance(model, str) or not model:
+            model = self._dispatcher.served_model_name()
         entries = scenario.entries_for_version(manifest["release_id"])
-        if not host or not isinstance(model, str) or not model or entries is None:
+        if entries is None:
+            entries = self._dispatcher.seed_entries()
+        if not host or not model or not entries:
             return {}
         scheme = normalized.get("x-forwarded-proto") or "http"
         binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)

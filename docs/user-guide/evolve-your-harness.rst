@@ -309,7 +309,9 @@ happens.
 Install the published tree
 --------------------------
 
-Clients pull an evolved harness the way they install any coding agent:
+Clients pull an evolved harness the way they install any coding agent. A
+fresh scenario already serves the recipe's seed as its first release, so
+the install works before any step has run:
 
 .. code:: bash
 
