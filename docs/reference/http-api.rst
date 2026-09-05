@@ -49,6 +49,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/harness/proposals``                | an agent's proposed tree change, admitted or not  |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                   | a shell script that installs the tree             |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/adapters``                  | every harness adapter this process resolves       |
@@ -62,9 +64,9 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | Header                            | Required for                                            |
 +===================================+=========================================================+
-| ``x-reef-scenario``               | inference, report, harness manifest and releases;       |
-|                                   | optional on harness install. Names the workload a       |
-|                                   | record belongs to.                                      |
+| ``x-reef-scenario``               | inference, report, harness manifest, releases and       |
+|                                   | proposals; optional on harness install. Names the       |
+|                                   | workload a record belongs to.                           |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
 |                                   | configured.                                             |
@@ -138,6 +140,13 @@ The receipt identifies the stored record:
 +---------------+-----------------------------------------------------------+
 
 Streams carry it only after the record is stored.
+
+On a scenario that serves harness files, every inference response also
+carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves at
+that moment, read after the call. A resident ``reef-native serve`` process
+compares it with the release it mounted and learns of a new head on its next
+model call, with no extra request. A weight serving scenario sends no such
+header.
 
 Report
 ------
@@ -222,8 +231,62 @@ generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
 automatically.
 
+``files`` is the rendered tree, path to text. An adapter whose descriptor
+declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
+file: the release's entries list, the same ``{id, name, config}`` objects the
+commit log persists, as one JSON array. A resident ``reef-native serve``
+process mounts that list entry by entry; an older ``reef-native`` ignores the
+file and reads the rendered files as before.
+
 Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
+
+Proposals
+~~~~~~~~~
+
+An agent running on the served tree can propose a change to it. The
+proposal enters the same gate as the method's own: nothing it says is served
+until paired episodes settle it.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \
+     -d '{"mutations": [{"op": "create", "id": "check", "options": {"name": "rules", "config": {"text": "Run the tests before you answer."}}}],
+          "reason": "three of five sessions answered before the tests ran",
+          "session": "3f1c2a9d0b7e", "release_id": "rel-12"}' \
+     "$REEF_URL/reef/harness/proposals"
+
++----------------+----------------------------------------------------------------------+
+| Field          | Meaning                                                              |
++================+======================================================================+
+| ``mutations``  | a non-empty list of ``{op, id, options}``: ``create`` and ``update`` |
+|                | carry ``options`` (``{name, config, disabled?}``, the entry without  |
+|                | its id), ``remove`` carries none                                     |
++----------------+----------------------------------------------------------------------+
+| ``reason``     | the proposer's own account, stored with the proposal                 |
++----------------+----------------------------------------------------------------------+
+| ``session``    | the session that proposed, named in the commit that settles it       |
++----------------+----------------------------------------------------------------------+
+| ``release_id`` | the release the proposer was running                                 |
++----------------+----------------------------------------------------------------------+
+
+The service admits the mutations against the head release's entries with the
+rules every mutation meets (a create on an existing id, an update on a missing
+id or one that changes the entry's kind, a remove on a missing id, a config the
+kind's admission refuses, a kind the adapter does not render, a tree that does
+not render) and answers ``{proposal_id, admitted, reason, release_id}``:
+``reason`` is the rule that refused, else ``null``; ``release_id`` is the head
+the proposal was admitted against. An admitted proposal waits in the
+scenario's inbox (``evolution.proposals_dir``) until the next evolve step takes
+it, oldest first, before the method's own ``propose`` is asked; the step admits
+it again against its own entries, since the head may have moved, and the gate
+settles it like any mutation. When ``evolution.max_pending_proposals`` already
+wait, the answer is ``admitted: false`` with reason ``inbox full``. A malformed
+body is HTTP 400; a scenario whose recipe is not a harness evolution recipe is
+HTTP 404 naming that. `Operate a deployment
+<../user-guide/operate.rst#read-the-proposal-inbox>`__ describes the inbox
+directories.
 
 Rollback
 ~~~~~~~~

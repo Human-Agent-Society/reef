@@ -26,20 +26,26 @@ from reef.harness.native import (
     MAX_RESULT_CHARS,
     SPILL_TAIL_CHARS,
     HookModule,
+    LoadError,
     ToolModule,
     _invoke,
     _waterfall,
+    enforcer_for,
     load_hooks,
     load_tools,
     run_loop,
 )
+from reef.harness.native.enforce import BwrapEnforcer
+from reef.harness.native.host import NativeHost
 from reef.harness.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.nodes import NODE_KINDS
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import reader_for
 from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation.evaluators import AlwaysSelect
 from reef.train.types import TraceBatch, TraceSample
 
 TOOL = (
@@ -1752,3 +1758,156 @@ def test_an_ask_inside_an_agent_ends_its_turn_and_the_parent_reads_the_reason(tm
     finally:
         model.shutdown()
         model.server_close()
+
+
+# -- the tree travels as a file: the episode form boots from the entries list --------
+
+
+def _tree_episode(tmp_path: Path, model, entries, tree_entries=None, prompt="put hello in notes.txt and read it back"):
+    """An episode on the rendered files plus the entries list; ``tree_entries`` may differ from the render to probe the boot."""
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    files.update(tree_files(descriptor, entries if tree_entries is None else tree_entries))
+    return run_episode(descriptor, files, prompt, binary=_launcher(tmp_path))
+
+
+def _comparable(trajectory):
+    """The events without what differs between two roots: the clock, the paths, and the boot source the header names."""
+    events = []
+    for event in trajectory:
+        data = json.loads(json.dumps(event["data"]))
+        for key in ("cwd", "tree"):
+            data.pop(key, None)
+        if isinstance(data.get("meta"), dict):
+            data["meta"].pop("duration_ms", None)
+        events.append((event["type"], data))
+    return events
+
+
+def test_a_root_with_an_entries_list_boots_from_it_and_logs_the_same_events(tmp_path: Path, fake_model) -> None:
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    from_files = _episode(tmp_path, fake_model, _seed_nodes(entries))
+    from_tree = _tree_episode(tmp_path, fake_model, entries)
+    assert from_files.trajectory[0]["data"]["tree"] == "files"
+    assert from_tree.trajectory[0]["data"]["tree"] == "tree.json"
+    assert _comparable(from_tree.trajectory) == _comparable(from_files.trajectory)
+    assert from_tree.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    # The boot mounts its modules under the session directory, inside the cleanup whitelist.
+    assert from_tree.residue == () and from_tree.exit_code == 0
+
+
+def test_from_root_prefers_the_entries_list_and_admits_it_through_the_plugins(tmp_path: Path) -> None:
+    descriptor = get_adapter("native")
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    for relative, text in {**files, **tree_files(descriptor, entries)}.items():
+        (tmp_path / "root" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "root" / relative).write_text(text, encoding="utf-8")
+    root = tmp_path / "root" / "native"
+    with pytest.raises(LoadError, match=r"tree\.json needs a mount directory"):
+        NativeHost.from_root(root)
+    host = NativeHost.from_root(root, tmp_path / "mounts")
+    assert host.loader is not None and list(host.tools) == ["execute", "read_file", "run_bash", "write_file"]
+    assert sorted(p.name for p in (tmp_path / "mounts" / "tools").glob("*.py")) == [
+        "execute.py",
+        "read_file.py",
+        "run_bash.py",
+        "write_file.py",
+    ]
+    assert host.system_prompt() == "Be brief." and host.graph("main").source == "main"
+    assert [hook.name for hook in host.hooks["post_execute"]] == ["loop_guard"]
+
+    tree = root / "tree.json"
+    tree.unlink()
+    from_files = NativeHost.from_root(root)
+    assert from_files.loader is None and list(from_files.tools) == list(host.tools)
+    assert from_files.system_prompt() == host.system_prompt()
+
+    # A hand edited list cannot run unchecked: the shape, then every entry through its kind's plugin.
+    tree.write_text("[1]", encoding="utf-8")
+    with pytest.raises(LoadError, match="must be a JSON array of entry objects"):
+        NativeHost.from_root(root, tmp_path / "again")
+    tree.write_text(json.dumps([{"id": "x"}]), encoding="utf-8")
+    with pytest.raises(LoadError, match="requires a non-empty string 'name'"):
+        NativeHost.from_root(root, tmp_path / "again")
+    command = {"id": "cmd", "name": "agent_command", "config": {"name": "cmd", "text": "a command"}}
+    tree.write_text(json.dumps([*entries, command]), encoding="utf-8")
+    with pytest.raises(LoadError, match=r"tree\.json entry 'cmd' cannot load: no plugin for kind agent_command"):
+        NativeHost.from_root(root, tmp_path / "again")
+    # A failed boot leaves nothing behind, so the same mount directory serves the next attempt.
+    assert not list((tmp_path / "again").rglob("*.py"))
+    pinned = {"id": "pin", "name": "config", "config": {"target": "models", "data": {"model": "other"}}}
+    tree.write_text(json.dumps([*entries, pinned]), encoding="utf-8")
+    with pytest.raises(LoadError, match=r"tree\.json entry 'pin' cannot load: config: .*cannot set model"):
+        NativeHost.from_root(root, tmp_path / "again")
+
+
+def test_an_entries_list_that_cannot_load_ends_the_episode_naming_the_entry(tmp_path: Path, fake_model) -> None:
+    broken = {
+        "id": "broken",
+        "name": "native_tool",
+        "config": {
+            "name": "broken",
+            "description": "compiles, then fails to import",
+            "parameters": {},
+            "code": "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n",
+        },
+    }
+    result = _tree_episode(tmp_path, fake_model, [*SEED_TOOLS, broken])
+    assert result.exit_code == 1 and [e["type"] for e in result.trajectory] == ["session", "turn/start", "turn/end"]
+    error = result.trajectory[-1]["data"]["reason"]["error"]
+    assert error["code"] == "LOAD_ERROR"
+    assert error["message"].startswith("tree.json entry 'broken' cannot load: native_tool: broken.py failed to import")
+    assert "RuntimeError: boom" in error["message"]
+
+
+def test_a_host_plane_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:
+    tools = {
+        "harness_inspect": ToolModule("harness_inspect", "reef's own", {}, lambda a, w: "tree", host_plane=True),
+        "shout": ToolModule("shout", "the tree's", {}, lambda a, w: "loud"),
+    }
+    jailed = BwrapEnforcer()
+    assert tools["harness_inspect"].host_plane is True and tools["shout"].host_plane is False
+    assert (
+        enforcer_for(tools["harness_inspect"], jailed).mode == "none"
+        and enforcer_for(tools["shout"], jailed) is jailed
+    )
+    assert enforcer_for(tools["shout"], None).mode == "none"
+    assert _invoke(tools, "harness_inspect", "{}", tmp_path, enforcer=jailed)["content"] == "tree"
+    # A tree tool built in code has no module file for the jail to import: only the host plane flag bypasses it.
+    denied = _invoke(tools, "shout", "{}", tmp_path, enforcer=jailed)
+    assert denied["error"]["code"] == "SANDBOX_FAILED" and "no module file" in denied["error"]["message"]
+
+
+def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_published_tree(
+    tmp_path: Path, fake_model
+) -> None:
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    brief = Mutation("create", "brief", {"name": "rules", "config": {"text": "Be brief."}})
+    backend = CordisBackend(
+        descriptor=get_adapter("native"),
+        propose=resolve_proposer(lambda nodes, samples, models: brief),
+        score_episode=resolve_episode_scorer(lambda task, result: 1.0),
+        tasks=("put hello in notes.txt and read it back",),
+        models=binding,
+        binary=_launcher(tmp_path),
+        seed=SEED_NODES,
+    )
+    episode = backend._render_for_episode(SEED_NODES)
+    assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
+    assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
+    batch = TraceBatch("demo:trace:tree", (TraceSample("a1", {"messages": []}, 0.0),))
+    prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+    assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
+    evaluator = DefaultCandidateEvaluationPlugin(backend, AlwaysSelect())
+    settled = backend.settle_step(
+        prepared, evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+    )
+    assert settled.metrics["selected"] is True and settled.artifact is not None
+    published = settled.artifact.local_path
+    assert published is not None
+    entries = json.loads((published / "native" / "tree.json").read_text(encoding="utf-8"))
+    assert entries == settled.state["entries"] and [entry["id"] for entry in entries][-1] == "brief"
+    assert "base_url" not in (published / "native" / "models.json").read_text(encoding="utf-8")

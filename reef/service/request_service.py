@@ -12,9 +12,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
@@ -29,11 +29,25 @@ from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
-from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
+from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ProposalGate(Protocol):
+    """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
+
+    @property
+    def proposals(self) -> ProposalInbox | None: ...
+
+    def admit(
+        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
+    ) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
 def _random_harness_scenario_name() -> str:
@@ -464,6 +478,44 @@ class RequestService:
             "files": dict(files),
             "gate": gate,
         }
+
+    def harness_head(self, headers: Mapping[str, str]) -> str | None:
+        """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
+        try:
+            scenario = self._file_scenario(headers)
+        except ArtifactNotFound:
+            return None
+        return scenario.repository.require_current_artifact().release_id
+
+    def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
+
+        The admission is the backend's own (``admit_mutations`` over a fresh
+        loader), never a touch of its live tree, and it runs again on the
+        training thread when the step takes the proposal, since the head may
+        have moved. The answer names the proposal, whether it was admitted,
+        the refusal when not, and the head it was admitted against.
+        """
+        proposal = ProposalPayload.from_dict(payload)
+        scenario = self._file_scenario(headers)
+        backend = scenario.trainer.training_backend
+        if not isinstance(backend, ProposalGate) or backend.proposals is None:
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
+                "evolution recipe with a proposal inbox"
+            )
+        head = scenario.repository.require_current_artifact().release_id
+        # The head commit's entries, which the served tree.json carries too; the seed before the first commit.
+        entries = [dict(entry) for entry in scenario.trainer.state.get("entries") or ()]
+        proposal_id = ProposalInbox.new_id()
+        try:
+            mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
+            _, refusal = backend.admit(entries, mutations)
+        except MutationError as error:
+            refusal = str(error)
+        if refusal is None:
+            refusal = backend.proposals.submit(proposal_id, {**proposal.to_dict(), "head_release_id": head})
+        return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
 
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The scenario's release catalog with per-release gate metrics, newest last.

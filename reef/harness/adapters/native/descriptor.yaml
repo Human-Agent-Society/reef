@@ -17,13 +17,16 @@ files:
       path: "native/models.json"
       defaults: {}
   rules: "native/RULES.md"
-  agent_command: "native/commands/{name}.md"
   skill: "native/skills/{name}/SKILL.md"
-  code_extension: "native/extensions/{name}.py"
+  # agent_command and code_extension are absent on purpose: the loop never reads them, so a
+  # mutation of either kind fails admission and render here instead of installing nothing.
   native_tool: "native/tools/{name}.py"
   native_hook: "native/hooks/{name}.py"
   native_graph: "native/graphs/{name}.json"
   native_agent: "native/agents/{name}.json"
+  # The entries list travels with the files, so a resident process reconciles the tree entry by
+  # entry and the episode form boots from it when present.
+  tree: "native/tree.json"
 trajectory:
   format: native-jsonl
   path: "native/sessions"
@@ -32,6 +35,7 @@ writable_paths:
   - "native/sessions"
 cleanup_whitelist:
   - "native/sessions/**"
+  - "native/mounts/**"
   - "native/tools/__pycache__/**"
   - "native/hooks/__pycache__/**"
 # The served model reaches the loop through this file only; the served tree

@@ -135,10 +135,12 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             configs[target_name] = _deep_merge(configs[target_name], options.get("data", {}))
         elif kind == "rules":
             rules.append(str(options.get("text", "")).strip())
-        elif kind in ("agent_command", "skill"):
-            emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("text", "")))
-        elif kind == "code_extension":
-            emit(descriptor.node_paths[kind].format(name=options.get("name")), str(options.get("code", "")))
+        elif kind in ("agent_command", "skill", "code_extension"):
+            template = descriptor.node_paths.get(kind)
+            if template is None:
+                raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
+            body = options.get("code", "") if kind == "code_extension" else options.get("text", "")
+            emit(template.format(name=options.get("name")), str(body))
         elif kind in ("native_tool", "native_hook"):
             template = descriptor.node_paths.get(kind)
             if template is None:

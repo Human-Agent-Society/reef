@@ -202,6 +202,40 @@ retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
 ``tutorials/evolve-your-harness/configs/serve-native.yaml`` seeds them by reference to
 run the tutorial on this adapter.
 
+The native descriptor declares no path for ``agent_command`` or
+``code_extension``: the loop never reads either, so a mutation of those kinds
+is refused at admission ("does not render") instead of rendering a file
+nothing loads. ``config`` keeps both targets, since the render needs
+``primary``; the loop reads ``models`` only, and a live tree boot refuses a
+``config`` entry with target ``primary`` or one that sets a pinned binding
+field (``api``, ``base_url``, ``api_key``, ``model``).
+
+The tree travels as a file
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The native descriptor also declares ``files.tree: native/tree.json``. Every
+tree the backend renders for this adapter carries that file beside the
+rendered ones: the release's entries list, verbatim, as one JSON array of
+``{id, name, config}`` objects, the same list the commit log persists under
+``algorithm_state["entries"]``. It reaches the evaluation episodes, the
+published artifact, the manifest, the install script and a pulled tree
+through the existing channel; the base release a seeded recipe serves before
+any step carries the seed's list. The binding nodes never enter it: the
+pinned model fields stay in ``native/models.json``.
+
+At boot the loop reads the file when it exists: a fresh compose context, a
+``Loader`` over ``NATIVE_PLUGINS``, ``root.update(entries)``, every entry
+admitted again by its kind's plugin and installed into the host through the
+same effects a resident process uses, with the tool and hook modules written
+under ``sessions/mounts/boot/`` (the one writable path under the sandbox).
+An entry that does not end ACTIVE ends the episode with ``LOAD_ERROR``
+naming the entry id, its kind and the fiber's error, or ``no plugin for kind
+X`` for a kind the loop never reads, so a hand edited list cannot run
+unchecked. Without the file the loop reads the rendered files as before, so
+an older pulled tree runs unchanged. The two boots produce the same events;
+the session header's ``tree`` field says which ran, ``tree.json`` or
+``files``.
+
 The loop's own control flow is a ``native_graph`` node, rendered to
 ``native/graphs/main.json``: named stages from a closed vocabulary and edges
 keyed by each stage's outcome. ``reef.harness.native.seed.SEED_GRAPH`` is
@@ -269,7 +303,8 @@ tool errors per agent summed over each side's episodes.
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, hooks (name to
-event), and the ``enforcement`` mode; then ``turn/start``, per step
+event), the ``enforcement`` mode, and ``tree``, where the composition came
+from (``tree.json`` or ``files``); then ``turn/start``, per step
 ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
@@ -303,7 +338,7 @@ agent.
    name | the adapter's id
    binary | the executable an episode runs
    argv | the argument list for one headless prompt; ``{prompt}`` is substituted
-   files | where each node kind renders, like ``skills/{name}/SKILL.md``
+   files | where each node kind renders, like ``skills/{name}/SKILL.md``; ``rules`` and ``skill`` are required, every other kind is optional and a mutation of a kind left out is refused; ``tree`` names the file the entries list travels in, for a binary that reconciles the tree live
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix

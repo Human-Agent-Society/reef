@@ -185,6 +185,8 @@ zero.
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
+   evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured

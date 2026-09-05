@@ -45,6 +45,8 @@ MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
+#: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
+TREE_FILE = "tree.json"
 _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "string": str,
     "integer": int,
@@ -95,6 +97,7 @@ class ToolModule:
         run: ToolRunner,
         capabilities: Sequence[str] = (),
         path: Path | None = None,
+        host_plane: bool = False,
     ) -> None:
         self.name = name
         self.description = description
@@ -103,6 +106,9 @@ class ToolModule:
         self.capabilities = tuple(str(item) for item in capabilities)
         # The module file, which a sandboxing enforcer imports afresh in its child; a tool built in code has none.
         self.path = path
+        # Reef's own code rather than the tree's (the serve form's self tools): it runs in process whatever
+        # enforcer the environment names, since the enforcer confines what a tree entry may do.
+        self.host_plane = host_plane
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -414,13 +420,16 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         "model": binding.model,
         "base_url": binding.base_url,
         "cwd": str(workdir),
+        # Where the composition came from: the entries list a newer render carries, else the rendered files.
+        "tree": TREE_FILE if (root / TREE_FILE).is_file() else "files",
     }
     try:
         try:
             # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
             enforcer = select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
-            host = NativeHost.from_root(root)
+            # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
+            host = NativeHost.from_root(root, session_dir / "mounts" / "boot")
             graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
@@ -486,6 +495,13 @@ def _refused(decision: Mapping[str, Any], arguments: dict[str, Any]) -> dict[str
     return None
 
 
+def enforcer_for(tool: ToolModule, enforcer: Enforcer | None) -> Enforcer:
+    """The enforcer one call runs under: the environment's, except a host plane tool always runs in process."""
+    if tool.host_plane or enforcer is None:
+        return InProcessEnforcer()
+    return enforcer
+
+
 def _invoke(
     tools: Mapping[str, ToolModule],
     name: str,
@@ -525,7 +541,7 @@ def _invoke(
                 return _error("INVALID_ARGS", f"rewritten by a hook: {violation}", arguments)
     started = time.monotonic()
     try:
-        result = (enforcer or InProcessEnforcer()).run(tool, arguments, workdir)
+        result = enforcer_for(tool, enforcer).run(tool, arguments, workdir)
     except SandboxFailed as exc:
         return _error("SANDBOX_FAILED", str(exc), arguments)
     except ToolFailed as exc:
