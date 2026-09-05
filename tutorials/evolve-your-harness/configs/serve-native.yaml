@@ -43,7 +43,7 @@ evolution:
   # carries no provider: Reef renders its own model binding into each
   # evaluation episode.
   seed:
-    - reef.harness.native.seed:SEED_NODES
+    - reef.harness.runners.native.seed:SEED_NODES
     - id: answer-style
       name: skill
       config:

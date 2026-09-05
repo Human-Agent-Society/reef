@@ -18,10 +18,11 @@ import pytest
 from reef_service.test_native_enforce import PROBE, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.episode import run_episode
-from reef.harness.executor import SandboxExecutor
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native import (
+from reef.harness.episodes.executor import SandboxExecutor
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.trajectory import reader_for
+from reef.harness.runners.native import (
     _DEFAULTS,
     MAX_COMPLETION_TOKENS,
     MAX_RESULT_CHARS,
@@ -36,12 +37,11 @@ from reef.harness.native import (
     load_tools,
     run_loop,
 )
-from reef.harness.native.enforce import BwrapEnforcer
-from reef.harness.native.host import NativeHost
-from reef.harness.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
-from reef.harness.nodes import NODE_KINDS
-from reef.harness.render import RenderError, render_composition
-from reef.harness.trajectory import reader_for
+from reef.harness.runners.native.enforce import BwrapEnforcer
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
+from reef.harness.tree.nodes import NODE_KINDS
+from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonSelector
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -188,7 +188,7 @@ def _launcher(tmp_path: Path) -> str:
     path = tmp_path / "reef-native"
     path.write_text(
         f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(root)!r})\n"
-        "from reef.harness.native import main\nsys.exit(main())\n"
+        "from reef.harness.runners.native import main\nsys.exit(main())\n"
     )
     path.chmod(0o755)
     return str(path)
@@ -978,8 +978,8 @@ def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: 
     """Property: any graph admission accepts ends within (max_steps + 1) * 16 transitions, whatever the model does."""
     import random
 
-    from reef.harness.native import graph as graphs
-    from reef.harness.native import run_loop
+    from reef.harness.runners.native import graph as graphs
+    from reef.harness.runners.native import run_loop
 
     rng = random.Random(7)
     texts = ("a", "b", "c")
@@ -1273,7 +1273,7 @@ def test_a_compact_stage_summarizes_the_older_span_and_logs_the_policy(tmp_path:
 
 
 def test_a_compact_stage_below_the_ratio_or_without_a_summary_drops_nothing(tmp_path: Path) -> None:
-    from reef.harness.native import graph as graphs
+    from reef.harness.runners.native import graph as graphs
 
     messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
     for i in range(6):
@@ -1940,7 +1940,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
 
 
 def test_bounded_search_answers_ordinary_patterns_and_gives_up_on_one_that_never_finishes() -> None:
-    from reef.harness.native.graph import bounded_search
+    from reef.harness.runners.native.graph import bounded_search
 
     assert bounded_search(r"-?\d+(\.\d+)?", "the answer is 9592.5") is True
     assert bounded_search(r"^\s*(yes|no)\s*$", "maybe") is False
@@ -1973,7 +1973,7 @@ def test_bounded_search_answers_ordinary_patterns_and_gives_up_on_one_that_never
 def test_a_search_with_no_answer_is_a_miss_named_in_the_stage_detail(tmp_path: Path, monkeypatch) -> None:
     """A pattern that never finishes, in a branch case and in a verify check: the turn goes on, the case does not
     hold, the check fails, and each stage's detail says why; a child that cannot start reads the same way."""
-    from reef.harness.native import graph as graphs
+    from reef.harness.runners.native import graph as graphs
 
     class _LongA(_FakeModel):
         def script(self, body: dict) -> dict:

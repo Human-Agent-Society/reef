@@ -161,7 +161,7 @@ with the loop's reach: ``review_kinds`` with ``native_hook`` and
 either and the tree, and the trajectory's ``enforcement`` field describes
 the profile the run got, not what the module did at import. Moving a tool's
 import out of the loop's process is tracked as a follow up.
-``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
+``reef.harness.runners.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, ``run_bash``, and ``execute`` tools as entries a recipe can
 seed and the loop can then evolve; ``execute`` runs a Python block in the
 workspace with the other tools importable by name (``import read_file;
@@ -195,7 +195,7 @@ defines no ``listen``, or names an unknown event ends the episode with
    request_error | after a failed model call: ``{step, attempt, error}`` where ``error`` is ``{code: "MODEL_ERROR", message, status?}`` with ``status`` the HTTP status when the endpoint answered one; returns ``{kind: "retry", delay_ms}`` or ``{kind: "fail"}``; the loop spends at most ``MAX_REQUEST_ATTEMPTS`` (4) attempts a step and waits at most ``MAX_RETRY_DELAY_MS`` (10 s), whatever the hook asks
    post_execute | after each tool call has run: ``{step, call_id, name, arguments, result}``; returns ``{kind: "accept", content?, contexts: [text...]}`` (``content`` replaces what the model reads) or ``{kind: "block", feedback, contexts}`` (the model reads a ``HOOK_BLOCKED`` error carrying ``feedback``; the tool's side effects stand); contexts land as user messages after the step's results, in call order
 
-``reef.harness.native.seed.SEED_HOOKS`` holds the one starting hook,
+``reef.harness.runners.native.seed.SEED_HOOKS`` holds the one starting hook,
 ``loop_guard`` at ``post_execute``, which reminds the model when the same call
 repeats three, five, or eight times in a row; it is a node, so a tree can
 retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
@@ -238,7 +238,7 @@ the session header's ``tree`` field says which ran, ``tree.json`` or
 
 The loop's own control flow is a ``native_graph`` node, rendered to
 ``native/graphs/main.json``: named stages from a closed vocabulary and edges
-keyed by each stage's outcome. ``reef.harness.native.seed.SEED_GRAPH`` is
+keyed by each stage's outcome. ``reef.harness.runners.native.seed.SEED_GRAPH`` is
 today's loop as that data (``think`` asks the model, ``act`` runs its tool
 calls, ``done`` ends the turn), the loop runs it when a tree carries no graph,
 and a tree that carries one runs that instead, so a proposal that rewrites
@@ -338,11 +338,11 @@ injected lands as ``user/message`` with ``source.kind`` ``hook`` and the
 The native loop has two forms over the same entries, the same plugins and
 the same interpreter. The episode form (``reef-native -p``) is one process
 and one turn: ``run_episode`` launches it and the sandbox executor confines
-it. The serve form (``reef-native serve``, ``reef/harness/native/serve.py``)
+it. The serve form (``reef-native serve``, ``reef/harness/runners/native/serve.py``)
 is one resident process per installed tree: it boots a compose ``Loader``
 over ``NATIVE_PLUGINS`` from ``native/tree.json``, keeps one ``Run`` per
 session across turns, starts the wrapper's capture proxy in process
-(``harness_wrapper.CaptureProxy``), and follows the head through
+(``client.wrapper.CaptureProxy``), and follows the head through
 ``release_client.HeadWatch``, which polls the catalog and reads the
 ``x-reef-release-id`` header of every inference answer. The interpreter
 calls ``loop.before_step(run)`` at the top of every model stage; the
@@ -381,7 +381,7 @@ turn as written, then ``{"type": "turn/result", "data": {"exit", "session",
 "control/result", "data": {"mounted", "release_id", "error"}}``. A
 malformed request answers ``{"type": "error", "data": {"message"}}``.
 Turns are served one at a time; a second connection waits. The three self
-tools (``reef/harness/native/selftools.py``) are ``ToolModule`` instances
+tools (``reef/harness/runners/native/selftools.py``) are ``ToolModule`` instances
 built in code with ``host_plane`` set, run in process whatever
 ``REEF_NATIVE_ENFORCE`` says, and registered only under ``--self-tools``;
 a tree entry named like one fails to mount with ``reserved name``.
@@ -417,7 +417,7 @@ To connect an agent that has no adapter yet:
    #. The command line that runs one prompt headless becomes ``binary`` and ``argv``.
    #. The path and format of its session log become ``trajectory``. A new format
       subclasses ``TrajectoryReader``
-      (`reef/harness/trajectory.py <../../reef/harness/trajectory.py>`__) and
+      (`reef/harness/episodes/trajectory.py <../../reef/harness/episodes/trajectory.py>`__) and
       registers with ``@register_trajectory_reader``.
    #. The files its first boot creates go in ``cleanup_whitelist``, so a fresh
       episode root is treated as clean. ``dir/**`` tolerates a whole subtree
@@ -425,7 +425,7 @@ To connect an agent that has no adapter yet:
       the root-relative path, so anchor a single file with its full path, like
       ``pi-agent/auth.json``. A bare directory name matches nothing under it.
 
-`reef/harness/descriptor.py <../../reef/harness/descriptor.py>`__ validates every
+`reef/harness/adapters/descriptor.py <../../reef/harness/adapters/descriptor.py>`__ validates every
 descriptor at load, and the bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. A third-party adapter
 registers on the ``reef.harness_adapters`` entry-point group.

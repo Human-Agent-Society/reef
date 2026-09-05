@@ -13,8 +13,8 @@ from types import ModuleType
 import pytest
 import yaml
 
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBindingError
+from reef.harness.episodes.model_binding import ModelBindingError
+from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
 from reef.records import RecordStore
 from reef.service.deploy.config import load_config
@@ -299,7 +299,7 @@ MAIN_GRAPH = {
 def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_evolution) -> None:
     """An agent alone can never win: only a subagent stage runs one, and its text comes back as a user message
     the grader never reads. The proposal carries the graph edit: ask the agent, then a model stage answers."""
-    from reef.harness.nodes import NODE_KINDS
+    from reef.harness.tree.nodes import NODE_KINDS
 
     reply = native_proposal("native_agent", "helper", prompt="Solve the task alone.", tools=["read_file"])
     nodes = (*NATIVE_NODES, ("native_graph", MAIN_GRAPH))

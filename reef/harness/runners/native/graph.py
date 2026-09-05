@@ -19,9 +19,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native.seed import SEED_GRAPH
-from reef.harness.nodes import NATIVE_MATCH_WINDOW, NATIVE_PATTERN_TIMEOUT_S, validate_native_graph
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native.seed import SEED_GRAPH
+from reef.harness.tree.nodes import NATIVE_MATCH_WINDOW, NATIVE_PATTERN_TIMEOUT_S, validate_native_graph
 
 #: The child side of a bounded search: the pattern and the text arrive as one JSON pair on stdin, the answer is one
 #: character. No reef import, so the child starts in tens of milliseconds and inherits nothing from the loop.
@@ -101,7 +101,7 @@ class Graph:
 
 
 class Host(Protocol):
-    """What the interpreter reads at each use; ``reef.harness.native.host.NativeHost`` is the one implementation."""
+    """What the interpreter reads at each use; ``reef.harness.runners.native.host.NativeHost`` is the one implementation."""
 
     @property
     def tools(self) -> Mapping[str, Any]: ...

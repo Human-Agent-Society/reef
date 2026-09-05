@@ -34,15 +34,15 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from reef.harness.adapters import get_adapter
-from reef.harness.harness_wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy, WrapperError
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native import SESSION_VERSION, SPILL_DIR, Session, _Loop, binding_from
-from reef.harness.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
-from reef.harness.native.graph import Run, run_graph
-from reef.harness.native.host import NativeHost
-from reef.harness.native.plugins import NATIVE_PLUGINS
-from reef.harness.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
-from reef.harness.native.selftools import RESERVED_NAMES, self_tools
+from reef.harness.client.wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy, WrapperError
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native import SESSION_VERSION, SPILL_DIR, Session, _Loop, binding_from
+from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
+from reef.harness.runners.native.graph import Run, run_graph
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.plugins import NATIVE_PLUGINS
+from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
+from reef.harness.runners.native.selftools import RESERVED_NAMES, self_tools
 from reef.train.cordis_backend.backend import admit_mutations
 from reef.train.cordis_backend.compose import Context, FiberState
 from reef.train.cordis_backend.compose.loader import Loader

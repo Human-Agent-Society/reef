@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.errors import ReefError
-from reef.harness.descriptor import AdapterDescriptor
+from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.runtime.base import InferenceRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,

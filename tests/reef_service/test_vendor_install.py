@@ -16,8 +16,8 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.executor import LocalExecutor, SandboxExecutor, SandboxUnavailable
-from reef.harness.vendor_install import (
+from reef.harness.episodes.executor import LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.harness.episodes.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
@@ -173,7 +173,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
         steps.append(list(command))
         _write_executable(binary, "#!/bin/sh\necho 'Hermes Agent v0.21.0'\n")
 
-    monkeypatch.setattr("reef.harness.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.episodes.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(binary)
     assert [step[0:2] for step in steps] == [

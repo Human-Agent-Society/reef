@@ -24,7 +24,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.errors import ReefError
-from reef.harness.descriptor import AdapterDescriptor, InstallSpec
+from reef.harness.adapters.descriptor import AdapterDescriptor, InstallSpec
 
 #: Where per-adapter install prefixes live, matching the ``PREFIX`` default the
 #: served install script bakes in; ``REEF_HARNESS_PREFIX`` moves the root, and

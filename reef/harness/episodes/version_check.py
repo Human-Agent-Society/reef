@@ -12,12 +12,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from reef.harness.descriptor import DescriptorError
+from reef.harness.adapters.descriptor import DescriptorError
 
 VERSION_CHECK_ENTRY_ID = "reef-version-check"
 
 _ASSETS = {
-    "pi": Path(__file__).parent / "adapters" / "pi" / "version_check.ts",
+    "pi": Path(__file__).parents[1] / "adapters" / "pi" / "version_check.ts",
 }
 
 

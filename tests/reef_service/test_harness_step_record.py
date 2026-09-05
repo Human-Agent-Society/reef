@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, TrajectoryKeepError, run_episode
-from reef.harness.model_binding import ModelBindings
-from reef.harness.render import render_composition
+from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
+from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation
 from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
@@ -304,7 +304,7 @@ def test_a_record_copy_that_fails_aborts_the_step_instead_of_scoring_it(tmp_path
 
     # The failure is not an episode failure: run_episode raises it past the launch mapping, and the episode
     # root is still removed on the way out.
-    from reef.harness import episode as episode_module
+    from reef.harness.episodes import run as episode_module
 
     removed: list[Path] = []
     remove = episode_module._remove_episode_root
