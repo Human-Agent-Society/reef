@@ -126,7 +126,15 @@ class FakeEpisodes:
 
 
 class FakeChat:
-    """A model binding stand-in that answers one canned reflection reply."""
+    """A model binding stand-in that answers one canned reflection reply; it
+    carries a binding's endpoint fields so the step record's recording seam
+    can wrap it like any declared model."""
+
+    base_url = "http://127.0.0.1:9"
+    model = "reflection"
+    api_key = None
+    api = "openai"
+    timeout_s = 600.0
 
     def __init__(self, reply: str) -> None:
         self.reply = reply
@@ -745,7 +753,8 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         dispatcher.close()
 
     assert result.metrics["published"] is True
-    assert result.metrics["mutation"] == {"op": "update", "id": "rules"}
+    mutation = result.metrics["mutation"]
+    assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("update", "rules", "rules")
     gate = result.metrics
     assert (gate["candidate_val_mean"], gate["served_val_mean"], gate["parent"]) == (1.0, 0.0, 0)
     assert (gate["archive_size"], gate["front_size"]) == (2, 1)

@@ -29,10 +29,11 @@ binding returns the assistant text. ``propose`` returns one ``Mutation``
 proposal under one verdict, or ``None`` to skip. An optional keyword-only
 ``manifest`` argument receives the previous step's ``FailureManifest``, and an
 optional keyword-only ``rejected`` argument receives the recent rejected
-proposals, oldest first, each a mapping of ``step``, ``mutations`` (``op`` and
-``id`` pairs), and the verdict's ``reason``; a method uses it to stop
-re-proposing what the gate already refused. Reef passes each keyword only to
-a signature that names it.
+proposals, oldest first, each a mapping of ``step``, ``mutations`` (each with
+its ``op``, ``id`` and the ``options`` it carried, ``None`` for a remove), and
+the verdict's ``reason``; a method uses it to stop re-proposing what the gate
+already refused, and can read the refused content rather than only its id.
+Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes

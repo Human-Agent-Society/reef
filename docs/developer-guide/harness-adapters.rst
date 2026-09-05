@@ -264,7 +264,13 @@ off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
 turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
 the parent graph is the one that can answer. The gate's verdict carries
 ``candidate_agents`` and ``current_agents``, the turns, steps, tool calls and
-tool errors per agent summed over each side's episodes.
+tool errors per agent summed over each side's episodes. It also carries
+``candidate_paths`` and ``current_paths``, one entry per episode in pairing
+order (task by task, then repeat by repeat): the root session's
+``stage/exit`` stage names in order and the ``turn/end`` reason kind; a
+delegated agent's stages under ``agents/`` stay out of it; an episode that
+could not run is ``None`` and a format without stage events gives an empty
+list and a ``None`` reason.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
