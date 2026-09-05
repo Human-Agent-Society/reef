@@ -40,7 +40,7 @@ def test_git_lfs_repository_initializes_default_local_repository(
     assert remote.is_dir()
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
     assert run_git("-C", str(tmp_path / "work" / "repository"), "config", "--local", "core.hooksPath") == str(
-        tmp_path / "work" / "repository" / ".git" / "hooks"
+        tmp_path / "work" / "repository" / ".git" / "reef-hooks"
     )
     assert not hasattr(backend.fork(), "scenario")
 
@@ -249,12 +249,28 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("hook_source", ["none", "global", "template"])
 def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    hook_source: str,
 ) -> None:
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    global_config = tmp_path / "gitconfig"
+    global_config.touch()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    hooks = tmp_path / "template" / "hooks"
+    hooks.mkdir(parents=True)
+    hook_contents = "#!/bin/sh\necho 'unrelated user hook must not run' >&2\nexit 1\n"
+    for name in ("pre-push", "post-checkout"):
+        hook = hooks / name
+        hook.write_text(hook_contents)
+        hook.chmod(0o755)
+    if hook_source == "global":
+        run_git("config", "--global", "core.hooksPath", str(hooks))
+    elif hook_source == "template":
+        monkeypatch.setenv("GIT_TEMPLATE_DIR", str(hooks.parent))
+    original_config = global_config.read_text()
     remote = tmp_path / "artifacts.git"
     first = GitLFSRepositoryBackend(
         "scenario-a",
@@ -292,3 +308,9 @@ def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
     materialized = fresh.materialize(forked)
     assert materialized.local_path is not None
     assert materialized.local_path.joinpath(weights.name).read_bytes() == b"trained weights"
+    assert not (materialized.local_path / ".git").exists()
+    assert global_config.read_text() == original_config
+    for name in ("pre-push", "post-checkout"):
+        assert (hooks / name).read_text() == hook_contents
+        if hook_source == "template":
+            assert (tmp_path / "fresh-work" / "repository" / ".git" / "hooks" / name).read_text() == hook_contents
