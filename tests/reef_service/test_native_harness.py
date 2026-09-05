@@ -1797,6 +1797,24 @@ def test_a_root_with_an_entries_list_boots_from_it_and_logs_the_same_events(tmp_
     assert from_tree.residue == () and from_tree.exit_code == 0
 
 
+def test_two_runs_on_one_sessions_directory_boot_from_the_tree_and_leave_no_mount(tmp_path: Path, fake_model) -> None:
+    descriptor = get_adapter("native")
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    for relative, text in {**files, **tree_files(descriptor, entries)}.items():
+        (tmp_path / "root" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "root" / relative).write_text(text, encoding="utf-8")
+    root, sessions, work = tmp_path / "root" / "native", tmp_path / "sessions", tmp_path / "work"
+    work.mkdir()
+    # The wrapper reuses one sessions directory across runs; a boot mount left behind would refuse the next boot.
+    assert run_loop("put hello in notes.txt and read it back", root, sessions, work) == 0
+    assert run_loop("put hello in notes.txt and read it back", root, sessions, work) == 0
+    assert not list((sessions / "mounts").rglob("*.py"))
+    events = [json.loads(line) for line in (sessions / "session.jsonl").read_text().splitlines()]
+    assert events[0]["data"]["tree"] == "tree.json"
+
+
 def test_from_root_prefers_the_entries_list_and_admits_it_through_the_plugins(tmp_path: Path) -> None:
     descriptor = get_adapter("native")
     entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
@@ -1841,6 +1859,10 @@ def test_from_root_prefers_the_entries_list_and_admits_it_through_the_plugins(tm
     pinned = {"id": "pin", "name": "config", "config": {"target": "models", "data": {"model": "other"}}}
     tree.write_text(json.dumps([*entries, pinned]), encoding="utf-8")
     with pytest.raises(LoadError, match=r"tree\.json entry 'pin' cannot load: config: .*cannot set model"):
+        NativeHost.from_root(root, tmp_path / "again")
+    # Two entries under one id would leave the loader with the last one and nobody the wiser.
+    tree.write_text(json.dumps([*entries, {"id": "brief", "name": "rules", "config": {"text": "Again."}}]))
+    with pytest.raises(LoadError, match=r"tree\.json names entry 'brief' twice"):
         NativeHost.from_root(root, tmp_path / "again")
 
 

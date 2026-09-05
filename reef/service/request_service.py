@@ -505,8 +505,13 @@ class RequestService:
                 "evolution recipe with a proposal inbox"
             )
         head = scenario.repository.require_current_artifact().release_id
-        # The head commit's entries, which the served tree.json carries too; the seed before the first commit.
-        entries = [dict(entry) for entry in scenario.trainer.state.get("entries") or ()]
+        # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
+        # state, which a step in flight has already moved; the seed before the first commit.
+        logged = scenario.entries_for_version(head)
+        info = scenario.surface.harness
+        if logged is None and info is not None:
+            logged = info.seed_entries
+        entries = [dict(entry) for entry in logged or ()]
         proposal_id = ProposalInbox.new_id()
         try:
             mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]

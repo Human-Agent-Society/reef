@@ -397,9 +397,32 @@ def admit_mutations(
                 raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
         admitted = _loader_entries(loader)
         render_composition(_nodes_from(admitted), descriptor)
+        refusal = _native_refusal(admitted, descriptor)
+        if refusal is not None:
+            raise MutationError(refusal)
     except (MutationError, RenderError) as error:
         return previous, str(error)
     return admitted, None
+
+
+def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDescriptor) -> str | None:
+    """The first config entry a native host would refuse at boot, None when the tree is not native or all pass.
+
+    The boot rules of the config plugin (target ``models`` only, no pinned
+    binding field, a positive window) are checked here too, so a tree the
+    serve process would roll back never wins a gate."""
+    if descriptor.tree_path is None:
+        return None
+    from reef.harness.native.plugins import check_native_config
+
+    for entry in entries:
+        if entry.get("name") != "config" or entry.get("disabled"):
+            continue
+        try:
+            check_native_config(entry.get("config") or {})
+        except ValueError as error:
+            return f"entry {entry.get('id')!r} rejected: {error}"
+    return None
 
 
 class ScoreComparisonSelector(CandidateSelector):
@@ -608,16 +631,23 @@ class CordisBackend(TrainingBackend):
         recipe build time, naming the failing entry - instead of an empty
         or broken composition tying every comparison at run time.
         """
+        seen: set[str] = set()
         for options in self._seed:
             for key in ("id", "name"):
                 value = options.get(key)
                 if not isinstance(value, str) or not value:
                     raise ValueError(f"seed entry {options!r} requires a non-empty string {key!r}")
+            if options["id"] in seen:
+                raise ValueError(f"seed names entry {options['id']!r} twice")
+            seen.add(str(options["id"]))
         self._loader.root.update([dict(options) for options in self._seed])
         for options in self._seed:
             error = self._load_error(str(options["id"]))
             if error is not None:
                 raise ValueError(f"seed entry {options['id']!r} rejected: {error}")
+        refusal = _native_refusal(self._seed, self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"seed {refusal}")
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
@@ -994,6 +1024,9 @@ class CordisBackend(TrainingBackend):
     def abort_step(self, prepared: PreparedStep) -> None:
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
+        if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+            self.proposals.refuse(candidate.proposal_id, "step aborted before a verdict")
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:

@@ -12,6 +12,7 @@ take each entry out again when it leaves (RFC #269).
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
@@ -237,6 +238,13 @@ class NativeHost:
 
         return uninstall
 
+    def dispose(self) -> None:
+        """Take every entry out and remove the mount directory; the episode form calls it when the turn ends."""
+        if self.loader is not None:
+            self.loader.root.update([])
+        if self.mount_dir is not None:
+            shutil.rmtree(self.mount_dir, ignore_errors=True)
+
     # -- the episode form ----------------------------------------------------------------------------------------
 
     @classmethod
@@ -304,10 +312,15 @@ def tree_entries(path: Path) -> list[dict[str, Any]]:
         raise LoadError(f"{path.name} cannot be read: {exc}") from exc
     if not isinstance(data, list) or not all(isinstance(entry, dict) for entry in data):
         raise LoadError(f"{path.name} must be a JSON array of entry objects")
+    seen: set[str] = set()
     for entry in data:
         for key in ("id", "name"):
             if not isinstance(entry.get(key), str) or not entry[key]:
                 raise LoadError(f"{path.name} entry {entry!r} requires a non-empty string {key!r}")
+        if entry["id"] in seen:
+            # The loader would keep the last one silently; a tree with two entries under one id is not one tree.
+            raise LoadError(f"{path.name} names entry {entry['id']!r} twice")
+        seen.add(entry["id"])
     return [dict(entry) for entry in data]
 
 

@@ -142,11 +142,11 @@ The receipt identifies the stored record:
 Streams carry it only after the record is stored.
 
 On a scenario that serves harness files, every inference response also
-carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves at
-that moment, read after the call. A resident ``reef-native serve`` process
-compares it with the release it mounted and learns of a new head on its next
-model call, with no extra request. A weight serving scenario sends no such
-header.
+carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when
+the response is written, so a head that moves during the call shows on the
+next one. A resident ``reef-native serve`` process compares it with the
+release it mounted and learns of a new head on its next model call, with no
+extra request. A weight serving scenario sends no such header.
 
 Report
 ------

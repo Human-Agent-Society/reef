@@ -504,6 +504,25 @@ def test_admission_refuses_a_failing_entry_and_a_kind_the_adapter_does_not_rende
     # The render's own checks refuse too: two skills at one path.
     _, refusal = _admit([], Mutation("create", "a", SKILL), Mutation("create", "b", SKILL))
     assert refusal is not None and "two nodes render to the same path" in refusal
+    # The native host's boot rules meet admission too, so a config the serve process would only roll back
+    # never wins a gate; pi renders the same config to a file and takes it.
+    primary = Mutation("create", "c1", {"name": "config", "config": {"data": {"theme": "dark"}}})
+    _, refusal = _admit([], primary)
+    assert refusal is None
+    _, refusal = _admit([], primary, descriptor=get_adapter("native"))
+    assert refusal == (
+        "entry 'c1' rejected: config node target 'primary' renders to a file the native loop never reads; "
+        "the host reads target 'models' only"
+    )
+    window = Mutation(
+        "create", "c2", {"name": "config", "config": {"target": "models", "data": {"context_window": 0}}}
+    )
+    _, refusal = _admit([], window, descriptor=get_adapter("native"))
+    assert refusal == "entry 'c2' rejected: config node 'context_window' must be a positive integer"
+    _, refusal = _admit(
+        [], Mutation("create", "c3", {**window.options, "disabled": True}), descriptor=get_adapter("native")
+    )
+    assert refusal is None
 
 
 def test_entries_and_load_round_trip(tmp_path: Path) -> None:
@@ -614,6 +633,9 @@ def test_invalid_seed_refuses_boot_naming_the_entry(tmp_path: Path) -> None:
         backend(tmp_path, lambda n, s, m: None, seed=({"id": "r1", "name": "rules", "config": {}},))
     with pytest.raises(ValueError, match="non-empty string 'id'"):
         backend(tmp_path, lambda n, s, m: None, seed=({"name": "rules", "config": {"text": "hi"}},))
+    twice = {"id": "r1", "name": "rules", "config": {"text": "hi"}}
+    with pytest.raises(ValueError, match="seed names entry 'r1' twice"):
+        backend(tmp_path, lambda n, s, m: None, seed=(twice, dict(twice)))
 
 
 def test_seed_with_an_inline_key_refuses_boot(tmp_path: Path) -> None:

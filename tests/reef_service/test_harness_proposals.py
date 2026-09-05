@@ -303,3 +303,80 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     )
     assert sorted(path.name for path in inbox.directory.iterdir()) == ["claimed", "refused", "settled"]
     assert list((inbox.directory / "claimed").iterdir()) == []
+    # A claimed file an operator removed by hand still gets its verdict filed, and no staging file stays behind.
+    third = ProposalInbox.new_id()
+    assert inbox.submit(third, _proposal(CREATE_RULES, session="c")) is None
+    claimed = inbox.claim()
+    assert claimed is not None and claimed.id == third
+    (inbox.directory / "claimed" / f"{third}.json").unlink()
+    inbox.settle(third, {"step": 2, "selected": False, "reason": "lost"})
+    assert json.loads((inbox.directory / "settled" / f"{third}.json").read_text(encoding="utf-8")) == {
+        "proposal_id": third,
+        "verdict": {"step": 2, "selected": False, "reason": "lost"},
+    }
+    assert list(inbox.directory.rglob(".*.part")) == []
+
+
+def test_the_route_admits_against_the_head_commits_entries_not_the_live_state(tmp_path: Path) -> None:
+    """A step in flight moves the trainer's state before it commits; the route admits against the entries the head
+    commit logged, which the served tree.json carries, so an agent on that release is refused for what it sees."""
+    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
+    scenario = dispatcher.get_or_create_scenario("agents")
+    assert scenario is not None
+
+    async def post(body: dict) -> dict:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            return await (await _post(client, body)).json()
+        finally:
+            await client.close()
+
+    try:
+        assert asyncio.run(post(_proposal(CREATE_RULES)))["admitted"] is True
+        _report_once(scenario, "agents", "1")
+        result = scenario.prepare_training_step()
+        assert result is not None
+        scenario.commit(result)
+        head = scenario.repository.require_current_artifact().release_id
+        logged = scenario.entries_for_version(head)
+        assert logged is not None and [entry["id"] for entry in logged] == ["models", "settings", "r1"]
+        state = scenario.trainer.state
+        assert isinstance(state, dict)
+        state["entries"] = [entry for entry in state["entries"] if entry["id"] != "r1"]
+        update = {"op": "update", "id": "r1", "options": {"config": {"text": "again"}}}
+        answer = asyncio.run(post(_proposal(update, release_id=head)))
+        assert answer["admitted"] is True and answer["release_id"] == head, answer
+    finally:
+        dispatcher.close()
+
+
+def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda n, s, m: None))
+    scenario = dispatcher.get_or_create_scenario("agents")
+    assert scenario is not None
+
+    async def post(body: dict) -> dict:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            return await (await _post(client, body)).json()
+        finally:
+            await client.close()
+
+    def die(self, prepared, decision):
+        raise RuntimeError("evaluator died")
+
+    try:
+        proposal_id = asyncio.run(post(_proposal(CREATE_RULES)))["proposal_id"]
+        backend = scenario.trainer.training_backend
+        monkeypatch.setattr(type(backend), "settle_step", die)
+        _report_once(scenario, "agents", "1")
+        with pytest.raises(RuntimeError, match="evaluator died"):
+            scenario.prepare_training_step()
+        inbox = tmp_path / "inbox" / "agents"
+        refused = json.loads((inbox / "refused" / f"{proposal_id}.json").read_text(encoding="utf-8"))
+        assert refused["refused"] == "step aborted before a verdict" and refused["session"] == "3f1c2a9d0b7e"
+        assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
+    finally:
+        dispatcher.close()

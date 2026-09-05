@@ -20,6 +20,7 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -429,7 +430,11 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             enforcer = select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
             # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
-            host = NativeHost.from_root(root, session_dir / "mounts" / "boot")
+            # One directory per process, cleared on the way out: the wrapper reuses the sessions directory
+            # across runs and a mount refuses a module file that is already there.
+            mount_dir = session_dir / "mounts" / f"boot-{os.getpid()}"
+            shutil.rmtree(mount_dir, ignore_errors=True)
+            host = NativeHost.from_root(root, mount_dir)
             graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
@@ -452,7 +457,10 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         session.write("turn/start", {"turn": 1})
         loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
         run = graphs.Run(loop, prompt, binding, host, workdir)
-        return graphs.run_graph(run, graph)
+        try:
+            return graphs.run_graph(run, graph)
+        finally:
+            host.dispose()
     finally:
         session.close()
 

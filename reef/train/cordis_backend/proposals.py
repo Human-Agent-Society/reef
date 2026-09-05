@@ -39,7 +39,10 @@ class Proposal:
 
 
 def _write(path: Path, data: Mapping[str, Any]) -> None:
-    path.write_text(json.dumps(dict(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Written beside and renamed over, so a reader never claims a half written file.
+    staging = path.with_name(f".{path.name}.part")
+    staging.write_text(json.dumps(dict(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    staging.replace(path)
 
 
 class ProposalInbox:
@@ -109,8 +112,13 @@ class ProposalInbox:
         source = self.directory / CLAIMED_DIR / f"{proposal_id}.json"
         target = self.directory / subdir / source.name
         target.parent.mkdir(parents=True, exist_ok=True)
-        _write(target, {**json.loads(source.read_text(encoding="utf-8")), **extra})
-        source.unlink()
+        try:
+            data = json.loads(source.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            # An operator moved or removed the claimed file by hand; the verdict still gets filed, not lost.
+            data = {"proposal_id": proposal_id}
+        _write(target, {**data, **extra})
+        source.unlink(missing_ok=True)
 
 
 __all__ = ["CLAIMED_DIR", "REFUSED_DIR", "SETTLED_DIR", "Proposal", "ProposalInbox"]
