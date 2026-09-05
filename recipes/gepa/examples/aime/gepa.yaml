@@ -14,17 +14,19 @@ implementation: recipes.gepa.recipe:GEPARecipe
 model:
   path: ${REEF_MODEL}
 
+execution:
+  evolution:
+    # The scorer shares the driver's mutable AIME answer registry.
+    backend: local
+    workers: ${REEF_GEPA_WORKERS}  # run.sh defaults to 128 RPC threads.
+    resources:
+      cpus_per_worker: 1
+      gpus_per_worker: 0
+
 evolution:
   adapter: pi
   # The harness binary the evaluation episodes run headless, from the environment.
   binary: ${REEF_PI_BINARY}
-  # The validation pass is 45 episodes a side; they are independent, so they
-  # run this many at once. run.sh defaults it to 128.
-  episode_workers: ${REEF_GEPA_WORKERS}
-  # Keep threaded evaluation: harness.aime registers its answer table in the
-  # driver process. Spawned mp workers would not inherit that mutable registry.
-  # This also avoids turning the default 128 threads into 128 persistent processes.
-  worker_executor: local
   # The task side, in the harness/ package: evaluate is the quickstart's
   # containment score over one episode, feedback is the wording GEPA's own
   # default evaluator writes into the reflective records.

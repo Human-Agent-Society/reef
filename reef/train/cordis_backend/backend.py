@@ -596,7 +596,7 @@ class CordisBackend(TrainingBackend):
         publish: str = "auto",
         review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
-        episode_workers: int = 1,
+        episode_workers: int | None = None,
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
         step_record_dir: str | Path | None = None,
@@ -607,8 +607,6 @@ class CordisBackend(TrainingBackend):
             raise ValueError("harness evolution requires a non-empty task set")
         if step_record_dir is not None and not str(step_record_dir):
             raise ValueError("step_record_dir must be a non-empty path when set")
-        if episode_workers < 1:
-            raise ValueError("harness evolution requires at least one episode worker")
         if isinstance(models, ModelBinding):
             models = ModelBindings(served=models)
         if not isinstance(models, ModelBindings):
@@ -648,7 +646,6 @@ class CordisBackend(TrainingBackend):
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
-        self._episode_workers = episode_workers
         self._worker_selection, self._worker_requirements = evaluation_selection(
             score_episode, episode_workers, worker_executor or ExecutorSettings(), worker_gpus
         )

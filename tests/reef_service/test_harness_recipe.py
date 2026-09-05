@@ -1735,6 +1735,8 @@ def test_episode_workers_config_is_a_positive_integer(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
 def test_harness_evolve_auto_runs_real_episodes_on_selected_backend(tmp_path, workers, expected, caplog):
+    from reef.runtime.executor.config import ExecutorSettings
+
     b = CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(
@@ -1744,7 +1746,7 @@ def test_harness_evolve_auto_runs_real_episodes_on_selected_backend(tmp_path, wo
         tasks=("task one", "task two"),
         models=MODEL,
         binary=str(make_binary(tmp_path)),
-        episode_workers=workers,
+        worker_executor=ExecutorSettings(workers=workers),
     )
     assert b._worker_selection.settings.backend == expected
     assert b._worker_requirements.gpus_per_worker == 0
@@ -1765,7 +1767,7 @@ def test_evolution_worker_selector_is_independent_of_sandbox_selector():
         "evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], "episode_workers": 2},
     }
     recipe = CordisRecipe.from_environment({}, config=config)
-    assert recipe.worker_executor == ExecutorSettings("mp")
+    assert recipe.worker_executor == ExecutorSettings("mp", workers=2)
     assert type(recipe.executor).__name__ == "LocalExecutor"
     config["evolution"]["worker_executor"] = "local"
     recipe = CordisRecipe.from_environment({}, config=config)

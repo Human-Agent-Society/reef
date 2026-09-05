@@ -52,7 +52,7 @@ OPENAI_API_KEY=... REEF_PI_BINARY=/path/to/pi ./run.sh
 A live run is roughly 150 search episodes plus the mechanism's validation
 passes, then 300 test episodes. Episodes are independent, so `REEF_GEPA_WORKERS`
 (default 128) run at once everywhere: the mechanism's validation pass through
-`evolution.episode_workers`, the driver's minibatch, and the test passes. It
+`execution.evolution.workers`, the driver's minibatch, and the test passes. It
 changes wall time only. `--budget` lowers the search budget for a
 shorter run. `REEF_GEPA_MULTI=1` adds an `aime-solver` skill node to the seed
 and evolves it alongside the rules node, which is the extension case, not the
@@ -60,14 +60,14 @@ comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
 tree; the Pi episodes authenticate to the local service with a placeholder.
 
-The validation pool explicitly uses `evolution.worker_executor: local`: its
+The validation pool explicitly uses `execution.evolution.backend: local`: its
 workers are persistent in-process objects with RPC threads, not 128 spawned
 processes. The scorer reads the AIME answer table registered by this driver,
 so switching to `mp` or Ray also requires making that table available in each
 worker; changing only the YAML backend would lose the answers. Episode
 subprocesses and temporary directories remain isolated. The driver forwards
 optional top-level `execution` and `executors` sections, including named
-profiles; an explicit `evolution.worker_executor` overrides `execution.evolution`.
+profiles containing the backend, worker count, and per-worker CPU/GPU requests.
 
 One round is: pull the served tree, take the method's plan for the iteration
 (its parent choice and its three training problems), run each as a Pi episode against that tree with a

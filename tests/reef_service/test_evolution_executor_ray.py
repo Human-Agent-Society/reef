@@ -10,6 +10,7 @@ import pytest
 from reef.harness.adapters import get_adapter
 from reef.harness.model_binding import ModelBinding
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.backend import CordisBackend, HarnessCandidate
 from reef.train.cordis_backend.strategies import EpisodeScorer, resolve_proposer
@@ -25,6 +26,7 @@ class GPUScorer(EpisodeScorer):
         import ray
 
         gpu_ids = ray.get_gpu_ids()
+        assert ray.get_runtime_context().get_assigned_resources()["CPU"] == 2
         if len(gpu_ids) != 1:
             raise RuntimeError(f"scorer did not receive its GPU reservation: {gpu_ids}")
         # CUDA visibility is NVIDIA-specific; this test also runs on Apple GPUs.
@@ -61,6 +63,7 @@ def test_evolution_auto_places_scorer_on_declared_ray_gpu(tmp_path):
             tasks=("one",),
             models=ModelBinding(base_url="http://127.0.0.1:8000", model="unused", api_key="dummy"),
             binary=str(binary),
+            worker_executor=executor_settings({}, {"workers": 1, "resources": {"cpus_per_worker": 2}}),
         )
         candidate = HarnessCandidate(
             candidate_id="test",

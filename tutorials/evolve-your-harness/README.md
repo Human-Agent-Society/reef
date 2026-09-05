@@ -61,8 +61,8 @@ serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 s
 ## Worker execution
 
 The configs launch the Reef service locally (`execution.services: local`).
-Episode scoring defaults to `evolution.worker_executor: auto` with
-`episode_workers: 1`: one CPU worker uses `uni`; increasing the count selects
+Worker placement defaults to `execution.evolution.backend: auto` with
+`execution.evolution.workers: 1`: one CPU worker uses `uni`; increasing the count selects
 spawned `mp` workers. Model inference still runs at the configured upstream
 endpoint, so these scorers do not reserve GPUs.
 
@@ -73,16 +73,25 @@ fresh temporary directory. This is a fixed-size pool, not autoscaling.
 `sandbox`), not a worker backend selector.
 
 The demo's materializer also preserves optional top-level `execution` and
-`executors` sections. An explicit `evolution.worker_executor` wins over
-`execution.evolution`; remove the former to use the role-level setting.
-For example, replace `worker_executor: auto` with `worker_executor: cpu-pool`
-and add this top-level profile (increase `episode_workers` as needed):
+`executors` sections. For example, choose a reusable worker/resource profile:
 
 ```yaml
+execution:
+  services: local
+  evolution: cpu-pool
 executors:
   cpu-pool:
-    backend: mp
+    backend: auto
+    workers: 8
+    resources:
+      cpus_per_worker: 1
+      gpus_per_worker: 0
 ```
+
+CPU requests do not enforce core limits on local workers. Ray uses CPU/GPU
+requests as per-worker scheduling reservations. The old `episode_workers`,
+`worker_executor` and `worker_resources` fields are deprecated; remove them
+when migrating to the new structure. Conflicting resource values are rejected.
 
 ## Keep a deployment running
 

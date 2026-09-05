@@ -6,14 +6,16 @@
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 execution:
   services: local
+  evolution:
+    backend: auto  # uni for one CPU worker, mp for multiple workers.
+    workers: 1
+    resources:
+      cpus_per_worker: 1
+      gpus_per_worker: 0
 model:
   path: &model your-model-name  # Set once; shared by serving and evaluation.
 
 evolution:
-  # CPU scoring: auto selects uni for one worker, mp for multiple workers.
-  # Workers persist between evaluations; each episode still has its own directory.
-  worker_executor: auto
-  episode_workers: 1
   adapter: pi
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate

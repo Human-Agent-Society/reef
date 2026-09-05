@@ -5,8 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from reef.runtime.executor.config import executor_settings, role_executor_settings, select_executor
-from reef.runtime.executor.requirements import ExecutionRequirements
+from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.config import validate_services
 from reef.service.deploy.execution import service_executor_selection
 
@@ -47,14 +46,11 @@ def test_examples_keep_service_processes_local_and_slime_workers_on_ray(relative
 def test_cpu_evolution_examples_select_uni_then_mp_without_changing_isolation(relative):
     config = yaml.safe_load((ROOT / relative).read_text())
     evolution = config["evolution"]
-    assert evolution["episode_workers"] == 1
-    assert evolution["worker_executor"] == "auto"
+    assert config["execution"]["evolution"]["workers"] == 1
+    assert config["execution"]["evolution"]["backend"] == "auto"
+    assert not {"episode_workers", "worker_executor", "worker_resources"} & evolution.keys()
     assert evolution.get("executor", "local") == "local"
-    settings = executor_settings(config, evolution["worker_executor"])
     for workers, expected in ((1, "uni"), (2, "mp")):
-        assert (
-            select_executor(
-                settings, role="evolution", requirements=ExecutionRequirements(workers=workers)
-            ).settings.backend
-            == expected
-        )
+        config["execution"]["evolution"]["workers"] = workers
+        settings = role_executor_settings(config, "evolution")
+        assert select_executor(settings, role="evolution").settings.backend == expected

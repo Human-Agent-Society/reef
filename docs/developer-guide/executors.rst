@@ -222,21 +222,38 @@ Harness evolution: component-driven selection
 Harness evolution evaluates external model endpoints; that does not require
 a local GPU. ``EpisodeScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
-supplies the worker count from ``evolution.episode_workers``; the selector
+supplies worker count/resources from ``execution.evolution``; the selector
 chooses ``uni`` for one CPU worker, ``mp`` for multiple local CPU workers, and
 ``ray`` for GPU/cluster requests. Installed GPUs or ``RAY_ADDRESS`` alone do
 not select Ray or reserve GPUs for this role.
 
 .. code:: yaml
 
+   execution:
+     evolution:
+       backend: auto
+       workers: 8
+       resources:
+         cpus_per_worker: 1
+         gpus_per_worker: 0
    evolution:
      # Existing adapter/propose/evaluate/tasks/models/seed remain unchanged.
-     episode_workers: 8
-     worker_executor: auto   # optional; selects mp for ordinary CPU scorers
      executor: sandbox      # independent isolation policy; requires bubblewrap
 
-``evolution.worker_executor`` overrides ``execution.evolution`` (default
-``auto``) and accepts the same backend/profile/inline selection as other roles.
+``execution.evolution`` accepts a backend, named profile, or inline object.
+Its backend defaults to ``auto``; omitted resources preserve component defaults
+(normally one CPU and zero GPUs). ``workers`` is the fixed worker-group size,
+not an episode count or a separate business-level concurrency limit. For
+``uni/mp/local``, CPU requests describe capacity but do not reserve cores or
+enforce a CPU quota. Ray maps them to ``num_cpus``/``num_gpus`` per actor;
+these are scheduling reservations, not hard CPU limits.
+
+Legacy ``evolution.episode_workers`` and ``worker_resources.num_gpus`` remain
+deprecated aliases. Conflicting old/new resource values are rejected.
+``evolution.worker_executor`` still overrides a backend-only role selector,
+but cannot be combined with role-level workers/resources; migrate it into
+``execution.evolution.backend``. Legacy Python constructor arguments remain
+accepted; prefer ``worker_executor=ExecutorSettings(workers=..., resources=WorkerResources(...))``.
 ``evolution.executor`` still means ``local`` or ``sandbox`` episode isolation;
 it is NOT renamed to ``uni``/``mp``. Sandbox preflight runs on the execution
 node too. A custom episode executor must preserve its own isolation and
@@ -244,13 +261,13 @@ owner-loss cleanup. Built-in local episodes in remote/process workers use a
 POSIX owner lease so loss of a worker also kills the episode process group;
 commands must not detach. Worker loss can leave temporary episode directories.
 
-To retain shared-memory callbacks, explicitly choose ``worker_executor: local``
+To retain shared-memory callbacks, explicitly choose ``execution.evolution.backend: local``
 (the previous thread-based behavior). With ``mp`` the scorer is copied per
 rank: mutable scorer state is not shared or merged back into the recipe.
 The parent retains proposal, composition, selection and publication ownership;
 only episode execution/scoring crosses the worker boundary. Candidate/current
 results retain pairing order. Each backend/scenario lazily starts one fixed
-pool of ``episode_workers`` ranks on its first nonempty evaluation and reuses
+pool of ``execution.evolution.workers`` ranks on its first nonempty evaluation and reuses
 it across evaluations. Workers and lazy scorer/model initialization persist;
 each episode still gets a fresh harness subprocess and temporary directory.
 RPC is ordered within each rank. A scorer error drains the submitted batch
@@ -272,10 +289,12 @@ plain evaluator function without that interface, declare its needs explicitly:
 
 .. code:: yaml
 
-   evolution:
-     episode_workers: 2
-     worker_resources:
-       num_gpus: 1          # per worker: two workers reserve two GPUs
+   execution:
+     evolution:
+       workers: 2
+       resources:
+         cpus_per_worker: 2
+         gpus_per_worker: 1  # per worker: two workers reserve two GPUs
 
 This reserves worker/scorer GPUs, not the external inference server's GPUs.
 Sandbox device access is unchanged; declaring a GPU for the scorer does not

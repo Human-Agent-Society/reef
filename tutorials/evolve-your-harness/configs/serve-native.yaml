@@ -6,15 +6,17 @@ implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
 execution:
   services: local
+  evolution:
+    backend: auto  # uni for one CPU worker, mp for multiple workers.
+    workers: 1
+    resources:
+      cpus_per_worker: 1
+      gpus_per_worker: 0
 
 model:
   path: qwen3-8b
 
 evolution:
-  # CPU scoring: auto selects uni for one worker, mp for multiple workers.
-  # Workers persist between evaluations; each episode still has its own directory.
-  worker_executor: auto
-  episode_workers: 1
   adapter: native
   # The native variant of the method beside this file (harness/): the same
   # grader, a proposer whose vocabulary is skills, tools and hooks.

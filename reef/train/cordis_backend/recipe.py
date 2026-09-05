@@ -12,6 +12,7 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 from __future__ import annotations
 
 import importlib
+import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,11 +31,11 @@ from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
-from reef.runtime.executor.config import ExecutorSettings, executor_settings, role_executor_settings
+from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector, tree_files
-from reef.train.cordis_backend.execution import evaluation_selection
+from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
@@ -119,8 +120,6 @@ class CordisRecipe(Recipe):
     algorithm state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``always``;
     or a dotted reference to an object implementing ``decide``), optional
-    ``episode_workers`` (how many evaluation episodes run at once, default
-    one; a large task set is one wave instead of a long turn-taking pass),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each gate
     episode's trajectory files, so the decision is reconstructible; off by
@@ -134,6 +133,9 @@ class CordisRecipe(Recipe):
     the first proposal arrives) and ``max_pending_proposals`` (default 8,
     the number of admitted proposals a scenario holds before the route
     refuses more).
+
+    Worker placement/count/resources live under ``execution.evolution``, not
+    the business configuration. Legacy ``episode_workers`` remains an alias.
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
@@ -191,7 +193,7 @@ class CordisRecipe(Recipe):
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
-    episode_workers: int = 1
+    episode_workers: int | None = None  # Deprecated Python compatibility alias.
     proposals_dir: str = DEFAULT_PROPOSALS_DIR
     max_pending_proposals: int = 8
     step_record_dir: str | None = None
@@ -215,9 +217,10 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires tasks")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.episode_workers < 1:
-            raise ValueError("episode_workers must be positive")
-        evaluation_selection(self.score_episode, self.episode_workers, self.worker_executor, self.worker_gpus)
+        settings = legacy_worker_settings(self.worker_executor, self.episode_workers, self.worker_gpus)
+        _, requirements = evaluation_selection(self.score_episode, None, settings)
+        object.__setattr__(self, "worker_executor", settings)
+        object.__setattr__(self, "episode_workers", requirements.workers)
         if self.batch_policy not in ("reports", "records"):
             raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
@@ -352,10 +355,12 @@ class CordisRecipe(Recipe):
         if "served" in models:
             raise RecipeConfigError("evolution.models may not name a model 'served'; that is the model under test")
         # A ``${VAR}`` interpolation arrives as text, so a digit string counts.
-        raw_workers = evolution.get("episode_workers", 1)
+        raw_workers = evolution.get("episode_workers")
         if isinstance(raw_workers, str) and raw_workers.strip().isdigit():
             raw_workers = int(raw_workers)
-        if isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1:
+        if "episode_workers" in evolution and (
+            isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1
+        ):
             raise RecipeConfigError("evolution.episode_workers must be a positive integer")
         episode_workers = raw_workers
         proposals_dir = evolution.get("proposals_dir", DEFAULT_PROPOSALS_DIR)
@@ -368,15 +373,30 @@ class CordisRecipe(Recipe):
         if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         try:
+            role_settings = role_executor_settings(settings, "evolution")
+            if "worker_executor" in evolution and (
+                role_settings.workers is not None or role_settings.resources != WorkerResources()
+            ):
+                raise ValueError(
+                    "remove deprecated evolution.worker_executor when execution.evolution defines workers/resources"
+                )
             worker_executor = (
                 executor_settings(settings, evolution["worker_executor"])
                 if "worker_executor" in evolution
-                else role_executor_settings(settings, "evolution")
+                else role_settings
             )
             resources = evolution.get("worker_resources", {})
             if not isinstance(resources, Mapping) or set(resources) - {"num_gpus"}:
                 raise ValueError("evolution.worker_resources accepts only num_gpus")
             worker_gpus = resources.get("num_gpus")
+            if any(key in evolution for key in ("episode_workers", "worker_executor", "worker_resources")):
+                warnings.warn(
+                    "evolution.episode_workers/worker_executor/worker_resources are deprecated; "
+                    "use execution.evolution.backend/workers/resources",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+            worker_executor = legacy_worker_settings(worker_executor, episode_workers, worker_gpus)
             scorer = resolve_episode_scorer(evolution.get("evaluate"))
             evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
         except (TypeError, ValueError) as exc:
@@ -492,11 +512,9 @@ class CordisRecipe(Recipe):
             "publish": self.publish,
             "review_kinds": self.review_kinds,
             "seed": self.seed,
-            "episode_workers": self.episode_workers,
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,
             "worker_executor": self.worker_executor,
-            "worker_gpus": self.worker_gpus,
         }
 
     def _build_trainer(
