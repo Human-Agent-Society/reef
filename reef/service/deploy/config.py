@@ -29,7 +29,7 @@ except ImportError as exc:  # pragma: no cover - environment-dependent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
-_CFG_VAR_RE = re.compile(r"\$\{([\w.]+)\}")
+_CFG_VAR_RE = re.compile(r"\$\{([\w.-]+)\}")
 
 
 def _interp_env(value: str, environ: Mapping[str, str]) -> str:
@@ -74,7 +74,16 @@ def interpolate_config(config: Mapping[str, Any], value: str) -> str:
         resolved = config_value(config, *match.group(1).split("."), default=None)
         return str(resolved) if resolved is not None else match.group(0)
 
-    return _CFG_VAR_RE.sub(repl, value)
+    seen: set[str] = set()
+    for _ in range(64):
+        expanded = _CFG_VAR_RE.sub(repl, value)
+        if expanded == value:
+            return expanded
+        if expanded in seen:
+            raise DeployConfigError("cyclic config interpolation")
+        seen.add(value)
+        value = expanded
+    raise DeployConfigError("config interpolation exceeded 64 levels")
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -111,6 +120,8 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
         name = service.get("name")
         if not isinstance(name, str) or not name.strip():
             raise DeployConfigError(f"config {config_path}: services[{index}] must have a non-empty 'name'")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise DeployConfigError(f"invalid service name {name!r}; use letters, digits, '_' or '-'")
         command = service.get("command")
         valid_string = isinstance(command, str) and bool(command.strip())
         valid_list = (
@@ -129,7 +140,50 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
         raise DeployConfigError(
             f"config {config_path}: service names must be unique; duplicated: {', '.join(duplicates)}"
         )
-    return services
+    from reef.service.deploy.execution import service_executor_config
+
+    endpoints = config.get("endpoints", {})
+    if not isinstance(endpoints, Mapping):
+        raise DeployConfigError("endpoints must be an object")
+    for service in services:
+        dependencies = service.get("depends_on", [])
+        if not isinstance(dependencies, list) or any(not isinstance(dep, str) for dep in dependencies):
+            raise DeployConfigError(f"service {service['name']!r}: depends_on must be a list of names")
+        if any(dep not in names for dep in dependencies):
+            raise DeployConfigError(f"service {service['name']!r}: unknown dependency")
+        for field in ("ready", "cwd", "endpoint", "advertise_host"):
+            if field in service and not isinstance(service[field], str):
+                raise DeployConfigError(f"service {service['name']!r}: {field} must be a string")
+        if not isinstance(service.get("env", {}), Mapping):
+            raise DeployConfigError(f"service {service['name']!r}: env must be an object")
+        try:
+            if float(service.get("ready_timeout", config.get("ready_timeout", 3600))) <= 0:
+                raise ValueError("ready_timeout must be positive")
+            service_executor_config(config, service, Path("."), 3600, Path(config_path))
+        except (ValueError, TypeError, ImportError, AttributeError) as exc:
+            raise DeployConfigError(f"service {service['name']!r}: {exc}") from exc
+
+    # Stable dependency order, rather than relying on hand-ordered YAML lists.
+    by_name = {service["name"]: service for service in services}
+    ordered: list[dict[str, Any]] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise DeployConfigError(f"service dependency cycle at {name!r}")
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in by_name[name].get("depends_on", []):
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(by_name[name])
+
+    for name in names:
+        visit(name)
+    return ordered
 
 
 def is_local_path(value: str) -> bool:

@@ -10,11 +10,15 @@
 # from the environment at launch time.
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 
+execution:
+  services: local
+
 reef:
   host: 0.0.0.0
   model_path: Qwen/Qwen2.5-7B-Instruct
   port: 8900
   recipe: recipe
+  upstream_url: ${endpoints.sglang}
   # The service credential. Use `tokens: [...]` instead to accept several
   # at once, e.g. while rotating.
   token: ${REEF_TOKEN}
@@ -26,6 +30,7 @@ sglang:
 
 services:
   - name: sglang
+    endpoint: http://{host}:${sglang.port}
     command: >-
       "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${reef.model_path} --tp 1

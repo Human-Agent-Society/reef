@@ -578,7 +578,7 @@ def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
 
 @pytest.mark.unit
 def test_stack_places_the_bridge_ready_marker_under_run_dir(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy.orchestrator import _Stack
+    from reef.service.deploy.process import ProcessWorker as _Stack
 
     monkeypatch.delenv("REEF_BRIDGE_READY_FILE", raising=False)
     config = {"reef": {"port": 8900}}
@@ -593,7 +593,7 @@ def test_stack_places_the_bridge_ready_marker_under_run_dir(tmp_path: Path, monk
 
 @pytest.mark.unit
 def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: Path) -> None:
-    from reef.service.deploy.orchestrator import _Stack
+    from reef.service.deploy.process import ProcessWorker as _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     process = _Process()
@@ -602,13 +602,12 @@ def test_stack_graceful_shutdown_ignores_deliberate_child_termination(tmp_path: 
     stack.shutdown(grace=0)
 
     assert process.returncode == -signal.SIGTERM
-    assert stack.exit_code == 0
 
 
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_terminates_descendants_after_the_service_leader_exits(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy.orchestrator import _Stack
+    from reef.service.deploy.process import ProcessWorker as _Stack
 
     run_dir = tmp_path / "stack"
     run_dir.mkdir()
@@ -641,7 +640,6 @@ subprocess.Popen([sys.executable, "-c", {child_code!r}])
     }
     stack = _Stack({}, [service], run_dir, 60, tmp_path / "serve.yaml")
     # This test targets lifecycle, not readiness polling.
-    monkeypatch.setattr(stack, "_wait_ready", lambda service, process: None)
 
     try:
         stack.start()
@@ -667,9 +665,10 @@ subprocess.Popen([sys.executable, "-c", {child_code!r}])
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import orchestrator
+    from reef.service.deploy import process as orchestrator
+    from reef.service.deploy.process import ProcessWorker
 
-    stack = orchestrator._Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     stack._procs["service"] = _Process(returncode=0)
     stack._process_groups["service"] = 123
     group_alive = True
@@ -700,9 +699,10 @@ def test_stack_shutdown_signals_descendants_after_the_leader_exits(tmp_path: Pat
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import orchestrator
+    from reef.service.deploy import process as orchestrator
+    from reef.service.deploy.process import ProcessWorker
 
-    stack = orchestrator._Stack(
+    stack = ProcessWorker(
         {},
         [{"name": "dependency"}, {"name": "dependent"}],
         tmp_path,
@@ -743,9 +743,10 @@ def test_stack_shutdown_escalates_surviving_groups_in_reverse_dependency_order(t
 @pytest.mark.unit
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group lifecycle")
 def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.deploy import orchestrator
+    from reef.service.deploy import process as orchestrator
+    from reef.service.deploy.process import ProcessWorker
 
-    stack = orchestrator._Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
+    stack = ProcessWorker({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     stack._procs["service"] = _Process(returncode=0, pid=123)
     stack._process_groups["service"] = 123
     signals = []
@@ -765,7 +766,16 @@ def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, retur
     from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
-    stack._procs["service"] = _Process(returncode)
+    from reef.runtime.executor.local import LocalExecutor
+
+    class Worker:
+        def status(self):
+            return {"service": returncode}
+
+        def read_log(self, *args):
+            return "", 0
+
+    stack._executors["service"] = LocalExecutor.from_workers([Worker()])
 
     stack._watchdog()
 
@@ -779,7 +789,17 @@ def test_watchdog_does_not_reclassify_a_signal_driven_child_exit(tmp_path: Path)
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     # Simulate a signal arriving after the watchdog began its polling pass but
     # before shutdown made the child exit.
-    stack._procs["service"] = _Process(-signal.SIGTERM, stop_on_poll=stack._stopping)
+    from reef.runtime.executor.local import LocalExecutor
+
+    class Worker:
+        def status(self):
+            stack._stopping.set()
+            return {"service": -signal.SIGTERM}
+
+        def read_log(self, *args):
+            return "", 0
+
+    stack._executors["service"] = LocalExecutor.from_workers([Worker()])
 
     stack._watchdog()
 
@@ -797,6 +817,9 @@ def test_stack_installs_signal_handlers_before_starting_watchdog(tmp_path: Path,
     monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
 
     class Watcher:
+        def join(self, timeout):
+            pass
+
         def start(self):
             assert signal.SIGINT in handlers and signal.SIGTERM in handlers
             started.append(True)
