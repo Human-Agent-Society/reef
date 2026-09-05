@@ -24,9 +24,18 @@ MAX_BACKOFF_S = 600.0
 class ReleaseClientError(Exception):
     """Reef did not answer a release request; ``status`` carries the HTTP status when there was one."""
 
-    def __init__(self, message: str, *, status: int | None = None) -> None:
+    def __init__(self, message: str, *, status: int | None = None, timed_out: bool = False) -> None:
         super().__init__(message)
         self.status = status
+        #: Reef was reached but answered nothing within the client timeout: busy, not down.
+        self.timed_out = timed_out
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """Whether a request failure is a timeout: the socket's own, or the one urllib wraps as a URLError reason."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
 
 
 class HeadSink(Protocol):
@@ -66,7 +75,9 @@ class ReleaseClient:
             detail = exc.read().decode(errors="replace")[:600]
             raise ReleaseClientError(f"{method} {path} answered {exc.code}: {detail}", status=exc.code) from exc
         except (OSError, ValueError) as exc:
-            raise ReleaseClientError(f"{method} {path} failed: {type(exc).__name__}: {exc}") from exc
+            raise ReleaseClientError(
+                f"{method} {path} failed: {type(exc).__name__}: {exc}", timed_out=_timed_out(exc)
+            ) from exc
 
     def releases(self) -> list[dict[str, Any]]:
         """The catalog rows, oldest first, as ``GET /reef/harness/releases`` lists them."""
@@ -119,6 +130,7 @@ class HeadWatch:
         self._mounted = mounted
         self._announced: str | None = None
         self._failure = ""
+        self._failure_timed_out = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -126,6 +138,12 @@ class HeadWatch:
     def mounted(self, release_id: str | None) -> None:
         with self._lock:
             self._mounted = release_id
+
+    def forget(self, release_id: str) -> None:
+        """A head whose mount could not even fetch its manifest: the next poll that names it announces it again."""
+        with self._lock:
+            if self._announced == release_id:
+                self._announced = None
 
     def _consider(self, release_id: str | None, source: str) -> None:
         with self._lock:
@@ -160,6 +178,7 @@ class HeadWatch:
             self._consider(self._client.poll(), "poll")
         except Exception as exc:
             self._failure = f"{type(exc).__name__}: {exc}"[:600]
+            self._failure_timed_out = isinstance(exc, ReleaseClientError) and exc.timed_out
             return False
         return True
 
@@ -170,9 +189,14 @@ class HeadWatch:
             if self.poll_once():
                 backoff = delay = self._interval_s
                 continue
-            self._log.write("release/poll-failed", {"error": self._failure, "retry_in_s": backoff})
-            delay = backoff
-            backoff = min(backoff * 2, MAX_BACKOFF_S)
+            if self._failure_timed_out:
+                # Reef answered nothing in time but is there: a catalog read waits behind a running evolve
+                # step. The next poll goes at the interval, so the head lands as soon as the step ends.
+                backoff = delay = self._interval_s
+            else:
+                delay = backoff
+                backoff = min(backoff * 2, MAX_BACKOFF_S)
+            self._log.write("release/poll-failed", {"error": self._failure, "retry_in_s": delay})
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="reef-native-poll", daemon=True)

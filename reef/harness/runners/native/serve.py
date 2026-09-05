@@ -313,6 +313,7 @@ class Server:
         reef_url: str | None = None,
         turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
         token: str | None = None,
+        release_timeout_s: float = 30.0,
     ) -> None:
         if follow not in FOLLOW_MODES:
             raise ServeError(f"--follow must be one of {', '.join(FOLLOW_MODES)}, not {follow!r}")
@@ -338,7 +339,7 @@ class Server:
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
         self.binding: ModelBinding = self._installed_binding
-        self.client = ReleaseClient(self.reef_url, self.token, scenario)
+        self.client = ReleaseClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
         self._served: list[dict[str, Any]] = []
         self._release_id: str | None = None
         self._parent_release_id: str | None = None
@@ -576,6 +577,10 @@ class Server:
                 "harness/mount-failed",
                 {"release_id": pending.release_id, "source": pending.source, "entry": None, "error": str(exc)},
             )
+            if isinstance(exc, ReleaseClientError) and exc.timed_out:
+                # Reef is busy (an evolve step holds the manifest as it holds the catalog), not gone: the next poll
+                # that names this head announces it again, so the mount is retried at the interval, not forgotten.
+                self._watch.forget(pending.release_id)
             return {"mounted": False, "release_id": pending.release_id, "error": str(exc)}
         parent = manifest.get("parent_release_id")
         failure = self._mount(
