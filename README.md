@@ -208,7 +208,8 @@ For another provider, use its base URL, model name, and API key. This config dep
 In another terminal, install the harness and run a task:
 
 ```bash
-export REEF_TOKEN="reef-local"   # the script also writes it into the installed harness's model binding
+export REEF_TOKEN="reef-local"   # the script writes it into the installed harness's
+                                 # model binding; keep it exported for `report`
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
   'http://localhost:8901/reef/harness/install?adapter=pi' | bash
 reef-pi -p "fix the failing test in auth.py"
