@@ -11,7 +11,9 @@ evolution:
   adapter: pi
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate
-  binary: pi
+  # No binary: reef installs the descriptor's pinned pi under
+  # ~/.local/share/reef-harness/pi the first time evolution runs an episode.
+  # Set evolution.binary to a path to use an install of your own instead.
   tasks:
   - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000?
     Reply with the count as a plain integer alone on the last line.'

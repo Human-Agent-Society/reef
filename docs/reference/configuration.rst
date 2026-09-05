@@ -169,7 +169,7 @@ zero.
    evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
-   evolution.binary | overrides the adapter's binary name
+   evolution.binary | a path to the harness binary; unset, the first episode installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run

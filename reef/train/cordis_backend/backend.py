@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import tempfile
+import threading
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from reef.harness.model_binding import ModelBinding, ModelBindings
 from reef.harness.nodes import NODE_KINDS, directive_shaped, secret_shaped
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
+from reef.harness.vendor_install import VendorInstallError, resolve_binary
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
@@ -332,7 +334,10 @@ class CordisBackend(TrainingBackend):
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
-        self._binary = binary
+        # The configured override, or ``None`` until the first episode resolves
+        # the descriptor's pinned vendor install: see ``_harness_binary``.
+        self._resolved_binary = binary
+        self._binary_lock = threading.Lock()
         self._episode_workers = episode_workers
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
@@ -745,6 +750,23 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
+    def _harness_binary(self) -> str:
+        """The binary an episode launches: the configured override, else the
+        descriptor's pinned vendor install, resolved once and reused.
+
+        Resolution runs at the first episode rather than at construction, so a
+        deployment boots and serves inference on a machine that has not
+        installed the agent yet and installs it when evolution first needs it.
+        Only a success is remembered, so a transient vendor failure is retried
+        by the next episode instead of wedging the deployment until restart.
+        The lock also keeps concurrent episode workers from installing into
+        one prefix at once.
+        """
+        with self._binary_lock:
+            if self._resolved_binary is None:
+                self._resolved_binary = resolve_binary(self._descriptor)
+            return self._resolved_binary
+
     def _run_and_score(
         self, files: Mapping[str, str], task: str
     ) -> tuple[float | None, FailureObservation | None, int]:
@@ -760,11 +782,11 @@ class CordisBackend(TrainingBackend):
                 self._descriptor,
                 files,
                 task,
-                binary=self._binary,
+                binary=self._harness_binary(),
                 timeout=self._episode_timeout_s,
                 executor=self._executor,
             )
-        except EpisodeError as error:
+        except (EpisodeError, VendorInstallError) as error:
             return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0
         except TrajectoryError as error:
             return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0

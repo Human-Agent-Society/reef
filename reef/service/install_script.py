@@ -24,6 +24,13 @@ from collections.abc import Mapping
 from pathlib import PurePosixPath
 
 from reef.harness.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+from reef.harness.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
+
+#: The script's install-prefix root in shell spelling, the same root reef's
+#: own server-side vendor install uses, honouring the same environment
+#: override: a server and a client on one machine share the installed binary
+#: instead of each fetching the pin into its own tree.
+_SHELL_PREFIX_ROOT = DEFAULT_PREFIX_ROOT.replace("~", "$HOME", 1)
 
 #: Client-side bookkeeping file, byte-identical to what the stdlib client
 #: pull writes; must match ``reef_client.client.HARNESS_RELEASE_SIDECAR``.
@@ -322,7 +329,7 @@ def render_install_script(
         "set -eu",
         "",
         'DEST="${1:-./reef-harness}"',
-        f'PREFIX="${{2:-$HOME/.local/share/reef-harness/{descriptor.name}}}"',
+        f'PREFIX="${{2:-${{{PREFIX_ENV}:-{_SHELL_PREFIX_ROOT}}}/{descriptor.name}}}"',
         f'BINARY="$PREFIX/{_double_quoted(install.binary_path)}"',
         f'CHECKSUM="{checksum}"',
         f'SIDECAR_CHECKSUM="{sidecar_checksum}"',

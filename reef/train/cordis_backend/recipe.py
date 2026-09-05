@@ -104,8 +104,10 @@ class CordisRecipe(Recipe):
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
     ``evaluate`` (callables or dotted references), ``tasks`` (the episode
-    prompts scored per step), optional ``binary`` (a path overriding the
-    adapter's binary name - the seam tests drive a fake harness through),
+    prompts scored per step), optional ``binary`` (a path to the harness
+    binary; left unset, the first episode installs the adapter descriptor's
+    pinned version through the vendor's own channel, into the same prefix a
+    client's install script uses - see :mod:`reef.harness.vendor_install`),
     optional ``seed`` (a list of entry options - id, name, config -
     loaded into the composition tree on first boot, where an item may also
     be a dotted ``module:attribute`` naming a sequence of them; a recovered

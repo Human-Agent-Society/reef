@@ -665,7 +665,7 @@ def test_install_script_golden_structure() -> None:
 set -eu
 
 DEST="${1:-./reef-harness}"
-PREFIX="${2:-$HOME/.local/share/reef-harness/pi}"
+PREFIX="${2:-${REEF_HARNESS_PREFIX:-$HOME/.local/share/reef-harness}/pi}"
 BINARY="$PREFIX/node_modules/.bin/pi"
 CHECKSUM="@CHECKSUM@"
 SIDECAR_CHECKSUM="@SIDECAR_CHECKSUM@"

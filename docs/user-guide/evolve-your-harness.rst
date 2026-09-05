@@ -224,9 +224,11 @@ Before you start
 - ``pip install reef-client``: the loop driver imports it.
 - An OpenAI-compatible endpoint serving the model under test, hosted or local.
   ``REEF_UPSTREAM_URL`` takes no ``/v1`` suffix.
-- The ``pi`` binary on ``PATH``
-  (``npm i -g @earendil-works/pi-coding-agent@0.84.2``); ``serve.yaml`` names
-  it under ``evolution.binary``.
+- Node and ``npm``: the first evaluation episode installs the adapter
+  descriptor's pinned ``pi`` under ``~/.local/share/reef-harness/pi`` through
+  npm, the same install the served harness script runs on a client.
+  ``REEF_HARNESS_PREFIX`` moves that root, and ``evolution.binary`` in
+  ``serve.yaml`` overrides the whole step with a path of your own.
 
 Run the example
 ---------------
@@ -291,10 +293,12 @@ task fails, the failing report opens the window, one evolve step runs, and
 shows a published version.
 
 If ``/reef/harness`` still returns 404 after a few minutes, the run has
-failed. A missing ``pi`` binary or a server without tool calling does not
-fail at config time: every episode fails, both sides tie, no candidate ever
-wins, and the route stays 404. Confirm that ``pi --version`` runs and that
-the server accepts tool calls before suspecting the recipe; vLLM needs
+failed. A ``pi`` install that did not happen or a server without tool
+calling does not fail at config time: every episode fails, both sides tie,
+no candidate ever wins, and the route stays 404. The failure manifest names
+the cause; a vendor install that could not run says so there. Confirm that
+``~/.local/share/reef-harness/pi/node_modules/.bin/pi --version`` runs and
+that the server accepts tool calls before suspecting the recipe; vLLM needs
 ``--enable-auto-tool-choice --tool-call-parser hermes``, and without those
 flags it rejects pi's ``tool_choice: "auto"`` requests with a 400 while
 still answering plain requests. A missing model server does not produce
