@@ -321,7 +321,8 @@ class Run:
             }
             verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
             result = loop._judged(result, verdict)
-            if result.get("is_error"):
+            # A jail that could not run is the sandbox's failure, not the tool's: it moves no branch on tool errors.
+            if result.get("is_error") and (result.get("error") or {}).get("code") != "SANDBOX_FAILED":
                 self.tool_errors += 1
             # The log says what was enforced on this tool, whether or not the call reached its run.
             enforcement = loop.enforcer.describe(tools.get(name))
