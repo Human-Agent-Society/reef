@@ -344,3 +344,205 @@ def test_native_propose_routes_the_main_graph_through_a_proposed_agent(native_ev
     assert isinstance(
         native_evolution.propose((*NATIVE_NODES, ("native_graph", taken)), SAMPLES, canned(reply)), Mutation
     )
+
+
+# -- the replay page --------------------------------------------------------
+
+
+def _session_events(session: str, release: str, stages, tool: str | None = None) -> list[dict]:
+    events = [
+        {
+            "type": "session",
+            "seq": 0,
+            "time": 1000,
+            "data": {"session": session, "release_id": release, "model": "m", "tools": ["read_file"], "agent": "root"},
+        },
+        {"type": "turn/start", "seq": 1, "time": 1001, "data": {"turn": 1, "prompt": "go"}},
+    ]
+    seq = 2
+    for index, stage in enumerate(stages):
+        events.append(
+            {
+                "type": "stage/enter",
+                "seq": seq,
+                "time": 1002 + index,
+                "data": {"step": index, "stage": stage, "kind": "model"},
+            }
+        )
+        seq += 1
+        if tool and index == 0:
+            events.append(
+                {
+                    "type": "tool/call",
+                    "seq": seq,
+                    "time": 1002 + index,
+                    "data": {"step": index, "name": tool, "call_id": "c", "arguments": "{}"},
+                }
+            )
+            seq += 1
+        events.append(
+            {
+                "type": "stage/exit",
+                "seq": seq,
+                "time": 1003 + index,
+                "data": {"step": index, "stage": stage, "outcome": "text", "to": "done"},
+            }
+        )
+        seq += 1
+    events.append({"type": "turn/end", "seq": seq, "time": 1100, "data": {"turn": 1, "reason": {"kind": "completed"}}})
+    return events
+
+
+def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Path, monkeypatch) -> None:
+    replay = _method(monkeypatch, "replay")
+    work = tmp_path / "work"
+    native = work / "tree" / "native"
+    (native / "sessions" / "s1").mkdir(parents=True)
+    (native / "sessions" / "s2").mkdir(parents=True)
+    (work / "agent-record").mkdir()
+    graph = {
+        "name": "main",
+        "start": "think",
+        "stages": {"think": {"kind": "model"}, "done": {"kind": "end"}},
+        "edges": [{"from": "think", "when": "text", "to": "done"}],
+    }
+    seed = [
+        {"id": "read_file", "name": "native_tool", "config": {"name": "read_file"}},
+        {"id": "main", "name": "native_graph", "config": graph},
+    ]
+    rule = {"id": "answer-format", "name": "rules", "config": {"text": "one line"}}
+    (native / "tree.json").write_text(json.dumps([*seed, rule]))
+    commit = {
+        "recorded_at": 1050.0,
+        "artifact_ref": {"release_id": "r2", "parent_release_id": "r1"},
+        "algorithm_state": {"entries": [*seed, rule], "steps": 1},
+        "metrics": {
+            "steps": 1,
+            "published": True,
+            "wins": 2,
+            "losses": 0,
+            "ties": 1,
+            "candidate_score": 2.0,
+            "current_score": 0.0,
+            "mutations": [
+                {"op": "create", "id": "answer-format", "options": {"name": "rules", "config": {"text": "one line"}}}
+            ],
+            "proposal": {"id": "p1", "session": "s1", "release_id": "r1"},
+            "selection": {"reason": "candidate won 2 task pairings and lost 0"},
+        },
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n")
+    for name, release, tool in (("s1", "r1", "harness_propose"), ("s2", "r2", None)):
+        events = _session_events(name, release, ["think"], tool)
+        (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    (native / "sessions" / "serve.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "harness/mount",
+                "seq": 0,
+                "time": 999,
+                "data": {"release_id": "r1", "source": "boot", "entries": 2},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "harness/mount",
+                "seq": 1,
+                "time": 1051,
+                "data": {"release_id": "r2", "parent_release_id": "r1", "source": "release", "entries": 3},
+            }
+        )
+        + "\n"
+    )
+
+    data = replay.collect(work)
+    assert [(r["step"], r["kind"], r["release_id"]) for r in data["releases"]] == [
+        (0, "seed", "r1"),
+        (1, "published", "r2"),
+    ]
+    seed_release, published = data["releases"]
+    # The seed is the published state with the step's creates undone; the diff names what the step added.
+    assert [e["id"] for e in seed_release["entries"]] == ["read_file", "main"]
+    assert published["diff"] == {"added": [{"id": "answer-format", "kind": "rules"}], "updated": [], "removed": []}
+    assert published["proposal"] == {"id": "p1", "session": "s1", "release_id": "r1"}
+    assert published["verdict"]["wins"] == 2 and published["verdict"]["reason"].startswith("candidate won")
+    assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
+        ("s1", "r1", 6),
+        ("s2", "r2", 5),
+    ]
+    assert [e["type"] for e in data["process"]] == ["harness/mount", "harness/mount"]
+
+    page = replay.render(
+        {
+            **data,
+            "sessions": [
+                {
+                    **data["sessions"][0],
+                    "events": [
+                        *data["sessions"][0]["events"],
+                        {
+                            "type": "user/message",
+                            "seq": 9,
+                            "time": 1200,
+                            "data": {"content": "<!--<script>x</script>"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    assert page.startswith("<title>Harness Evolution Replay</title>")
+    assert '<script id="data" type="application/json">' in page and "harness_propose" in page
+    # No "<" survives inside the data element: neither a closing tag nor the comment opener that would keep the
+    # element from closing and swallow the page's own script.
+    payload = page.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert "<" not in payload and "\\u003c!--\\u003cscript" in payload
+    assert page.count("</script>") == 2
+    assert "http://" not in page.split("</style>")[0] and "cdn" not in page
+    out = tmp_path / "replay.html"
+    assert replay.main([str(work), str(out)]) == 0 and out.read_text(encoding="utf-8") == replay.render(
+        replay.collect(work)
+    )
+
+    # A first step that updated an entry: its previous options are not on the record, so the seed keeps the
+    # published entry and the step's diff names it from the mutation.
+    updated = {
+        **commit,
+        "metrics": {
+            **commit["metrics"],
+            "mutations": [{"op": "update", "id": "main", "options": {"name": "native_graph", "config": graph}}],
+        },
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(updated) + "\n")
+    first_update = replay.collect(work)
+    assert first_update["releases"][1]["diff"] == {
+        "added": [],
+        "updated": [{"id": "main", "kind": "native_graph"}],
+        "removed": [],
+    }
+    assert [e["id"] for e in first_update["releases"][0]["entries"]] == ["read_file", "main", "answer-format"]
+
+    # A rollback row is not a step: it is shown as its own kind, with no verdict.
+    rollback = {
+        "recorded_at": 1060.0,
+        "operation": "rollback",
+        "step": 2,
+        "artifact_ref": {"release_id": "r1", "parent_release_id": "r2"},
+        "metrics": None,
+        "algorithm_state": None,
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n" + json.dumps(rollback) + "\n")
+    with_rollback = replay.collect(work)
+    assert [(r["kind"], r["step"], r["release_id"]) for r in with_rollback["releases"]] == [
+        ("seed", 0, "r1"),
+        ("published", 1, "r2"),
+        ("rollback", 2, "r1"),
+    ]
+    assert with_rollback["releases"][2]["verdict"] is None
+    assert with_rollback["releases"][2]["entries"] == with_rollback["releases"][1]["entries"]
+
+    # An empty work directory still renders a page.
+    empty = replay.collect(tmp_path / "nothing")
+    assert empty == {"releases": [], "sessions": [], "process": [], "seed_entries": []}
+    assert '<script id="data" type="application/json">' in replay.render(empty)
