@@ -27,6 +27,7 @@ from reef.harness.native import (
     _invoke,
     _waterfall,
     load_hooks,
+    load_tools,
 )
 from reef.harness.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.nodes import NODE_KINDS
@@ -422,11 +423,16 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     ]
     assert [event["seq"] for event in result.trajectory] == list(range(len(kinds)))
     header = result.trajectory[0]["data"]
-    assert header["version"] == 1 and header["tools"] == ["read_file", "run_bash", "write_file"]
+    assert header["version"] == 1 and header["tools"] == ["execute", "read_file", "run_bash", "write_file"]
     assert header["hooks"] == {"loop_guard": "post_execute"} and header["graph"] == "main"
     request = _events(result.trajectory, "request/header")[0]["data"]
     assert request["system"] == "Be brief."
-    assert sorted(tool["function"]["name"] for tool in request["tools"]) == ["read_file", "run_bash", "write_file"]
+    assert sorted(tool["function"]["name"] for tool in request["tools"]) == [
+        "execute",
+        "read_file",
+        "run_bash",
+        "write_file",
+    ]
     written, read = (event["data"] for event in _events(result.trajectory, "tool/result"))
     assert written["name"] == "write_file" and written["content"] == "wrote 5 characters to notes.txt"
     assert written["is_error"] is False and written["arguments"] == {"path": "notes.txt", "content": "hello"}
@@ -437,7 +443,12 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     first = fake_model.requests[0]
     assert first["messages"][0] == {"role": "system", "content": "Be brief."}
     assert first["max_tokens"] == MAX_COMPLETION_TOKENS
-    assert sorted(tool["function"]["name"] for tool in first["tools"]) == ["read_file", "run_bash", "write_file"]
+    assert sorted(tool["function"]["name"] for tool in first["tools"]) == [
+        "execute",
+        "read_file",
+        "run_bash",
+        "write_file",
+    ]
 
 
 def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
@@ -642,6 +653,7 @@ def test_native_tool_capabilities_are_validated_rendered_and_declared_by_the_see
         "read_file": ["read"],
         "write_file": ["write"],
         "run_bash": ["exec", "write", "network"],
+        "execute": ["exec", "write", "network"],
     }
 
 
@@ -680,6 +692,7 @@ def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_
     result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
     header = result.trajectory[0]["data"]
     assert header["capabilities"] == {
+        "execute": ["exec", "write", "network"],
         "read_file": ["read"],
         "run_bash": ["exec", "write", "network"],
         "write_file": ["write"],
@@ -959,13 +972,22 @@ def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: 
         stages = {"think": {"kind": "model"}, "act": {"kind": "tools"}, "done": {"kind": "end"}}
         names = ["think", "act", "done"]
         for i in range(extras):
-            kind = rng.choice(("verify", "message"))
+            kind = rng.choice(("verify", "message", "branch", "compact"))
             name = f"s{i}"
-            stages[name] = (
-                {"kind": "message", "text": rng.choice(texts)}
-                if kind == "message"
-                else {"kind": "verify", "check": rng.choice(("nonempty", "last_line_integer"))}
-            )
+            if kind == "message":
+                stages[name] = {"kind": "message", "text": rng.choice(texts)}
+            elif kind == "verify":
+                stages[name] = {"kind": "verify", "check": rng.choice(("nonempty", "last_line_integer"))}
+            elif kind == "branch":
+                stages[name] = {
+                    "kind": "branch",
+                    "cases": [
+                        {"when": "steps_used_at_least", "value": rng.randint(0, 3), "outcome": "many"},
+                        {"when": "last_text_matches", "value": "9592", "outcome": "answered"},
+                    ],
+                }
+            else:
+                stages[name] = {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2}
             names.append(name)
         # Text stages only point forward (to a later text stage, think, or done), so no text cycle exists.
         text_names = [n for n in names if n.startswith("s")]
@@ -979,8 +1001,9 @@ def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: 
             {"from": "think", "when": "text", "to": rng.choice(["done", *text_names])},
             {"from": "act", "when": "done", "to": rng.choice(["think", *text_names])},
         ]
+        outcomes_of = {"verify": ("pass", "fail"), "branch": ("many", "answered", "else")}
         for index, name in enumerate(text_names):
-            for outcome in ("pass", "fail") if stages[name]["kind"] == "verify" else ("done",):
+            for outcome in outcomes_of.get(stages[name]["kind"], ("done",)):
                 edges.append({"from": name, "when": outcome, "to": forward(index)})
         return {"name": "main", "start": "think", "max_steps": rng.randint(1, 4), "stages": stages, "edges": edges}
 
@@ -1024,3 +1047,286 @@ def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: 
     finally:
         model.shutdown()
         model.server_close()
+
+
+# -- branch and compact stages, and the execute seed tool ------------------------------------------
+
+
+class _ChattyModel(_FakeModel):
+    """Answers in prose every time, so a graph that routes on the run's counters decides when to stop."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) == 3:
+            return _reply(content="the count is 9592")
+        return _reply(content="still working")
+
+
+def _branch_graph(cases, route_edges):
+    """think answers in text to route; the route's own edges are the test's."""
+    return {
+        "name": "main",
+        "start": "think",
+        "max_steps": 6,
+        "stages": {
+            "think": {"kind": "model"},
+            "act": {"kind": "tools"},
+            "route": {"kind": "branch", "cases": cases},
+            "done": {"kind": "end", "reason": "completed"},
+            "quit": {"kind": "end", "reason": "gave_up"},
+        },
+        "edges": [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "route"},
+            {"from": "act", "when": "done", "to": "think"},
+            *route_edges,
+        ],
+    }
+
+
+def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> None:
+    cases = [
+        {"when": "steps_used_at_least", "value": 2, "outcome": "enough"},
+        {"when": "last_text_matches", "value": r"\d+", "outcome": "answered"},
+    ]
+    good = _branch_graph(
+        cases,
+        [
+            {"from": "route", "when": "enough", "to": "quit"},
+            {"from": "route", "when": "answered", "to": "done"},
+            {"from": "route", "when": "else", "to": "think"},
+        ],
+    )
+    NODE_KINDS["native_graph"](None, good)
+    route = good["stages"]["route"]
+    bad = [
+        ({**route, "cases": []}, "'cases' must be a list of 1 to 8"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": 2}]}, "objects with when, value and outcome"),
+        ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
+        ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": 2, "outcome": "else"}]}, "other than else"),
+        (
+            {**route, "cases": [{"when": "steps_used_at_least", "value": 1, "outcome": "x"}] * 2},
+            "names outcome 'x' twice",
+        ),
+        ({"kind": "compact", "fire_ratio": 0.5}, "'keep_ratio' must be a number"),
+        ({"kind": "compact", "fire_ratio": 1.5, "keep_ratio": 0.2}, "'fire_ratio' must be a number above 0"),
+        ({"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.5}, "'keep_ratio' must be below 'fire_ratio'"),
+        ({"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2, "model": "x"}, "does not take model"),
+    ]
+    for stage, rule in bad:
+        with pytest.raises(ValueError, match=rule):
+            NODE_KINDS["native_graph"](None, {**good, "stages": {**good["stages"], "route": stage}})
+    # A branch's outcomes are its cases plus else, and every one needs its edge.
+    with pytest.raises(ValueError, match="stage 'route' has no edge for outcome 'else'"):
+        NODE_KINDS["native_graph"](None, {**good, "edges": good["edges"][:-1]})
+    with pytest.raises(ValueError, match="names outcome 'maybe', not one of its branch stage"):
+        NODE_KINDS["native_graph"](
+            None, {**good, "edges": [*good["edges"], {"from": "route", "when": "maybe", "to": "done"}]}
+        )
+    # A branch that loops on itself has no model stage in the cycle, so nothing would end it.
+    with pytest.raises(ValueError, match="cycle without a model stage"):
+        NODE_KINDS["native_graph"](
+            None,
+            {
+                **good,
+                "edges": [e if e.get("when") != "else" else {**e, "to": "route"} for e in good["edges"]],
+            },
+        )
+
+
+def test_a_branch_stage_routes_on_the_steps_used_and_the_last_text(tmp_path: Path) -> None:
+    model = _ChattyModel()
+    try:
+        cases = [
+            {"when": "last_text_matches", "value": r"\b9592\b", "outcome": "answered"},
+            {"when": "steps_used_at_least", "value": 3, "outcome": "enough"},
+        ]
+        graph = _branch_graph(
+            cases,
+            [
+                {"from": "route", "when": "answered", "to": "done"},
+                {"from": "route", "when": "enough", "to": "quit"},
+                {"from": "route", "when": "else", "to": "think"},
+            ],
+        )
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+        assert [(e["outcome"], e["to"], e["case"]) for e in exits] == [
+            ("else", "think", "else"),
+            ("else", "think", "else"),
+            ("answered", "done", "last_text_matches"),
+        ]
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"} and len(model.requests) == 3
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+class _WrongToolModel(_FakeModel):
+    """Calls a tool the tree lacks, so every call is a tool error, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) <= 3:
+            return _reply(tool_calls=[_call("nope", {}, f"c{len(self.requests)}")])
+        return _reply(content="giving up")
+
+
+def test_a_branch_stage_counts_tool_errors(tmp_path: Path) -> None:
+    model = _WrongToolModel()
+    try:
+        graph = _branch_graph([{"when": "tool_errors_at_least", "value": 2, "outcome": "stuck"}], [])
+        graph["edges"] = [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "done"},
+            {"from": "act", "when": "done", "to": "route"},
+            {"from": "route", "when": "stuck", "to": "quit"},
+            {"from": "route", "when": "else", "to": "think"},
+        ]
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+        assert [(e["outcome"], e.get("value")) for e in exits] == [("else", None), ("stuck", 2)]
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "gave_up"} and len(model.requests) == 2
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+class _SummarizingModel(_FakeModel):
+    """Plays the seed script, and answers the compact stage's summary call with a fixed summary."""
+
+    def script(self, body: dict) -> dict:
+        if body["messages"][0]["content"].startswith("Summarize the work so far"):
+            return _reply(content="wrote hello to notes.txt")
+        if any(str(m.get("content")).startswith("Summary of the earlier steps") for m in body["messages"]):
+            return _reply(content="Done: the file says hello.")
+        return super().script(body)
+
+
+def test_a_compact_stage_summarizes_the_older_span_and_logs_the_policy(tmp_path: Path) -> None:
+    model = _SummarizingModel()
+    try:
+        graph = {
+            "name": "main",
+            "start": "think",
+            "max_steps": 6,
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "squeeze": {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2},
+                "done": {"kind": "end", "reason": "completed"},
+            },
+            "edges": [
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "done"},
+                {"from": "act", "when": "done", "to": "squeeze"},
+                {"from": "squeeze", "when": "done", "to": "think"},
+            ],
+        }
+        # A window this small is over the ratio after the first tool result, but the only older span would split
+        # that result from its call, so nothing fires; after the second result the first pair is summarized.
+        window = ("config", {"target": "models", "data": {"context_window": 120}})
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        compacted = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
+        assert len(compacted) == 1 and compacted[0]["fired"] is True and compacted[0]["step"] == 2
+        assert compacted[0]["summary"] == "wrote hello to notes.txt" and compacted[0]["dropped"] == 2
+        assert compacted[0]["policy"] == {"fire_ratio": 0.5, "keep_ratio": 0.2}
+        assert compacted[0]["tokens_after"] < compacted[0]["tokens_before"]
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "squeeze"]
+        assert exits[0]["fired"] is False and exits[0]["tokens"] > 60
+        assert exits[1]["fired"] is True and exits[1]["dropped"] == 2
+        # What the model saw next: the system prompt, the task, the summary note, then the kept tail.
+        after = next(
+            r
+            for r in model.requests
+            if any("Summary of the earlier steps" in str(m.get("content")) for m in r["messages"])
+        )
+        roles = [m["role"] for m in after["messages"]]
+        assert roles[:3] == ["system", "user", "user"] and after["messages"][2]["content"].startswith(
+            "Summary of the earlier steps:\nwrote hello"
+        )
+        assert roles[3] != "tool"
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_a_compact_stage_below_the_ratio_or_without_a_summary_drops_nothing(tmp_path: Path) -> None:
+    from reef.harness.native import graph as graphs
+
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+    for i in range(6):
+        messages.append(
+            {"role": "assistant", "content": None, "tool_calls": [_call("read_file", {"path": str(i)}, f"c{i}")]}
+        )
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 40})
+    head, older, tail = graphs._split(messages, keep_tokens=40)
+    assert head == messages[:2] and older and head + older + tail == messages
+    assert tail[0]["role"] == "assistant", "the tail opens on the call whose result it keeps"
+
+    class _Down(_FakeModel):
+        def status(self, body: dict) -> int:
+            return 500 if body["messages"][0]["content"].startswith("Summarize") else 200
+
+    model = _Down()
+    try:
+        graph = {
+            "name": "main",
+            "start": "squeeze",
+            "max_steps": 6,
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "squeeze": {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2},
+                "done": {"kind": "end", "reason": "completed"},
+            },
+            "edges": [
+                {"from": "squeeze", "when": "done", "to": "think"},
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "done"},
+                {"from": "act", "when": "done", "to": "squeeze"},
+            ],
+        }
+        window = ("config", {"target": "models", "data": {"context_window": 120}})
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "squeeze"]
+        assert exits[0]["fired"] is False and "error" not in exits[0], "below the ratio at the start"
+        failed = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
+        assert failed and failed[0]["fired"] is False and failed[0]["error"]["code"] == "MODEL_ERROR"
+        assert all(not e.get("fired") for e in exits) and result.trajectory[-1]["data"]["reason"] == {
+            "kind": "completed"
+        }
+        # Nothing was dropped: every request still carries the full tail of tool results.
+        assert all(
+            m["role"] != "user" or "Summary of" not in str(m["content"]) for r in model.requests for m in r["messages"]
+        )
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_the_execute_seed_tool_runs_code_that_calls_the_other_tools(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    files = render_composition(
+        [*_seed_nodes(SEED_TOOLS), *ModelBinding(base_url="http://x", model="m").compose_nodes(get_adapter("native"))],
+        get_adapter("native"),
+    )
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+    tools = load_tools(root / "native" / "tools")
+    assert tools["execute"].capabilities == ("exec", "write", "network")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    code = (
+        "import read_file, write_file\n"
+        "write_file.run({'path': 'notes.txt', 'content': 'hello'}, WORKDIR)\n"
+        "print(read_file.run({'path': 'notes.txt'}, WORKDIR).upper())\n"
+    )
+    result = _invoke(tools, "execute", json.dumps({"code": code}), workdir)
+    assert result["is_error"] is False and result["content"] == "exit 0\nHELLO\n"
+    assert (workdir / "notes.txt").read_text() == "hello"
+    failed = _invoke(tools, "execute", json.dumps({"code": "raise SystemExit(3)"}), workdir)
+    assert failed["content"].startswith("exit 3")
+    assert _invoke(tools, "execute", json.dumps({"code": "  "}), workdir)["content"] == "refused: empty code"
