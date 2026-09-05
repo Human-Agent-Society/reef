@@ -28,7 +28,7 @@ native harness adds kinds only it renders:
   (``native/agents/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
-is the state, and ``reef.harness.render`` reads it back out per adapter.
+is the state, and ``reef.harness.tree.render`` reads it back out per adapter.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
-#: Tool names the serve form's host plane owns (``reef.harness.native.selftools``); no tree entry may take one.
+#: Tool names the serve form's host plane owns (``reef.harness.runners.native.selftools``); no tree entry may take one.
 NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
 #: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
 NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {

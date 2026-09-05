@@ -19,9 +19,9 @@ from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeResult
-from reef.harness.executor import LocalExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.episodes.executor import LocalExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
@@ -1311,7 +1311,7 @@ def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> Non
     local = CordisRecipe.from_environment({}, config=config(executor="local"))
     assert type(local.executor).__name__ == "LocalExecutor"
 
-    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.harness.episodes.executor.shutil.which", lambda name: None)
     with pytest.raises(RecipeConfigError, match="bubblewrap"):
         CordisRecipe.from_environment({}, config=config(executor="sandbox"))
 
@@ -1589,7 +1589,7 @@ def test_recipe_seed_expands_a_dotted_reference_in_place(tmp_path: Path, monkeyp
         return {"evolution": evolution}
 
     starter = {"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# a\n"}}
-    recipe = CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:SEED_TOOLS", starter]))
+    recipe = CordisRecipe.from_environment({}, config=config(["reef.harness.runners.native.seed:SEED_TOOLS", starter]))
     assert [entry["id"] for entry in recipe.seed] == [
         "read_file",
         "write_file",
@@ -1598,7 +1598,7 @@ def test_recipe_seed_expands_a_dotted_reference_in_place(tmp_path: Path, monkeyp
         "answer-style",
     ]
     with pytest.raises(RecipeConfigError, match=r"cannot import evolution\.seed reference"):
-        CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:NO_SUCH"]))
+        CordisRecipe.from_environment({}, config=config(["reef.harness.runners.native.seed:NO_SUCH"]))
     with pytest.raises(RecipeConfigError, match="must name a sequence of entry option mappings"):
         CordisRecipe.from_environment({}, config=config(["json:dumps"]))
     with pytest.raises(RecipeConfigError, match="entry option mappings or dotted references"):

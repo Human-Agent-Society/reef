@@ -127,7 +127,7 @@ class AdapterDescriptor:
     finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
     install: InstallSpec | None = None
     #: True when the adapter isolates episodes itself (a task container) and
-    #: cannot be nested inside :class:`~reef.harness.executor.SandboxExecutor`.
+    #: cannot be nested inside :class:`~reef.harness.episodes.executor.SandboxExecutor`.
     self_isolating: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,

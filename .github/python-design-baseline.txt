@@ -4,7 +4,7 @@
 # cohesive object interface.
 PYD002|reef/artifact/git_lfs.py|GitLFSRepositoryBackend.__init__|snapshot_download
 PYD002|reef/artifact/git_lfs.py|_GitLFSRepositoryBackendFactory.__init__|snapshot_download
-PYD002|reef/harness/trajectory.py|_CallableTrajectoryReader.__init__|fn
+PYD002|reef/harness/episodes/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/inference.py|InferenceStream.__init__|close
 PYD002|reef/runtime/registry.py|_CallableRuntimeFactory.__init__|fn
 PYD002|reef/train/algos/base.py|_CallableStepPreparer.__init__|fn
@@ -14,8 +14,8 @@ PYD002|reef/train/cordis_backend/strategies.py|_CallableProposer.__init__|fn
 PYD002|reef/train/processors/computed.py|JudgingWorker.__init__|judge
 PYD002|reef/train/slime_backend/reef_adapters/sglang/chat.py|SGLangChatTrainingInferenceBackend.__init__|tool_parser_factory
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
-PYD003|reef/harness/descriptor.py|AdapterDescriptor|finalize_render
-PYD003|reef/harness/nodes.py|<module>|NODE_KINDS
+PYD003|reef/harness/adapters/descriptor.py|AdapterDescriptor|finalize_render
+PYD003|reef/harness/tree/nodes.py|<module>|NODE_KINDS
 PYD003|reef/recipe/config_fields.py|<module>|_PARSERS
 PYD003|reef/recipe/config_fields.py|ConfigField|parse
 PYD003|reef/scenario/registry.py|ScenarioRegistry|self._on_training_scenario_resolved

@@ -47,7 +47,7 @@ from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime

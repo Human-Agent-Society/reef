@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from reef.harness.executor import SandboxExecutor, SandboxUnavailable
-from reef.harness.native import ToolModule, _invoke, load_tools
-from reef.harness.native.enforce import (
+from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
+from reef.harness.runners.native import ToolModule, _invoke, load_tools
+from reef.harness.runners.native.enforce import (
     CHILD,
     ENFORCE_ENV,
     BwrapEnforcer,
@@ -153,9 +153,9 @@ def test_the_environment_selects_the_enforcer(monkeypatch) -> None:
     assert isinstance(select_enforcer({}), InProcessEnforcer)
     assert isinstance(select_enforcer({ENFORCE_ENV: ""}), InProcessEnforcer)
     assert select_enforcer({ENFORCE_ENV: "none"}).mode == "none"
-    monkeypatch.setattr("reef.harness.native.enforce.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.harness.runners.native.enforce.shutil.which", lambda name: "/usr/bin/bwrap")
     assert isinstance(select_enforcer({ENFORCE_ENV: "bwrap"}), BwrapEnforcer)
-    monkeypatch.setattr("reef.harness.native.enforce.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.harness.runners.native.enforce.shutil.which", lambda name: None)
     with pytest.raises(ValueError, match=r"bwrap.*not on PATH"):
         select_enforcer({ENFORCE_ENV: "bwrap"})
     with pytest.raises(ValueError, match=r"seccomp.*names no enforcer"):

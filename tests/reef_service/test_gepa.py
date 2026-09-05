@@ -22,9 +22,9 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, EpisodeResult
-from reef.harness.executor import LocalExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.executor import LocalExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeError, EpisodeResult
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.records import RecordStore

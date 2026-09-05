@@ -11,14 +11,14 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native import DEFAULT_SYSTEM_PROMPT, LoadError, Session, _Loop
-from reef.harness.native.graph import DEFAULT_CONTEXT_WINDOW, Run, narrow_allow
-from reef.harness.native.host import NativeHost
-from reef.harness.native.plugins import NATIVE_PLUGINS, LoaderOrder
-from reef.harness.native.seed import SEED_GRAPH, SEED_NODES
-from reef.harness.nodes import NODE_KINDS
-from reef.harness.render import render_composition
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native import DEFAULT_SYSTEM_PROMPT, LoadError, Session, _Loop
+from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Run, narrow_allow
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.plugins import NATIVE_PLUGINS, LoaderOrder
+from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES
+from reef.harness.tree.nodes import NODE_KINDS
+from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend import compose
 from reef.train.cordis_backend.compose import FiberState
 from reef.train.cordis_backend.compose.loader import Loader

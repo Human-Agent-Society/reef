@@ -21,9 +21,9 @@ sys.path.insert(0, str(HERE.parent))  # the harness package
 sys.path.insert(0, str(HERE.parents[3]))  # the reef checkout, for a source run
 
 from harness import native_evolution
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native.seed import SEED_NODES
-from reef.harness.nodes import NODE_KINDS
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native.seed import SEED_NODES
+from reef.harness.tree.nodes import NODE_KINDS
 from reef.train.types import TraceSample
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")

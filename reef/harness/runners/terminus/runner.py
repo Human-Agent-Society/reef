@@ -26,7 +26,13 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from reef.harness.terminus.tree import TerminusTreeError, instruction_paths, load_tree, skill_roots, terminus_kwargs
+from reef.harness.runners.terminus.tree import (
+    TerminusTreeError,
+    instruction_paths,
+    load_tree,
+    skill_roots,
+    terminus_kwargs,
+)
 
 #: Harbor's own Terminus 2. Reef contributes configuration, not code.
 AGENT_NAME = "terminus-2"

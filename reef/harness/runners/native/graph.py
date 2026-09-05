@@ -17,9 +17,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native.seed import SEED_GRAPH
-from reef.harness.nodes import validate_native_graph
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native.seed import SEED_GRAPH
+from reef.harness.tree.nodes import validate_native_graph
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
 TRANSITIONS_PER_STEP = 16
@@ -54,7 +54,7 @@ class Graph:
 
 
 class Host(Protocol):
-    """What the interpreter reads at each use; ``reef.harness.native.host.NativeHost`` is the one implementation."""
+    """What the interpreter reads at each use; ``reef.harness.runners.native.host.NativeHost`` is the one implementation."""
 
     @property
     def tools(self) -> Mapping[str, Any]: ...
