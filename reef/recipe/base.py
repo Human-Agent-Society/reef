@@ -120,7 +120,7 @@ class Recipe:
         """
         return Surface()
 
-    def seed_files(self) -> Mapping[str, str] | None:
+    def base_artifact_files(self) -> Mapping[str, str] | None:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
         return None
 

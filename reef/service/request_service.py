@@ -31,6 +31,7 @@ from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
+from reef.surface.harnesses import HarnessSurface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 
 logger = logging.getLogger(__name__)
@@ -539,11 +540,12 @@ class RequestService:
         host = normalized.get("host")
         gate = manifest.get("gate") or {}
         model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        surface = scenario.surface
         if not isinstance(model, str) or not model:
-            model = self._dispatcher.served_model_name()
+            model = surface.served_model if isinstance(surface, HarnessSurface) else None
         entries = scenario.entries_for_version(manifest["release_id"])
-        if entries is None:
-            entries = self._dispatcher.seed_entries()
+        if entries is None and isinstance(surface, HarnessSurface):
+            entries = surface.seed_entries
         if not host or not model or not entries:
             return {}
         scheme = normalized.get("x-forwarded-proto") or "http"

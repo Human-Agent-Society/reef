@@ -164,7 +164,7 @@ def _dispatcher(
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
     # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in {**(recipe.seed_files() or {}), **(bootstrap_files or {})}.items():
+    for relative, text in {**(recipe.base_artifact_files() or {}), **(bootstrap_files or {})}.items():
         target = bootstrap / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")

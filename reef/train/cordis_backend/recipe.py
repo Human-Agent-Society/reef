@@ -369,9 +369,13 @@ class CordisRecipe(Recipe):
         return ModelBindings(served=self.model_binding(), named=dict(self.models))
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
+        model = self.model_name or getattr(self.runtime, "model_path", None)
+        return create_harness_surface(
+            seed_entries=tuple(dict(entry) for entry in self.seed),
+            served_model=model if isinstance(model, str) and model else None,
+        )
 
-    def seed_files(self) -> Mapping[str, str] | None:
+    def base_artifact_files(self) -> Mapping[str, str] | None:
         """The seed rendered for the adapter: a fresh scenario serves it before any step publishes."""
         if not self.seed:
             return None
