@@ -110,9 +110,13 @@ def propose(nodes, samples, models):
 
 
 def _route_through_agent(nodes, name):
-    """The graph mutation that makes a proposed agent reachable: the main graph's model stage hands its text to
-    a new subagent stage for ``name`` and the agent's outcomes go where the text went; ``None`` when the main
-    graph has no such edge or already routes through the agent."""
+    """The graph mutation that makes a proposed agent reachable, or ``None`` when the main graph has no model
+    text edge to route or already runs the agent.
+
+    The main graph's model stage hands its text to a new ``ask-<name>`` subagent stage; the agent's text comes
+    back as a user message, so every outcome of that stage goes to a new ``answer-<name>`` model stage whose
+    text goes where the model's text went (the grader reads the last assistant message, and only a model stage
+    writes one) and whose other outcomes follow the model stage's own edges."""
     from reef.train.cordis_backend import Mutation  # lazy: keeps run.py reef-free
 
     graph = next(
@@ -122,8 +126,10 @@ def _route_through_agent(nodes, name):
         return None
     stages = {key: dict(value) for key, value in (graph.get("stages") or {}).items()}
     edges = [dict(edge) for edge in graph.get("edges") or ()]
-    stage = f"ask-{name}"
-    if stage in stages:
+    ask, answer = f"ask-{name}", f"answer-{name}"
+    if ask in stages or answer in stages:
+        return None
+    if any(stage.get("kind") == "subagent" and stage.get("agent") == name for stage in stages.values()):
         return None
     text_edge = next(
         (
@@ -135,11 +141,16 @@ def _route_through_agent(nodes, name):
     )
     if text_edge is None:
         return None
-    target = text_edge["to"]
-    text_edge["to"] = stage
-    stages[stage] = {"kind": "subagent", "agent": name}
+    model, target = text_edge["from"], text_edge["to"]
+    text_edge["to"] = ask
+    stages[ask] = {"kind": "subagent", "agent": name}
+    stages[answer] = {"kind": "model"}
+    edges.extend({"from": ask, "when": outcome, "to": answer} for outcome in ("completed", "gave_up", "budget", "ask"))
+    edges.append({"from": answer, "when": "text", "to": target})
     edges.extend(
-        {"from": stage, "when": outcome, "to": target} for outcome in ("completed", "gave_up", "budget", "ask")
+        {**edge, "from": answer}
+        for edge in (graph.get("edges") or ())
+        if edge.get("from") == model and edge.get("when") != "text"
     )
     return Mutation("update", "main", {"name": "native_graph", "config": {**graph, "stages": stages, "edges": edges}})
 

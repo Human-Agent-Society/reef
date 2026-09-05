@@ -69,12 +69,13 @@ NATIVE_GRAPH_MAX_STEPS = 32
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
-#: A proposed pattern's length limit, and how much of the last assistant text a branch matches against.
+#: A proposed pattern's length limit, how much of the last assistant text a branch matches against, and the wall
+#: clock one search gets. Python's matcher has no step budget and no static test tells a pattern that finishes
+#: from one that never does ((a|a)+b hangs on forty characters), so the interpreter runs each search in a child
+#: process and a search that outlives the clock is a check that failed, never a step that stalls.
 NATIVE_PATTERN_MAX_LENGTH = 200
 NATIVE_MATCH_WINDOW = 4096
-#: A quantified group that itself holds a quantifier: (a+)+, (?:x*y)*, (a{2}){3}; the shape that backtracks
-#: exponentially. Escaped characters are skipped so \( and \+ do not count.
-_NESTED_QUANTIFIER = re.compile(r"\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)(?:[+*{]|\?)")
+NATIVE_PATTERN_TIMEOUT_S = 1.0
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -330,12 +331,8 @@ def _graph_stage(name: str, stage: Any) -> str:
 
 
 def _admit_pattern(value: Any, where: str) -> None:
-    """A proposed regular expression the loop may run: it compiles, it is short, and it nests no quantifier.
-
-    Python's matcher has no step budget, so a pattern such as ``(a+)+b`` from
-    a proposer would hold the interpreter until the episode's wall clock; the
-    nested quantifier rule refuses the shape at admission and the window in
-    the interpreter bounds the rest."""
+    """A proposed regular expression the loop may run: it compiles and it is short; its running time is bounded
+    where it runs, not here."""
     if not isinstance(value, str) or not value:
         raise ValueError(f"{where} must be a regular expression")
     if len(value) > NATIVE_PATTERN_MAX_LENGTH:
@@ -344,8 +341,6 @@ def _admit_pattern(value: Any, where: str) -> None:
         re.compile(value)
     except re.error as exc:
         raise ValueError(f"{where} must be a regular expression: {exc}") from exc
-    if _NESTED_QUANTIFIER.search(value):
-        raise ValueError(f"{where} must not repeat a group that repeats (a pattern like (a+)+ never finishes)")
 
 
 def _branch_cases(name: str, cases: Any) -> None:

@@ -66,6 +66,7 @@ def main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
 
+    before = _steps_before(client)
     # record + report: the traffic the evolve steps learn from.
     failures = 0
     for index, task in enumerate(tasks, start=1):
@@ -119,29 +120,55 @@ def main():
         if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/", "/agents/")):
             print(f"--- {path} ---")
             print(text)
-    _wait_for_steps(client, failures, deadline)
+    _wait_for_steps(client, before, failures, deadline)
 
 
-def _wait_for_steps(client, expected, deadline):
-    """Every batched report runs one step; wait for the rest so each verdict is on the record before run.sh
-    stops the service, and print the later verdicts as the catalog lists them."""
-    shown = 0
+def _training_rows(client):
+    """The catalog's training rows, oldest first; a step in flight holds the catalog, so the caller may wait."""
+    rows = client.get("/reef/harness/releases", extra_headers={"x-reef-scenario": SCENARIO})["releases"]
+    return [row for row in rows if row.get("operation") == "training"]
+
+
+def _steps_before(client):
+    """How many training steps the scenario already recorded; work/ keeps the commit log across runs."""
+    try:
+        return len(_training_rows(client))
+    except ReefClientError as exc:
+        if exc.status != 404:  # 404: nothing has named the scenario yet
+            raise
+        return 0
+
+
+def _wait_for_steps(client, before, expected, deadline):
+    """Every batched report runs one step; wait for the ones this run batched, so each verdict is on the record
+    before run.sh stops the service, and print each verdict as the catalog lists it."""
+    shown = before
     while time.monotonic() < deadline:
         try:
-            rows = client.get("/reef/harness/releases", extra_headers={"x-reef-scenario": SCENARIO})["releases"]
-        except (ReefClientError, TimeoutError, OSError):
-            time.sleep(2.0)  # a step in flight holds the catalog; ask again
+            steps = _training_rows(client)
+        except ReefClientError as exc:
+            if exc.status != 404:
+                raise
+            steps = []
+        except (TimeoutError, OSError) as exc:
+            # A step in flight holds the catalog until it ends; a service that is gone does not answer /healthz.
+            try:
+                client.get("/healthz")
+            except (ReefClientError, TimeoutError, OSError):
+                raise SystemExit("the service stopped answering; check work/reef.log") from exc
+            time.sleep(2.0)
             continue
-        steps = [row for row in rows if row.get("operation") == "training"]
         for row in steps[shown:]:
             metrics = row.get("metrics") or {}
             verdict = "published" if metrics.get("published") else metrics.get("skipped") or "rejected"
             print(f"step {metrics.get('steps', '?')}: {verdict} (release {row['release_id'][:12]})")
-        shown = len(steps)
-        if shown >= expected:
+        shown = max(shown, len(steps))
+        if shown - before >= expected:
             return
         time.sleep(2.0)
-    print(f"{expected - shown} step(s) still pending at the deadline; their verdicts land in the commit log")
+    print(
+        f"{expected - (shown - before)} step(s) still pending at the deadline; their verdicts land in the commit log"
+    )
 
 
 # -- the native variant: the serve form ----------------------------------------------------------------------
@@ -247,6 +274,7 @@ def native_main():
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     seed = json.loads((TREE_DIR / SIDECAR).read_text())["release_id"]
 
+    before = _steps_before(client)
     # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
     failures = 0
     for index, task in enumerate(tasks, start=1):
@@ -287,6 +315,10 @@ def native_main():
     print(f"published: artifact {release} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
+
+    # The other batched steps run back to back and hold the catalog and the manifest while they do; the process
+    # mounts once they are over, so wait for their verdicts first.
+    _wait_for_steps(client, before, failures, deadline)
 
     # The process follows the head: no reinstall, no restart, one harness/mount line in its log.
     deadline = time.monotonic() + MOUNT_TIMEOUT_S

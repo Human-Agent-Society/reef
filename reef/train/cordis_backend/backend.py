@@ -1086,10 +1086,13 @@ class CordisBackend(TrainingBackend):
                 None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
             )
         if path.get("error") is not None:
-            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run):
-            # nothing it wrote is an answer, so it ranks below every real score instead of tying a zero.
+            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
+            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
+            # score instead of tying a zero.
             error = path["error"]
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
+            if path.get("errored_agent"):
+                cause = f"agent {path['errored_agent']}: {cause}"
             return _ScoredEpisode(
                 None, FailureObservation(task=task, stage="graph", cause=cause), residue, agents, path
             )
@@ -1229,24 +1232,31 @@ def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
     stages: list[str] = []
     reason: str | None = None
-    error: Mapping[str, Any] | None = None
+    errors: dict[str, Mapping[str, Any]] = {}
     agent: str | None = None
     for event in trajectory:
         type_, data = event.get("type"), event.get("data") or {}
         if type_ == "session":
             agent = str(data.get("agent") or "root")
+        elif type_ == "turn/end" and agent is not None:
+            details = data.get("reason") or {}
+            kind = details.get("kind")
+            if kind == "error" and isinstance(details.get("error"), Mapping):
+                errors[agent] = details["error"]
+            if agent == "root":
+                reason = None if kind is None else str(kind)
         elif agent != "root":
             continue
         elif type_ == "stage/exit":
             stages.append(str(data.get("stage")))
-        elif type_ == "turn/end":
-            details = data.get("reason") or {}
-            kind = details.get("kind")
-            reason = None if kind is None else str(kind)
-            error = details.get("error") if kind == "error" and isinstance(details.get("error"), Mapping) else None
     path: dict[str, Any] = {"stages": stages, "reason": reason}
-    if error is not None:
-        path["error"] = dict(error)
+    # The root's own error, else the error of an agent whose failure ended the run before the root wrote its end:
+    # a subagent's model error aborts the whole run with no root turn/end.
+    errored = "root" if "root" in errors else next((name for name in errors if reason is None), None)
+    if errored is not None:
+        path["error"] = dict(errors[errored])
+        if errored != "root":
+            path["errored_agent"] = errored
     return path
 
 

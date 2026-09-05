@@ -648,6 +648,40 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
+def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(tmp_path: Path) -> None:
+    """A subagent's model error aborts the whole run with no root turn/end; the episode could not run either."""
+    b = backend(tmp_path, lambda n, s, m: None)
+    error = {"code": "MODEL_ERROR", "message": "the endpoint answered 500"}
+    trajectory = (
+        {"type": "session", "seq": 0, "time": 0, "data": {"agent": "checker"}},
+        {"type": "turn/end", "seq": 1, "time": 0, "data": {"turn": 1, "reason": {"kind": "error", "error": error}}},
+        {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root"}},
+        {"type": "stage/exit", "seq": 1, "time": 0, "data": {"stage": "think"}, "rules": "marker"},
+    )
+    result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
+    scored = b._score_result(result, "task one")
+    assert scored.score is None and scored.failure is not None and scored.failure.stage == "graph"
+    assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
+    assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
+    # An agent that errored while the root still finished its turn is the root's business: the turn scores.
+    finished = (
+        *trajectory,
+        {
+            "type": "turn/end",
+            "seq": 2,
+            "time": 0,
+            "data": {"turn": 1, "reason": {"kind": "completed"}},
+            "rules": "marker",
+        },
+    )
+    scored = b._score_result(
+        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=finished, residue=()), "task one"
+    )
+    assert (
+        scored.score == 1.0 and scored.failure is None and scored.path == {"stages": ["think"], "reason": "completed"}
+    )
+
+
 def test_invalid_seed_refuses_boot_naming_the_entry(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"seed entry 'r1' rejected: .*'text'"):
         backend(tmp_path, lambda n, s, m: None, seed=({"id": "r1", "name": "rules", "config": {}},))
