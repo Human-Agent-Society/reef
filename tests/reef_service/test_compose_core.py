@@ -99,7 +99,7 @@ def test_waterfall_chains_through_next() -> None:
 
     root.on("chain", outer)
     root.on("chain", mid)
-    result = root.waterfall("chain", "seed", lambda seed, next_: seed + ":base")
+    result = root.waterfall("chain", "seed", lambda: "seed:base")  # the innermost callback gets no arguments
     assert result == "seed:base:mid:outer"
     assert order == ["outer-pre", "mid", "outer-post"]
 
@@ -645,3 +645,185 @@ def test_dependent_disposing_its_provider_during_notify_retires_the_provider() -
     fiber = root.plugin(provider)
     assert seen == ["value"]
     assert fiber.state is FiberState.DISPOSED
+
+
+# -- cordis 4.0.0-rc.9 conformance (UPSTREAM.md, Conformance since 4.0.0-rc.8) ---------------
+
+
+def test_failed_fiber_does_not_re_enter_on_dependency_refresh(caplog: pytest.LogCaptureFixture) -> None:
+    root = compose.Context()
+    calls: list[str] = []
+
+    def apply(ctx, config):
+        calls.append("apply")
+        raise RuntimeError("boom")
+
+    apply.inject = ["foo"]
+    release = root.provide("foo", 1)
+    with caplog.at_level(logging.ERROR):
+        fiber = root.plugin(apply)
+    assert fiber.state is FiberState.FAILED
+    release()
+    root.provide("foo", 2)
+    # The provider came back, but a failed fiber recovers only through update().
+    assert calls == ["apply"]
+    assert fiber.state is FiberState.FAILED
+
+
+def test_update_recovers_a_failed_fiber(caplog: pytest.LogCaptureFixture) -> None:
+    root = compose.Context()
+    calls: list[str] = []
+    fail = [True]
+
+    def apply(ctx, config):
+        calls.append("apply")
+        if fail[0]:
+            raise RuntimeError("boom")
+
+    apply.inject = ["foo"]
+    root.provide("foo", 1)
+    with caplog.at_level(logging.ERROR):
+        fiber = root.plugin(apply)
+    assert fiber.state is FiberState.FAILED
+    fail[0] = False
+    assert fiber.update(None) is None  # sync round trip
+    assert calls == ["apply", "apply"]
+    assert fiber.state is FiberState.ACTIVE and fiber.error is None
+
+
+def test_update_surfaces_a_failed_reload_and_a_dropped_failure_stays_handled(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    unhandled: list[object] = []
+
+    async def main() -> None:
+        root = compose.Context()
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        fail = [False]
+
+        async def apply(ctx, config):
+            await asyncio.sleep(0)
+            if fail[0]:
+                raise RuntimeError("boom")
+
+        fiber = root.plugin(apply)
+        await fiber.wait()
+        assert fiber.state is FiberState.ACTIVE
+        fail[0] = True
+        with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError, match="boom"):
+            await fiber.update({})
+        assert fiber.state is FiberState.FAILED
+        # A caller that drops the result must not turn the same failure into an unretrieved task exception.
+        with caplog.at_level(logging.ERROR):
+            fiber.update({})
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        assert fiber.state is FiberState.FAILED
+
+    asyncio.run(main())
+    import gc
+
+    gc.collect()
+    assert unhandled == []
+
+
+def test_waterfall_rejects_a_second_next_from_any_frame() -> None:
+    root = compose.Context()
+    terminal_calls: list[int] = []
+
+    def twice(value, next_):
+        next_()
+        return next_()
+
+    root.on("chain", twice)
+    with pytest.raises(RuntimeError, match=r"next\(\) called multiple times"):
+        root.waterfall("chain", 1, lambda: terminal_calls.append(1) or 2)
+    assert terminal_calls == [1]
+
+    order: list[str] = []
+    outer_next: list = []
+
+    def first(value, next_):
+        outer_next.append(next_)
+        order.append("first")
+        return next_()
+
+    def second(value, next_):
+        order.append("second")
+        return next_()
+
+    other = compose.Context()
+    other.on("chain", first)
+    other.on("chain", second)
+
+    def terminal():
+        order.append("terminal")
+        return outer_next[0]()  # an outer frame's continuation, after that frame already called it
+
+    with pytest.raises(RuntimeError, match=r"next\(\) called multiple times"):
+        other.waterfall("chain", 1, terminal)
+    assert order == ["first", "second", "terminal"]
+
+
+def test_waterfall_nests_inside_a_listener() -> None:
+    root = compose.Context()
+    seen: list[int] = []
+
+    def listener(value, next_):
+        seen.append(value)
+        result = next_()
+        if value == 1:
+            return result + root.waterfall("chain", 2, lambda: 2)
+        return result
+
+    root.on("chain", listener)
+    assert root.waterfall("chain", 1, lambda: 2) == 4
+    assert seen == [1, 2]
+
+
+def test_object_event_names_dispatch_in_every_mode_and_once_fires_once() -> None:
+    root = compose.Context()
+    event = compose.EventName("event")
+    seen: list[int] = []
+
+    def listener(value):
+        seen.append(value)
+        return value
+
+    release = root.on(event, listener)
+    root.emit(event, 1)
+    assert root.bail(event, 2) == 2
+    assert asyncio.run(root.serial(event, 3)) == 3
+    asyncio.run(root.parallel(event, 4))
+    assert seen == [1, 2, 3, 4]
+    release()
+    root.emit(event, 5)
+    assert seen == [1, 2, 3, 4]
+
+    once_event = compose.EventName("once")
+    fired: list[int] = []
+    root.once(once_event, lambda: fired.append(1))
+    root.emit(once_event)
+    root.emit(once_event)
+    assert fired == [1]
+
+
+def test_dunder_shaped_names_are_ordinary_events_and_empty_buckets_are_removed() -> None:
+    root = compose.Context()
+    root.emit("toString")  # an unregistered name dispatches to nobody
+    calls: list[str] = []
+    for name in ("__proto__", "toString", "constructor"):
+        release = root.on(name, lambda: calls.append("hit"))
+        root.emit(name)
+        release()
+        root.emit(name)
+        assert name not in root.events._hooks, name
+    assert calls == ["hit"] * 3
+
+    event = compose.EventName("temporary")
+    first = root.on(event, lambda: None)
+    second = root.on(event, lambda: None)
+    first()
+    assert event in root.events._hooks
+    second()
+    assert event not in root.events._hooks
