@@ -121,6 +121,16 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 
+Add a worker executor
+---------------------
+
+Use an ``Executor`` subclass when worker launch or control transport changes
+while the training lifecycle stays the same. Implement the common interface
+under ``reef/runtime/executor/`` for a general-purpose backend, or inside the
+owning training integration for a backend-specific launcher. See
+`Worker executors <../developer-guide/executors.rst>`__ for configuration,
+ownership, rank ordering and the Slime extension contract.
+
 Add a surface or artifact type
 ------------------------------
 

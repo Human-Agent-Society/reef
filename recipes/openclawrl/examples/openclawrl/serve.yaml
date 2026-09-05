@@ -28,6 +28,11 @@
 #   HF model directory at reef.model_path (bridge mode loads HF weights
 #   directly; no torch_dist conversion needed).
 
+execution:
+  services: local
+  training: ray
+  rollout: ray
+
 reef:
   host: 0.0.0.0
   model_path: /root/models/Qwen3-4B-Thinking-2507
@@ -47,7 +52,7 @@ reef:
   # slime's sglang router binds the node IP, not localhost.
   # In-processor judging: one sglang server (prm-sglang below) answers judge
   # generations and teacher prefills.
-  prm_url: http://127.0.0.1:${prm.port}
+  prm_url: ${endpoints.prm-sglang}
   prm_tokenizer_path: ${prm.model_path}
   # Thinking-model PRM under judge load: single votes need minutes. Upstream
   # never times judge calls out (httpx timeout=None); 3600s is effectively
@@ -174,6 +179,7 @@ services:
     cuda: ${training.cuda_visible_devices}
 
   - name: prm-sglang
+    endpoint: http://{host}:${prm.port}
     command: >-
       "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${prm.model_path} --tp ${prm.tp}
@@ -183,6 +189,7 @@ services:
     cuda: ${prm.cuda_visible_devices}
 
   - name: user-llm-sglang
+    endpoint: http://{host}:${user_llm.port}
     command: >-
       "${REEF_PYTHON}" -m sglang.launch_server
       --model-path=${user_llm.model_path} --tp 1

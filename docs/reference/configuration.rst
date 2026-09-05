@@ -146,6 +146,45 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A preset's ``runtime.type: executor_training`` selects an executor-backed
+training coordinator. Its ``executor`` mapping accepts ``backend`` (``ray``,
+``local`` or a custom executor import path), ordered ``workers`` and backend
+``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
+configuration still connects to a named bridge. The Slime driver's separate
+``--reef-executor-backend`` selects the model worker executor and defaults to
+``auto`` (currently Slime's Ray launcher). See `Worker executors <../developer-guide/executors.rst>`__ for the full
+contracts and examples.
+
+Stack execution backends
+------------------------
+
+``execution.services`` selects the deployment executor (default ``auto``).
+``services[].executor`` overrides it for one service, including SGLang, PRM,
+Slime driver or Reef itself. ``execution.training`` and ``execution.rollout``
+select the Slime training-worker and rollout-control executors (both default
+``auto``, resolving to ``ray``). All selectors accept a backend name/import path or a profile under
+``executors`` with ``backend`` and ``options`` fields.
+
+``execution.evolution`` selects harness evaluation workers (default ``auto``).
+Unlike Slime, ordinary harness evolution calls external model endpoints and
+does not need local GPUs: one worker selects ``uni``, multiple workers select
+``mp``. Component-declared GPU/cluster needs select ``ray``.
+
+For services, ``auto`` selects local execution unless resource/worker options
+or an existing Ray placement group call for Ray. Explicit local CUDA visibility
+selects local execution and cannot be combined with cluster resource options.
+Explicit service selectors and Slime CLI flags override the corresponding role
+defaults. Backend startup failures never silently fall back to another backend.
+
+For Ray services, ``resources`` supplies actor launch options such as
+``num_gpus`` and ``num_cpus``; do not also set ``cuda``. A service can publish
+``endpoint: http://{host}:23001`` and dependents can use
+``${endpoints.SERVICE_NAME}``. Readiness runs on the service's execution node,
+and dependencies are topologically sorted. Local services advertise localhost
+unless ``advertise_host`` is set. See the `whole-stack examples and backend
+contracts <../developer-guide/executors.rst#whole-stack-deployment-configuration>`__
+before moving services across nodes.
+
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -177,6 +216,9 @@ zero.
    evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
+   evolution.episode_workers | 1 | maximum concurrent evaluation workers; CPU auto selects ``uni`` for one and ``mp`` for multiple
+   evolution.worker_executor | auto | overrides ``execution.evolution``; selects worker placement, independently of the ``local/sandbox`` episode isolation policy; explicit ``local`` retains shared-memory thread-based callbacks
+   evolution.worker_resources | | optional ``num_gpus`` per worker; defaults to the scorer's declared needs (normally zero), selects Ray under ``auto``, and cannot reduce those needs
    evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded

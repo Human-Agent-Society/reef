@@ -12,22 +12,25 @@ import json
 import math
 import tempfile
 import time
+import weakref
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.executor import EpisodeExecutor, LocalExecutor, SandboxExecutor
+from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
 from reef.harness.tree.render import RenderError, render_composition
+from reef.runtime.executor import Executor, WorkerSpec
+from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import PreparedStep, TrainingBackend
+from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
@@ -47,6 +50,78 @@ from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepRe
 from .compose import Context, FiberState
 from .compose.loader import EntryOptions, Loader
 
+
+@dataclass(repr=False)
+class EpisodeEvaluationWorker:
+    """Only episode/scorer state crosses the process boundary, never the recipe tree."""
+
+    descriptor: AdapterDescriptor
+    scorer: EpisodeScorer
+    binary: str | None
+    timeout: float
+    executor: EpisodeExecutor
+    forbid_residue: bool
+    owner_lease: bool = False
+
+    def __post_init__(self) -> None:
+        self.executor.preflight()
+
+    def run(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
+        """Score one side's episode; a ``None`` score marks an episode that
+        could not run. The observation keeps what the exception handling
+        would otherwise discard: the failure's stage and cause. A nonzero
+        exit still scores, as before, and is observed alongside the score.
+        The residue counts files the episode left outside the cleanup
+        whitelist; with ``forbid_residue`` a littering episode scores as one
+        that could not run. ``keep_dir`` receives the episode's trajectory
+        files before its root is removed; a copy that fails is not an
+        episode failure and propagates, so the step aborts instead of
+        scoring a verdict shaped by a disk error."""
+        token = EPISODE_OWNER_LEASE.set(self.owner_lease)
+        try:
+            result = run_episode(
+                self.descriptor,
+                files,
+                task,
+                binary=self.binary,
+                timeout=self.timeout,
+                executor=self.executor,
+                keep_dir=keep_dir,
+            )
+        except EpisodeError as error:
+            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
+            _write_episode_record(keep_dir, task, None, scored)
+            return scored
+        except TrajectoryError as error:
+            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
+            _write_episode_record(keep_dir, task, None, scored)
+            return scored
+        finally:
+            EPISODE_OWNER_LEASE.reset(token)
+        scored = self._score_result(result, task)
+        _write_episode_record(keep_dir, task, result, scored)
+        return scored
+
+    def _score_result(self, result: EpisodeResult, task: str) -> _ScoredEpisode:
+        """The score and the observations of an episode that ran."""
+        residue = len(result.residue)
+        agents = _agent_work(result.trajectory)
+        path = _stage_path(result.trajectory)
+        if residue and self.forbid_residue:
+            cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
+            return _ScoredEpisode(
+                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+            )
+        score = float(self.scorer(task, result))
+        if not math.isfinite(score):
+            raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
+        if result.exit_code != 0:
+            stderr_lines = result.stderr.strip().splitlines()
+            cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
+            return _ScoredEpisode(
+                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
+            )
+        return _ScoredEpisode(score, None, residue, agents, path)
 
 @dataclass(frozen=True, kw_only=True)
 class HarnessCandidate(UpdateCandidate):
@@ -525,6 +600,8 @@ class CordisBackend(TrainingBackend):
         proposals_dir: str | Path | None = None,
         max_pending_proposals: int = 8,
         step_record_dir: str | Path | None = None,
+        worker_executor: ExecutorSettings | None = None,
+        worker_gpus: float | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -572,6 +649,10 @@ class CordisBackend(TrainingBackend):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 disables the limit)")
         self._episode_workers = episode_workers
+        self._worker_selection, self._worker_requirements = evaluation_selection(
+            score_episode, episode_workers, worker_executor or ExecutorSettings(), worker_gpus
+        )
+        Executor.get_class(self._worker_selection.settings.backend)
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
         self._forbid_residue = forbid_residue
@@ -620,6 +701,27 @@ class CordisBackend(TrainingBackend):
             # Bind the whole install: npm launchers are symlinks into packages,
             # and git installs need both their editable source and their venv.
             self._executor = replace(self._executor, base_paths=(*self._executor.base_paths, str(prefix)))
+        self._evaluation_pool = EvaluationWorkerPool(
+            self._worker_selection,
+            self._worker_requirements,
+            WorkerSpec(
+                EpisodeEvaluationWorker,
+                args=(
+                    descriptor,
+                    score_episode,
+                    self._binary,
+                    self._episode_timeout_s,
+                    self._executor,
+                    forbid_residue,
+                    self._worker_selection.settings.backend not in ("uni", "local"),
+                ),
+            ),
+        )
+        # Direct Python users should close explicitly; GC is a fallback only.
+        self._pool_finalizer = weakref.finalize(self, self._evaluation_pool.close)
+
+    def close(self) -> None:
+        self._pool_finalizer()
 
     @property
     def descriptor(self) -> AdapterDescriptor:
@@ -879,11 +981,7 @@ class CordisBackend(TrainingBackend):
             for repeat in range(self._episode_repeats)
             for side, files in (("candidate", candidate_files), ("current", current_files))
         ]
-        if self._episode_workers > 1 and len(pairings) > 1:
-            with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(pairings))) as pool:
-                scored = list(pool.map(lambda pairing: self._run_and_score(*pairing), pairings))
-        else:
-            scored = [self._run_and_score(*pairing) for pairing in pairings]
+        scored = self._evaluate_pairings(pairings)
         candidate_runs = scored[0::2]
         current_runs = scored[1::2]
         candidate_scores = tuple(run.score for run in candidate_runs)
@@ -1049,60 +1147,6 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
-    def _run_and_score(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
-        """Score one side's episode; a ``None`` score marks an episode that
-        could not run. The observation keeps what the exception handling
-        would otherwise discard: the failure's stage and cause. A nonzero
-        exit still scores, as before, and is observed alongside the score.
-        The residue counts files the episode left outside the cleanup
-        whitelist; with ``forbid_residue`` a littering episode scores as one
-        that could not run. ``keep_dir`` receives the episode's trajectory
-        files before its root is removed; a copy that fails is not an
-        episode failure and propagates, so the step aborts instead of
-        scoring a verdict shaped by a disk error."""
-        try:
-            result = run_episode(
-                self._descriptor,
-                files,
-                task,
-                binary=self._binary,
-                timeout=self._episode_timeout_s,
-                executor=self._executor,
-                keep_dir=keep_dir,
-            )
-        except EpisodeError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
-            _write_episode_record(keep_dir, task, None, scored)
-            return scored
-        except TrajectoryError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
-            _write_episode_record(keep_dir, task, None, scored)
-            return scored
-        scored = self._score_result(result, task)
-        _write_episode_record(keep_dir, task, result, scored)
-        return scored
-
-    def _score_result(self, result: EpisodeResult, task: str) -> _ScoredEpisode:
-        """The score and the observations of an episode that ran."""
-        residue = len(result.residue)
-        agents = _agent_work(result.trajectory)
-        path = _stage_path(result.trajectory)
-        if residue and self._forbid_residue:
-            cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
-            )
-        score = float(self._score_episode(task, result))
-        if not math.isfinite(score):
-            raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
-        if result.exit_code != 0:
-            stderr_lines = result.stderr.strip().splitlines()
-            cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
-            )
-        return _ScoredEpisode(score, None, residue, agents, path)
-
     def _claim_step_dir(self, step: int) -> Path | None:
         """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
         if self._step_record_dir is None:
@@ -1128,9 +1172,13 @@ class CordisBackend(TrainingBackend):
         with open(step_dir / name, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
+
     @staticmethod
     def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
         return _agent_work(trajectory)
+
+    def _evaluate_pairings(self, pairings):
+        return self._evaluation_pool.evaluate(pairings)
 
     @staticmethod
     def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:

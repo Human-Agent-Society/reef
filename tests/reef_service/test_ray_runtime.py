@@ -17,9 +17,9 @@ from reef.runtime import (
     TrainingJobResult,
     TrainingRuntime,
 )
-from reef.runtime.adapters import ray_runtime
 from reef.runtime.adapters.ray_runtime import RemoteRayTrainGroupHandle
 from reef.runtime.base import InferenceAdmissionController
+from reef.runtime.executor import ray as ray_executor
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
@@ -786,7 +786,7 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
     actor = Bridge()
     handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
 
@@ -813,12 +813,13 @@ def test_remote_handle_probes_the_named_serving_runtime_load_id_method(monkeypat
             FakeRay.calls.append(kwargs)
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     handle = RemoteRayTrainGroupHandle(train_group_actor=Bridge())
 
     assert handle.serving_runtime_load_id() == "engine-incarnation:3"
-    assert FakeRay.calls == [{"timeout": 300.0}]
+    assert handle._timeout_s == 300.0
+    assert FakeRay.calls == [{"timeout": 0.1}]
 
 
 @pytest.mark.unit
@@ -835,7 +836,7 @@ def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) ->
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     assert RemoteRayTrainGroupHandle(train_group_actor=Bridge()).serving_runtime_load_id() is None
 
@@ -866,7 +867,7 @@ def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     actor = Bridge()
     handle = RemoteRayTrainGroupHandle(train_group_actor=actor)

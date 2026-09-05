@@ -210,8 +210,10 @@ class Scenario:
         than once; the trainer closes first so no processor thread can touch
         the record store after it closes.
         """
-        self._trainer.close()
-        self._records.close()
+        try:
+            self._trainer.close()
+        finally:
+            self._records.close()
 
     def to_snapshot_metadata(self) -> dict[str, object]:
         return snapshot_metadata_for(

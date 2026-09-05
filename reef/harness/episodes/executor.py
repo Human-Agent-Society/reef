@@ -28,13 +28,17 @@ import resource
 import shutil
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
 from reef.core.errors import ReefError
 from reef.harness.runners.native.enforce import ISOLATION as TOOL_ISOLATION
+
+EPISODE_OWNER_LEASE: ContextVar[bool] = ContextVar("episode_owner_lease", default=False)
 
 
 class SandboxUnavailable(ReefError):
@@ -88,9 +92,20 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
     """Start a process in its own session and wait, killing the whole group on
     timeout. Coding agents spawn tool children, so a timeout kills the session,
     not just the direct child."""
+    read_fd = write_fd = None
+    command = list(popen_argv)
+    if EPISODE_OWNER_LEASE.get():
+        # Detect missing executables before the guard changes their exit status.
+        executable = command[0]
+        if "/" in executable and not os.path.isabs(executable):
+            executable = str(cwd / executable)
+        if shutil.which(executable, path=env.get("PATH", "")) is None:
+            raise EpisodeLaunchError(f"harness binary {command[0]!r} not found or not executable")
+        read_fd, write_fd = os.pipe()
+        command = [sys.executable, str(Path(__file__).with_name("lease.py")), str(read_fd), *command]
     try:
         process = subprocess.Popen(
-            list(popen_argv),
+            command,
             cwd=cwd,
             env=dict(env),
             stdin=subprocess.DEVNULL,
@@ -98,9 +113,19 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
             stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
+            pass_fds=() if read_fd is None else (read_fd,),
         )
     except FileNotFoundError as exc:
+        if write_fd is not None:
+            os.close(write_fd)
         raise EpisodeLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
+    except BaseException:
+        if write_fd is not None:
+            os.close(write_fd)
+        raise
+    finally:
+        if read_fd is not None:
+            os.close(read_fd)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -108,12 +133,26 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
             os.killpg(process.pid, signal.SIGKILL)
         process.wait()
         raise EpisodeTimeout(f"episode timed out after {timeout}s: {list(popen_argv)}") from exc
+    except BaseException:
+        # A local worker can be terminated while an episode is in flight.
+        # Do not leave the harness's separate process group behind.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+        raise
+    finally:
+        if write_fd is not None:
+            os.close(write_fd)
     return ProcessOutcome(exit_code=process.returncode, stdout=stdout, stderr=stderr)
 
 
 def _inherited_env() -> dict[str, str]:
     """The minimal parent environment an episode keeps: how to find binaries."""
-    return {key: value for key, value in os.environ.items() if key in ("PATH", "SYSTEMROOT", "TMPDIR")}
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in ("PATH", "SYSTEMROOT", "TMPDIR", "CUDA_VISIBLE_DEVICES")
+    }
 
 
 @dataclass(frozen=True)
@@ -301,6 +340,11 @@ class SandboxExecutor:
                 os.killpg(process.pid, signal.SIGKILL)
             process.wait()
             raise EpisodeTimeout(f"episode timed out after {timeout}s: {list(argv)}") from exc
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise
         return ProcessOutcome(exit_code=process.returncode, stdout=stdout, stderr=stderr)
 
     def _apply_limits(self) -> None:

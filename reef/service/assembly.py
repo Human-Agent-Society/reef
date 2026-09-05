@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import os
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -162,7 +163,12 @@ def _training_recipe(
         max_staleness=resolved_recipe_data["max_staleness"],
         connector=connector,
     )
-    return recipe_type.from_environment(env, config=recipe_config, runtime=runtime)
+    try:
+        return recipe_type.from_environment(env, config=recipe_config, runtime=runtime)
+    except BaseException:
+        with suppress(Exception):
+            runtime.shutdown()
+        raise
 
 
 def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, str], connector: Any) -> Recipe:
@@ -191,28 +197,39 @@ def build_dispatcher(
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
-    # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
-    backend_factory = GitLFSRepositoryBackend.factory(
-        _repository_location(settings.artifact_repository),
-        work_dir=Path(settings.artifact_work_dir),
-        cache_dir=Path(settings.artifact_cache_dir),
-        bootstrap_files=recipe.base_artifact_files(),
-    )
-    if not isinstance(settings.training_settings, Mapping):
-        raise ValueError("training must be an object")
-    experiment_tracker = build_experiment_tracker(
-        settings.wandb_config,
-        model=settings.model_path,
-        training_config=settings.training_settings,
-    )
-    return Dispatcher(
-        recipe,
-        backend_factory,
-        local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
-        agent_record_dir=Path(settings.agent_record_dir),
-        allow_implicit_creation=settings.allow_implicit_scenario_creation,
-        experiment_tracker=experiment_tracker,
-    )
+    experiment_tracker = None
+    try:
+        # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
+        backend_factory = GitLFSRepositoryBackend.factory(
+            _repository_location(settings.artifact_repository),
+            work_dir=Path(settings.artifact_work_dir),
+            cache_dir=Path(settings.artifact_cache_dir),
+            bootstrap_files=recipe.base_artifact_files(),
+        )
+        if not isinstance(settings.training_settings, Mapping):
+            raise ValueError("training must be an object")
+        experiment_tracker = build_experiment_tracker(
+            settings.wandb_config,
+            model=settings.model_path,
+            training_config=settings.training_settings,
+        )
+        return Dispatcher(
+            recipe,
+            backend_factory,
+            local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
+            agent_record_dir=Path(settings.agent_record_dir),
+            allow_implicit_creation=settings.allow_implicit_scenario_creation,
+            experiment_tracker=experiment_tracker,
+            owns_runtime=True,
+        )
+    except BaseException:
+        if recipe.runtime is not None:
+            with suppress(Exception):
+                recipe.runtime.shutdown()
+        if experiment_tracker is not None:
+            with suppress(Exception):
+                experiment_tracker.close()
+        raise
 
 
 def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
@@ -224,9 +241,14 @@ def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = 
     dispatcher = build_dispatcher(settings, environ=environ, connector=connector)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
-    return create_app(
-        dispatcher,
-        tokens=settings.tokens,
-        inference_retry_policy=retry_policy,
-        close_dispatcher=True,
-    )
+    try:
+        return create_app(
+            dispatcher,
+            tokens=settings.tokens,
+            inference_retry_policy=retry_policy,
+            close_dispatcher=True,
+        )
+    except BaseException:
+        with suppress(Exception):
+            dispatcher.close()
+        raise

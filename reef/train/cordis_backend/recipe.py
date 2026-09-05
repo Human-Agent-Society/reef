@@ -30,9 +30,11 @@ from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
+from reef.runtime.executor.config import ExecutorSettings, executor_settings, role_executor_settings
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector, tree_files
+from reef.train.cordis_backend.execution import evaluation_selection
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
@@ -193,6 +195,8 @@ class CordisRecipe(Recipe):
     proposals_dir: str = DEFAULT_PROPOSALS_DIR
     max_pending_proposals: int = 8
     step_record_dir: str | None = None
+    worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
+    worker_gpus: float | None = None
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
@@ -213,6 +217,7 @@ class CordisRecipe(Recipe):
             raise ValueError("batch_size must be positive")
         if self.episode_workers < 1:
             raise ValueError("episode_workers must be positive")
+        evaluation_selection(self.score_episode, self.episode_workers, self.worker_executor, self.worker_gpus)
         if self.batch_policy not in ("reports", "records"):
             raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
@@ -362,12 +367,28 @@ class CordisRecipe(Recipe):
         step_record_dir = evolution.get("step_record_dir")
         if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
             raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
+        try:
+            worker_executor = (
+                executor_settings(settings, evolution["worker_executor"])
+                if "worker_executor" in evolution
+                else role_executor_settings(settings, "evolution")
+            )
+            resources = evolution.get("worker_resources", {})
+            if not isinstance(resources, Mapping) or set(resources) - {"num_gpus"}:
+                raise ValueError("evolution.worker_resources accepts only num_gpus")
+            worker_gpus = resources.get("num_gpus")
+            scorer = resolve_episode_scorer(evolution.get("evaluate"))
+            evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
+        except (TypeError, ValueError) as exc:
+            raise RecipeConfigError(str(exc)) from exc
         return {
             "proposals_dir": proposals_dir.strip(),
             "max_pending_proposals": max_pending,
             "propose": resolve_proposer(evolution.get("propose")),
             "promote": resolve_promoter(evolution["promote"]) if "promote" in evolution else None,
-            "score_episode": resolve_episode_scorer(evolution.get("evaluate")),
+            "score_episode": scorer,
+            "worker_executor": worker_executor,
+            "worker_gpus": worker_gpus,
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
             "binary": binary,
@@ -474,6 +495,8 @@ class CordisRecipe(Recipe):
             "episode_workers": self.episode_workers,
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,
+            "worker_executor": self.worker_executor,
+            "worker_gpus": self.worker_gpus,
         }
 
     def _build_trainer(

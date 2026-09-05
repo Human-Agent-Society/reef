@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from reef.core.errors import ReefError
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TraceSample
 
@@ -111,6 +112,14 @@ class EpisodeScorer(ABC):
     @abstractmethod
     def __call__(self, task: str, result: EpisodeResult) -> float:
         """Score one episode result for a task."""
+
+    def execution_requirements(self) -> ExecutionRequirements:
+        """Override when scoring loads a local GPU model or needs cluster placement.
+
+        API calls do not request local GPUs. GPU scorers must initialize their
+        model lazily in the allocated worker, not while the recipe is built.
+        """
+        return ExecutionRequirements()
 
 
 def accepts_keyword(fn: Callable[..., Any], name: str) -> bool:

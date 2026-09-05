@@ -3,9 +3,12 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from slime.ray.actor_group import RayTrainGroup
+from slime.ray import actor_group
 
+from reef.runtime.executor import ExecutorFuture, resolve
 from reef.train.slime_backend.reef_adapters import ray_train_groups
+from reef.train.slime_backend.reef_adapters.executors.ray import SlimeRayExecutor
+from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 
 
 class _RemoteMethod:
@@ -18,55 +21,87 @@ class _RemoteMethod:
         return self.result
 
 
-def _group(*handlers):
-    group = object.__new__(ray_train_groups.ReefRayTrainGroup)
-    group._actor_handlers = list(handlers)
-    return group
-
-
-@pytest.mark.unit
-def test_bridge_facing_train_group_methods_fan_out(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ray_train_groups.ray, "get", lambda value: value)
-    first = SimpleNamespace(
-        restore_runtime_load_id_for_republication=_RemoteMethod("restore-0"),
-        pop_metrics=_RemoteMethod("metrics"),
+def _worker(rank):
+    return SimpleNamespace(
+        init=_RemoteMethod(0),
+        restore_runtime_load_id_for_republication=_RemoteMethod(f"restore-{rank}"),
+        pop_metrics=_RemoteMethod({"rank": rank}),
         get_runtime_load_id=_RemoteMethod("incarnation:4"),
+        update_weights=_RemoteMethod(f"updated-{rank}"),
     )
-    second = SimpleNamespace(
-        restore_runtime_load_id_for_republication=_RemoteMethod("restore-1"),
-    )
-    group = _group(first, second)
 
-    assert group.restore_runtime_load_id_for_republication("incarnation:4") == ["restore-0", "restore-1"]
-    assert group.async_pop_rank0_metrics() == "metrics"
-    assert group.async_get_rank0_runtime_load_id() == "incarnation:4"
+
+@pytest.fixture
+def ray_group(monkeypatch: pytest.MonkeyPatch):
+    workers = [_worker(0), _worker(1)]
+    allocations = []
+    killed = []
+    reservation = object()
+    placement = (reservation, [3, 1], [7, 5])
+
+    def allocate(launcher, pg, num_gpus_per_actor):
+        allocations.append((pg, num_gpus_per_actor, launcher.role))
+        launcher._actor_handlers = list(workers)
+
+    monkeypatch.setattr(actor_group.RayTrainGroup, "_allocate_gpus_for_actor", allocate)
+    monkeypatch.setattr(actor_group.ray, "get", lambda value, timeout=None: value)
+    monkeypatch.setattr(actor_group.ray, "kill", lambda actor, *, no_restart: killed.append((actor, no_restart)))
+    monkeypatch.setattr(actor_group.time, "sleep", lambda duration: None)
+    group = ray_train_groups.ReefRayTrainGroup(
+        args=SimpleNamespace(update_weight_mode="full", update_weight_transport="nccl"),
+        num_nodes=1,
+        num_gpus_per_node=2,
+        pg=placement,
+        num_gpus_per_actor=0.4,
+    )
+    assert group.create() == [0, 0]
+    yield group, workers, allocations, killed, placement
+    group.release()
 
 
 @pytest.mark.unit
-def test_train_group_uses_public_update_path_until_full_disk_reload(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    monkeypatch.setattr(ray_train_groups.ray, "get", lambda value: value)
-    monkeypatch.setattr(RayTrainGroup, "update_weights", lambda self: "public-update")
-    group = _group(SimpleNamespace())
-    group._full_disk_weight_update_enabled = lambda: False
+def test_bridge_facing_train_group_methods_fan_out(ray_group) -> None:
+    group, workers, *_ = ray_group
 
-    assert group.update_weights() == "public-update"
+    assert ray_train_groups.ReefRayTrainGroup is SlimeTrainGroup
+    assert isinstance(group.executor, SlimeRayExecutor)
+    assert group.restore_runtime_load_id_for_republication("incarnation:4") == ["restore-0", "restore-1"]
+    metrics = group.async_pop_rank0_metrics()
+    version = group.async_get_rank0_runtime_load_id()
+    assert isinstance(metrics, ExecutorFuture)
+    assert resolve(metrics) == {"rank": 0}
+    assert resolve(version) == "incarnation:4"
+    assert workers[0].restore_runtime_load_id_for_republication.calls == [(("incarnation:4",), {})]
+    assert workers[1].restore_runtime_load_id_for_republication.calls == [(("incarnation:4",), {})]
+    assert workers[1].pop_metrics.calls == []
+    assert workers[1].get_runtime_load_id.calls == []
 
-    update = _RemoteMethod("updated")
-    version = _RemoteMethod("deployment:6")
-    group._actor_handlers = [SimpleNamespace(update_weights=update, get_runtime_load_id=version)]
-    group._full_disk_weight_update_enabled = lambda: True
-    group._release_train_enabled = lambda: True
-    group.args = SimpleNamespace(update_weight_disk_dir=str(tmp_path))
-    group._disk_runtime_load_id = 5
-    released: list[bool] = []
-    reloaded: list[tuple[object, int, str, bool]] = []
-    group.release = lambda: released.append(True)
-    group._reload_rollout_weights_from_disk = lambda path, sequence, exact, *, manage_generation: reloaded.append(
-        (path, sequence, exact, manage_generation)
-    )
 
-    assert group.update_weights() is None
-    assert group._disk_runtime_load_id == 6
-    assert update.calls == [((), {})]
-    assert released == [True]
-    assert reloaded == [(tmp_path / "weight_v000006", 6, "deployment:6", True)]
+@pytest.mark.unit
+def test_non_disk_weight_update_preserves_default_and_explicit_worker_flags(ray_group) -> None:
+    group, workers, *_ = ray_group
+
+    assert group.update_weights() == ["updated-0", "updated-1"]
+    assert group.update_weights(manage_generation=False, force_full=True) == ["updated-0", "updated-1"]
+    for worker in workers:
+        assert worker.update_weights.calls == [
+            ((), {}),
+            ((), {"manage_generation": False, "force_full": True}),
+        ]
+
+
+@pytest.mark.unit
+def test_ray_launcher_preserves_placement_and_releases_only_owned_workers(ray_group) -> None:
+    group, workers, allocations, killed, placement = ray_group
+
+    assert allocations == [(placement, 0.4, "actor")]
+    assert group.executor._launcher._pg is placement
+    group.release()
+    group.release()
+
+    # The generic RPC wrapper borrows these handles. Slime's launcher alone
+    # owns their teardown; the reservation can still be shared with rollout.
+    assert killed == [(worker, True) for worker in workers]
+    assert all(target is not placement[0] for target, _ in killed)
+    with pytest.raises(RuntimeError, match="not running"):
+        _ = group.executor

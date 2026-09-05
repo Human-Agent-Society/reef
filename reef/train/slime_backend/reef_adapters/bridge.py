@@ -34,6 +34,8 @@ import ray
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.adapter_residency import AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
+from reef.runtime.executor import resolve
+from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.surface.adapter import parse_adapter_name
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -318,7 +320,7 @@ def create_rollout_manager(args, placement_group):
 
 def create_train_groups(args, placement_groups, rollout_manager):
     from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import create_train_groups as implementation
+    from reef.train.slime_backend.reef_adapters.train_groups import create_train_groups as implementation
 
     return implementation(
         args,
@@ -359,11 +361,10 @@ class _RolloutAdapterEngine:
         payload()
 
     def unload_adapter(self, name: str) -> None:
-        engines, *_ = ray.get(
-            self._rollout_manager.get_updatable_engines_and_lock.remote(), timeout=_TRAIN_RPC_TIMEOUT_S
-        )
-        results = ray.get(
-            [engine.unload_lora_adapter.remote(lora_name=name) for engine in engines], timeout=_TRAIN_RPC_TIMEOUT_S
+        manager = RayExecutor.from_workers([self._rollout_manager])
+        engines, *_ = manager.rpc(0, "get_updatable_engines_and_lock", timeout=_TRAIN_RPC_TIMEOUT_S)
+        results = RayExecutor.from_workers(engines).collective_rpc(
+            "unload_lora_adapter", kwargs={"lora_name": name}, timeout=_TRAIN_RPC_TIMEOUT_S
         )
         for result in results:
             if result is not None and (not isinstance(result, Mapping) or result.get("success") is not True):
@@ -407,6 +408,7 @@ class TrainBridgeActorImpl:
         # the bridge falls back to the historical save-actor-only behavior.
         self._critic_save_root = critic_save_root if critic_group is not None else None
         self._rollout_manager = rollout_manager
+        self._manager_executor = RayExecutor.from_workers([rollout_manager])
         self._save_hf_template = save_hf_template
         self._colocate = colocate
         # A LoRA deployment serves one adapter per scenario: the scenarios
@@ -434,6 +436,7 @@ class TrainBridgeActorImpl:
         else:
             self._algo = _NullAlgorithm()
         self._phase = "serving"
+        self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None
         self._last_train_metrics: dict[str, Any] = {}
@@ -608,6 +611,29 @@ class TrainBridgeActorImpl:
             raise ValueError("per-scenario LoRA training jobs must name their scenario")
         return scenario
 
+    def shutdown(self) -> None:
+        """Release training and rollout workers before retiring their bridge."""
+        with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._phase = "stopped"
+            errors = []
+            for group in (self._critic_group, self._group):
+                if group is not None:
+                    try:
+                        group.release_train()
+                    except Exception as exc:
+                        errors.append(exc)
+            try:
+                self._manager_executor.rpc(0, "dispose", timeout=60)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                RayExecutor.from_workers([self._rollout_manager], owned=True).shutdown()
+            if errors:
+                raise errors[0]
+
     def health(self) -> dict[str, Any]:
         """Return a lightweight liveness marker for container health checks."""
         training_job: dict[str, Any] = {
@@ -626,7 +652,7 @@ class TrainBridgeActorImpl:
             )
             if "scenario" in marker:
                 training_job["scenario"] = marker["scenario"]
-        ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed"}
+        ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed", "stopped"}
         return {
             "ok": ok,
             # A publication failure with a durable UPDATING_WEIGHTS marker is
@@ -951,7 +977,7 @@ class TrainBridgeActorImpl:
             # RolloutManager owns Slime's DP schedule and
             # object-store transport contract. It returns one Box
             # per DP rank, exactly what the training actors expect.
-            packed = self._get(self._rollout_manager.prepare_external_train_data.remote(rollout_data))
+            packed = self._manager_call("prepare_external_train_data", rollout_data)
             marker = {
                 "status": "RUNNING",
                 "job_id": job_id,
@@ -1074,7 +1100,7 @@ class TrainBridgeActorImpl:
         return raw_version
 
     def _manager_call(self, method: str, *args: Any) -> Any:
-        return self._get(getattr(self._rollout_manager, method).remote(*args))
+        return self._manager_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
 
     def _pause_generation(self) -> None:
         if self._generation_paused:
@@ -1090,7 +1116,7 @@ class TrainBridgeActorImpl:
 
     @staticmethod
     def _get(value: Any) -> Any:
-        return ray.get(value, timeout=_TRAIN_RPC_TIMEOUT_S)
+        return resolve(value, timeout=_TRAIN_RPC_TIMEOUT_S)
 
     def _checkpoint_path(self, rollout_id: int) -> str:
         if self._save_hf_template is None:
@@ -1142,6 +1168,12 @@ def start_bridge(
     configure_sglang_runtime(args)
     configure_megatron_runtime(args)
     configure_rollout_runtime(args)
+    from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
+
+    slime_executor_class(getattr(args, "reef_executor_backend", "auto"), role="training")
+    from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
+
+    rollout_executor_class(args)
     colocate = bool(getattr(args, "colocate", False))
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
@@ -1154,29 +1186,53 @@ def start_bridge(
     if not ray.is_initialized():
         ray.init(namespace=namespace)
     pgs = create_placement_groups(args)
-    rollout_manager = create_rollout_manager(args, pgs["rollout"])
-    # Loss families that train a value model need the critic actor group;
-    # the others discard it. ``args.use_critic`` comes from the explicit
-    # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
-    # so keeping the group here is what wires the value model into the bridge
-    # schedule rather than leaving it uninitialized.
-    actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
-    return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
-        actor_group,
-        rollout_manager,
-        save_hf_template=args.save_hf,
-        start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
-        storage_config=retention,
-        megatron_save_root=args.save,
-        critic_save_root=getattr(args, "critic_save", None),
-        source_hf=getattr(args, "hf_checkpoint", None),
-        source_megatron=getattr(args, "load", None),
-        colocate=colocate,
-        lora=lora,
-        adapter_capacity=lora_engine_slots(args) if lora else None,
-        critic_group=critic_group,
-        critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
-        critic_only_steps=getattr(args, "num_critic_only_steps", 0),
-        loss_family=loss_family,
-        loss_family_config=loss_family_config,
-    )
+    rollout_manager = None
+    actor_group = None
+    critic_group = None
+    try:
+        rollout_manager = create_rollout_manager(args, pgs["rollout"])
+        # Loss families that train a value model need the critic actor group;
+        # the others discard it. ``args.use_critic`` comes from the explicit
+        # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
+        # so keeping the group here is what wires the value model into the bridge
+        # schedule rather than leaving it uninitialized.
+        actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
+        return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
+            actor_group,
+            rollout_manager,
+            save_hf_template=args.save_hf,
+            start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
+            storage_config=retention,
+            megatron_save_root=args.save,
+            critic_save_root=getattr(args, "critic_save", None),
+            source_hf=getattr(args, "hf_checkpoint", None),
+            source_megatron=getattr(args, "load", None),
+            colocate=colocate,
+            lora=lora,
+            adapter_capacity=lora_engine_slots(args) if lora else None,
+            critic_group=critic_group,
+            critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
+            critic_only_steps=getattr(args, "num_critic_only_steps", 0),
+            loss_family=loss_family,
+            loss_family_config=loss_family_config,
+        )
+    except BaseException:
+        for group in (critic_group, actor_group):
+            if group is not None:
+                with suppress(Exception):
+                    group.release_train()
+        if rollout_manager is not None:
+            with suppress(Exception):
+                RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)
+            with suppress(Exception):
+                RayExecutor.from_workers([rollout_manager], owned=True).shutdown()
+        # This function created the reservation; per-role executors only borrow it.
+        with suppress(Exception):
+            from ray.util.placement_group import remove_placement_group
+
+            released = set()
+            for placement in pgs.values():
+                if placement is not None and placement[0] is not None and placement[0].id not in released:
+                    released.add(placement[0].id)
+                    remove_placement_group(placement[0])
+        raise

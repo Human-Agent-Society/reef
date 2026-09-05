@@ -14,6 +14,7 @@ import importlib
 import os
 import re
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -103,12 +104,17 @@ def build_named_recipe(
     if not isinstance(model_path, str) or not model_path:
         raise RecipeConfigError(f"recipe {name!r} must configure a non-empty model.path")
     runtime_config = settings["runtime"]
-    # Training runtimes are Ray-based and cannot be built from YAML, so a
-    # preset without a runtime section gets the default and the recipe itself
-    # reports whether it needs a training runtime injected instead.
+    # A configured runtime may connect a service or launch an executor's
+    # workers. Presets without one borrow the deployment's default runtime.
     runtime = (
         (runtime_registry or RuntimeRegistry()).build(runtime_config, model_path=model_path, recipe_config=settings)
         if runtime_config
         else default_runtime
     )
-    return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
+    try:
+        return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
+    except BaseException:
+        if runtime_config and runtime is not None:
+            with suppress(Exception):
+                runtime.shutdown()
+        raise

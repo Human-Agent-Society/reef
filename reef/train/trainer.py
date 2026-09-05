@@ -396,13 +396,17 @@ class Trainer:
             backend.commit_applied(state)
 
     def close(self) -> None:
-        """Release the processor's resources; the trainer owns its lifecycle.
+        """Release processor and backend resources owned by the trainer.
 
         Held under the trainer lock so a processor is never closed while a
         batch is being ingested or built on the training thread.
         """
         with self._lock:
-            self._processor.close()
+            try:
+                self._processor.close()
+            finally:
+                if self._training_backend is not None:
+                    self._training_backend.close()
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.
