@@ -23,7 +23,7 @@ import json
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
-from reef.harness.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
 
 #: Client-side bookkeeping file, byte-identical to what the stdlib client
 #: pull writes; must match ``reef_client.client.HARNESS_RELEASE_SIDECAR``.
@@ -120,7 +120,7 @@ def _wrapper_lines(
 
     Written inside the install script's ``else`` branch (only when the
     composition changed), after the checksum verifies and before the sidecar.
-    The wrapper calls ``reef.harness.harness_wrapper``, which starts a local
+    The wrapper calls ``reef.harness.client.wrapper``, which starts a local
     proxy between the agent binary and Reef — capturing receipts so
     ``reef-<adapter> report`` can report without manual receipt handling.
     """
@@ -140,7 +140,7 @@ def _wrapper_lines(
         f'export REEF_HARNESS_SCENARIO="{_double_quoted(scenario)}"',
         f'export REEF_HARNESS_ADAPTER="{_double_quoted(descriptor.name)}"',
         f'export REEF_HARNESS_ENV_VAR="{_double_quoted(env_var)}"',
-        'exec python3 -m reef.harness.harness_wrapper "\\$@"',
+        'exec python3 -m reef.harness.client.wrapper "\\$@"',
         "REEF_WRAPPER_EOF",
         f'    chmod +x "$DEST/{_double_quoted(wrapper_name)}"',
         f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH. The link target",
@@ -222,11 +222,11 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         # after and the wrapper's own failure is named here rather than
         # surfacing later as a bare ModuleNotFoundError from the launcher.
         (
-            "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
+            "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
             'python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
         ),
         (
-            "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
+            "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
             'echo "reef: warning: reef-client and reef-infra are not importable by python3; '
             'install them into the environment that runs the wrapper" >&2'
         ),

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Protocol
 
 from reef.core.errors import ReefError
-from reef.harness.native.enforce import ISOLATION as TOOL_ISOLATION
+from reef.harness.runners.native.enforce import ISOLATION as TOOL_ISOLATION
 
 
 class SandboxUnavailable(ReefError):

@@ -29,9 +29,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from reef.core.errors import ReefError
-from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor, SandboxExecutor
-from reef.harness.trajectory import reader_for
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.executor import (
+    EpisodeExecutor,
+    EpisodeLaunchError,
+    EpisodeTimeout,
+    LocalExecutor,
+    SandboxExecutor,
+)
+from reef.harness.episodes.trajectory import reader_for
 
 
 class EpisodeError(ReefError):

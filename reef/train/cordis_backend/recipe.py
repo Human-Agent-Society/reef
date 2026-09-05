@@ -20,11 +20,11 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
-from reef.harness.descriptor import DescriptorError
-from reef.harness.executor import EpisodeExecutor, build_executor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.render import render_composition
-from reef.harness.version_check import version_check_entry
+from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.episodes.executor import EpisodeExecutor, build_executor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.tree.render import render_composition
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field

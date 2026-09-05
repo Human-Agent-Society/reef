@@ -19,13 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
-from reef.harness.executor import EpisodeExecutor, LocalExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
-from reef.harness.render import RenderError, render_composition
-from reef.harness.trajectory import TrajectoryError
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.executor import EpisodeExecutor, LocalExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
+from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.tree.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
+from reef.harness.tree.render import RenderError, render_composition
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
@@ -413,7 +413,7 @@ def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDes
     serve process would roll back never wins a gate."""
     if descriptor.tree_path is None:
         return None
-    from reef.harness.native.plugins import check_native_config
+    from reef.harness.runners.native.plugins import check_native_config
 
     for entry in entries:
         if entry.get("name") != "config" or entry.get("disabled"):

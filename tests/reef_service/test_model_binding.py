@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
-from reef.harness.render import render_composition
+from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import CordisRecipe

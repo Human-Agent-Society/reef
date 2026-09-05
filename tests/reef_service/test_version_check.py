@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
-from reef.harness.render import render_composition
-from reef.harness.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
+from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.train.cordis_backend import CordisBackend, CordisRecipe
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer

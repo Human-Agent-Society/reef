@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 
-from reef.harness.render import RenderError
+from reef.harness.tree.render import RenderError
 
 _CONFIG_PATH = "opencode/opencode.json"
 

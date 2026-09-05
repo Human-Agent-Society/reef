@@ -23,7 +23,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions

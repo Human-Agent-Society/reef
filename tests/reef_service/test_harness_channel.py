@@ -27,10 +27,10 @@ import reef.harness.adapters
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.descriptor import DescriptorError, load_descriptor
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBinding
-from reef.harness.render import render_composition
+from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree.render import render_composition
 from reef.recipe import Recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
@@ -627,7 +627,7 @@ def _run_install(script: Path, dest: Path, prefix: Path, env: dict) -> subproces
 def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path) -> None:
     """The served composition carries no endpoint; the script writes the adapter's binding at the Reef it
     came from, fills the token from REEF_TOKEN at install time, and the wrapper reads the URL back."""
-    from reef.harness.harness_wrapper import _extract_reef_url
+    from reef.harness.client.wrapper import _extract_reef_url
 
     binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
     bound = render_composition(
@@ -711,8 +711,8 @@ case " $installed " in
 esac
 
 # Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.
-python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true
-python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
+python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true
+python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
 
 # The checksum stream, as baked into CHECKSUM: each sorted relative path,
 # its byte length, then its bytes, newline separated. The unquoted wc
@@ -772,7 +772,7 @@ export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
 export REEF_HARNESS_SCENARIO="code-repair"
 export REEF_HARNESS_ADAPTER="pi"
 export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
-exec python3 -m reef.harness.harness_wrapper "\$@"
+exec python3 -m reef.harness.client.wrapper "\$@"
 REEF_WRAPPER_EOF
     chmod +x "$DEST/reef-pi"
     # Symlink into ~/.local/bin so reef-pi is on PATH. The link target
@@ -848,7 +848,7 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
 @pytest.mark.unit
 def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> None:
     """The reef-<adapter> wrapper is executable, bakes binary/compose/scenario
-    as absolute paths, calls the harness_wrapper module, and is symlinked."""
+    as absolute paths, calls the client wrapper module, and is symlinked."""
     script, dest, prefix, env = _install_fixture(
         tmp_path,
         binary_version="0.84.2",
@@ -870,7 +870,7 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     assert "code-repair" in text
     assert '"pi"' in text
     assert "PI_CODING_AGENT_DIR" in text
-    assert "python3 -m reef.harness.harness_wrapper" in text
+    assert "python3 -m reef.harness.client.wrapper" in text
     # compose dir is baked as an absolute path (resolved at install time)
     assert "$COMPOSE_ABS" not in text
     assert str(dest / "pi-agent") in text

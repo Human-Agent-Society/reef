@@ -1,0 +1,1 @@
+"""One episode: launch a harness binary on a rendered root (``run``, ``executor``), bind its model (``model_binding``), pin its version (``version_check``) and read its trajectory back (``trajectory``)."""

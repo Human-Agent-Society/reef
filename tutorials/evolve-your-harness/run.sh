@@ -12,7 +12,7 @@ if [ "${1:-}" = native ]; then
     SERVE=configs/serve-native.yaml
     # The native loop is reef's own; this launcher stands in for the
     # reef-native console script an installed reef would put on PATH.
-    printf '#!/bin/sh\nexport PYTHONPATH=%s\nexec %s -m reef.harness.native "$@"\n' \
+    printf '#!/bin/sh\nexport PYTHONPATH=%s\nexec %s -m reef.harness.runners.native "$@"\n' \
         "$(cd ../.. && pwd)" "$(command -v python3)" > work/bin/reef-native
     chmod +x work/bin/reef-native
     export PATH="$PWD/work/bin:$PATH"
