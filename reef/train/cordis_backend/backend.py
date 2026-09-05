@@ -792,6 +792,8 @@ class CordisBackend(TrainingBackend):
     @staticmethod
     def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:
         """Node kinds the mutations touch; update and remove read the kind off the pre-mutation tree."""
+        # The kind after the mutation: an update cannot change it (_apply refuses), and a remove reads it
+        # off the tree it left, so the pre-mutation entries answer for every op that is not a create.
         by_id = {str(entry.get("id")): str(entry.get("name")) for entry in candidate.current_entries}
         kinds: set[str] = set()
         for mutation in candidate.mutations:
@@ -838,9 +840,17 @@ class CordisBackend(TrainingBackend):
                 raise MutationError("create mutation must carry options")
             self._loader.create({**mutation.options, "id": mutation.id})
         elif mutation.op == "update":
-            self._resolve(mutation.id)
+            entry = self._resolve(mutation.id)
             if mutation.options is None:
                 raise MutationError("update mutation must carry options")
+            # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
+            # update that renamed the kind would validate under the old one; a kind change is remove + create.
+            kind = mutation.options.get("name")
+            if kind is not None and str(kind) != str(entry.options.get("name")):
+                raise MutationError(
+                    f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
+                    f"to {kind!r}; remove the entry and create it under the new kind"
+                )
             self._loader.update(mutation.id, dict(mutation.options))
         else:
             self._resolve(mutation.id)
