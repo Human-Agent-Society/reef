@@ -33,11 +33,76 @@ def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, A
     return merged
 
 
+def _names_of(nodes: Sequence[tuple[str, Any]], kind: str) -> set[str]:
+    return {str(config.get("name")) for k, config in nodes if k == kind and isinstance(config, Mapping)}
+
+
+def _check_native_references(
+    nodes: Sequence[tuple[str, Any]], graphs: Sequence[Mapping[str, Any]], agents: Sequence[Mapping[str, Any]]
+) -> None:
+    """Names a graph or an agent uses exist in the same tree, and agents never call each other in a cycle.
+
+    The checks need every node, so they land here rather than in admission.
+    ``main`` is always a graph: the loop runs the seed when the tree carries
+    none. The reference graph is an agent's ``then`` list plus the agents its
+    graph's subagent stages name; a cycle would run without end, so every
+    delegation is a finite tree."""
+    tool_names = _names_of(nodes, "native_tool")
+    skill_names = _names_of(nodes, "skill")
+    # main is always a graph (the loop runs the seed when the tree carries none) and seed is the built in loop.
+    graph_names = {str(graph.get("name")) for graph in graphs} | {"main", "seed"}
+    agent_names = {str(agent.get("name")) for agent in agents}
+    subagents: dict[str, list[str]] = {}
+    for graph in graphs:
+        called: list[str] = []
+        for stage_name, stage in (graph.get("stages") or {}).items():
+            if not isinstance(stage, Mapping):
+                continue
+            missing = sorted(set(stage.get("allow") or ()) - tool_names)
+            if missing:
+                raise RenderError(
+                    f"native_graph stage {stage_name!r} allows tools the tree lacks: {', '.join(missing)}"
+                )
+            if stage.get("kind") == "subagent":
+                if stage.get("agent") not in agent_names:
+                    raise RenderError(
+                        f"native_graph stage {stage_name!r} calls an agent the tree lacks: {stage.get('agent')}"
+                    )
+                called.append(str(stage["agent"]))
+        subagents[str(graph.get("name"))] = called
+    calls: dict[str, list[str]] = {"": subagents.get("main", [])}
+    for agent in agents:
+        name = str(agent.get("name"))
+        for key, names in (("tools", tool_names), ("skills", skill_names), ("then", agent_names)):
+            missing = sorted(set(agent.get(key) or ()) - names)
+            if missing:
+                raise RenderError(f"native_agent {name!r} names {key} the tree lacks: {', '.join(missing)}")
+        graph_name = str(agent.get("graph", "seed"))
+        if graph_name not in graph_names:
+            raise RenderError(f"native_agent {name!r} runs a graph the tree lacks: {graph_name}")
+        calls[name] = [*(agent.get("then") or ()), *subagents.get(graph_name, [])]
+    state: dict[str, int] = {}
+
+    def visit(name: str) -> None:
+        state[name] = 1
+        for target in calls.get(name, ()):
+            if state.get(target) == 1:
+                raise RenderError(f"native_agent {target!r} is called in a cycle; delegation must be a finite tree")
+            if state.get(target) is None:
+                visit(target)
+        state[name] = 2
+
+    for name in calls:
+        if state.get(name) is None:
+            visit(name)
+
+
 def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDescriptor) -> dict[str, str]:
     """Render ``(kind, config)`` nodes to root-relative file texts."""
     configs = {name: _deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()}
     rules: list[str] = []
     graphs: list[Mapping[str, Any]] = []
+    agents: list[Mapping[str, Any]] = []
     files: dict[str, str] = {}
 
     def emit(path: str, text: str) -> None:
@@ -76,27 +141,17 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
                 )
             header = "\n".join(f"{key} = {value!r}" for key, value in fields)
             emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
-        elif kind == "native_graph":
+        elif kind in ("native_graph", "native_agent"):
             template = descriptor.node_paths.get(kind)
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
             # Sorted keys, so a proposal's diff against the previous graph is a few lines.
             emit(template.format(name=options.get("name")), json.dumps(options, indent=2, sort_keys=True) + "\n")
-            graphs.append(options)
+            (graphs if kind == "native_graph" else agents).append(options)
         else:
             raise RenderError(f"unknown node kind {kind!r}")
 
-    # A graph's allow list names tools the same tree carries; the check needs every node, so it lands here.
-    tool_names = {
-        str(config.get("name")) for kind, config in nodes if kind == "native_tool" and isinstance(config, Mapping)
-    }
-    for graph in graphs:
-        for stage_name, stage in (graph.get("stages") or {}).items():
-            missing = sorted(set(stage.get("allow") or ()) - tool_names) if isinstance(stage, Mapping) else []
-            if missing:
-                raise RenderError(
-                    f"native_graph stage {stage_name!r} allows tools the tree lacks: {', '.join(missing)}"
-                )
+    _check_native_references(nodes, graphs, agents)
 
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
