@@ -37,7 +37,7 @@ from reef.train.cordis_backend import (
     Promoter,
     ScoreComparisonSelector,
 )
-from reef.train.cordis_backend.backend import admit_mutations
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, admit_mutations
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -651,10 +651,21 @@ def test_recovered_state_wins_over_the_seed(tmp_path: Path) -> None:
     assert seen == [(("rules", {"text": "Answer briefly."}),)]
 
 
-def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not_run(tmp_path: Path) -> None:
+@pytest.fixture
+def episode_worker() -> EpisodeEvaluationWorker:
+    return EpisodeEvaluationWorker(
+        descriptor=get_adapter("pi"),
+        scorer=resolve_episode_scorer(evaluate),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+
+
+def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not_run(episode_worker) -> None:
     """A tree that cannot load or a graph that cannot run writes no answer; it ranks below every real score
     instead of tying a current tree that also scored nothing. Any other nonzero exit still scores."""
-    b = backend(tmp_path, lambda n, s, m: None)
     session = {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root"}}
 
     def result(reason: dict, exit_code: int) -> EpisodeResult:
@@ -662,18 +673,17 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
         return EpisodeResult(exit_code=exit_code, stdout="", stderr="boom", trajectory=(session, end), residue=())
 
     error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
-    errored = b._score_result(result({"kind": "error", "error": error}, 1), "task one")
+    errored = episode_worker._score_result(result({"kind": "error", "error": error}, 1), "task one")
     assert errored.score is None and errored.failure is not None
     assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
     assert errored.path == {"stages": [], "reason": "error", "error": error}
-    crashed = b._score_result(result({"kind": "completed"}, 1), "task one")
+    crashed = episode_worker._score_result(result({"kind": "completed"}, 1), "task one")
     assert crashed.score == 1.0 and crashed.failure is not None and crashed.failure.stage == "exit"
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
-def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(tmp_path: Path) -> None:
+def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(episode_worker) -> None:
     """A subagent's model error aborts the whole run with no root turn/end; the episode could not run either."""
-    b = backend(tmp_path, lambda n, s, m: None)
     error = {"code": "MODEL_ERROR", "message": "the endpoint answered 500"}
     trajectory = (
         {"type": "session", "seq": 0, "time": 0, "data": {"agent": "checker"}},
@@ -682,7 +692,7 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
         {"type": "stage/exit", "seq": 1, "time": 0, "data": {"stage": "think"}, "rules": "marker"},
     )
     result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
-    scored = b._score_result(result, "task one")
+    scored = episode_worker._score_result(result, "task one")
     assert scored.score is None and scored.failure is not None and scored.failure.stage == "graph"
     assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
     assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
@@ -697,7 +707,7 @@ def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_
             "rules": "marker",
         },
     )
-    scored = b._score_result(
+    scored = episode_worker._score_result(
         EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=finished, residue=()), "task one"
     )
     assert (

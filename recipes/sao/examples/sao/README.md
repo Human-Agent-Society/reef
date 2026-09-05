@@ -136,6 +136,13 @@ loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
 up; `work/reef.log` has the service log if the wait never ends.
 
+Reef starts and stops the shared Ray runtime automatically; no `ray start`
+or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
+`CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
+To use an existing cluster, set `RAY_ADDRESS`; that cluster's node configuration
+controls GPU visibility, and Reef leaves it running on exit. Slime allocates
+the model GPUs; the local driver does not reserve them a second time.
+
 `run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
 executes one episode: the agent runs its six rollouts, reporting each one as
 it is scored, then Harbor's verifier scores the last completion. The ordering

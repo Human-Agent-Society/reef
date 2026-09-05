@@ -34,6 +34,7 @@ from reef_service.test_native_serve import (
 )
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.native import LoadError, LoopModule, load_loop, run_loop, serve
@@ -52,7 +53,7 @@ from reef.harness.tree.nodes import (
 )
 from reef.harness.tree.render import RenderError, render_composition, render_native_module
 from reef.train.cordis_backend import CordisBackend, Mutation
-from reef.train.cordis_backend.backend import _stage_path, admit_mutations, tree_files
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _stage_path, admit_mutations, tree_files
 from reef.train.cordis_backend.compose import Context, FiberState
 from reef.train.cordis_backend.compose.loader import Loader
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -1200,12 +1201,19 @@ def _loop_error_trajectory(loop: str | None) -> tuple[dict[str, Any], ...]:
     )
 
 
-def test_a_loop_error_failure_is_observed_at_stage_loop(tmp_path: Path) -> None:
-    backend = _backend(tmp_path, lambda n, s, m: None)
+def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
+    worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("native"),
+        scorer=resolve_episode_scorer(_score),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
     observed = {}
     for loop in ("main", None):
         result = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
-        scored = backend._score_result(result, "task one")
+        scored = worker._score_result(result, "task one")
         assert scored.score is None and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {
