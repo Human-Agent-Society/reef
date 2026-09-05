@@ -38,6 +38,10 @@ class EpisodeError(ReefError):
     """The episode could not be launched or torn down."""
 
 
+class TrajectoryKeepError(ReefError):
+    """The episode ran but its trajectory could not be kept, so the step has no record of it."""
+
+
 @dataclass(frozen=True)
 class EpisodeResult:
     """One headless invocation's observable outcome."""
@@ -77,6 +81,18 @@ def _remove_episode_root(root: Path) -> None:
             raise EpisodeError(f"cannot remove episode root {root}: {exc}") from exc
 
 
+def _keep_trajectory(source: Path, target: Path) -> None:
+    """Copy the trajectory directory out of the root; a crash before any event leaves nothing to keep."""
+    if not source.is_dir():
+        return
+    try:
+        # Links are copied as links so an evolved tool cannot pull an outside file into the ledger,
+        # and an existing target is refused so a kept record is never merged over.
+        shutil.copytree(source, target, symlinks=True)
+    except OSError as exc:
+        raise TrajectoryKeepError(f"cannot keep episode trajectory under {target}: {exc}") from exc
+
+
 def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
     pure = PurePosixPath(path)
     for pattern in patterns:
@@ -99,6 +115,7 @@ def run_episode(
     binary: str | None = None,
     timeout: float = 600.0,
     executor: EpisodeExecutor | None = None,
+    keep_dir: Path | None = None,
 ) -> EpisodeResult:
     """Run one headless episode of ``descriptor``'s harness over ``files``.
 
@@ -108,7 +125,9 @@ def run_episode(
     (the default local subprocess, or a sandbox); the root preparation,
     environment, trajectory read, and residue collection are the same for
     every executor. The episode root is removed before this returns, success
-    or failure.
+    or failure; ``keep_dir`` receives a copy of the trajectory directory
+    first, so a step ledger can hold what the root held, and a copy that
+    fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
     """
     executor = executor or LocalExecutor()
     # An adapter that isolates episodes itself cannot also run inside the jail:
@@ -181,4 +200,8 @@ def run_episode(
             residue=residue,
         )
     finally:
-        _remove_episode_root(root)
+        try:
+            if keep_dir is not None:
+                _keep_trajectory(root / descriptor.trajectory_path, keep_dir)
+        finally:
+            _remove_episode_root(root)
