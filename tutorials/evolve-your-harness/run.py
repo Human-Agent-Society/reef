@@ -124,7 +124,6 @@ def main():
             print(f"--- {path} ---")
             print(text)
     _wait_for_steps(client, before, failures, deadline)
-    replay()
 
 
 def _training_rows(client):
@@ -342,7 +341,6 @@ def native_main():
     print(f"second pass {task.split(maxsplit=1)[0]}: stages {' -> '.join(stages)}")
     print(f"second pass answer: {result['text'].strip().splitlines()[-1] if result['text'].strip() else ''}")
     print(f"second pass score: {evolution.grade_text(task, result['text'])} (session {result['session']})")
-    replay()
 
 
 # -- the self tools variant: the model proposes the change itself -----------------------------------------------
@@ -367,6 +365,7 @@ def self_main():
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     seed = json.loads((TREE_DIR / SIDECAR).read_text())["release_id"]
     task = tasks[0]
+    before = _steps_before(client)
 
     events, result = turn(SELF_PROMPT)
     calls = [e["data"] for e in events if e["type"] == "tool/call"]
@@ -385,7 +384,6 @@ def self_main():
     print("turn 1 answer:", answer.splitlines()[-1] if answer else "(none: the model stopped after the proposal)")
     if not admitted:
         print("no admitted proposal: the model did not call harness_propose, or the route refused it")
-        replay()
         return
     score = evolution.grade_text(task, answer)
     report(score, task.split(maxsplit=1)[0])
@@ -406,17 +404,17 @@ def self_main():
         if current["release_id"] != seed:
             manifest = current
             break
-        if rows:
+        if error := client.get("/reef/status").get("error"):
+            raise SystemExit(f"evolve step failed: {error}; check work/reef.log")
+        if len(rows) > before:
             metrics = rows[-1].get("metrics") or {}
             verdict = "published" if metrics.get("published") else metrics.get("skipped") or "rejected"
             print(f"step {metrics.get('steps')}: {verdict}; proposal {metrics.get('proposal')}")
             if not metrics.get("published"):
-                replay()
                 return
         time.sleep(2.0)
     if manifest is None:
         print(f"no verdict within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh self for another attempt")
-        replay()
         return
     release = manifest["release_id"]
     gate = manifest["gate"]
@@ -429,7 +427,6 @@ def self_main():
     mounts = _mount_events(release)
     if not mounts:
         print(f"the serve process did not mount {release} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
-        replay()
         return
     for path, data in mounts:
         print(f"{path}: harness/mount {json.dumps(data, sort_keys=True)}")
@@ -439,7 +436,6 @@ def self_main():
     print(f"second pass {task.split(maxsplit=1)[0]}: stages {' -> '.join(stages)}")
     print(f"second pass answer: {result['text'].strip().splitlines()[-1] if result['text'].strip() else ''}")
     print(f"second pass score: {evolution.grade_text(task, result['text'])} (session {result['session']})")
-    replay()
 
 
 def replay():
@@ -457,13 +453,12 @@ def replay():
 
 if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
-    if mode == "pull":
-        pull()
-    elif mode == "native":
-        native_main()
-    elif mode == "self":
-        self_main()
-    elif mode == "replay":
-        replay()
-    else:
-        main()
+    forms = {"": main, "pull": pull, "native": native_main, "self": self_main, "replay": replay}
+    if mode not in forms:
+        raise SystemExit(f"usage: run.py [pull|native|self|replay]; got {mode!r}")
+    try:
+        forms[mode]()
+    finally:
+        # Every form leaves the page behind, however it ended; a pull alone has nothing to show yet.
+        if mode not in ("pull", "replay"):
+            replay()

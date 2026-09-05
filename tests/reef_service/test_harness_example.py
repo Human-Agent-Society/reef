@@ -481,7 +481,12 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
                     **data["sessions"][0],
                     "events": [
                         *data["sessions"][0]["events"],
-                        {"type": "user/message", "seq": 9, "time": 1200, "data": {"content": "</script><b>x</b>"}},
+                        {
+                            "type": "user/message",
+                            "seq": 9,
+                            "time": 1200,
+                            "data": {"content": "<!--<script>x</script>"},
+                        },
                     ],
                 }
             ],
@@ -489,10 +494,55 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     )
     assert page.startswith("<title>Harness Evolution Replay</title>")
     assert '<script id="data" type="application/json">' in page and "harness_propose" in page
-    # The inline JSON never closes its own script tag early.
-    assert page.count("</script>") == 2 and "<\\/script>" in page
+    # No "<" survives inside the data element: neither a closing tag nor the comment opener that would keep the
+    # element from closing and swallow the page's own script.
+    payload = page.split('<script id="data" type="application/json">', 1)[1].split("</script>", 1)[0]
+    assert "<" not in payload and "\\u003c!--\\u003cscript" in payload
+    assert page.count("</script>") == 2
     assert "http://" not in page.split("</style>")[0] and "cdn" not in page
     out = tmp_path / "replay.html"
     assert replay.main([str(work), str(out)]) == 0 and out.read_text(encoding="utf-8") == replay.render(
         replay.collect(work)
     )
+
+    # A first step that updated an entry: its previous options are not on the record, so the seed keeps the
+    # published entry and the step's diff names it from the mutation.
+    updated = {
+        **commit,
+        "metrics": {
+            **commit["metrics"],
+            "mutations": [{"op": "update", "id": "main", "options": {"name": "native_graph", "config": graph}}],
+        },
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(updated) + "\n")
+    first_update = replay.collect(work)
+    assert first_update["releases"][1]["diff"] == {
+        "added": [],
+        "updated": [{"id": "main", "kind": "native_graph"}],
+        "removed": [],
+    }
+    assert [e["id"] for e in first_update["releases"][0]["entries"]] == ["read_file", "main", "answer-format"]
+
+    # A rollback row is not a step: it is shown as its own kind, with no verdict.
+    rollback = {
+        "recorded_at": 1060.0,
+        "operation": "rollback",
+        "step": 2,
+        "artifact_ref": {"release_id": "r1", "parent_release_id": "r2"},
+        "metrics": None,
+        "algorithm_state": None,
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n" + json.dumps(rollback) + "\n")
+    with_rollback = replay.collect(work)
+    assert [(r["kind"], r["step"], r["release_id"]) for r in with_rollback["releases"]] == [
+        ("seed", 0, "r1"),
+        ("published", 1, "r2"),
+        ("rollback", 2, "r1"),
+    ]
+    assert with_rollback["releases"][2]["verdict"] is None
+    assert with_rollback["releases"][2]["entries"] == with_rollback["releases"][1]["entries"]
+
+    # An empty work directory still renders a page.
+    empty = replay.collect(tmp_path / "nothing")
+    assert empty == {"releases": [], "sessions": [], "process": [], "seed_entries": []}
+    assert '<script id="data" type="application/json">' in replay.render(empty)

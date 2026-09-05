@@ -22,10 +22,20 @@ def _lines(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _diff(before, after):
-    """Entry ids added, updated and removed between two entry lists."""
+def _diff(before, after, mutations=()):
+    """Entry ids added, updated and removed by a step: from its mutations when it recorded them, else by comparing
+    the two entry lists (an update's previous options are not on the record, so only the mutation names it)."""
     old = {e["id"]: e for e in before}
     new = {e["id"]: e for e in after}
+    if mutations:
+        kinds = {**{i: e.get("name") for i, e in old.items()}, **{i: e.get("name") for i, e in new.items()}}
+        rows = {"create": [], "update": [], "remove": []}
+        for m in mutations:
+            op = m.get("op")
+            if op in rows:
+                kind = ((m.get("options") or {}).get("name")) or kinds.get(m.get("id")) or "?"
+                rows[op].append({"id": m.get("id"), "kind": kind})
+        return {"added": rows["create"], "updated": rows["update"], "removed": rows["remove"]}
     added = [e for i, e in new.items() if i not in old]
     removed = [e for i, e in old.items() if i not in new]
     updated = [e for i, e in new.items() if i in old and old[i] != e]
@@ -53,6 +63,26 @@ def collect(work: Path) -> dict:
         metrics = row.get("metrics") or {}
         state = row.get("algorithm_state") or {}
         entries = state.get("entries") or []
+        operation = row.get("operation")
+        if operation in ("rollback", "promote"):
+            # Not a step: the head moved by hand; the entries are what the row's state holds, if it holds any.
+            ref = row.get("artifact_ref") or {}
+            releases.append(
+                {
+                    "release_id": ref.get("release_id"),
+                    "parent_release_id": ref.get("parent_release_id"),
+                    "step": row.get("step"),
+                    "kind": operation,
+                    "recorded_at": row.get("recorded_at"),
+                    "mutations": [],
+                    "verdict": None,
+                    "entries": entries or previous or [],
+                    "diff": None,
+                }
+            )
+            if entries:
+                previous = entries
+            continue
         if first_entries is None:
             # The seed the first step started from: the served tree before any commit.
             first_entries = _seed_before(entries, metrics)
@@ -93,7 +123,7 @@ def collect(work: Path) -> dict:
                     "proposer_seconds": metrics.get("proposer_seconds"),
                 },
                 "entries": entries if published else previous,
-                "diff": _diff(previous, entries) if published else None,
+                "diff": _diff(previous, entries, metrics.get("mutations") or ()) if published else None,
             }
         )
         if published:
@@ -144,7 +174,8 @@ def _seed_before(entries, metrics):
             before = [e for e in before if e.get("id") != entry_id]
         elif op == "remove":
             before.append({"id": entry_id, "name": "?", "config": {}})
-        # An update's previous options are not in the record; the diff marks the entry updated.
+        # An update's previous options are not on the record: the seed keeps the updated entry as published,
+        # and the step's diff names it from the mutation, not from a comparison.
     return before
 
 
@@ -206,8 +237,9 @@ tr.mount td{background:color-mix(in srgb,var(--good) 14%,transparent)}tr.fail td
 <script id="data" type="application/json">__DATA__</script>
 <script>
 const D = JSON.parse(document.getElementById('data').textContent);
-const t0 = Math.min(...D.sessions.map(s => s.start || Infinity), ...D.process.map(e => e.time || Infinity));
-const sec = ms => ((ms - t0) / 1000).toFixed(1);
+const starts = [...D.sessions.map(s => s.start), ...D.process.map(e => e.time)].filter(t => typeof t === 'number');
+const t0 = starts.length ? Math.min(...starts) : 0;
+const sec = ms => (typeof ms === 'number' ? ((ms - t0) / 1000).toFixed(1) : '-');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const short = id => id ? String(id).slice(0, 8) : '-';
 const state = { release: 0, session: 0, pos: 0, timer: null };
@@ -253,8 +285,10 @@ function layout(g) {
   return { pos, W, H, width, height };
 }
 function renderGraph() {
-  const r = D.releases[state.release]; const g = graphOf(r.entries);
+  const r = D.releases[state.release];
   const box = document.getElementById('graph');
+  if (!r) { box.innerHTML = '<div class="panel"><span class="empty">No release on record: nothing was pulled or committed under work/ yet.</span></div>'; return; }
+  const g = graphOf(r.entries);
   if (!g) { box.innerHTML = '<div class="panel"><span class="empty">This release carries no main graph (the seed graph runs).</span></div>'; return; }
   const L = layout(g); const s = D.sessions[state.session];
   const seen = new Set(), seenEdges = new Set(); let now = null;
@@ -355,7 +389,9 @@ renderChain(); renderLedger(); renderProcess(); renderGraph(); renderDetail();
 
 
 def render(data: dict) -> str:
-    payload = json.dumps(data, ensure_ascii=True).replace("</", "<\\/")
+    # Every "<" leaves the JSON as <: a tool result holding "<!--<script" would otherwise switch the HTML
+    # tokenizer into a state where the data element never closes and the page's own script is swallowed.
+    payload = json.dumps(data, ensure_ascii=True).replace("<", "\\u003c")
     return PAGE.replace("__DATA__", payload)
 
 
