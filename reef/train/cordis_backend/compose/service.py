@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .context import Context
+from .context import Context, chain_layers
 
 
 class Service:
@@ -72,7 +72,7 @@ class Service:
         """
         scope = ctx if ctx is not None else self.ctx
         configs: list[Any] = []
-        for layer in scope._intercept.maps:
+        for layer in chain_layers(scope._intercept):
             if self.name in layer:
                 configs.insert(0, layer[self.name])
         if base is not None:

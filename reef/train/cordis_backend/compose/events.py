@@ -225,17 +225,10 @@ class EventsService:
         _, callbacks, rest = self._resolve("waterfall", args)
         inner = rest.pop()
         queue = list(callbacks)
-        # Awaitables minted by the caller's own innermost callback may pass
-        # back through the chain; awaitables minted by a listener are the
-        # silent never-awaited bug the sync-mode guard exists for.
-        passthrough: list[Any] = []
 
         def dispatch() -> Any:
             if not queue:
-                result = inner()  # neither the arguments nor a continuation, as events.ts:122
-                if inspect.isawaitable(result):
-                    passthrough.append(result)
-                return result
+                return inner()  # neither the arguments nor a continuation, as events.ts:122
             callback = queue.pop(0)
             called = False
 
@@ -246,10 +239,11 @@ class EventsService:
                 called = True
                 return dispatch()
 
-            result = callback(*rest, next_)
-            if not any(result is allowed for allowed in passthrough):
-                self._reject_awaitable("waterfall", result)
-            return result
+            # A listener's value is returned to the caller verbatim, so an
+            # awaitable one is legitimate here (events.ts:129): the caller
+            # awaits the waterfall, and an async listener awaits its own
+            # next(). Only bail can silently swallow one.
+            return callback(*rest, next_)
 
         return dispatch()
 

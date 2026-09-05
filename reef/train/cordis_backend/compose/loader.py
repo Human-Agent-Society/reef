@@ -28,10 +28,10 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import ChainMap
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
-from .context import Context, RealmKey
+from .context import Context, RealmKey, chain_layers
 from .fiber import Fiber, FiberState
 from .registry import Plugin, _resolve_inject
 
@@ -40,6 +40,60 @@ EntryOptions = dict[str, Any]
 
 _ENTRY_KEY = "_loader_entry"
 """Override key marking a context as belonging to an entry (Entry.key)."""
+
+
+_DELIM_PREFIX = "_loader_delim:"
+"""Override key prefix for the per-name delimiter of isolate.ts:104."""
+
+
+def _delim(ctx: Context, name: str) -> Any:
+    """The delimiter value visible at ``ctx``, inherited down the view chain."""
+    key = _DELIM_PREFIX + name
+    node: Context | None = ctx
+    while node is not None:
+        overrides = node.__dict__.get("_overrides")
+        if overrides and key in overrides:
+            return overrides[key]
+        node = node.__dict__.get("_parent")
+    return None
+
+
+class _ParentChain(Mapping):
+    """A live stand-in for the reference's prototype link (isolate.ts:118-119).
+
+    An entry's isolate and intercept tables keep their identity across a
+    move: every context derived from the entry holds this object rather than
+    a snapshot of the parent's layers, so re-parenting the entry is visible
+    to the fibers beneath it, the way ``Object.setPrototypeOf`` is. Swapping
+    in a fresh ChainMap instead would leave those descendants resolving
+    against the group the entry just left.
+
+    ``source`` moves at the point the reference swaps the prototype, which is
+    after the diff is taken -- reads before that still see the old chain.
+    """
+
+    __slots__ = ("_attr", "source")
+
+    def __init__(self, source: Context, attr: str) -> None:
+        self.source = source
+        self._attr = attr
+
+    @property
+    def __chain_target__(self) -> Mapping:
+        """The chain this link currently stands for; see context.chain_layers."""
+        return getattr(self.source, self._attr)  # type: ignore[no-any-return]
+
+    def __getitem__(self, key: str) -> Any:
+        return self.__chain_target__[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.__chain_target__)
+
+    def __len__(self) -> int:
+        return len(self.__chain_target__)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.__chain_target__
 
 
 def _entry_of(ctx: Context) -> Entry | None:
@@ -66,6 +120,16 @@ class Entry:
         self.subtree: EntryTree | None = None
         self.realm: LocalRealm | None = None
         self.ctx = loader.ctx.extend(**{_ENTRY_KEY: self})
+        # entry-init in the reference gives the entry context its own isolate
+        # and intercept objects over the parent's (isolate.ts:87-90); here the
+        # own layer sits over a live link to whichever group currently holds
+        # the entry.
+        self._isolate_link = _ParentChain(loader.ctx, "_isolate")
+        self._intercept_link = _ParentChain(loader.ctx, "_intercept")
+        # ChainMap is typed as writing through to every layer; it only ever
+        # writes to maps[0], so a read-only link is safe in the tail.
+        object.__setattr__(self.ctx, "_isolate", ChainMap({}, self._isolate_link))  # type: ignore[arg-type]
+        object.__setattr__(self.ctx, "_intercept", ChainMap({}, self._intercept_link))  # type: ignore[arg-type]
         self.ctx.emit("loader/entry-init", self)
 
     @property
@@ -105,10 +169,9 @@ class Entry:
         def inner(*_: Any) -> None:
             parent_ctx = self.parent.ctx
             object.__setattr__(self.ctx, "_parent", parent_ctx)
-            object.__setattr__(self.ctx, "_isolate", ChainMap(self.ctx._isolate.maps[0], *parent_ctx._isolate.maps))
-            object.__setattr__(
-                self.ctx, "_intercept", ChainMap(self.ctx._intercept.maps[0], *parent_ctx._intercept.maps)
-            )
+            # The reference's step 3: re-link, keeping both tables' identity.
+            self._isolate_link.source = parent_ctx
+            self._intercept_link.source = parent_ctx
             if (
                 self.fiber is not None
                 and self.fiber.uid is not None
@@ -128,12 +191,17 @@ class Entry:
         """Reconcile new options: dispose when disabled, patch and
         reconfigure when live and changed, load when not yet live.
 
-        In non-create mode a None value deletes its key; ``create`` replaces
+        In non-create mode a None value deletes its key; ``create`` adopts
         the options wholesale.
         """
         legacy = dict(self.options)
         if create:
-            self.options = dict(options)
+            # Adopted, not copied (entry.ts:105). The group's data list holds
+            # this same object, so a write-back into the options -- a config
+            # update, a self-disposal marked disabled -- is what the tree
+            # serializes, and EntryGroup.unlink can find the entry by
+            # identity when it moves between groups.
+            self.options = options
         else:
             for key, value in options.items():
                 if value is None:
@@ -227,7 +295,10 @@ class EntryGroup:
         """Reconcile the desired child list: create or update every entry
         still present, remove every entry that is not."""
         old = self.data
-        self.data = list(config)
+        # Adopted, not copied (group.ts:52). For a group this list is the
+        # entry's own ``config``, so a child created here lands in the tree's
+        # serialized options rather than in a detached copy.
+        self.data = config if isinstance(config, list) else list(config)
         old_map = {str(options["id"]): options for options in old if options.get("id")}
         new_map = {self.tree.ensure_id(options): options for options in self.data}
         for id_ in {**old_map, **new_map}:
@@ -257,7 +328,7 @@ class Group(EntryGroup):
         if owner is None:
             raise RuntimeError("the group plugin only loads under a loader entry")
         super().__init__(ctx, owner.parent.tree)
-        self.config = list(config or [])
+        self.config = config if isinstance(config, list) else list(config or [])
         ctx.on("internal/update", self._on_update)
 
     def _on_update(
@@ -411,7 +482,7 @@ class Loader(EntryTree):
         intercepts ``{"await": True}`` only sees the loader while no entry
         work is in flight (index.ts:133-137)."""
         config: dict[str, Any] = {}
-        for layer in reversed(ctx._intercept.maps):
+        for layer in reversed(list(chain_layers(ctx._intercept))):
             value = layer.get("loader")
             if value:
                 config.update(value)
@@ -569,44 +640,80 @@ def _entry_isolate(ctx: Context, config: Any = None) -> None:
             realm = realms.get(label)
         return None if realm is None else realm.access(name, create)
 
-    def within(fiber: Fiber, entry: Entry) -> bool:
-        node = fiber.entry
-        while node is not None:
-            if node is entry:
-                return True
-            node = _entry_of(node.parent.ctx)
-        return False
-
     def on_patch(entry: Entry, next_: Callable[[], Any]) -> None:
         new_layer = {}
         for name in entry.options.get("isolate") or {}:
             key = access(entry, name, True)
             if key is not None:
                 new_layer[name] = key
-        old_layer = dict(entry.ctx._isolate.maps[0])
-        changed = [name for name in {**old_layer, **new_layer} if old_layer.get(name) is not new_layer.get(name)]
-        old_keys = {name: entry.ctx._isolate.get(name) for name in changed}
+        # Step 2 of isolate.ts:99-115. The diff is over the fully resolved
+        # mapping, before against after, not over the entry's own layer (the
+        # reference's newMap is created with the new parent's table as its
+        # prototype and the `for...in` walks that chain). An entry moved
+        # between groups keeps its own layer and changes only what it
+        # inherits, so an own-layer diff would report no change.
+        reflect = entry.ctx.reflect
+        old_resolved = entry.ctx._isolate
+        new_resolved = ChainMap(new_layer, *entry.parent.ctx._isolate.maps)
+        diff: dict[str, tuple[Any, Any, Any, Any]] = {}
+        for name in set(old_resolved) | set(new_resolved):
+            old_key, new_key = old_resolved.get(name), new_resolved.get(name)
+            if old_key is new_key:
+                continue
+            # A fresh delimiter marks every context under this entry as having
+            # moved on this patch. A provider that carries the same marker
+            # moved with the entry; one that carries a different marker sits
+            # under a nested entry that pins the realm itself, and its binding
+            # must stay where it is.
+            marker = object()
+            entry.ctx._overrides[_DELIM_PREFIX + name] = marker
+            for key in (old_key, new_key):
+                impl = reflect.store.get(key) if key is not None else None
+                if impl is None:
+                    continue
+                provider_mark = _delim(impl.fiber.ctx, name)
+                diff[name] = (old_key, new_key, marker, provider_mark)
+                if marker is not provider_mark:
+                    break
+
+        # Step 3: re-link the tables, keeping their identity.
         top = entry.ctx._isolate.maps[0]
         top.clear()
         top.update(new_layer)
         intercept_top = entry.ctx._intercept.maps[0]
         intercept_top.clear()
         intercept_top.update(entry.options.get("intercept") or {})
+
+        # Step 4: reload the fiber.
         next_()
-        if not changed:
+
+        def _cleanup() -> None:
+            # Step 7: an entry that no longer isolates a name stops marking
+            # it. Runs last: steps 5 and 6 still read the marker.
+            for key in [k for k in entry.ctx._overrides if k.startswith(_DELIM_PREFIX)]:
+                if key[len(_DELIM_PREFIX) :] not in new_layer:
+                    entry.ctx._overrides.pop(key, None)
+
+        if not diff:
+            _cleanup()
             return
-        new_keys = {name: entry.ctx._isolate.get(name) for name in changed}
-        reflect = entry.ctx.reflect
-        for name in changed:
-            old_key, new_key = old_keys[name], new_keys[name]
-            impl = reflect.store.get(old_key) if old_key is not None else None
-            if impl is not None and new_key is not None and new_key not in reflect.store and within(impl.fiber, entry):
-                reflect.store[new_key] = reflect.store.pop(old_key)  # type: ignore[arg-type]
 
+        # Step 5: a binding that moved with the entry follows it to the new key.
+        for old_key, new_key, mark, provider_mark in diff.values():
+            if mark is not provider_mark or old_key is None or new_key is None:
+                continue
+            if old_key in reflect.store and new_key not in reflect.store:
+                reflect.store[new_key] = reflect.store.pop(old_key)
+
+        # Step 6: wake exactly the fibers whose resolution can have changed.
         def moved(target: Context, name: str) -> bool:
-            return target._isolate.get(name) in (old_keys.get(name), new_keys.get(name))
+            old_key, new_key, mark, provider_mark = diff[name]
+            seen = target._isolate.get(name)
+            target_mark = _delim(target, name)
+            return (seen is old_key or seen is new_key) and (mark is target_mark) != (mark is provider_mark)
 
-        reflect.notify(changed, ctx=entry.ctx, filter=moved)
+        reflect.notify(list(diff), ctx=entry.ctx, filter=moved)
+        _cleanup()
 
     def on_partial_dispose(entry: Entry, legacy: EntryOptions, active: bool) -> None:
         # Realm garbage collection: drop a global realm's key when no entry

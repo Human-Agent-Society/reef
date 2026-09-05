@@ -27,9 +27,26 @@ from __future__ import annotations
 
 import logging
 from collections import ChainMap
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
 from typing import Any
+
+
+def chain_layers(chain: Mapping[str, Any]) -> Iterator[Mapping[str, Any]]:
+    """The overlay chain's layers, nearest first.
+
+    Resolving one key through a ChainMap is enough for most reads, but the
+    intercept overlays are merged layer by layer, and a chain may end in a
+    live link to another context's chain rather than in that context's
+    layers (the loader installs one so an entry survives a move). Expand
+    those links so a walk sees the same sequence a prototype chain would.
+    """
+    for layer in getattr(chain, "maps", (chain,)):
+        target = getattr(layer, "__chain_target__", None)
+        if target is None:
+            yield layer
+        else:
+            yield from chain_layers(target)
 
 
 class ServiceAccessError(AttributeError):
@@ -109,10 +126,23 @@ class Context:
             if overrides and name in overrides:
                 return overrides[name]
             node = node.__dict__.get("_parent")
-        if self.fiber.runtime is not None and self.events._hooks.get("internal/get"):
+        if self.fiber.runtime is None:
+            # A runtime-less fiber -- the root and every view derived from it
+            # -- resolves through the realm-keyed store rather than the fiber
+            # walk, and bypasses the seam (reflect.ts:79). Going through the
+            # walk instead would read the root fiber's store by name, which
+            # an isolated sibling view writes into as well, so a read on one
+            # side of a realm boundary could answer with the other side's
+            # binding. The port's documented divergence is only the raise:
+            # the reference yields undefined here, both for an unknown name
+            # and for a service some plugin fiber provides.
+            impl = self.reflect._get_impl(name, strict=False, ctx=self)
+            if impl is None or impl.fiber is not self.fiber:
+                raise ServiceAccessError(f'cannot get property "{name}" without inject')
+            return impl.value
+        if self.events._hooks.get("internal/get"):
             # The interposition seam: listeners may serve or veto the read
-            # before the walk runs (reflect.ts:80). Root reads bypass it,
-            # as upstream.
+            # before the walk runs (reflect.ts:80).
             return self.events.waterfall("internal/get", self, name, lambda *_: self._service_walk(name))
         return self._service_walk(name)
 
