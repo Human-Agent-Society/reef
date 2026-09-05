@@ -18,9 +18,9 @@ harness_evolve/
     evolution.py the method: propose (self proposer over failures, skill
                  nodes only) and evaluate (exact last-line answer grading)
     native_evolution.py
-                 the native variant: propose over skills, tools, hooks and
-                 the loop graph, evaluate over the native trajectory; the
-                 grader is shared
+                 the native variant: propose over skills, tools, hooks,
+                 the loop graph and its agents, evaluate over the native
+                 trajectory; the grader is shared
   run.py         the loop, written out: record -> report -> evolve -> pull
   run.sh         copies the recipe config out of serve.yaml, starts
                  reef serve, waits for /healthz, runs run.py
@@ -90,10 +90,10 @@ Pick a model that fails at least one task and still writes the strict JSON mutat
 
 ## Native variant
 
-`./run.sh native` runs the same loop on reef's own coding agent (`evolution.adapter: native`), whose tools, loop hooks and loop graph are composition nodes. Three things differ from the pi run:
+`./run.sh native` runs the same loop on reef's own coding agent (`evolution.adapter: native`), whose tools, loop hooks, loop graph and helper agents are composition nodes. Three things differ from the pi run:
 
 - The seed is the loop's shipped `read_file`, `write_file` and `run_bash` tools, its `loop_guard` hook and its `main` graph (`think` to `act` to `think`, `done` on a text reply), named by reference (`reef.harness.native.seed:SEED_NODES`) beside the starter skill, so the proposer sees them as nodes it may retune or replace.
-- `harness/native_evolution.py`'s `propose` accepts one mutation on a skill, a `native_tool` (a schema plus a module defining `run(args, workdir) -> str`), a `native_hook` (a module defining `listen(payload, next) -> decision` at `pre_step`, `pre_execute`, `request_error` or `post_execute`) or the `native_graph` (the loop's stages and the edges between them, shown to the model as one worked example: the seed loop plus a `check` stage); a node's entry id is its name, so a proposal that reuses a seed tool's name updates that tool. `evaluate` grades the last `assistant/message` event of the native-jsonl trajectory with the same grader.
+- `harness/native_evolution.py`'s `propose` accepts one mutation on a skill, a `native_tool` (a schema plus a module defining `run(args, workdir) -> str`), a `native_hook` (a module defining `listen(payload, next) -> decision` at `pre_step`, `pre_execute`, `request_error` or `post_execute`) a `native_agent` (a helper with its own prompt, tools and budget that a graph's `subagent` stage calls) or the `native_graph` (the loop's stages and the edges between them, shown to the model as one worked example: the seed loop plus a `check` stage); a node's entry id is its name, so a proposal that reuses a seed tool's name updates that tool. `evaluate` grades the last `assistant/message` event of the native-jsonl trajectory with the same grader.
 - No agent binary is installed: `run.sh native` writes a `reef-native` launcher for this checkout under `work/bin` and puts it on PATH, which is what an installed reef's console script provides.
 
 The recorded pass is identical, so the two variants are comparable on the same three tasks; `run.py` prints every evolved skill, tool, hook and graph file from the pulled tree.
