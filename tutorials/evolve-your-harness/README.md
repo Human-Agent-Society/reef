@@ -36,6 +36,9 @@ evolve-your-harness/
     probe_proposals.py
                  samples the native proposer over one failing task and
                  counts what admission lets through, by kind
+    replay.py    writes work/replay.html from a run's files: the release
+                 chain, the loop graph replayed from a session, the tool
+                 call ledger and the process timeline
   pyproject.toml makes harness/ an installable package
 ```
 
@@ -54,7 +57,10 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ```bash
 ./run.sh          # on pi (serve.yaml)
 ./run.sh native   # on reef's native harness (serve-native.yaml)
+./run.sh self     # the same, and the model proposes the change itself through its self tools
 ```
+
+Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session's tool call ledger and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
@@ -107,6 +113,10 @@ Pick a model that fails at least one task and still writes the strict JSON mutat
 
 The recorded pass is identical, so the two variants are comparable on the same three tasks; `run.py` prints every evolved skill, tool, hook and graph file from the pulled tree.
 
+## Self tools variant
+
+`./run.sh self` is the native variant with `reef-native serve --self-tools`: the served model gets `harness_inspect`, `harness_try` and `harness_propose`, the host plane tools of the resident process. `python3 run.py self` sends one turn that tells the model it runs on a harness it can read and change and asks it to inspect the tree, propose one change through `harness_propose` that makes its answers end with the integer alone on the last line, and then answer the sieve task. The route admits the proposal into the scenario's inbox; the turn's answer is graded and reported, and the failing report opens a step that claims the proposal before it asks the method. A win publishes, the process mounts the release the model proposed (the commit's `proposal` names the proposal and the session that made it), and the first task runs again on the mounted tree. The prompt names the goal and the shape of a rules entry, not the rule's text: what the model writes is what the gate judges.
+
 ## Results
 
 Last updated: 2026-09-05. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
@@ -121,6 +131,7 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | pi, notebook | Mac mini | ollama | `qwen2.5:7b` | pi 0.84.2 |
 | native | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout |
 | native + graph | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout, after #250 |
+| native, self | Mac mini | ollama | `qwen2.5:7b` | `reef-native serve --self-tools` from the checkout, after #285 |
 
 ### Runs
 
@@ -134,6 +145,8 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | native | qwen2.5:7b | 2 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-skill` (skill) | 0.0 / 0.0 / 1.0 | 0.0 / 0.0 / 0.0 | 0 / 1 / 2 | rejected | 217 |
 | native + graph | qwen2.5:7b | 1 | 2026-09-05 | #258 | 1.0 / 0.0 / 1.0 | `update main` (native_graph) [5] | 1.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 645 |
 | native + graph | qwen2.5:7b | 2 | 2026-09-05 | #258 | 0.0 / 0.0 / 1.0 | `update main` (native_graph): a `check` stage | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 1.0 | 2 / 0 / 1 | published | 178 [6] |
+| native, self | qwen2.5:7b | 1 | 2026-09-06 | #285 | 0.0 [11] | `create answer-format`, `create answer-format-rationale` (rules), by the model through `harness_propose` | 0.0 / 0.0 / 0.0 | 0.0 / 1.0 / 1.0 | 2 / 0 / 1 | published, mounted [12] | 125 |
+| native, self | qwen2.5:7b | 2 | 2026-09-06 | #287 | 0.0 [13] | `remove answer-style`, `create answer-style` (skill to rules), by the model after the route refused a kind change | 0.0 / 0.0 / 0.0 | 0.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 113 |
 
 One run is one sample and no run was repeated, so the rows carry no spread. Gate episodes are stochastic: the seed tree scored `[sieve]` 1.0 on every recorded pass and 0.0 in four of the five gate episodes on the Mac, because with tools in hand the model runs the sieve and then answers in prose, so the integer is not alone on the last line.
 
@@ -203,6 +216,9 @@ The model name is set in three places, `model.path` and `upstream_model` in the 
 [8] 6 graphs carried a duplicated edge or an outcome the stage does not have.
 [9] qwen3:8b: 4 samples over the 120 s limit and 4 replies with no mutation; qwen3.5:9b: 9 over the limit and 1 with no mutation.
 [10] 1 graph had a stage unreachable from `think`.
+[11] The self form sends one turn, not the three tasks: the model inspected its tree, proposed the two rules through `harness_propose` (admitted at the route) and answered the sieve task `\boxed{95920}`, score 0.0, reported.
+[12] The step claimed the model's proposal (the commit's `proposal` names its id and session), the process mounted the release within one second of the commit, and the sieve task ran again on the 9 entry tree with the model's rules in its prompt: stages think, act, think, answer `\boxed{9657}`, score 0.0. The gate's win and the served turn's miss are both on the record. Launch to verdict is the first turn's start to the commit.
+[13] `./run.sh self` as shipped. The model's first proposal updated the `answer-style` skill into a `rules` entry; the route refused it under the kind rule and said why (remove the entry and create it under the new kind); the model read the reason and proposed the remove plus create pair, admitted. Its own answer put the right number in a sentence, score 0.0. The gate tied all three tasks (both sides 0.0) and rejected; the settled proposal file carries the verdict, and the replay page shows the rejected step beside the seed.
 
 ### Known limitations
 

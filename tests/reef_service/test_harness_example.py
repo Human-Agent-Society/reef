@@ -378,3 +378,155 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
         ).base_artifact_files()
         is None
     )
+
+
+# -- the replay page --------------------------------------------------------
+
+
+def _session_events(session: str, release: str, stages, tool: str | None = None) -> list[dict]:
+    events = [
+        {
+            "type": "session",
+            "seq": 0,
+            "time": 1000,
+            "data": {"session": session, "release_id": release, "model": "m", "tools": ["read_file"], "agent": "root"},
+        },
+        {"type": "turn/start", "seq": 1, "time": 1001, "data": {"turn": 1, "prompt": "go"}},
+    ]
+    seq = 2
+    for index, stage in enumerate(stages):
+        events.append(
+            {
+                "type": "stage/enter",
+                "seq": seq,
+                "time": 1002 + index,
+                "data": {"step": index, "stage": stage, "kind": "model"},
+            }
+        )
+        seq += 1
+        if tool and index == 0:
+            events.append(
+                {
+                    "type": "tool/call",
+                    "seq": seq,
+                    "time": 1002 + index,
+                    "data": {"step": index, "name": tool, "call_id": "c", "arguments": "{}"},
+                }
+            )
+            seq += 1
+        events.append(
+            {
+                "type": "stage/exit",
+                "seq": seq,
+                "time": 1003 + index,
+                "data": {"step": index, "stage": stage, "outcome": "text", "to": "done"},
+            }
+        )
+        seq += 1
+    events.append({"type": "turn/end", "seq": seq, "time": 1100, "data": {"turn": 1, "reason": {"kind": "completed"}}})
+    return events
+
+
+def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Path, monkeypatch) -> None:
+    replay = _method(monkeypatch, "replay")
+    work = tmp_path / "work"
+    native = work / "tree" / "native"
+    (native / "sessions" / "s1").mkdir(parents=True)
+    (native / "sessions" / "s2").mkdir(parents=True)
+    (work / "agent-record").mkdir()
+    graph = {
+        "name": "main",
+        "start": "think",
+        "stages": {"think": {"kind": "model"}, "done": {"kind": "end"}},
+        "edges": [{"from": "think", "when": "text", "to": "done"}],
+    }
+    seed = [
+        {"id": "read_file", "name": "native_tool", "config": {"name": "read_file"}},
+        {"id": "main", "name": "native_graph", "config": graph},
+    ]
+    rule = {"id": "answer-format", "name": "rules", "config": {"text": "one line"}}
+    (native / "tree.json").write_text(json.dumps([*seed, rule]))
+    commit = {
+        "recorded_at": 1050.0,
+        "artifact_ref": {"release_id": "r2", "parent_release_id": "r1"},
+        "algorithm_state": {"entries": [*seed, rule], "steps": 1},
+        "metrics": {
+            "steps": 1,
+            "published": True,
+            "wins": 2,
+            "losses": 0,
+            "ties": 1,
+            "candidate_score": 2.0,
+            "current_score": 0.0,
+            "mutations": [
+                {"op": "create", "id": "answer-format", "options": {"name": "rules", "config": {"text": "one line"}}}
+            ],
+            "proposal": {"id": "p1", "session": "s1", "release_id": "r1"},
+            "selection": {"reason": "candidate won 2 task pairings and lost 0"},
+        },
+    }
+    (work / "agent-record" / "x.commits.jsonl").write_text(json.dumps(commit) + "\n")
+    for name, release, tool in (("s1", "r1", "harness_propose"), ("s2", "r2", None)):
+        events = _session_events(name, release, ["think"], tool)
+        (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    (native / "sessions" / "serve.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "harness/mount",
+                "seq": 0,
+                "time": 999,
+                "data": {"release_id": "r1", "source": "boot", "entries": 2},
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "harness/mount",
+                "seq": 1,
+                "time": 1051,
+                "data": {"release_id": "r2", "parent_release_id": "r1", "source": "release", "entries": 3},
+            }
+        )
+        + "\n"
+    )
+
+    data = replay.collect(work)
+    assert [(r["step"], r["kind"], r["release_id"]) for r in data["releases"]] == [
+        (0, "seed", "r1"),
+        (1, "published", "r2"),
+    ]
+    seed_release, published = data["releases"]
+    # The seed is the published state with the step's creates undone; the diff names what the step added.
+    assert [e["id"] for e in seed_release["entries"]] == ["read_file", "main"]
+    assert published["diff"] == {"added": [{"id": "answer-format", "kind": "rules"}], "updated": [], "removed": []}
+    assert published["proposal"] == {"id": "p1", "session": "s1", "release_id": "r1"}
+    assert published["verdict"]["wins"] == 2 and published["verdict"]["reason"].startswith("candidate won")
+    assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
+        ("s1", "r1", 6),
+        ("s2", "r2", 5),
+    ]
+    assert [e["type"] for e in data["process"]] == ["harness/mount", "harness/mount"]
+
+    page = replay.render(
+        {
+            **data,
+            "sessions": [
+                {
+                    **data["sessions"][0],
+                    "events": [
+                        *data["sessions"][0]["events"],
+                        {"type": "user/message", "seq": 9, "time": 1200, "data": {"content": "</script><b>x</b>"}},
+                    ],
+                }
+            ],
+        }
+    )
+    assert page.startswith("<title>Harness Evolution Replay</title>")
+    assert '<script id="data" type="application/json">' in page and "harness_propose" in page
+    # The inline JSON never closes its own script tag early.
+    assert page.count("</script>") == 2 and "<\\/script>" in page
+    assert "http://" not in page.split("</style>")[0] and "cdn" not in page
+    out = tmp_path / "replay.html"
+    assert replay.main([str(work), str(out)]) == 0 and out.read_text(encoding="utf-8") == replay.render(
+        replay.collect(work)
+    )
