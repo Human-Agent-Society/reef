@@ -429,6 +429,21 @@ def test_update_missing_id_is_rejected(tmp_path: Path) -> None:
         b._apply(Mutation("update", "x", RULES))
 
 
+def test_update_cannot_change_an_entrys_kind(tmp_path: Path) -> None:
+    """A kind change through update would validate the new config under the old kind's plugin and hide
+    the new kind from review_kinds; it is refused, and remove plus create is the way to change a kind."""
+    b = backend(tmp_path, lambda n, s, m: None)
+    run_backend_step(b, batch(), b.initial_state())
+    b._apply(Mutation("create", "notes", SKILL))
+    swapped = {"name": "native_tool", "config": {**SKILL["config"], "description": "d", "parameters": {}, "code": "("}}
+    with pytest.raises(MutationError, match="cannot change the entry's kind from 'skill' to 'native_tool'"):
+        b._apply(Mutation("update", "notes", swapped))
+    assert [entry["name"] for entry in b._entries()] == ["skill"]
+    # The same kind, restated, is an ordinary update.
+    b._apply(Mutation("update", "notes", {"name": "skill", "config": {**SKILL["config"], "text": "# more"}}))
+    assert b._entries()[0]["config"]["text"] == "# more"
+
+
 def test_update_merges_and_disabled_hides(tmp_path: Path) -> None:
     b = backend(tmp_path, lambda n, s, m: None)
     run_backend_step(b, batch(), b.initial_state())
