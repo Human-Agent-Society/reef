@@ -318,6 +318,9 @@ def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillcl
 
 @pytest.mark.parametrize("selector", ["role", "worker"])
 def test_driver_preserves_executor_profiles(driver, monkeypatch, selector):
+    monkeypatch.setenv("REEF_MODEL", "test-model")
+    monkeypatch.setenv("REEF_PI_BINARY", "pi")
+    monkeypatch.setenv("REEF_SC_SKILLS", "")
     config = driver.load_config(EXAMPLE_DIR / "skillclaw.yaml")
     config["evolution"]["seed_skills"] = ""
     config["executors"] = {"cpu-pool": {"backend": "mp"}}
