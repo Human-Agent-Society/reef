@@ -92,6 +92,7 @@ class _FakeReef(ThreadingHTTPServer):
         self.proposals_route = True
         self.fail_releases = False
         self.delay_s = 0.0
+        self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -141,6 +142,9 @@ class _Handler(BaseHTTPRequestHandler):
                 row["current"] = row["release_id"] == reef.head
             self._json(200, {"scenario": SCENARIO, "releases": rows})
         elif split.path == "/reef/harness":
+            if reef.hang_manifest_s:
+                hang, reef.hang_manifest_s = reef.hang_manifest_s, 0.0
+                time.sleep(hang)
             release_id = parse_qs(split.query).get("release_id", [reef.head])[0]
             row = reef.releases.get(release_id)
             if row is None:
@@ -465,6 +469,20 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
         watch.stop()
     assert [event["type"] for event in events] == ["release/poll-failed"] * 5
     assert [event["retry_in_s"] for event in events] == [0.01, 0.01, 0.01, 0.01, 0.02]
+
+
+def test_a_manifest_fetch_that_times_out_is_retried_by_the_next_poll(tmp_path: Path, reef: _FakeReef) -> None:
+    """The head moved, the poll saw it, and the manifest read then waited behind the next step's lock: the mount
+    fails on the timeout, and the next poll that names the head announces it again instead of leaving it."""
+    reef.release("r1", [_tool("one")])
+    with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1, release_timeout_s=0.2) as server:
+        log = server.sessions_dir / serve.SERVE_LOG
+        reef.hang_manifest_s = 0.6
+        reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
+        _wait(lambda: server.status()["release_id"] == "r2", timeout_s=10.0)
+        failed = _typed(_events(log), "harness/mount-failed")
+        assert [f["release_id"] for f in failed] == ["r2"] and "timed out" in failed[0]["error"]
+        assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1", "r2"]
 
 
 def test_a_release_request_that_times_out_is_marked_busy_and_a_refused_one_is_not() -> None:

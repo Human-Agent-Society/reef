@@ -139,6 +139,12 @@ class HeadWatch:
         with self._lock:
             self._mounted = release_id
 
+    def forget(self, release_id: str) -> None:
+        """A head whose mount could not even fetch its manifest: the next poll that names it announces it again."""
+        with self._lock:
+            if self._announced == release_id:
+                self._announced = None
+
     def _consider(self, release_id: str | None, source: str) -> None:
         with self._lock:
             if not release_id:
