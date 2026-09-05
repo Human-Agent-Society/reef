@@ -7,12 +7,14 @@ import pytest
 
 from reef.service.deploy.config import validate_services
 from reef.service.deploy.orchestrator import _Stack
+from reef.service.deploy.process import ProcessWorker
 
 
 @pytest.mark.parametrize("stale_marker", [False, True], ids=["fresh-start", "restart"])
 def test_stack_waits_for_current_bridge_marker_before_starting_dependents(tmp_path, monkeypatch, stale_marker):
-    marker = tmp_path / "bridge.ready"
+    marker = tmp_path / "slime-driver" / "bridge.ready"
     if stale_marker:
+        marker.parent.mkdir()
         marker.write_text("previous driver")
     release_driver = tmp_path / "release-driver"
     dependent_started = tmp_path / "dependent-started"
@@ -53,7 +55,7 @@ def test_stack_waits_for_current_bridge_marker_before_starting_dependents(tmp_pa
         ],
     }
     spawn = subprocess.Popen
-    probe = subprocess.run
+    probe = ProcessWorker.probe
     readiness = []
 
     def checked_spawn(command, **options):
@@ -61,17 +63,17 @@ def test_stack_waits_for_current_bridge_marker_before_starting_dependents(tmp_pa
             assert not marker.exists(), "stale marker must be removed before the driver starts"
         return spawn(command, **options)
 
-    def checked_probe(command, **options):
-        result = probe(command, **options)
-        if command == config["services"][0]["ready"]:
-            readiness.append(result.returncode == 0)
-            if result.returncode != 0:
+    def checked_probe(self, name, timeout=5):
+        result = probe(self, name, timeout)
+        if name == "slime-driver":
+            readiness.append(result)
+            if not result:
                 assert not dependent_started.exists()
                 release_driver.touch()
         return result
 
     monkeypatch.setattr(subprocess, "Popen", checked_spawn)
-    monkeypatch.setattr(subprocess, "run", checked_probe)
+    monkeypatch.setattr(ProcessWorker, "probe", checked_probe)
     stack = _Stack(config, validate_services(config, "test.yaml"), tmp_path, 10, tmp_path / "input.yaml")
     try:
         stack.start()
