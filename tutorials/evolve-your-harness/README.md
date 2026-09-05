@@ -86,7 +86,6 @@ The demo's materializer also preserves optional top-level `execution` and
 
 ```yaml
 execution:
-  services: auto
   evolution: cpu-pool
 executors:
   cpu-pool:

@@ -10,9 +10,6 @@
 # from the environment at launch time.
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 
-execution:
-  services: auto
-
 reef:
   host: 0.0.0.0
   model_path: Qwen/Qwen2.5-7B-Instruct

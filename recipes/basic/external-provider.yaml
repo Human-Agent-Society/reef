@@ -9,9 +9,6 @@
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 #   export REEF_UPSTREAM_API_KEY=sk-...
 
-execution:
-  services: auto
-
 reef:
   host: 0.0.0.0
   port: 8900
