@@ -152,6 +152,12 @@ class FakeRay:
     def remote(self, worker_cls):
         return FakeActorBuilder(self, worker_cls)
 
+    def is_initialized(self):
+        return True
+
+    def get_runtime_context(self):
+        return SimpleNamespace(gcs_address="127.0.0.1:6379")
+
     def get(self, refs, *, timeout=None):
         self.events.append(("wait", timeout))
         if isinstance(refs, list):
@@ -173,6 +179,7 @@ class FakeRay:
 def fake_ray(monkeypatch):
     ray = FakeRay()
     monkeypatch.setattr("reef.runtime.executor.ray._require_ray", lambda: ray)
+    monkeypatch.setattr("reef.runtime.executor.ray_runtime._require_ray", lambda: ray)
     # This synchronous transport fake has no liveness service. Real monitoring
     # is exercised by the opt-in Ray integration tests.
     monkeypatch.setattr(RayExecutor, "_start_monitor", lambda self: None)

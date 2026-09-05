@@ -1,6 +1,6 @@
 """Process orchestrator behind ``reef serve``.
 
-Starts every service a config declares in dependency order, probes readiness,
+Starts independent services concurrently while honoring readiness dependencies,
 mirrors child output, watches for unexpected exits, and tears the stack down
 in reverse order on signal. Assembly of the Reef HTTP application itself
 lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -25,6 +26,9 @@ from typing import Any
 import yaml
 
 from reef.runtime.executor import Executor
+from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
+from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.service.deploy.config import (
     PROJECT_ROOT,
     config_value,
@@ -150,6 +154,7 @@ class _Stack:
         self._stopping = threading.Event()
         self._unexpected_exit = threading.Event()
         self._closed = False
+        self._ray_runtime: RayRuntimeLease | None = None
 
     def _is_alive(self, name: str) -> bool:
         executor = self._executors.get(name)
@@ -167,8 +172,7 @@ class _Stack:
                 handle.write(content)
             print(content, end="", flush=True)
 
-    def _wait_ready(self, service: Mapping[str, Any], executor: Executor) -> None:
-        deadline = time.monotonic() + float(service.get("ready_timeout", self.ready_timeout_default))
+    def _wait_ready(self, service: Mapping[str, Any], executor: Executor, deadline: float) -> None:
         while not self._stopping.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -180,13 +184,41 @@ class _Stack:
             self._stopping.wait(min(0.25, max(0, deadline - time.monotonic())))
         raise InterruptedError("stack stopped during startup")
 
-    def _start_service(self, service: Mapping[str, Any]) -> None:
+    def _prepare_services(self, services: Sequence[dict[str, Any]]) -> None:
+        # Only prepare eligible services: an explicitly managed Ray head may
+        # itself be an upstream dependency. Placement does not load models.
+        selections = [service_executor_selection(self.config, service) for service in services]
+        ray_services = any(
+            issubclass(Executor.get_class(selection.settings.backend), RayExecutor) for selection in selections
+        )
+        ray_roles = any(
+            select_executor(role_executor_settings(self.config, role), role=role).settings.backend == "ray"
+            for role in ("training", "rollout")
+            if role in self.config.get("execution", {})
+        )
+        if services and self._ray_runtime is None and (ray_services or ray_roles):
+            address = os.environ.get("RAY_ADDRESS") or self.config.get("reef", {}).get("ray_address")
+            address = interpolate_config(self.config, address) if address else None
+            # Local Slime drivers connect to an explicitly supplied cluster
+            # themselves, after their dependencies (possibly a Ray head) are ready.
+            # Without an address, own one runtime without reserving driver GPUs.
+            if ray_services or not address or address == "local":
+                self._ray_runtime = acquire_ray_runtime(address)
+                address = self._ray_runtime.address
+            self.config.setdefault("reef", {})["ray_address"] = address
+        # Publish all eligible endpoints before any of their processes start.
+        for service, selection in zip(services, selections, strict=True):
+            self._prepare_service(service, selection)
+
+    def _prepare_service(self, service: Mapping[str, Any], selection: ExecutorSelection) -> None:
         name = service["name"]
         for dependency in service.get("depends_on") or []:
             if not self._is_alive(dependency):
                 raise RuntimeError(f"service {name!r} requires healthy dependency {dependency!r}")
-        selection = service_executor_selection(self.config, service)
         _log(f"{name}: executor={selection.settings.backend} ({selection.reason})")
+        address = self.config.get("reef", {}).get("ray_address")
+        if address:
+            service = {**service, "env": {"RAY_ADDRESS": address, **service.get("env", {})}}
         executor = Executor.create(
             service_executor_config(
                 self.config,
@@ -206,18 +238,56 @@ class _Stack:
             host = f"[{host}]" if ":" in host and not host.startswith("[") else host
             endpoint = interpolate_config(self.config, endpoint).replace("{host}", host)
             self.config.setdefault("endpoints", {})[name] = endpoint
-        executor.rpc(0, "prepare", args=(self.config,), timeout=30)
+
+    def _start_service(self, service: Mapping[str, Any], config: dict[str, Any]) -> None:
+        name = service["name"]
+        executor = self._executors[name]
+        if self._stopping.is_set():
+            raise InterruptedError("stack stopped during startup")
+        executor.rpc(0, "prepare", args=(config,), timeout=30)
+        if self._stopping.is_set():
+            raise InterruptedError("stack stopped during startup")
+        deadline = time.monotonic() + float(service.get("ready_timeout", self.ready_timeout_default))
         executor.rpc(0, "start", timeout=30)
         info = executor.rpc(0, "describe", timeout=30)
         with (self.run_dir / f"{name}.worker.json").open("w") as handle:
             json.dump(info, handle)
-        self._wait_ready(service, executor)
+        self._wait_ready(service, executor, deadline)
+        endpoint = config.get("endpoints", {}).get(name)
         _log(f"{name}: ready" + (f" at {endpoint}" if endpoint else ""))
 
     def start(self) -> None:
         try:
-            for service in self.services:
-                self._start_service(service)
+            # Launch/readiness tasks never mutate the deployment config. The
+            # coordinator alone publishes addresses and unlocks dependents.
+            with ThreadPoolExecutor(max_workers=max(1, len(self.services)), thread_name_prefix="reef-start") as pool:
+                try:
+                    pending = list(self.services)
+                    running: dict[Future[None], str] = {}
+                    ready: set[str] = set()
+                    while pending or running:
+                        if self._stopping.is_set():
+                            raise InterruptedError("stack stopped during startup")
+                        eligible = [svc for svc in pending if ready.issuperset(svc.get("depends_on", []))]
+                        self._prepare_services(eligible)
+                        for service in eligible:
+                            pending.remove(service)
+                            future = pool.submit(self._start_service, service, copy.deepcopy(self.config))
+                            running[future] = service["name"]
+                        done, _ = wait(running, timeout=0.25, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            future.result()
+                            ready.add(running.pop(future))
+                        # Readiness is not a permanent liveness guarantee. A
+                        # previously ready service may die while peers load.
+                        for name in ready:
+                            if not self._is_alive(name):
+                                raise RuntimeError(f"service {name!r} exited during startup")
+                except BaseException:
+                    # Wake peer readiness loops before joining launch tasks.
+                    # Join first so none can create a process after cleanup.
+                    self._stopping.set()
+                    raise
         except BaseException:
             self.shutdown()
             raise
@@ -289,6 +359,8 @@ class _Stack:
                     executor.shutdown()
                 except Exception as exc:
                     _log(f"{name}: executor cleanup failed: {exc}")
+        if self._ray_runtime is not None:
+            self._ray_runtime.close()
 
     @property
     def exit_code(self) -> int:

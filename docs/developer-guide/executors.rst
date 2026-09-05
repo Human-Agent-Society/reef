@@ -328,8 +328,10 @@ does not contain local process or Ray placement operations.
 
 Omitted selectors (or YAML ``null``) use ``auto``. Existing YAML without
 resource reservations or a Ray placement-group context continues to launch
-services locally and Slime workers through Ray. No ``execution`` block is
-needed unless overriding those defaults.
+services locally and Slime workers through Ray. No ``execution.services``
+setting is needed for those defaults. Local-controller training stacks declare
+the training/rollout roles so ``reef serve`` can prepare their shared runtime
+before launching the driver (see below).
 
 Selection happens before the Executor factory imports the chosen class.
 Service startup and the Slime driver log the selected backend and reason.
@@ -399,10 +401,29 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
        depends_on: [prm-sglang]
        ready: curl -sf http://127.0.0.1:8900/healthz
 
-Connect the orchestrator to an existing Ray cluster using ``RAY_ADDRESS``.
-A locally declared ``ray-head`` can still bootstrap it; keep that service on
-``executor: uni`` and declare it as a dependency of Ray services. Reef does
-not create cloud machines or install software on Ray nodes. The command,
+Ray executors share a process-wide runtime, initialized only when needed.
+Without an external address, Reef starts a local cluster using the deployment's
+visible GPUs. Set ``RAY_ADDRESS`` (or the deployment's ``reef.ray_address``) to
+connect to an external cluster; connection errors never fall back to local.
+An already initialized Ray connection is borrowed and left intact. Otherwise,
+the last owner disconnects; only a local cluster started by Reef is stopped.
+Attached/serialized executor handles borrow their owner's runtime.
+
+An explicitly declared ``execution.training`` or ``execution.rollout`` role
+that resolves to ``ray`` also requests this runtime, even when all service
+controllers run locally. It does not reserve GPUs for the Slime driver;
+Slime's model topology still determines its GPU placement. With an external
+address and only local controllers, Reef passes the address through and the
+drivers connect after their readiness dependencies are satisfied. Stacks
+without Ray services or declared Ray training/rollout roles do not start Ray.
+
+The service stack keeps the runtime alive through service shutdown, publishes
+the actual address as ``reef.ray_address`` in runtime snapshots, and supplies
+``RAY_ADDRESS`` to subsequent services, including the Slime driver. There is
+no need for a ``ray-head`` service or a fixed port in a managed local stack.
+Existing explicitly managed heads remain supported: connect to their address
+and keep the head on ``executor: uni`` with the appropriate dependencies.
+Reef does not create cloud machines or install software on Ray nodes. The command,
 working directory, Python environment, models and recipe modules must exist
 on the selected nodes; use shared storage/images or Ray runtime environments.
 For a Ray-executed Slime driver, reserve coordinator CPUs, not its model GPUs:
@@ -421,10 +442,23 @@ The readiness command runs on the execution node with the service's environment
 and working directory, under a bounded timeout. ``{host}`` in ``endpoint`` is
 the Ray node address, or ``127.0.0.1`` for local execution. A local service that
 must be reachable from remote consumers must declare a routable
-``advertise_host``. After startup, the endpoint is available as
-``${endpoints.SERVICE_NAME}``. Consumers must depend on its producer, and receive
-a node-local config snapshot with resolved endpoints via ``REEF_CONFIG``.
+``advertise_host``. Eligible services are prepared together: executors acquire
+placement and publish ``${endpoints.SERVICE_NAME}`` before their service
+processes start. Each receives a private node-local config snapshot via
+``REEF_CONFIG`` containing all endpoints published so far, including those of
+independent peers prepared in the same batch. References to a producer gated
+behind dependencies still require that producer to be prepared first.
 Ordinary ``127.0.0.1`` literals elsewhere are not automatically rewritten.
+
+Process launch and readiness waits run concurrently for independent services.
+``depends_on`` remains a readiness prerequisite: a dependent starts as soon as
+all of its declared dependencies are ready, without waiting for unrelated
+services. Readiness deadlines are per service, measured from its start RPC,
+not from the beginning of the deployment. The stack is declared ready only
+when every service is ready. Services that already passed readiness are still
+checked for process exits while their peers initialize. Explicit Ray-head
+services can remain dependencies of Ray-executed services; their dependents'
+placement is not attempted before the head is ready.
 
 Logs are kept on the worker and tailed into ``run_dir/SERVICE.log``. Worker
 metadata (host, PIDs and worker log directory) is written to
@@ -436,7 +470,8 @@ guard so loss of the owning actor terminates their process group. Commands
 must remain foreground processes and must not detach into another session.
 
 Failure policy is fail-stop, not automatic restart/replay. Startup failures
-close already-created executors, and shutdown attempts every dependent before
+cancel peer readiness waits and join launch tasks before closing already-created
+executors, preventing a late launch from escaping cleanup. Shutdown attempts every dependent before
 its dependencies, even if an RPC fails. Borrowed external rollout engines and
 shared Slime placement groups are not deleted by an individual rollout/training
 executor. The Slime driver asks the bridge to release owned workers before

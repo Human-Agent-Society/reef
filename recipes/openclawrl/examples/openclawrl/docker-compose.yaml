@@ -19,13 +19,16 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              # One pool; Ray assigns GPUs to services and Slime workers.
+              device_ids: ["1", "2", "3", "4", "5", "6", "7"]
               capabilities: [gpu]
     volumes:
       - ${MODEL_DIR}:/root/models
       - ${RUN_DIR}:/var/lib/reef
       - ${REEF_ROOT}:/workspace/Reef
     environment:
+      # Optional external cluster; empty means Reef owns a local runtime.
+      RAY_ADDRESS: ${RAY_ADDRESS:-}
       REEF_TOKEN: ${REEF_TOKEN}
       REEF_INFERENCE_HOST: ${HOST_IP}
       PYTHONPATH: /workspace/Reef:/root/Megatron-LM

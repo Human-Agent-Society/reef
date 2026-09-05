@@ -641,7 +641,7 @@ def test_guidance_committed_archive_is_the_only_resume_source(tmp_path: Path) ->
 
 def test_ray_bridge_rejects_an_invalid_training_timeout() -> None:
     with pytest.raises(ValueError, match="training timeout"):
-        RayTrainingBridge("http://127.0.0.1:8900", "guidance-run", timeout_s=0)
+        RayTrainingBridge("http://127.0.0.1:8900", "guidance-run", ray_address="127.0.0.1:12345", timeout_s=0)
 
 
 def _harbor_agent_module(monkeypatch):
@@ -691,10 +691,16 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
     checkpoint_root = tmp_path / "checkpoints" / "megatron"
     checkpoint_root.mkdir(parents=True)
     (checkpoint_root / "latest_checkpointed_iteration.txt").write_text("1")
+    runtime_path = tmp_path / "stack" / "slime-driver" / "runtime.yaml"
+    runtime_path.parent.mkdir(parents=True)
+    runtime_path.write_text('reef: {ray_address: "10.0.0.1:12345", ray_namespace: test, ray_actor_name: test-bridge}')
 
     class _Bridge:
         def __init__(self, *args, **kwargs) -> None:
             self.args = (args, kwargs)
+            assert kwargs["ray_address"] == "10.0.0.1:12345"
+            assert kwargs["ray_namespace"] == "test"
+            assert kwargs["ray_actor_name"] == "test-bridge"
 
         def start_step(self) -> int:
             return 0

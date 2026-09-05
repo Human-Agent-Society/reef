@@ -20,7 +20,6 @@ reef:
   groups_per_step: 8
   rollouts_per_group: 64
   checkpoint_every_n_versions: 2
-  ray_address: 127.0.0.1:6379
   ray_namespace: reef
   ray_actor_name: reef-train-bridge
   inference_timeout_s: 7200
@@ -43,7 +42,6 @@ training:
   # keys, so the harness and the stack cannot disagree about the step.
   steps: 1
   max_new_tokens: 26000
-  cuda_visible_devices: "0,1"
   checkpoint_dir: ${TTTD_STATE_DIR}/checkpoints
   checkpoint_retention:
     max_storage_fraction: 0.8
@@ -51,14 +49,6 @@ training:
     policy: latest
 
 services:
-  - name: ray-head
-    command: >-
-      ray start --head --node-ip-address=127.0.0.1 --port=6379
-      --include-dashboard=false --num-cpus=32
-      --num-gpus=${training.num_gpus} --disable-usage-stats --block
-    ready: ray health-check --address=127.0.0.1:6379
-    cuda: ${training.cuda_visible_devices}
-
   - name: slime-driver
     command: >-
       "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
@@ -140,18 +130,13 @@ services:
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     ready_timeout: 3600
     env:
-      RAY_ADDRESS: 127.0.0.1:6379
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
-    depends_on: [ray-head]
-    cuda: ${training.cuda_visible_devices}
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
     ready_timeout: 120
-    env:
-      RAY_ADDRESS: 127.0.0.1:6379
     depends_on: [slime-driver]

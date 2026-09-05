@@ -7,6 +7,10 @@
 # that owns the complete Guidance-TTT trajectory.
 set -e
 cd "$(dirname "$0")"
+
+# Limit the locally managed Ray cluster to this training stack's GPU pool.
+# On an external cluster, its node configuration determines GPU visibility.
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 mkdir -p work/polyomino_packing
 
 # Download the model on first run (serve.yaml expects it at work/model).

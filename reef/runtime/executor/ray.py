@@ -10,6 +10,7 @@ from typing import Any, Literal, overload
 
 from reef.runtime.executor.base import Executor, ExecutorConfig, ExecutorFuture, resolve_class
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener, FailureState
+from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 
 
 def _require_ray() -> Any:
@@ -64,6 +65,7 @@ class RayExecutor(Executor):
     """
 
     def _init_executor(self) -> None:
+        self._runtime_lease: RayRuntimeLease | None = None
         self._workers: tuple[Any, ...] = ()
         self._owned = True
         self._closed = False
@@ -73,6 +75,7 @@ class RayExecutor(Executor):
         ray = _require_ray()
         workers = []
         try:
+            self._runtime_lease = acquire_ray_runtime()
             for spec in self.config.workers:
                 actor_class = ray.remote(resolve_class(spec.worker_cls))
                 options = {"max_restarts": 0, "max_task_retries": 0, **self.config.options, **spec.options}
@@ -88,6 +91,8 @@ class RayExecutor(Executor):
             for worker in workers:
                 with suppress(Exception):
                     ray.kill(worker, no_restart=True)
+            if self._runtime_lease is not None:
+                self._runtime_lease.close()
             raise
 
     @classmethod
@@ -106,11 +111,12 @@ class RayExecutor(Executor):
         return {
             key: value
             for key, value in self.__dict__.items()
-            if key not in ("_monitor_stop", "_monitor_lock", "_monitor_thread")
+            if key not in ("_monitor_stop", "_monitor_lock", "_monitor_thread", "_runtime_lease")
         }
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._runtime_lease = None
         self._init_monitor_state()
 
     def register_failure_listener(self, listener: ExecutorFailureListener) -> None:
@@ -237,12 +243,17 @@ class RayExecutor(Executor):
             self._failure_state.close()
         if self._monitor_thread is not None and self._monitor_thread is not threading.current_thread():
             self._monitor_thread.join(timeout=2)
-        if not self._owned or not self._workers:
-            return
-        ray = _require_ray()
-        errors = [error for worker in self._workers if (error := self._try_kill_worker(ray, worker)) is not None]
-        if errors:
-            raise errors[0]
+        try:
+            if self._owned and self._workers:
+                ray = _require_ray()
+                errors = [
+                    error for worker in self._workers if (error := self._try_kill_worker(ray, worker)) is not None
+                ]
+                if errors:
+                    raise errors[0]
+        finally:
+            if self._runtime_lease is not None:
+                self._runtime_lease.close()
 
     @staticmethod
     def _try_kill_worker(ray: Any, worker: Any) -> Exception | None:

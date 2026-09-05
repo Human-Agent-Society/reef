@@ -2,6 +2,10 @@
 # Serve + run. Setup (once): see README. State and logs go to ./work.
 set -e
 cd "$(dirname "$0")"
+
+# Limit the locally managed Ray cluster to this training stack's GPU pool.
+# On an external cluster, its node configuration determines GPU visibility.
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 mkdir -p work
 
 # Start the Reef training stack, stop it again when this script exits.

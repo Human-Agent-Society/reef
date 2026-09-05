@@ -125,11 +125,25 @@ reef-eval starts the task container and the judge sidecar for the next session
 
 ## Setup (once)
 
-You need a GPU host that matches the cuda maps in `serve.yaml`, Docker, and
-`uv` (for `uvx`, which runs reef-eval). The default map uses seven GPUs and leaves
-GPU 0 free for other users of a shared host: GPUs 1-4 for the Megatron actor
-(tensor parallel 4), 5 for the policy rollout engine, 6 for the PRM, and 7
-for the student model.
+You need a GPU host with seven available GPUs, Docker, and `uv` (for `uvx`,
+which runs reef-eval). In `docker-compose.yaml`, `device_ids` defines the
+container's pool once: the default exposes physical GPUs 1-7, leaving GPU 0 free.
+Ray assigns device IDs within that pool: the PRM and student model each reserve
+one GPU through `services[].resources.num_gpus`; Slime reserves five more for
+the Megatron actor (tensor parallel 4) and policy rollout engine (one GPU).
+The inference services start before Slime allocates its group. The CPU-only
+`slime-driver` does not reserve GPUs itself, and individual services do not
+set CUDA visibility. This is a single-host stack, not a multi-node deployment.
+
+There is no `ray-head` service or fixed Ray port to configure. The first GPU
+service selects the Ray executor and Reef starts one shared local runtime.
+Reef passes its actual address to Slime and subsequent services, and stops
+the runtime after the services exit. Set `RAY_ADDRESS` only to connect to an
+external cluster; Reef does not stop that cluster. An unavailable external
+address is an error, not a reason to start a different local cluster.
+When launching directly instead of through Compose, restrict the available
+pool once at the deployment boundary, for example
+`CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml`.
 
 ```bash
 docker build -f docker/Dockerfile.reef -t reef-openclawrl .

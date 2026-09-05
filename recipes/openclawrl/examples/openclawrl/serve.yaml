@@ -1,5 +1,6 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
-# Five processes: ray-head + prm-sglang + user-llm-sglang + slime-driver + reef.
+# Four services: prm-sglang + user-llm-sglang + slime-driver + reef.
+# Reef starts a shared local Ray runtime when the first GPU service launches.
 # The whole method is the cookbook `openclawrl` recipe: its processor
 # correlates sessions from the harness's conversation-unique
 # x-reef-tag-session value, with trace matching as a fallback, and judges next
@@ -10,9 +11,9 @@
 # Ports sit in the 2xxxx range: --network host shares the namespace with
 # anything else on the host (e.g. another reef stack on 8900/30000), and
 # Ray reserves 10002-19999 for worker ports.
-# GPU split (GPU 0 is deliberately left free on shared hosts — adjust):
-#   1-4 Megatron actor (TP4) · 5 policy rollout · 6 PRM
-#   · 7 the Qwen3-32B user simulator (the paper's §4.1 persona).
+# One Ray pool: 4 GPUs for Megatron (TP4), 1 for policy rollout,
+# 1 for PRM and 1 for the Qwen3-32B user simulator (the paper's §4.1 persona).
+# Ray assigns the device IDs; the container's GPU pool excludes physical GPU 0.
 #
 # Hyperparameters mirror the run that reproduced the paper's Table 3
 # (PR #240): Qwen3-4B-Thinking policy/PRM, batch 16, 8192-token responses.
@@ -40,7 +41,6 @@ reef:
   token: ${REEF_TOKEN}                 # run.sh mints one per run
   batch_size: 16                       # MUST equal training.global_batch_size
   checkpoint_every_n_versions: 1
-  ray_address: 127.0.0.1:${training.ray_port}
   ray_namespace: reef
   ray_actor_name: reef-train-bridge
   # A step with long assembled episodes can exceed the 300 s default; a
@@ -89,7 +89,6 @@ reef:
 
 prm:
   model_path: /root/models/Qwen3-4B-Thinking-2507
-  cuda_visible_devices: "6"
   port: "23001"
   tp: 1
 
@@ -97,7 +96,6 @@ user_llm:
   # The paper simulates users with Qwen3-32B "to ensure faithful
   # role-following" (§4.1); one B200 hosts it comfortably.
   model_path: /root/models/Qwen3-32B
-  cuda_visible_devices: "7"
   port: "30001"
   served_name: qwen3-32b-user-llm
 
@@ -114,10 +112,6 @@ observability:
     upload_checkpoints: false
 
 training:
-  num_gpus: 5                          # ray-head GPU total (actor + rollout)
-  cuda_visible_devices: "1,2,3,4,5"
-  ray_port: 26379
-  ray_dashboard_port: 28265
   sglang_port: "23000"
   checkpoint_dir: /var/lib/reef/checkpoints
   checkpoint_retention:
@@ -140,7 +134,7 @@ training:
   # Megatron parses with ignore_unknown_args.
   slime_flags: >-
     --actor-num-nodes=1 --actor-num-gpus-per-node=4 --rollout-num-gpus=1
-    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=5
+    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=7
     --tensor-model-parallel-size=4 --pipeline-model-parallel-size=1
     --seq-length=65536 --rollout-max-response-len=8192
     --rollout-max-context-len=65536 --sglang-context-length=65536
@@ -169,14 +163,6 @@ training:
     --sglang-tool-call-parser=qwen25
 
 services:
-  - name: ray-head
-    command: >-
-      ray start --head --port=${training.ray_port}
-      --dashboard-host=0.0.0.0 --dashboard-port=${training.ray_dashboard_port}
-      --num-gpus=${training.num_gpus} --disable-usage-stats --block
-    ready: ray health-check --address=127.0.0.1:${training.ray_port}
-    cuda: ${training.cuda_visible_devices}
-
   - name: prm-sglang
     endpoint: http://{host}:${prm.port}
     command: >-
@@ -185,7 +171,8 @@ services:
       --host 0.0.0.0 --port=${prm.port}
     ready: curl -sf http://127.0.0.1:${prm.port}/health
     ready_timeout: 600
-    cuda: ${prm.cuda_visible_devices}
+    resources:
+      num_gpus: 1
 
   - name: user-llm-sglang
     endpoint: http://{host}:${user_llm.port}
@@ -196,7 +183,8 @@ services:
       --host 0.0.0.0 --port=${user_llm.port}
     ready: curl -sf http://127.0.0.1:${user_llm.port}/health
     ready_timeout: 600
-    cuda: ${user_llm.cuda_visible_devices}
+    resources:
+      num_gpus: 1
 
   - name: slime-driver
     command: >-
@@ -219,16 +207,15 @@ services:
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     ready_timeout: 900
     env:
-      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
       NCCL_NVLS_ENABLE: "0"
-    depends_on: [ray-head]
+    # Reserve both inference services before Slime creates its five-GPU group.
+    # The driver itself is CPU-only; Slime's model workers own its GPUs.
+    depends_on: [prm-sglang, user-llm-sglang]
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
-    env:
-      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
     depends_on: [slime-driver, prm-sglang]
