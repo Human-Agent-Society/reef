@@ -181,6 +181,10 @@ class Scenario:
         """Materialize a catalog version for read-only serving; absence raises ArtifactNotFound."""
         return self._commit_protocol.artifact_for_version(release_id)
 
+    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries behind a catalog version, if its training commit logged them."""
+        return self._commit_protocol.entries_for_version(release_id)
+
     def artifact_snapshot(
         self,
         release_id: str | None = None,

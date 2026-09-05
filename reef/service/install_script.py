@@ -218,6 +218,43 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     ]
 
 
+def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
+    """Shell that writes the model binding files over the pulled tree, the token filled from the environment.
+
+    The binding is written after the checksum and on every run, so a rerun
+    re-points an installed tree at the Reef the script came from; the
+    checksum still covers the served composition alone."""
+    if not bindings:
+        return []
+    lines = [
+        "",
+        "# The model binding: the adapter's config pointed at the Reef this script was",
+        "# fetched from, with the client's own token; written on every run, after the",
+        "# checksum, so the served composition stays what the sidecar records.",
+        'if [ -z "${REEF_TOKEN:-}" ]; then',
+        '    echo "reef: REEF_TOKEN is not set; the harness will reach Reef without a token" >&2',
+        "fi",
+    ]
+    for relative in sorted(bindings):
+        lines.append(_write_file_block(relative, bindings[relative]).rstrip("\n"))
+        lines.extend(
+            [
+                f"python3 - \"$DEST/{_double_quoted(relative)}\" <<'REEF_BIND_EOF'",
+                "import os, sys",
+                "path = sys.argv[1]",
+                'text = open(path, encoding="utf-8").read()',
+                f'open(path, "w", encoding="utf-8").write(text.replace({TOKEN_PLACEHOLDER!r}, os.environ.get("REEF_TOKEN", "")))',
+                "REEF_BIND_EOF",
+            ]
+        )
+    return lines
+
+
+#: The literal the model binding overlay carries where the client's own token goes; the script swaps in
+#: ``$REEF_TOKEN`` at install time, so the served script itself never holds a credential.
+TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
+
+
 def render_install_script(
     *,
     descriptor: AdapterDescriptor,
@@ -225,13 +262,18 @@ def render_install_script(
     release_id: str,
     content_id: str,
     scenario: str = "",
+    binding_files: Mapping[str, str] | None = None,
 ) -> str:
     """The complete install script for one adapter and one served manifest.
 
     The manifest side (``files``, ``release_id``) is adapter-agnostic;
     the descriptor contributes the binary's vendor install path. ``scenario``
     is baked into the wrapper so ``reef-<adapter> report`` knows which
-    scenario to report to. Raises ``DescriptorError`` when the descriptor
+    scenario to report to. ``binding_files`` are the adapter's config targets
+    re-rendered with the model binding that points the harness at Reef; they
+    carry ``TOKEN_PLACEHOLDER`` where the token goes, and the script writes
+    them over the pulled files after the checksum, filling the placeholder
+    from ``$REEF_TOKEN``. Raises ``DescriptorError`` when the descriptor
     declares no install section and ``ValueError`` when a composition path is
     absolute or escapes the destination through a ``..`` part, the same rule
     the stdlib client pull applies to served paths.
@@ -245,7 +287,8 @@ def render_install_script(
         raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
     env_var, compose_dir = _compose_env_var(descriptor)
     wrapper_name = f"reef-{descriptor.name}"
-    for relative in files:
+    bindings = dict(binding_files or {})
+    for relative in (*files, *bindings):
         if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
             raise ValueError(f"composition path {relative!r} escapes the destination")
     ordered = sorted(files)
@@ -349,6 +392,7 @@ def render_install_script(
         "    # The same sidecar the stdlib client pull writes: pulled version and file list.",
         _write_file_block(HARNESS_RELEASE_SIDECAR, sidecar_text).rstrip("\n"),
         "fi",
+        *_binding_lines(bindings),
         "",
         f'echo "run:     $DEST/{wrapper_name}"',
         'echo "binary:  $BINARY"',

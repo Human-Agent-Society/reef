@@ -21,12 +21,14 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.model_binding import ModelBinding, ModelBindingError
+from reef.harness.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
 from reef.records import AgentRecord
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
-from reef.service.install_script import render_install_script
+from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
@@ -508,13 +510,47 @@ class RequestService:
             release_id=release_id,
         )
         manifest = self._harness_manifest_for_scenario(scenario, release_id)
+        descriptor = get_adapter(adapter)
         return render_install_script(
-            descriptor=get_adapter(adapter),
+            descriptor=descriptor,
             files=manifest["files"],
             release_id=manifest["release_id"],
             content_id=manifest["content_id"],
             scenario=scenario.name,
+            binding_files=self._install_binding(scenario, manifest, descriptor, headers),
         )
+
+    @staticmethod
+    def _install_binding(
+        scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
+    ) -> dict[str, str]:
+        """The adapter's config targets re-rendered with a binding at the Reef this request reached.
+
+        The served composition never carries an endpoint or a credential, so
+        an installed tree needs one written beside it: the release's own
+        entries plus the descriptor's binding template, the base URL taken
+        from the request's Host, the model from the gate the release ran
+        against, and the token left as a placeholder the script fills from
+        the client's environment. Empty when any of those is unknown, and
+        the script then installs the composition as before.
+        """
+        normalized = {key.lower(): value.strip() for key, value in headers.items()}
+        host = normalized.get("host")
+        gate = manifest.get("gate") or {}
+        model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        entries = scenario.entries_for_version(manifest["release_id"])
+        if not host or not isinstance(model, str) or not model or entries is None:
+            return {}
+        scheme = normalized.get("x-forwarded-proto") or "http"
+        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)
+        nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
+        try:
+            bound = binding.compose_nodes(descriptor)
+            files = render_composition((*nodes, *bound), descriptor)
+        except (ModelBindingError, RenderError, KeyError, TypeError):
+            return {}
+        targets = {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound}
+        return {path: files[path] for path in sorted(targets) if path in files}
 
     def _file_scenario(
         self,
