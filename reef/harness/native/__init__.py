@@ -189,6 +189,17 @@ def binding_from(models_path: Path) -> ModelBinding:
     )
 
 
+def context_window_from(models_path: Path) -> int:
+    """``context_window`` in models.json (a config node with target ``models`` sets it), else the default."""
+    from reef.harness.native.graph import DEFAULT_CONTEXT_WINDOW  # late: graph.py imports this module
+
+    data = json.loads(models_path.read_text(encoding="utf-8"))
+    value = data.get("context_window")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_CONTEXT_WINDOW
+    return value
+
+
 class Session:
     """The trajectory: ``{type, seq, time, data}`` per line, appended and flushed as the loop goes."""
 
@@ -390,7 +401,8 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         )
         session.write("turn/start", {"turn": 1})
         loop = _Loop(session, root)
-        return graphs.run_graph(graphs.Run(loop, prompt, binding, tools, hooks, workdir), graph)
+        window = context_window_from(root / "models.json")
+        return graphs.run_graph(graphs.Run(loop, prompt, binding, tools, hooks, workdir, context_window=window), graph)
     finally:
         session.close()
 
@@ -496,6 +508,7 @@ class _Loop:
 
     system_prompt = staticmethod(system_prompt)
     _decide = staticmethod(_decide)
+    _complete = staticmethod(_complete)
     _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
     _judged = staticmethod(_judged)
