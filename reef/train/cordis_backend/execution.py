@@ -7,7 +7,7 @@ from dataclasses import replace
 from threading import Lock
 
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import ExecutorSelection, ExecutorSettings, select_executor
+from reef.runtime.executor.config import ExecutorSelection, ExecutorSettings, select_executor, worker_requirements
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.strategies import EpisodeScorer
@@ -78,29 +78,50 @@ class EvaluationWorkerPool:
                 self._executor.shutdown()
 
 
+def legacy_worker_settings(
+    settings: ExecutorSettings, workers: int | None = None, gpus: float | None = None
+) -> ExecutorSettings:
+    """Compatibility boundary for the old recipe/Python resource arguments."""
+    if workers is not None:
+        if settings.workers is not None and settings.workers != workers:
+            raise ValueError("episode_workers conflicts with execution.evolution.workers")
+        settings = replace(settings, workers=workers)
+    if gpus is not None:
+        if settings.resources.gpus_per_worker is not None and settings.resources.gpus_per_worker != gpus:
+            raise ValueError("worker_resources.num_gpus conflicts with execution.evolution.resources.gpus_per_worker")
+        settings = replace(settings, resources=replace(settings.resources, gpus_per_worker=gpus))
+    return settings
+
+
 def evaluation_selection(
     scorer: EpisodeScorer,
-    workers: int,
+    workers: int | None,
     settings: ExecutorSettings,
     gpus_per_worker: float | None = None,
 ) -> tuple[ExecutorSelection, ExecutionRequirements]:
     declared = scorer.execution_requirements()
     if not isinstance(declared, ExecutionRequirements):
         raise TypeError("EpisodeScorer.execution_requirements must return ExecutionRequirements")
-    gpus = declared.gpus_per_worker if gpus_per_worker is None else gpus_per_worker
-    requirements = replace(declared, workers=workers, gpus_per_worker=gpus)
-    if requirements.gpus_per_worker < declared.gpus_per_worker:
-        raise ValueError("evolution worker GPU allocation is below the scorer's declared requirement")
+    settings = legacy_worker_settings(settings, workers, gpus_per_worker)
+    requirements = worker_requirements(settings, declared)
+    gpus = requirements.gpus_per_worker
     configured_gpus = settings.options.get("num_gpus", gpus)
     if configured_gpus != gpus:
         raise ValueError(
-            "declare evolution GPU needs through worker_resources.num_gpus, not executor.options.num_gpus"
+            "declare GPU needs through execution.evolution.resources.gpus_per_worker, not executor.options.num_gpus"
         )
+    configured_cpus = settings.options.get("num_cpus", requirements.cpus_per_worker)
+    if settings.resources.cpus_per_worker is not None and configured_cpus != requirements.cpus_per_worker:
+        raise ValueError("executor.options.num_cpus conflicts with execution.evolution.resources.cpus_per_worker")
+    # Preserve old Ray profiles which request CPUs through options.num_cpus.
+    requirements = replace(requirements, cpus_per_worker=configured_cpus)
     runtime_env = settings.options.get("runtime_env", {})
     if not isinstance(runtime_env, dict):
         raise ValueError("evolution executor runtime_env must be an object")
     if "CUDA_VISIBLE_DEVICES" in runtime_env.get("env_vars", {}):
-        raise ValueError("Ray owns evolution worker CUDA visibility; declare worker_resources.num_gpus")
+        raise ValueError(
+            "Ray owns evolution worker CUDA visibility; declare execution.evolution.resources.gpus_per_worker"
+        )
     if settings.options.get("max_restarts", 0) != 0 or settings.options.get("max_task_retries", 0) != 0:
         raise ValueError("evolution executors must not replay evaluations")
     return select_executor(settings, role="evolution", requirements=requirements), requirements
@@ -111,10 +132,11 @@ def evaluation_executor_config(
 ) -> ExecutorConfig:
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
-    if issubclass(backend, RayExecutor):
-        options = {"num_cpus": 1, **options, "num_gpus": requirements.gpus_per_worker}
-    elif requirements.gpus_per_worker:
-        options = {**options, "num_gpus": requirements.gpus_per_worker}
+    if issubclass(backend, RayExecutor) or (
+        selection.settings.backend not in ("uni", "mp", "local")
+        and (requirements.gpus_per_worker or selection.settings.resources.cpus_per_worker is not None)
+    ):
+        options = {**options, "num_cpus": requirements.cpus_per_worker, "num_gpus": requirements.gpus_per_worker}
     logging.getLogger(__name__).info(
         "evolution: executor=%s workers=%s gpus_per_worker=%s (%s)",
         selection.settings.backend,

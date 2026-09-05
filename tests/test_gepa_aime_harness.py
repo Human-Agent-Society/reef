@@ -84,11 +84,9 @@ def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selecto
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
-    config["executors"] = {"cpu-pool": {"backend": "local"}}
+    config["executors"] = {"cpu-pool": {"backend": "local", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
-    if selector == "role":
-        config["evolution"].pop("worker_executor")
-    else:
+    if selector == "worker":
         config["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
@@ -102,8 +100,8 @@ def test_default_driver_pool_keeps_registered_answers_visible(load, monkeypatch,
     driver = load("run")
     driver.aime.register([{"input": "problem", "answer": "### 17"}])
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-    assert config["evolution"]["worker_executor"] == "local"
-    config["evolution"]["episode_workers"] = 2
+    assert config["execution"]["evolution"]["backend"] == "local"
+    config["execution"]["evolution"]["workers"] = 2
     config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))

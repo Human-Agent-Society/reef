@@ -15,11 +15,15 @@ implementation: recipes.skillclaw.recipe:SkillClawRecipe
 model:
   path: ${REEF_MODEL}
 
+execution:
+  evolution:
+    backend: auto  # uni for one CPU worker, mp for multiple workers.
+    workers: 1
+    resources:
+      cpus_per_worker: 1
+      gpus_per_worker: 0
+
 evolution:
-  # CPU probe scoring; auto selects uni here, or mp if episode_workers is increased.
-  # The pool persists across nights; episode directories remain isolated.
-  worker_executor: auto
-  episode_workers: 1
   adapter: pi
   # The method module in the harness/ package: propose is the sealed night
   # flow (one decision per skill group plus the no-skill bucket) mapped to
