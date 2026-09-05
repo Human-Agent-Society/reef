@@ -97,6 +97,22 @@ def _check_native_references(
             visit(name)
 
 
+def render_native_module(kind: str, options: Mapping[str, Any]) -> str:
+    """One importable module for a ``native_tool`` or ``native_hook`` node: the code that defines ``run`` or ``listen``, then the declaration as constants, so the node config binds."""
+    fields: tuple[tuple[str, Any], ...]
+    if kind == "native_hook":
+        fields = (("NAME", options.get("name")), ("EVENT", options.get("event")))
+    else:
+        fields = (
+            ("NAME", options.get("name")),
+            ("DESCRIPTION", options.get("description", "")),
+            ("PARAMETERS", dict(options.get("parameters", {}) or {})),
+            ("CAPABILITIES", list(options.get("capabilities", []) or [])),
+        )
+    header = "\n".join(f"{key} = {value!r}" for key, value in fields)
+    return f"{str(options.get('code', '')).rstrip()}\n\n{header}\n"
+
+
 def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDescriptor) -> dict[str, str]:
     """Render ``(kind, config)`` nodes to root-relative file texts."""
     configs = {name: _deep_merge({}, target.defaults) for name, target in descriptor.config_targets.items()}
@@ -127,20 +143,7 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             template = descriptor.node_paths.get(kind)
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
-            # One importable module: the code that defines run or listen, then
-            # the declaration as constants, so the node config binds.
-            fields: tuple[tuple[str, Any], ...]
-            if kind == "native_hook":
-                fields = (("NAME", options.get("name")), ("EVENT", options.get("event")))
-            else:
-                fields = (
-                    ("NAME", options.get("name")),
-                    ("DESCRIPTION", options.get("description", "")),
-                    ("PARAMETERS", dict(options.get("parameters", {}) or {})),
-                    ("CAPABILITIES", list(options.get("capabilities", []) or [])),
-                )
-            header = "\n".join(f"{key} = {value!r}" for key, value in fields)
-            emit(template.format(name=options.get("name")), f"{str(options.get('code', '')).rstrip()}\n\n{header}\n")
+            emit(template.format(name=options.get("name")), render_native_module(kind, options))
         elif kind in ("native_graph", "native_agent"):
             template = descriptor.node_paths.get(kind)
             if template is None:
