@@ -196,7 +196,7 @@ The model name is set in three places, `model.path` and `upstream_model` in the 
 [2] End to end, including the pull of the published tree.
 [3] The notebook's committed outputs hold the run cell by cell but no timing.
 [4] `current_residue: 16`: on macOS a `run_bash` call that runs Apple's python3 leaves its bytecode cache under the episode's `HOME`; a Linux run reports 0, and residue is counted, never forbidden, unless `evolution.forbid_residue` is set.
-[5] A rejected proposal's content is not kept: the commit and the `rejected` history that `propose` receives carry the mutation's id and op only, so this rewrite is known as a `main` update and nothing more (a follow up of #248).
+[5] This run was measured before a rejected proposal's content was kept, so the rewrite is known as a `main` update and nothing more. Since then the commit record and the `rejected` history that `propose` receives carry each mutation's options, and `evolution.step_record_dir` writes every step's proposer calls, parsed proposal and gate episode logs to disk; a rerun of this table can show the rejected rewrite itself.
 [6] The run's second failing report opened a second step, a `fib-optimize` tool, which was still on the gate when `run.py` pulled the published tree and `run.sh` stopped the service.
 [7] 9 graphs left out the verify stage's `check` and 2 omitted the `fail` edge.
 [8] 6 graphs carried a duplicated edge or an outcome the stage does not have.

@@ -127,7 +127,7 @@ class FakeEpisodes:
 
 class FakeChat:
     """A model binding stand-in that answers one canned reflection reply; it
-    carries a binding's endpoint fields so the step ledger's recording seam
+    carries a binding's endpoint fields so the step record's recording seam
     can wrap it like any declared model."""
 
     base_url = "http://127.0.0.1:9"

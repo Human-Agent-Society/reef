@@ -86,7 +86,7 @@ def _keep_trajectory(source: Path, target: Path) -> None:
     if not source.is_dir():
         return
     try:
-        # Links are copied as links so an evolved tool cannot pull an outside file into the ledger,
+        # Links are copied as links so an evolved tool cannot pull an outside file into the record,
         # and an existing target is refused so a kept record is never merged over.
         shutil.copytree(source, target, symlinks=True)
     except OSError as exc:
@@ -126,7 +126,7 @@ def run_episode(
     environment, trajectory read, and residue collection are the same for
     every executor. The episode root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
-    first, so a step ledger can hold what the root held, and a copy that
+    first, so a step record can hold what the root held, and a copy that
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
     """
     executor = executor or LocalExecutor()

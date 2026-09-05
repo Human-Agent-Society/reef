@@ -59,35 +59,35 @@ class HarnessCandidate(UpdateCandidate):
     gate_tasks: tuple[str, ...] = ()
     #: The candidate is the rollback target, so selecting it rolls back.
     recheck: bool = False
-    #: The step ledger directory claimed for it at prepare time; ``None`` with the ledger off.
-    ledger_dir: Path | None = None
+    #: The step record directory claimed for it at prepare time; ``None`` with the record off.
+    record_dir: Path | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
 
 
-#: Characters kept per text in the step ledger; a longer text ends in a clip marker.
-LEDGER_TEXT_CAP = 20_000
-#: The ledger files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
-LEDGER_PROPOSER_FILE = "proposer.json"
-LEDGER_MUTATIONS_FILE = "mutations.json"
-LEDGER_EPISODES_DIR = "episodes"
-LEDGER_EPISODE_FILE = "episode.json"
+#: Characters kept per text in the step record; a longer text ends in a clip marker.
+RECORD_TEXT_CAP = 20_000
+#: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
+RECORD_PROPOSER_FILE = "proposer.json"
+RECORD_MUTATIONS_FILE = "mutations.json"
+RECORD_EPISODES_DIR = "episodes"
+RECORD_EPISODE_FILE = "episode.json"
 
 
 def _clip(text: str) -> str:
-    """``text`` with credential-shaped literals redacted, cut at the ledger cap with a marker naming how much was dropped.
+    """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
 
-    The ledger holds model traffic and proposals before the tree boundary
+    The record holds model traffic and proposals before the tree boundary
     saw them, so the boundary's credential tripwire runs here too."""
     text = redact_secret_shaped(text)
-    if len(text) <= LEDGER_TEXT_CAP:
+    if len(text) <= RECORD_TEXT_CAP:
         return text
-    return f"{text[:LEDGER_TEXT_CAP]}... [clipped {len(text) - LEDGER_TEXT_CAP} chars]"
+    return f"{text[:RECORD_TEXT_CAP]}... [clipped {len(text) - RECORD_TEXT_CAP} chars]"
 
 
 def _bounded(value: Any) -> Any:
-    """A copy of a request value that JSON can write, with every string redacted and cut at the ledger cap."""
+    """A copy of a request value that JSON can write, with every string redacted and cut at the record cap."""
     if isinstance(value, str):
         return _clip(value)
     if isinstance(value, Mapping):
@@ -100,13 +100,13 @@ def _bounded(value: Any) -> Any:
 
 
 def _mutation_record(mutation: Mutation) -> dict[str, Any]:
-    """A mutation as the commit record, the rejected ledger and the step ledger persist it: op, id and full options."""
+    """A mutation as the commit record, the rejected history and the step record persist it: op, id and full options."""
     options = None if mutation.options is None else dict(mutation.options)
     return {"op": mutation.op, "id": mutation.id, "options": options}
 
 
 def _episode_name(side: str, task_index: int, repeat: int) -> str:
-    """The ledger directory of one gate episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
+    """The record directory of one gate episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
     return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
@@ -189,23 +189,23 @@ def _admit_promoted(
 
 class _BudgetedBinding(ModelBinding):
     """A ModelBinding that delegates ``chat`` to a wrapped binding under a
-    shared per-step call budget and records every call in the step ledger.
+    shared per-step call budget and records every call in the step record.
 
     A subclass so the proposer still receives ModelBinding values, but it
     holds the real binding and forwards to its ``chat`` (never the base
     implementation), so a method's own binding behavior is preserved. The
     shared counter is a mutable one-element list so every binding in the set
-    decrements the same budget; a cap of 0 is no budget. The ledger is the
+    decrements the same budget; a cap of 0 is no budget. The record is the
     step's list: one entry per call with the model, the request, the reply
-    or the error, and the seconds it took, every text cut at the ledger cap.
+    or the error, and the seconds it took, every text cut at the record cap.
     """
 
     _inner: ModelBinding
     _spent: list[int]
     _cap: int
-    _ledger: list[dict[str, Any]]
+    _record: list[dict[str, Any]]
 
-    def __init__(self, inner: ModelBinding, spent: list[int], cap: int, ledger: list[dict[str, Any]]) -> None:
+    def __init__(self, inner: ModelBinding, spent: list[int], cap: int, record: list[dict[str, Any]]) -> None:
         super().__init__(
             base_url=inner.base_url,
             model=inner.model,
@@ -216,7 +216,7 @@ class _BudgetedBinding(ModelBinding):
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_spent", spent)
         object.__setattr__(self, "_cap", cap)
-        object.__setattr__(self, "_ledger", ledger)
+        object.__setattr__(self, "_record", record)
 
     def _spend(self) -> None:
         if self._cap and self._spent[0] >= self._cap:
@@ -233,18 +233,18 @@ class _BudgetedBinding(ModelBinding):
         try:
             reply = self._inner.chat(messages, **kwargs)
         except BaseException as exc:
-            # The failed call is the step's decision too: the ledger keeps it before the error propagates.
+            # The failed call is the step's decision too: the record keeps it before the error propagates.
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
-            self._ledger.append(entry)
+            self._record.append(entry)
             raise
         entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
         entry["seconds"] = round(time.monotonic() - started, 3)
-        self._ledger.append(entry)
+        self._record.append(entry)
         return reply
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
-        """A method's raw request goes through the same budget and ledger as ``chat``: ``body`` in, ``response`` out."""
+        """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
         self._spend()
         kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
         entry: dict[str, Any] = {"model": self.model, "body": _bounded(body), "params": _bounded(kwargs)}
@@ -254,25 +254,25 @@ class _BudgetedBinding(ModelBinding):
         except BaseException as exc:
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
-            self._ledger.append(entry)
+            self._record.append(entry)
             raise
         entry["response"] = _bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
-        self._ledger.append(entry)
+        self._record.append(entry)
         return response
 
 
-def _budgeted_bindings(models: ModelBindings, cap: int, ledger: list[dict[str, Any]]) -> ModelBindings:
-    """The proposer's view: every ``chat`` shares one per-step budget and lands in ``ledger``.
+def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, Any]]) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares one per-step budget and lands in ``record``.
 
-    The bindings are wrapped whatever the cap, so the ledger sees every call;
+    The bindings are wrapped whatever the cap, so the record sees every call;
     with ``cap`` 0 nothing is refused. The counter is per prepare_step call,
     so a cap bounds one step's model bill, never the campaign's.
     """
     spent: list[int] = [0]
 
     def wrap(binding: ModelBinding) -> ModelBinding:
-        return _BudgetedBinding(binding, spent, cap, ledger)
+        return _BudgetedBinding(binding, spent, cap, record)
 
     return ModelBindings(
         served=wrap(models.served), named={name: wrap(models[name]) for name in models if name != "served"}
@@ -375,12 +375,12 @@ class CordisBackend(TrainingBackend):
         review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         episode_workers: int = 1,
-        step_ledger_dir: str | Path | None = None,
+        step_record_dir: str | Path | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
-        if step_ledger_dir is not None and not str(step_ledger_dir):
-            raise ValueError("step_ledger_dir must be a non-empty path when set")
+        if step_record_dir is not None and not str(step_record_dir):
+            raise ValueError("step_record_dir must be a non-empty path when set")
         if episode_workers < 1:
             raise ValueError("harness evolution requires at least one episode worker")
         if isinstance(models, ModelBinding):
@@ -454,13 +454,13 @@ class CordisBackend(TrainingBackend):
         # Track only trees created by this backend so a durable commit can
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}
-        # Created at boot so an unwritable ledger path refuses to start, not the first step.
-        self._step_ledger_dir = None if step_ledger_dir is None else Path(step_ledger_dir)
-        if self._step_ledger_dir is not None:
+        # Created at boot so an unwritable record path refuses to start, not the first step.
+        self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
+        if self._step_record_dir is not None:
             try:
-                self._step_ledger_dir.mkdir(parents=True, exist_ok=True)
+                self._step_record_dir.mkdir(parents=True, exist_ok=True)
             except OSError as exc:
-                raise ValueError(f"step_ledger_dir {self._step_ledger_dir} cannot be created: {exc}") from exc
+                raise ValueError(f"step_record_dir {self._step_record_dir} cannot be created: {exc}") from exc
         self._validate_seed()
 
     def _validate_seed(self) -> None:
@@ -587,7 +587,7 @@ class CordisBackend(TrainingBackend):
             metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
         step_dir = self._claim_step_dir(steps)
         if step_dir is not None:
-            metrics["step_ledger"] = str(step_dir)
+            metrics["step_record"] = str(step_dir)
         # Re-gate the last-good tree against the published one on cadence or when the served model changed.
         drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
@@ -596,7 +596,7 @@ class CordisBackend(TrainingBackend):
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
-            # A recheck asks the proposer nothing, so its ledger holds episodes only.
+            # A recheck asks the proposer nothing, so its record holds episodes only.
             metrics["proposer_calls"] = 0
             metrics["proposer_seconds"] = 0.0
             return PreparedStep.with_candidate(
@@ -609,13 +609,13 @@ class CordisBackend(TrainingBackend):
                     mutations=(),
                     gate_tasks=gate_tasks,
                     recheck=True,
-                    ledger_dir=step_dir,
+                    record_dir=step_dir,
                 ),
                 state={"steps": steps, **carried},
                 metrics=metrics,
             )
-        ledger: list[dict[str, Any]] = []
-        models = _budgeted_bindings(self._models, self._max_model_calls_per_step, ledger)
+        record: list[dict[str, Any]] = []
+        models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
         extra: dict[str, Any] = {}
         if self._propose_accepts_manifest:
             extra["manifest"] = manifest
@@ -627,13 +627,13 @@ class CordisBackend(TrainingBackend):
             proposal = self._propose(self._nodes(), batch.samples, models, **extra)
         finally:
             # Written even when propose raised: the calls before the failure are the decision's record.
-            self._write_ledger(step_dir, LEDGER_PROPOSER_FILE, ledger)
-        metrics["proposer_calls"] = len(ledger)
-        metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in ledger), 3)
+            self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
+        metrics["proposer_calls"] = len(record)
+        metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
         mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
-        self._write_ledger(step_dir, LEDGER_MUTATIONS_FILE, [_bounded(_mutation_record(m)) for m in mutations])
+        self._write_record(step_dir, RECORD_MUTATIONS_FILE, [_bounded(_mutation_record(m)) for m in mutations])
         if not mutations:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
@@ -676,7 +676,7 @@ class CordisBackend(TrainingBackend):
                 current_entries=snapshot,
                 mutations=mutations,
                 gate_tasks=gate_tasks,
-                ledger_dir=step_dir,
+                record_dir=step_dir,
             ),
             state={"steps": steps, **carried},
             metrics=metrics,
@@ -700,7 +700,7 @@ class CordisBackend(TrainingBackend):
         # back in submission order either way.
         # An older candidate carries no gate_tasks and falls back to the seed set.
         gate_tasks = candidate.gate_tasks or self._tasks
-        episodes_dir = None if candidate.ledger_dir is None else candidate.ledger_dir / LEDGER_EPISODES_DIR
+        episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
         pairings = [
             (files, task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
             for index, task in enumerate(gate_tasks)
@@ -800,7 +800,7 @@ class CordisBackend(TrainingBackend):
         if rollback_entries is not None:
             state["rollback_entries"] = rollback_entries
             state["rollback_gated_against"] = rollback_gated_against
-        # A real rejection joins a bounded ledger the proposer can read back, options included.
+        # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
             rejected.append(
@@ -923,27 +923,27 @@ class CordisBackend(TrainingBackend):
         return _ScoredEpisode(score, None, residue, agents, path)
 
     def _claim_step_dir(self, step: int) -> Path | None:
-        """Create and return a fresh ledger directory for ``step``; ``None`` with the ledger off."""
-        if self._step_ledger_dir is None:
+        """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
+        if self._step_record_dir is None:
             return None
         # A retried step keeps the earlier attempt on file: its directory is never reused.
         attempt = 1
-        step_dir = self._step_ledger_dir / str(step)
+        step_dir = self._step_record_dir / str(step)
         while True:
             try:
                 step_dir.mkdir(parents=True)
             except FileExistsError:
                 attempt += 1
-                step_dir = self._step_ledger_dir / f"{step}-{attempt}"
+                step_dir = self._step_record_dir / f"{step}-{attempt}"
                 continue
             return step_dir
 
     @staticmethod
-    def _write_ledger(step_dir: Path | None, name: str, payload: Any) -> None:
-        """One ledger file of the step as JSON; nothing is written with the ledger off."""
+    def _write_record(step_dir: Path | None, name: str, payload: Any) -> None:
+        """One record file of the step as JSON; nothing is written with the record off."""
         if step_dir is None:
             return
-        # Exclusive create: a ledger file on disk is a record and is never replaced.
+        # Exclusive create: a record file on disk is a record and is never replaced.
         with open(step_dir / name, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
@@ -1078,7 +1078,7 @@ class _ScoredEpisode:
 def _write_episode_record(
     keep_dir: Path | None, task: str, result: EpisodeResult | None, scored: _ScoredEpisode
 ) -> None:
-    """``episode.json`` beside the kept trajectory: what the scorer saw, so a verdict can be re-derived from the ledger."""
+    """``episode.json`` beside the kept trajectory: what the scorer saw, so a verdict can be re-derived from the record."""
     if keep_dir is None:
         return
     record = {
@@ -1093,7 +1093,7 @@ def _write_episode_record(
     }
     # An episode that never wrote an event has no trajectory copy, so the directory may not exist yet.
     keep_dir.mkdir(parents=True, exist_ok=True)
-    with open(keep_dir / LEDGER_EPISODE_FILE, "x", encoding="utf-8") as handle:
+    with open(keep_dir / RECORD_EPISODE_FILE, "x", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2, default=str) + "\n")
 
 

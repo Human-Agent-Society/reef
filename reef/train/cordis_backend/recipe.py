@@ -115,7 +115,7 @@ class CordisRecipe(Recipe):
     or a dotted reference to an object implementing ``decide``), optional
     ``episode_workers`` (how many evaluation episodes run at once, default
     one; a large task set is one wave instead of a long turn-taking pass),
-    optional ``step_ledger_dir`` (a directory under which every scenario's
+    optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each gate
     episode's trajectory files, so the decision is reconstructible; off by
     default),
@@ -181,7 +181,7 @@ class CordisRecipe(Recipe):
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
     episode_workers: int = 1
-    step_ledger_dir: str | None = None
+    step_record_dir: str | None = None
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
@@ -222,10 +222,10 @@ class CordisRecipe(Recipe):
             raise ValueError("publish must be 'auto' or 'review'")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
-        if self.step_ledger_dir is not None and (
-            not isinstance(self.step_ledger_dir, str) or not self.step_ledger_dir
+        if self.step_record_dir is not None and (
+            not isinstance(self.step_record_dir, str) or not self.step_record_dir
         ):
-            raise ValueError("step_ledger_dir must be a non-empty path when set")
+            raise ValueError("step_record_dir must be a non-empty path when set")
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
@@ -338,9 +338,9 @@ class CordisRecipe(Recipe):
         if isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1:
             raise RecipeConfigError("evolution.episode_workers must be a positive integer")
         episode_workers = raw_workers
-        step_ledger_dir = evolution.get("step_ledger_dir")
-        if step_ledger_dir is not None and (not isinstance(step_ledger_dir, str) or not step_ledger_dir.strip()):
-            raise RecipeConfigError("evolution.step_ledger_dir must be a non-empty path when set")
+        step_record_dir = evolution.get("step_record_dir")
+        if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
+            raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         return {
             "propose": resolve_proposer(evolution.get("propose")),
             "promote": resolve_promoter(evolution["promote"]) if "promote" in evolution else None,
@@ -363,7 +363,7 @@ class CordisRecipe(Recipe):
             "models": models,
             "candidate_selector": candidate_selector,
             "episode_workers": episode_workers,
-            "step_ledger_dir": None if step_ledger_dir is None else step_ledger_dir.strip(),
+            "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
     def model_binding(self) -> ModelBinding:
@@ -405,10 +405,10 @@ class CordisRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs()
-        # One recipe serves many scenarios, so each scenario's steps ledger under their own directory; absolute,
+        # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
         # so the path a commit record names resolves from any working directory.
-        if kwargs["step_ledger_dir"] is not None:
-            kwargs["step_ledger_dir"] = Path(kwargs["step_ledger_dir"]).expanduser().resolve() / scenario
+        if kwargs["step_record_dir"] is not None:
+            kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
         training_backend = CordisBackend(**kwargs)
         return self._build_trainer(
             scenario,
@@ -444,7 +444,7 @@ class CordisRecipe(Recipe):
             "review_kinds": self.review_kinds,
             "seed": self.seed,
             "episode_workers": self.episode_workers,
-            "step_ledger_dir": self.step_ledger_dir,
+            "step_record_dir": self.step_record_dir,
         }
 
     def _build_trainer(
