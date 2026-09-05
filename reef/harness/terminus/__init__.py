@@ -1,42 +1,10 @@
-"""The ``reef-terminus`` runner: the binary the terminus adapter's episodes launch.
+"""``reef-terminus`` as installed before this move binds ``reef.harness.terminus:main``; the program is ``reef.harness.runners.terminus``.
 
-Terminus 2 is a harbor agent class rather than a CLI, so this package is the
-adapter's own runner. It reads the tree Reef rendered into ``REEF_TERMINUS_DIR``,
-hands it to Harbor's own ``terminus-2`` agent as native configuration,
-runs the task, and writes the ATIF trajectory and the verifier's reward under
-``REEF_TERMINUS_SESSION_DIR`` for the episode's trajectory reader.
-
-harbor is an optional dependency (``pip install reef-infra[terminus]``) and is
-imported only when the runner actually runs, so importing the adapter registry
-stays cheap and CI without Docker still loads the descriptor.
+A console script is written at install time and keeps the module path it
+was given, so an environment that predates the move launches terminus
+episodes through this name until it is reinstalled.
 """
 
-from __future__ import annotations
+from reef.harness.runners.terminus import main
 
-import argparse
-from collections.abc import Sequence
-
-from reef.harness.terminus.tree import TerminusTreeError, instruction_paths, load_tree, skill_roots, terminus_kwargs
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """The ``reef-terminus`` console script: run one task through harbor."""
-    parser = argparse.ArgumentParser(
-        prog="reef-terminus", description="Run one Terminal-Bench task for a reef episode."
-    )
-    parser.add_argument("--task", required=True, help="the task name harbor should run")
-    arguments = parser.parse_args(argv)
-    # Imported here so the adapter, its tests, and the registry never need harbor.
-    from reef.harness.terminus.runner import run
-
-    return run(arguments.task)
-
-
-__all__ = [
-    "TerminusTreeError",
-    "instruction_paths",
-    "load_tree",
-    "main",
-    "skill_roots",
-    "terminus_kwargs",
-]
+__all__ = ["main"]

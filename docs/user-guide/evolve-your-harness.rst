@@ -56,7 +56,7 @@ kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
 ``native_hook``), ``config.name`` is the file name the entry renders to.
 Nine kinds are registered in
-`reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
+`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
 | ``name``           | Renders as                                               |
@@ -393,8 +393,8 @@ with the same five settings the script bakes into ``reef-pi``:
    printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "reef-local", "model": "qwen3-8b"}\n' > reef-harness/native/models.json
    export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
    export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
-   python3 -m reef.harness.harness_wrapper -p "fix the failing test in auth.py"
-   python3 -m reef.harness.harness_wrapper report --score 0 --feedback "missed the empty-token case"
+   python3 -m reef.harness.client.wrapper -p "fix the failing test in auth.py"
+   python3 -m reef.harness.client.wrapper report --score 0 --feedback "missed the empty-token case"
 
 The wrapper points the loop at its capture proxy through a temp copy of
 the tree, keeps the loop's session log under ``native/sessions`` beside
@@ -416,7 +416,7 @@ or at once when no turn is open. No reinstall, no restart.
    reef-native turn --tree ./reef-harness -p "fix the failing test in auth.py"
    reef-native turn --tree ./reef-harness -p "now add a test for it" --session 3f9a1c2b7d4e
    reef-native status --tree ./reef-harness
-   python3 -m reef.harness.harness_wrapper report --score 1 --feedback "fixed"
+   python3 -m reef.harness.client.wrapper report --score 1 --feedback "fixed"
 
 ``--tree`` names the pulled tree, the directory that holds ``native/`` and
 the release sidecar. The process boots from ``native/tree.json``, the

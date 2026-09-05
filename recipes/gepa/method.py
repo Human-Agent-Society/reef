@@ -30,12 +30,12 @@ from dataclasses import dataclass
 from statistics import fmean
 from typing import Any, Protocol
 
-from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
-from reef.harness.executor import EpisodeExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.render import render_composition
-from reef.harness.trajectory import TrajectoryError
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.executor import EpisodeExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
+from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation
 from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import TraceSample
@@ -61,7 +61,7 @@ class Feedback(Protocol):
 
 
 class EpisodeRunner(Protocol):
-    """``reef.harness.episode.run_episode``, as an injectable interface."""
+    """``reef.harness.episodes.run.run_episode``, as an injectable interface."""
 
     def __call__(
         self,

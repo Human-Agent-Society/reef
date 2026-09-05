@@ -1,4 +1,4 @@
-"""Guarantees of reef.harness.render and the bundled adapter descriptors."""
+"""Guarantees of reef.harness.tree.render and the bundled adapter descriptors."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
     import tomli as tomllib
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindingError
-from reef.harness.render import RenderError, render_composition
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
 

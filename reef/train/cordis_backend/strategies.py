@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from reef.core.errors import ReefError
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBindings
+from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TraceSample
 
@@ -61,7 +61,7 @@ class Proposer(ABC):
         pairs in tree order), a batch of trace samples (a sample's ``score``
         is ``None`` when the deployment batches recorded traffic without
         reports, so a method must handle unscored samples), and the
-        :class:`~reef.harness.model_binding.ModelBindings` the method may
+        :class:`~reef.harness.episodes.model_binding.ModelBindings` the method may
         call, return one :class:`~reef.train.cordis_backend.Mutation`, a
         sequence of them (one composite proposal, applied under one snapshot
         and settled by one selection decision), or ``None`` to skip.

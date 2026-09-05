@@ -18,7 +18,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.core.errors import ReefError
-from reef.harness.descriptor import AdapterDescriptor
+from reef.harness.adapters.descriptor import AdapterDescriptor
 
 
 class RenderError(ReefError):

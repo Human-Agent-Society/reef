@@ -5,7 +5,7 @@ import asyncio
 from aiohttp import web
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.descriptor import DescriptorError
+from reef.harness.adapters.descriptor import DescriptorError
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 

@@ -17,9 +17,9 @@ import copy
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.harness import nodes
-from reef.harness.native.graph import Graph
-from reef.harness.native.host import NativeHost
+from reef.harness.runners.native.graph import Graph
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.tree import nodes
 
 #: The models config fields the host pins from the installed binding; a tree entry never sets them.
 PINNED_MODEL_FIELDS = ("api", "base_url", "api_key", "model")

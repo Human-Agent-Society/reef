@@ -15,9 +15,9 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.terminus.quirks import _ALLOWED_KNOBS, _BINDING_KNOBS
-from reef.harness.render import render_composition
-from reef.harness.terminus import instruction_paths, skill_roots
-from reef.harness.terminus.runner import AGENT_NAME, agent_spec
+from reef.harness.runners.terminus import instruction_paths, skill_roots
+from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
+from reef.harness.tree.render import render_composition
 
 pytest.importorskip("harbor", reason="the terminus extra is not installed")
 
