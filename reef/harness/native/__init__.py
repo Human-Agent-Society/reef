@@ -587,6 +587,9 @@ class _Loop:
         self.open.append(session)
         return session, self.turns
 
+    def before_step(self, run: Any) -> None:
+        """Called at the top of every model stage; the episode form has nothing to land between steps."""
+
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
     _request = staticmethod(_request)

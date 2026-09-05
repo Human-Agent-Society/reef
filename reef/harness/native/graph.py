@@ -234,6 +234,8 @@ class Run:
     def model(self, graph: Graph, stage: Mapping[str, Any]) -> str:
         loop = self.loop
         self.close_step()
+        # Between two steps the serve form lands a queued mount, so what the host holds below is what this step runs on.
+        loop.before_step(self)
         if self.step >= graph.max_steps:
             self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1

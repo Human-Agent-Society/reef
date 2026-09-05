@@ -327,6 +327,57 @@ the decision), a hook that raised logs ``hook/error``, and a text a hook
 injected lands as ``user/message`` with ``source.kind`` ``hook`` and the
 ``event``.
 
+The native loop has two forms over the same entries, the same plugins and
+the same interpreter. The episode form (``reef-native -p``) is one process
+and one turn: ``run_episode`` launches it and the sandbox executor confines
+it. The serve form (``reef-native serve``, ``reef/harness/native/serve.py``)
+is one resident process per installed tree: it boots a compose ``Loader``
+over ``NATIVE_PLUGINS`` from ``native/tree.json``, keeps one ``Run`` per
+session across turns, starts the wrapper's capture proxy in process
+(``harness_wrapper.CaptureProxy``), and follows the head through
+``release_client.HeadWatch``, which polls the catalog and reads the
+``x-reef-release-id`` header of every inference answer. The interpreter
+calls ``loop.before_step(run)`` at the top of every model stage; the
+episode form's loop does nothing there, the serve form's lands the queued
+mount and checks the turn's wall clock. Tool and hook modules are written
+under ``native/mounts/live/`` and unchanged entries keep their modules and
+their in memory state across mounts; a changed entry is reinstalled through
+its inverse, and a mount whose entries do not all end ACTIVE is rolled back
+with ``root.update`` to the served entries.
+
+The serve form adds these events, with the same ``{type, seq, time, data}``
+shape, to the open turn's session when there is one and else to
+``native/sessions/serve.jsonl``: ``harness/mount`` (``release_id``,
+``parent_release_id``, ``source`` of ``boot``, ``release`` or ``try``,
+``entries``; a trial adds ``try_id`` and ``mutations``),
+``harness/mount-failed`` (``release_id``, ``source``, ``entry``, ``kind``,
+``error``), ``harness/unmount`` (``try_id``, ``release_id``, ``source``
+``rollback``, ``entries``), ``release/available`` (``release_id``, under
+``--follow pinned``) and ``release/poll-failed`` (``error``,
+``retry_in_s``). The ``session`` header gains ``mode`` (``serve``),
+``session``, ``release_id`` and ``tree``; ``turn/start`` carries the turn
+number, the ``prompt`` and the ``cwd``; ``request/header`` repeats whenever
+the prompt or the declarations changed since the last one; a turn the wall
+clock ended has ``turn/end`` with reason ``turn-timeout``. Steps restart at
+1 each turn, so a turn's spill files land under ``.reef/spill/t<turn>/``.
+
+The socket protocol is one request per connection, JSON lines, UTF-8, on a
+Unix domain socket at ``native/serve.sock`` (or under ``/tmp`` when that
+path exceeds 100 bytes). A turn request is ``{"turn": {"prompt": str,
+"session": str | null, "workdir": str}}``; the answer is every event of the
+turn as written, then ``{"type": "turn/result", "data": {"exit", "session",
+"turn", "text"}}``. ``{"control": "status"}`` answers ``{"type":
+"control/result", "data": {"release_id", "parent_release_id", "follow",
+"entries", "pending_mount", "sessions", "socket", "self_tools"}}`` and
+``{"control": "mount", "release_id": str}`` answers ``{"type":
+"control/result", "data": {"mounted", "release_id", "error"}}``. A
+malformed request answers ``{"type": "error", "data": {"message"}}``.
+Turns are served one at a time; a second connection waits. The three self
+tools (``reef/harness/native/selftools.py``) are ``ToolModule`` instances
+built in code with ``host_plane`` set, run in process whatever
+``REEF_NATIVE_ENFORCE`` says, and registered only under ``--self-tools``;
+a tree entry named like one fails to mount with ``reserved name``.
+
 The descriptor
 --------------
 

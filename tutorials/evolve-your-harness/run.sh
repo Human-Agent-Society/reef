@@ -1,7 +1,8 @@
 #!/bin/bash
 # Serve + run. Setup (once): see README. State and logs go to ./work.
 # ./run.sh runs on pi (configs/serve.yaml); ./run.sh native runs on reef's
-# native harness (configs/serve-native.yaml).
+# native harness (configs/serve-native.yaml) through a resident reef-native
+# serve process.
 set -e
 cd "$(dirname "$0")"
 mkdir -p work/recipes work/bin
@@ -34,4 +35,25 @@ while ! curl -sf http://127.0.0.1:8900/healthz > /dev/null; do
     sleep 1
 done
 
-python3 run.py
+if [ "$SERVE" != serve-native.yaml ]; then
+    python3 run.py
+    exit 0
+fi
+
+# The serve form: pull the seed tree, then one resident process follows the
+# head while run.py sends the tasks to it as turns. The receipts of every
+# turn spool under work/captures, where run.py's report command claims them.
+export REEF_HARNESS_CAPTURES_DIR="$PWD/work/captures"
+python3 run.py pull
+reef-native serve --tree work/tree --scenario harness-evolve-demo --follow head --poll-interval 5 \
+    > work/serve.log 2>&1 &
+NATIVE_PID=$!
+trap 'kill "$NATIVE_PID" "$SERVE_PID" 2>/dev/null' EXIT
+
+# Wait until the process answers on its socket; a process that died fails fast with its log.
+while ! reef-native status --tree work/tree > /dev/null 2>&1; do
+    kill -0 "$NATIVE_PID" 2>/dev/null || { cat work/serve.log >&2; exit 1; }
+    sleep 1
+done
+
+python3 run.py native
