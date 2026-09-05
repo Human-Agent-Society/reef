@@ -224,6 +224,7 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         work_dir: Path,
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None = None,
+        bootstrap_files: Mapping[str, str] | None = None,
     ) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
@@ -249,7 +250,7 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         if bootstrap_artifact is not None:
             self._bootstrap(bootstrap_artifact, snapshot_download=snapshot_download)
         elif local_repository is not None:
-            self._bootstrap_empty()
+            self._bootstrap_empty(bootstrap_files or {})
 
     @classmethod
     def factory(
@@ -260,6 +261,7 @@ class GitLFSRepositoryBackend(RepositoryBackend):
         work_dir: Path,
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None = None,
+        bootstrap_files: Mapping[str, str] | None = None,
     ) -> CachedRepositoryBackendFactory:
         _check_tools()
         return _GitLFSRepositoryBackendFactory(
@@ -269,6 +271,7 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             work_dir=work_dir,
             cache_dir=cache_dir,
             snapshot_download=snapshot_download,
+            bootstrap_files=bootstrap_files,
         )
 
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
@@ -440,7 +443,11 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             )
             return self._manifest.artifact_ref(commit)
 
-    def _bootstrap_empty(self) -> ArtifactRef:
+    def _bootstrap_empty(self, files: Mapping[str, str] = {}) -> ArtifactRef:
+        """The base artifact of a local repository: ``files`` when the recipe seeds one, else empty.
+
+        An existing base always wins, so a redeploy with a changed seed keeps
+        the base its scenarios forked from."""
         existing = self._bootstrap_ref()
         if existing is not None:
             return existing
@@ -451,10 +458,14 @@ class GitLFSRepositoryBackend(RepositoryBackend):
             raise ArtifactSourceError("artifact repository has refs but no base or head release")
         with self._workspace.lock:
             self._workspace.orphan_checkout()
+            for relative, text in files.items():
+                target = self._workspace.clone_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
             self._manifest.write(
                 content_id=f"content:{uuid.uuid4().hex}",
                 parent_release_id=None,
-                source={"kind": "empty"},
+                source={"kind": "seed" if files else "empty"},
                 metadata={},
             )
             commit = self._workspace.commit("initialize artifact repository")
@@ -505,6 +516,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
         work_dir: Path,
         cache_dir: Path,
         snapshot_download: Callable[..., str] | None,
+        bootstrap_files: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
@@ -513,6 +525,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
         self._snapshot_download = snapshot_download
+        self._bootstrap_files = None if bootstrap_files is None else dict(bootstrap_files)
 
     def _build_backend(self, scenario: str) -> GitLFSRepositoryBackend:
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
@@ -523,6 +536,7 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
             work_dir=self._work_dir / encoded,
             cache_dir=self._cache_dir,
             snapshot_download=self._snapshot_download,
+            bootstrap_files=self._bootstrap_files,
         )
 
     def _has_persisted_registration(self, scenario: str) -> bool:

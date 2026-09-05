@@ -10,7 +10,7 @@ operations.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from pathlib import Path
 from threading import RLock
@@ -527,6 +527,18 @@ class ScenarioCommitProtocol:
         for record in self._commit_log.records():
             if record.artifact_ref.release_id == release_id and record.operation == "training":
                 return record.metrics
+        return None
+
+    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries the training step that published ``release_id`` committed, if logged."""
+        if self._commit_log is None:
+            return None
+        for record in self._commit_log.records():
+            if record.artifact_ref.release_id == release_id and record.operation == "training":
+                entries = (record.algorithm_state or {}).get("entries")
+                if isinstance(entries, Sequence) and not isinstance(entries, str):
+                    return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
+                return None
         return None
 
     def artifact_for_version(self, release_id: str) -> Artifact:
