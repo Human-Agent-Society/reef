@@ -316,6 +316,25 @@ def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillcl
 # -- the recipe: yaml boot, delivery surface --------------------------------
 
 
+@pytest.mark.parametrize("selector", ["role", "worker"])
+def test_driver_preserves_executor_profiles(driver, monkeypatch, selector):
+    config = driver.load_config(EXAMPLE_DIR / "skillclaw.yaml")
+    config["evolution"]["seed_skills"] = ""
+    config["executors"] = {"cpu-pool": {"backend": "mp"}}
+    config["execution"] = {"evolution": "cpu-pool"}
+    if selector == "role":
+        config["evolution"].pop("worker_executor")
+    else:
+        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["execution"]["evolution"] = "uni"
+    config["evolution"]["episode_workers"] = 2
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    monkeypatch.setattr(driver, "read_key", lambda: "dummy")
+    recipe = driver.load_recipe()
+    assert recipe.worker_executor.backend == "mp"
+    assert recipe.episode_workers == 2
+
+
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
     through reef's config loader and build the explicit implementation - selection

@@ -6,6 +6,12 @@
 run_dir: ${TTTD_STATE_DIR}/stack
 ready_timeout: 3600
 
+# Service processes launch locally; Slime owns distributed GPU model workers.
+execution:
+  services: local
+  training: ray
+  rollout: ray
+
 reef:
   host: 127.0.0.1
   model_path: work/model

@@ -5,8 +5,14 @@
 # ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 # The recipe uses the upstream runtime's model for evaluation as well as serving.
+execution:
+  services: local
 
 evolution:
+  # CPU scoring: auto selects uni for one worker, mp for multiple workers.
+  # Workers persist between evaluations; each episode still has its own directory.
+  worker_executor: auto
+  episode_workers: 1
   adapter: pi
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate
