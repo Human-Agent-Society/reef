@@ -8,20 +8,22 @@ can import the backend without an import cycle.
 
 from __future__ import annotations
 
+import json
 import math
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.episode import EpisodeError, run_episode
+from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
 from reef.harness.executor import EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.nodes import NODE_KINDS, directive_shaped, secret_shaped
+from reef.harness.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
 from reef.harness.render import RenderError, render_composition
 from reef.harness.trajectory import TrajectoryError
 from reef.harness.vendor_install import install_prefix, resolve_binary
@@ -29,6 +31,7 @@ from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
+from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
     Mutation,
@@ -58,9 +61,57 @@ class HarnessCandidate(UpdateCandidate):
     gate_tasks: tuple[str, ...] = ()
     #: The candidate is the rollback target, so selecting it rolls back.
     recheck: bool = False
+    #: The inbox proposal these mutations came from, settled with the verdict; None for the method's own.
+    proposal_id: str | None = None
+    #: The step record directory claimed for it at prepare time; ``None`` with the record off.
+    record_dir: Path | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
+
+
+#: Characters kept per text in the step record; a longer text ends in a clip marker.
+RECORD_TEXT_CAP = 20_000
+#: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
+RECORD_PROPOSER_FILE = "proposer.json"
+RECORD_MUTATIONS_FILE = "mutations.json"
+RECORD_EPISODES_DIR = "episodes"
+RECORD_EPISODE_FILE = "episode.json"
+
+
+def _clip(text: str) -> str:
+    """``text`` with credential-shaped literals redacted, cut at the record cap with a marker naming how much was dropped.
+
+    The record holds model traffic and proposals before the tree boundary
+    saw them, so the boundary's credential tripwire runs here too."""
+    text = redact_secret_shaped(text)
+    if len(text) <= RECORD_TEXT_CAP:
+        return text
+    return f"{text[:RECORD_TEXT_CAP]}... [clipped {len(text) - RECORD_TEXT_CAP} chars]"
+
+
+def _bounded(value: Any) -> Any:
+    """A copy of a request value that JSON can write, with every string redacted and cut at the record cap."""
+    if isinstance(value, str):
+        return _clip(value)
+    if isinstance(value, Mapping):
+        return {str(key): _bounded(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, bytes):
+        return [_bounded(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _clip(str(value))
+
+
+def _mutation_record(mutation: Mutation) -> dict[str, Any]:
+    """A mutation as the commit record, the rejected history and the step record persist it: op, id and full options."""
+    options = None if mutation.options is None else dict(mutation.options)
+    return {"op": mutation.op, "id": mutation.id, "options": options}
+
+
+def _episode_name(side: str, task_index: int, repeat: int) -> str:
+    """The record directory of one gate episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
+    return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
 def _prompt_of(sample: TraceSample) -> str | None:
@@ -142,20 +193,23 @@ def _admit_promoted(
 
 class _BudgetedBinding(ModelBinding):
     """A ModelBinding that delegates ``chat`` to a wrapped binding under a
-    shared per-step call budget.
+    shared per-step call budget and records every call in the step record.
 
     A subclass so the proposer still receives ModelBinding values, but it
     holds the real binding and forwards to its ``chat`` (never the base
     implementation), so a method's own binding behavior is preserved. The
     shared counter is a mutable one-element list so every binding in the set
-    decrements the same budget.
+    decrements the same budget; a cap of 0 is no budget. The record is the
+    step's list: one entry per call with the model, the request, the reply
+    or the error, and the seconds it took, every text cut at the record cap.
     """
 
     _inner: ModelBinding
     _spent: list[int]
     _cap: int
+    _record: list[dict[str, Any]]
 
-    def __init__(self, inner: ModelBinding, spent: list[int], cap: int) -> None:
+    def __init__(self, inner: ModelBinding, spent: list[int], cap: int, record: list[dict[str, Any]]) -> None:
         super().__init__(
             base_url=inner.base_url,
             model=inner.model,
@@ -166,31 +220,210 @@ class _BudgetedBinding(ModelBinding):
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_spent", spent)
         object.__setattr__(self, "_cap", cap)
+        object.__setattr__(self, "_record", record)
 
-    def chat(self, *args: Any, **kwargs: Any) -> str:
-        if self._spent[0] >= self._cap:
+    def _spend(self) -> None:
+        if self._cap and self._spent[0] >= self._cap:
             raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
         self._spent[0] += 1
-        return self._inner.chat(*args, **kwargs)
+
+    def chat(self, messages: Sequence[Mapping[str, Any]], *, timeout_s: float | None = None, **params: Any) -> str:
+        self._spend()
+        kwargs: dict[str, Any] = dict(params)
+        if timeout_s is not None:
+            kwargs["timeout_s"] = timeout_s
+        entry: dict[str, Any] = {"model": self.model, "messages": _bounded(messages), "params": _bounded(kwargs)}
+        started = time.monotonic()
+        try:
+            reply = self._inner.chat(messages, **kwargs)
+        except BaseException as exc:
+            # The failed call is the step's decision too: the record keeps it before the error propagates.
+            entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
+            entry["seconds"] = round(time.monotonic() - started, 3)
+            self._record.append(entry)
+            raise
+        entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
+        entry["seconds"] = round(time.monotonic() - started, 3)
+        self._record.append(entry)
+        return reply
+
+    def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
+        """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
+        self._spend()
+        kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
+        entry: dict[str, Any] = {"model": self.model, "body": _bounded(body), "params": _bounded(kwargs)}
+        started = time.monotonic()
+        try:
+            response = self._inner.complete(body, **kwargs)
+        except BaseException as exc:
+            entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
+            entry["seconds"] = round(time.monotonic() - started, 3)
+            self._record.append(entry)
+            raise
+        entry["response"] = _bounded(response)
+        entry["seconds"] = round(time.monotonic() - started, 3)
+        self._record.append(entry)
+        return response
 
 
-def _budgeted_bindings(models: ModelBindings, cap: int) -> ModelBindings:
-    """The proposer's view: every ``chat`` shares one per-step budget.
+def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, Any]]) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares one per-step budget and lands in ``record``.
 
-    With ``cap`` 0 the bindings pass through unchanged. The counter is per
-    prepare_step call, so a cap bounds one step's model bill, never the
-    campaign's.
+    The bindings are wrapped whatever the cap, so the record sees every call;
+    with ``cap`` 0 nothing is refused. The counter is per prepare_step call,
+    so a cap bounds one step's model bill, never the campaign's.
     """
-    if not cap:
-        return models
     spent: list[int] = [0]
 
     def wrap(binding: ModelBinding) -> ModelBinding:
-        return _BudgetedBinding(binding, spent, cap)
+        return _BudgetedBinding(binding, spent, cap, record)
 
     return ModelBindings(
         served=wrap(models.served), named={name: wrap(models[name]) for name in models if name != "served"}
     )
+
+
+def tree_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The entries list as the file ``files.tree`` names, verbatim; empty for an adapter that declares none."""
+    if descriptor.tree_path is None:
+        return {}
+    return {descriptor.tree_path: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
+
+
+def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
+    return tuple((str(options["name"]), options.get("config")) for options in entries if not options.get("disabled"))
+
+
+def _loader_entries(loader: Loader) -> list[EntryOptions]:
+    """Live entry options in tree order."""
+    result = []
+    for options in loader.root.data:
+        entry = loader.store.get(str(options.get("id")))
+        if entry is not None:
+            result.append(dict(entry.options))
+    return result
+
+
+def _unrenderable(descriptor: AdapterDescriptor, kind: str) -> str | None:
+    """Why the adapter cannot render an entry of ``kind``; config nodes render through the config targets."""
+    if kind == "config" or kind in descriptor.node_paths:
+        return None
+    return f"adapter {descriptor.name!r} does not render {kind} nodes"
+
+
+def _load_error(loader: Loader, id_: str, descriptor: AdapterDescriptor) -> str | None:
+    """Why the entry cannot serve: its kind's admission, its fiber's state, then whether the adapter renders it."""
+    entry = loader.resolve(id_)
+    kind = str(entry.options.get("name"))
+    if entry.disabled:
+        # Disabled is a serving state, not a validation bypass (#476): a
+        # disabled entry builds no fiber, but its options persist in the
+        # state verbatim, so its kind's admission gate runs directly here.
+        plugin = NODE_KINDS.get(kind)
+        if plugin is None:
+            return f"unknown node kind {kind!r}"
+        try:
+            plugin(None, entry.options.get("config"))
+        except ValueError as error:
+            return str(error)
+        return _unrenderable(descriptor, kind)
+    fiber = entry.fiber
+    if fiber is None:
+        return f"unknown node kind {kind!r}"
+    if fiber.error is not None:
+        return str(fiber.error)
+    if fiber.state is not FiberState.ACTIVE:
+        return f"node fiber is {fiber.state.name}"
+    return _unrenderable(descriptor, kind)
+
+
+def _resolve(loader: Loader, id_: str) -> Any:
+    try:
+        return loader.resolve(id_)
+    except LookupError as exc:
+        raise MutationError(str(exc)) from exc
+
+
+def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
+    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id."""
+    if mutation.op == "create":
+        try:
+            loader.resolve(mutation.id)
+        except LookupError:
+            pass
+        else:
+            raise MutationError(f"entry {mutation.id!r} already exists")
+        if mutation.options is None:
+            raise MutationError("create mutation must carry options")
+        loader.create({**mutation.options, "id": mutation.id})
+    elif mutation.op == "update":
+        entry = _resolve(loader, mutation.id)
+        if mutation.options is None:
+            raise MutationError("update mutation must carry options")
+        # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
+        # update that renamed the kind would validate under the old one; a kind change is remove + create.
+        kind = mutation.options.get("name")
+        if kind is not None and str(kind) != str(entry.options.get("name")):
+            raise MutationError(
+                f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
+                f"to {kind!r}; remove the entry and create it under the new kind"
+            )
+        loader.update(mutation.id, dict(mutation.options))
+    else:
+        _resolve(loader, mutation.id)
+        loader.remove(mutation.id)
+        loader.root.data[:] = [options for options in loader.root.data if str(options.get("id")) != mutation.id]
+
+
+def admit_mutations(
+    entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation], descriptor: AdapterDescriptor
+) -> tuple[list[EntryOptions], str | None]:
+    """Apply ``mutations`` over a fresh admission loader and try the render: the new entries and None, or the old entries and the refusal.
+
+    The one admission every proposal meets, the method's in ``prepare_step``
+    and an agent's at the proposals route: each mutation under the rules of
+    ``_apply_mutation``, a FAILED fiber refused with its error, a kind the
+    adapter renders no path for refused naming the kind, and a render error
+    refused with its message."""
+    previous = [dict(entry) for entry in entries]
+    loader = Loader(Context(), NODE_KINDS.get)
+    loader.root.update([dict(entry) for entry in entries])
+    try:
+        for mutation in mutations:
+            _apply_mutation(loader, mutation)
+            if mutation.op == "remove":
+                continue
+            error = _load_error(loader, mutation.id, descriptor)
+            if error is not None:
+                raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
+        admitted = _loader_entries(loader)
+        render_composition(_nodes_from(admitted), descriptor)
+        refusal = _native_refusal(admitted, descriptor)
+        if refusal is not None:
+            raise MutationError(refusal)
+    except (MutationError, RenderError) as error:
+        return previous, str(error)
+    return admitted, None
+
+
+def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDescriptor) -> str | None:
+    """The first config entry a native host would refuse at boot, None when the tree is not native or all pass.
+
+    The boot rules of the config plugin (target ``models`` only, no pinned
+    binding field, a positive window) are checked here too, so a tree the
+    serve process would roll back never wins a gate."""
+    if descriptor.tree_path is None:
+        return None
+    from reef.harness.native.plugins import check_native_config
+
+    for entry in entries:
+        if entry.get("name") != "config" or entry.get("disabled"):
+            continue
+        try:
+            check_native_config(entry.get("config") or {})
+        except ValueError as error:
+            return f"entry {entry.get('id')!r} rejected: {error}"
+    return None
 
 
 class ScoreComparisonSelector(CandidateSelector):
@@ -289,9 +522,14 @@ class CordisBackend(TrainingBackend):
         review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         episode_workers: int = 1,
+        proposals_dir: str | Path | None = None,
+        max_pending_proposals: int = 8,
+        step_record_dir: str | Path | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        if step_record_dir is not None and not str(step_record_dir):
+            raise ValueError("step_record_dir must be a non-empty path when set")
         if episode_workers < 1:
             raise ValueError("harness evolution requires at least one episode worker")
         if isinstance(models, ModelBinding):
@@ -364,6 +602,15 @@ class CordisBackend(TrainingBackend):
         # Track only trees created by this backend so a durable commit can
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}
+        # Agent proposals wait here between the route that admitted them and the step that takes them.
+        self.proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
+        # Created at boot so an unwritable record path refuses to start, not the first step.
+        self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
+        if self._step_record_dir is not None:
+            try:
+                self._step_record_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise ValueError(f"step_record_dir {self._step_record_dir} cannot be created: {exc}") from exc
         self._validate_seed()
         # Evolution needs the binary at boot, just like the model binding.
         # Install failures propagate with the missing tool or vendor error.
@@ -374,6 +621,16 @@ class CordisBackend(TrainingBackend):
             # and git installs need both their editable source and their venv.
             self._executor = replace(self._executor, base_paths=(*self._executor.base_paths, str(prefix)))
 
+    @property
+    def descriptor(self) -> AdapterDescriptor:
+        return self._descriptor
+
+    def admit(
+        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
+    ) -> tuple[list[EntryOptions], str | None]:
+        """The route's admission: ``admit_mutations`` under this backend's adapter, touching no live state."""
+        return admit_mutations(entries, mutations, self._descriptor)
+
     def _validate_seed(self) -> None:
         """Load the seed into the tree once so a bad seed refuses construction.
 
@@ -382,16 +639,23 @@ class CordisBackend(TrainingBackend):
         recipe build time, naming the failing entry - instead of an empty
         or broken composition tying every comparison at run time.
         """
+        seen: set[str] = set()
         for options in self._seed:
             for key in ("id", "name"):
                 value = options.get(key)
                 if not isinstance(value, str) or not value:
                     raise ValueError(f"seed entry {options!r} requires a non-empty string {key!r}")
+            if options["id"] in seen:
+                raise ValueError(f"seed names entry {options['id']!r} twice")
+            seen.add(str(options["id"]))
         self._loader.root.update([dict(options) for options in self._seed])
         for options in self._seed:
             error = self._load_error(str(options["id"]))
             if error is not None:
                 raise ValueError(f"seed entry {options['id']!r} rejected: {error}")
+        refusal = _native_refusal(self._seed, self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"seed {refusal}")
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
@@ -496,6 +760,9 @@ class CordisBackend(TrainingBackend):
         if self._promote_failures:
             metrics["gate_tasks"] = len(gate_tasks)
             metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
+        step_dir = self._claim_step_dir(steps)
+        if step_dir is not None:
+            metrics["step_record"] = str(step_dir)
         # Re-gate the last-good tree against the published one on cadence or when the served model changed.
         drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
@@ -504,6 +771,9 @@ class CordisBackend(TrainingBackend):
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
             metrics["recheck_reason"] = "drift" if drifted else "cadence"
+            # A recheck asks the proposer nothing, so its record holds episodes only.
+            metrics["proposer_calls"] = 0
+            metrics["proposer_seconds"] = 0.0
             return PreparedStep.with_candidate(
                 HarnessCandidate(
                     candidate_id=f"{batch.batch_id}:recheck",
@@ -514,62 +784,71 @@ class CordisBackend(TrainingBackend):
                     mutations=(),
                     gate_tasks=gate_tasks,
                     recheck=True,
+                    record_dir=step_dir,
                 ),
                 state={"steps": steps, **carried},
                 metrics=metrics,
             )
-        models = _budgeted_bindings(self._models, self._max_model_calls_per_step)
-        extra: dict[str, Any] = {}
-        if self._propose_accepts_manifest:
-            extra["manifest"] = manifest
-        if self._propose_accepts_rejected:
-            extra["rejected"] = tuple(rejected)
-        if self._propose_accepts_sources:
-            extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
-        proposal = self._propose(self._nodes(), batch.samples, models, **extra)
-        mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
+        snapshot = tuple(dict(entry) for entry in self._entries())
+        skipped_state = {"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried}
+        record: list[dict[str, Any]] = []
+        # An agent's pending proposal goes first; the method proposes only when none waits.
+        inbox = self.proposals
+        claimed = None if inbox is None else inbox.claim()
+        if inbox is not None and claimed is not None:
+            metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "release_id": claimed.release_id}
+            # An agent's proposal asks the method nothing, so the step's proposer record is empty.
+            self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
+            metrics["proposer_calls"] = 0
+            metrics["proposer_seconds"] = 0.0
+            try:
+                mutations = _proposal_mutations(claimed)
+            except MutationError as error:
+                inbox.refuse(claimed.id, str(error))
+                self._write_record(step_dir, RECORD_MUTATIONS_FILE, [])
+                return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
+        else:
+            models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
+            extra: dict[str, Any] = {}
+            if self._propose_accepts_manifest:
+                extra["manifest"] = manifest
+            if self._propose_accepts_rejected:
+                extra["rejected"] = tuple(rejected)
+            if self._propose_accepts_sources:
+                extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+            try:
+                proposal = self._propose(self._nodes(), batch.samples, models, **extra)
+            finally:
+                # Written even when propose raised: the calls before the failure are the decision's record.
+                self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
+            metrics["proposer_calls"] = len(record)
+            metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
+            mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
+        # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
+        # like the proposer's traffic: the tree boundary has not seen it yet.
+        self._write_record(step_dir, RECORD_MUTATIONS_FILE, [_bounded(_mutation_record(m)) for m in mutations])
         if not mutations:
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": self._entries(), **carried},
-                metrics={**metrics, "skipped": "no proposal"},
-            )
+            return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": "no proposal"})
 
         current_files = render_composition(self._nodes(), self._descriptor)
-        snapshot = tuple(dict(entry) for entry in self._entries())
-        try:
-            for mutation in mutations:
-                self._apply(mutation)
-        except MutationError as error:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried},
-                metrics={**metrics, "skipped": str(error)},
-            )
-        except BaseException:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            raise
-
-        try:
-            candidate_files = render_composition(self._nodes(), self._descriptor)
-        except RenderError as error:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried},
-                metrics={**metrics, "skipped": str(error)},
-            )
-        except BaseException:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            raise
-
+        # Admission runs again here even for a proposal the route admitted: the head may have moved since.
+        admitted, refusal = admit_mutations(snapshot, mutations, self._descriptor)
+        if refusal is not None:
+            if inbox is not None and claimed is not None:
+                inbox.refuse(claimed.id, refusal)
+            return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": refusal})
+        self._loader.root.update([dict(entry) for entry in admitted])
         return PreparedStep.with_candidate(
             HarnessCandidate(
                 candidate_id=f"{batch.batch_id}:candidate",
-                candidate_files=candidate_files,
+                candidate_files=render_composition(self._nodes(), self._descriptor),
                 current_files=current_files,
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
                 current_entries=snapshot,
                 mutations=mutations,
                 gate_tasks=gate_tasks,
+                proposal_id=None if claimed is None else claimed.id,
+                record_dir=step_dir,
             ),
             state={"steps": steps, **carried},
             metrics=metrics,
@@ -593,21 +872,22 @@ class CordisBackend(TrainingBackend):
         # back in submission order either way.
         # An older candidate carries no gate_tasks and falls back to the seed set.
         gate_tasks = candidate.gate_tasks or self._tasks
+        episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
         pairings = [
-            (files, task)
-            for task in gate_tasks
-            for _ in range(self._episode_repeats)
-            for files in (candidate_files, current_files)
+            (files, task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
+            for index, task in enumerate(gate_tasks)
+            for repeat in range(self._episode_repeats)
+            for side, files in (("candidate", candidate_files), ("current", current_files))
         ]
         if self._episode_workers > 1 and len(pairings) > 1:
             with ThreadPoolExecutor(max_workers=min(self._episode_workers, len(pairings))) as pool:
                 scored = list(pool.map(lambda pairing: self._run_and_score(*pairing), pairings))
         else:
-            scored = [self._run_and_score(files, task) for files, task in pairings]
+            scored = [self._run_and_score(*pairing) for pairing in pairings]
         candidate_runs = scored[0::2]
         current_runs = scored[1::2]
-        candidate_scores = tuple(score for score, _, _, _ in candidate_runs)
-        current_scores = tuple(score for score, _, _, _ in current_runs)
+        candidate_scores = tuple(run.score for run in candidate_runs)
+        current_scores = tuple(run.score for run in current_runs)
         return EvaluationResult(
             evaluator="harness_episode_pairs",
             evaluator_version="1",
@@ -616,17 +896,22 @@ class CordisBackend(TrainingBackend):
                 "current_scores": current_scores,
                 # Failure observations ride the evaluation so settlement can
                 # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(f.to_dict() for _, f, _, _ in candidate_runs if f is not None),
-                "current_failures": tuple(f.to_dict() for _, f, _, _ in current_runs if f is not None),
+                "candidate_failures": tuple(
+                    run.failure.to_dict() for run in candidate_runs if run.failure is not None
+                ),
+                "current_failures": tuple(run.failure.to_dict() for run in current_runs if run.failure is not None),
                 "episode_failures": sum(score is None for score in candidate_scores + current_scores),
                 "episode_repeats": self._episode_repeats,
-                "candidate_residue": sum(residue for _, _, residue, _ in candidate_runs),
-                "current_residue": sum(residue for _, _, residue, _ in current_runs),
+                "candidate_residue": sum(run.residue for run in candidate_runs),
+                "current_residue": sum(run.residue for run in current_runs),
                 "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
                 "current_score": float(sum(score for score in current_scores if score is not None)),
                 # Per agent sums over the side's episodes, so a verdict says which agent did the work.
-                "candidate_agents": _sum_agents(agents for _, _, _, agents in candidate_runs),
-                "current_agents": _sum_agents(agents for _, _, _, agents in current_runs),
+                "candidate_agents": _sum_agents(run.agents for run in candidate_runs),
+                "current_agents": _sum_agents(run.agents for run in current_runs),
+                # Per episode, in pairing order: the root's stage path and how its turn ended.
+                "candidate_paths": tuple(run.path for run in candidate_runs),
+                "current_paths": tuple(run.path for run in current_runs),
             },
         )
 
@@ -687,13 +972,13 @@ class CordisBackend(TrainingBackend):
         if rollback_entries is not None:
             state["rollback_entries"] = rollback_entries
             state["rollback_gated_against"] = rollback_gated_against
-        # A real rejection joins a bounded ledger the proposer can read back.
+        # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
             rejected.append(
                 {
                     "step": int(prepared.state["steps"]),
-                    "mutations": [{"op": mutation.op, "id": mutation.id} for mutation in candidate.mutations],
+                    "mutations": [_mutation_record(mutation) for mutation in candidate.mutations],
                     "reason": decision.reason,
                 }
             )
@@ -711,15 +996,20 @@ class CordisBackend(TrainingBackend):
             }
         )
         if len(candidate.mutations) == 1:
-            mutation = candidate.mutations[0]
-            metrics["mutation"] = {"op": mutation.op, "id": mutation.id}
+            metrics["mutation"] = _mutation_record(candidate.mutations[0])
         else:
-            metrics["mutations"] = [{"op": mutation.op, "id": mutation.id} for mutation in candidate.mutations]
+            metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
+
+        if candidate.proposal_id is not None and self.proposals is not None:
+            verdict = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
+            self.proposals.settle(candidate.proposal_id, verdict)
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
             self._loader.root.update(entries)
-            artifact = Artifact.local(_write_rendered_files(candidate.candidate_files))
+            # The published tree carries its entries list too, so a resident process can mount it entry by entry.
+            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
+            artifact = Artifact.local(_write_rendered_files(published))
             step = int(state["steps"])
             replaced = self._rendered_publications.get(step)
             if replaced is not None:
@@ -742,6 +1032,9 @@ class CordisBackend(TrainingBackend):
     def abort_step(self, prepared: PreparedStep) -> None:
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
+        if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+            self.proposals.refuse(candidate.proposal_id, "step aborted before a verdict")
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:
@@ -756,16 +1049,17 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
-    def _run_and_score(
-        self, files: Mapping[str, str], task: str
-    ) -> tuple[float | None, FailureObservation | None, int, dict[str, dict[str, int]]]:
+    def _run_and_score(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A nonzero
         exit still scores, as before, and is observed alongside the score.
-        The third element counts files the episode left outside the cleanup
+        The residue counts files the episode left outside the cleanup
         whitelist; with ``forbid_residue`` a littering episode scores as one
-        that could not run. The fourth is the trajectory's work per agent."""
+        that could not run. ``keep_dir`` receives the episode's trajectory
+        files before its root is removed; a copy that fails is not an
+        episode failure and propagates, so the step aborts instead of
+        scoring a verdict shaped by a disk error."""
         try:
             result = run_episode(
                 self._descriptor,
@@ -774,24 +1068,65 @@ class CordisBackend(TrainingBackend):
                 binary=self._binary,
                 timeout=self._episode_timeout_s,
                 executor=self._executor,
+                keep_dir=keep_dir,
             )
         except EpisodeError as error:
-            return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0, {}
+            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
+            _write_episode_record(keep_dir, task, None, scored)
+            return scored
         except TrajectoryError as error:
-            return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0, {}
+            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
+            _write_episode_record(keep_dir, task, None, scored)
+            return scored
+        scored = self._score_result(result, task)
+        _write_episode_record(keep_dir, task, result, scored)
+        return scored
+
+    def _score_result(self, result: EpisodeResult, task: str) -> _ScoredEpisode:
+        """The score and the observations of an episode that ran."""
         residue = len(result.residue)
         agents = _agent_work(result.trajectory)
+        path = _stage_path(result.trajectory)
         if residue and self._forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents
+            return _ScoredEpisode(
+                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+            )
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents
-        return score, None, residue, agents
+            return _ScoredEpisode(
+                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
+            )
+        return _ScoredEpisode(score, None, residue, agents, path)
+
+    def _claim_step_dir(self, step: int) -> Path | None:
+        """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
+        if self._step_record_dir is None:
+            return None
+        # A retried step keeps the earlier attempt on file: its directory is never reused.
+        attempt = 1
+        step_dir = self._step_record_dir / str(step)
+        while True:
+            try:
+                step_dir.mkdir(parents=True)
+            except FileExistsError:
+                attempt += 1
+                step_dir = self._step_record_dir / f"{step}-{attempt}"
+                continue
+            return step_dir
+
+    @staticmethod
+    def _write_record(step_dir: Path | None, name: str, payload: Any) -> None:
+        """One record file of the step as JSON; nothing is written with the record off."""
+        if step_dir is None:
+            return
+        # Exclusive create: a record file on disk is a record and is never replaced.
+        with open(step_dir / name, "x", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
     @staticmethod
     def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
@@ -819,94 +1154,93 @@ class CordisBackend(TrainingBackend):
         }
 
     def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-        return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)
+        """The tree plus the model binding, and the entries list beside them where the adapter carries one."""
+        files = render_composition((*_nodes_from(entries), *self._binding_nodes), self._descriptor)
+        return {**files, **tree_files(self._descriptor, entries)}
 
     def _nodes(self) -> tuple[tuple[str, Any], ...]:
         """The enabled composition in tree order, as (kind, config) pairs."""
-        return self._nodes_from(self._entries())
+        return _nodes_from(self._entries())
 
     @staticmethod
     def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
-        return tuple(
-            (str(options["name"]), options.get("config")) for options in entries if not options.get("disabled")
-        )
+        return _nodes_from(entries)
 
     def _entries(self) -> list[EntryOptions]:
         """Live entry options in tree order."""
-        result = []
-        for options in self._loader.root.data:
-            entry = self._loader.store.get(str(options.get("id")))
-            if entry is not None:
-                result.append(dict(entry.options))
-        return result
-
-    def _apply(self, mutation: Mutation) -> None:
-        if mutation.op == "create":
-            if self._exists(mutation.id):
-                raise MutationError(f"entry {mutation.id!r} already exists")
-            if mutation.options is None:
-                raise MutationError("create mutation must carry options")
-            self._loader.create({**mutation.options, "id": mutation.id})
-        elif mutation.op == "update":
-            entry = self._resolve(mutation.id)
-            if mutation.options is None:
-                raise MutationError("update mutation must carry options")
-            # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
-            # update that renamed the kind would validate under the old one; a kind change is remove + create.
-            kind = mutation.options.get("name")
-            if kind is not None and str(kind) != str(entry.options.get("name")):
-                raise MutationError(
-                    f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
-                    f"to {kind!r}; remove the entry and create it under the new kind"
-                )
-            self._loader.update(mutation.id, dict(mutation.options))
-        else:
-            self._resolve(mutation.id)
-            self._loader.remove(mutation.id)
-            self._loader.root.data[:] = [
-                options for options in self._loader.root.data if str(options.get("id")) != mutation.id
-            ]
-
-        if mutation.op != "remove":
-            error = self._load_error(mutation.id)
-            if error is not None:
-                raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
-
-    def _exists(self, id_: str) -> bool:
-        try:
-            self._loader.resolve(id_)
-        except LookupError:
-            return False
-        return True
-
-    def _resolve(self, id_: str) -> Any:
-        try:
-            return self._loader.resolve(id_)
-        except LookupError as exc:
-            raise MutationError(str(exc)) from exc
+        return _loader_entries(self._loader)
 
     def _load_error(self, id_: str) -> str | None:
-        entry = self._loader.resolve(id_)
-        if entry.disabled:
-            # Disabled is a serving state, not a validation bypass (#476): a
-            # disabled entry builds no fiber, but its options persist in the
-            # state verbatim, so its kind's admission gate runs directly here.
-            plugin = NODE_KINDS.get(str(entry.options.get("name")))
-            if plugin is None:
-                return f"unknown node kind {entry.options.get('name')!r}"
-            try:
-                plugin(None, entry.options.get("config"))
-            except ValueError as error:
-                return str(error)
-            return None
-        fiber = entry.fiber
-        if fiber is None:
-            return f"unknown node kind {entry.options.get('name')!r}"
-        if fiber.error is not None:
-            return str(fiber.error)
-        if fiber.state is not FiberState.ACTIVE:
-            return f"node fiber is {fiber.state.name}"
-        return None
+        return _load_error(self._loader, id_, self._descriptor)
+
+
+def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
+    """The mutations an inbox proposal carries, in the shape the backend applies; a bad shape is a MutationError."""
+    mutations = []
+    for record in proposal.mutations:
+        op, id_ = record.get("op"), record.get("id")
+        if not isinstance(op, str) or not isinstance(id_, str):
+            raise MutationError(f"proposal {proposal.id} carries a mutation without a string op and id")
+        options = record.get("options")
+        if options is not None and not isinstance(options, Mapping):
+            raise MutationError(f"proposal {proposal.id} mutation {op} {id_!r} options must be an object")
+        mutations.append(Mutation(op, id_, None if options is None else dict(options)))
+    if not mutations:
+        raise MutationError(f"proposal {proposal.id} carries no mutations")
+    return tuple(mutations)
+
+
+@dataclass(frozen=True)
+class _ScoredEpisode:
+    """One gate episode as the evaluation keeps it: the score, or why it has none, and what the trajectory showed."""
+
+    score: float | None
+    failure: FailureObservation | None
+    residue: int = 0
+    agents: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: The root's stage path and end reason; ``None`` when no trajectory was read.
+    path: dict[str, Any] | None = None
+
+
+def _write_episode_record(
+    keep_dir: Path | None, task: str, result: EpisodeResult | None, scored: _ScoredEpisode
+) -> None:
+    """``episode.json`` beside the kept trajectory: what the scorer saw, so a verdict can be re-derived from the record."""
+    if keep_dir is None:
+        return
+    record = {
+        "task": _clip(task),
+        "score": scored.score,
+        "failure": None if scored.failure is None else scored.failure.to_dict(),
+        "path": scored.path,
+        "exit_code": None if result is None else result.exit_code,
+        "stdout": None if result is None else _clip(result.stdout),
+        "stderr": None if result is None else _clip(result.stderr),
+        "residue": None if result is None else [_clip(str(path)) for path in result.residue],
+    }
+    # An episode that never wrote an event has no trajectory copy, so the directory may not exist yet.
+    keep_dir.mkdir(parents=True, exist_ok=True)
+    with open(keep_dir / RECORD_EPISODE_FILE, "x", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, indent=2, default=str) + "\n")
+
+
+def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The root's ``stage/exit`` stage names in order and its ``turn/end`` reason kind; empty for other formats."""
+    stages: list[str] = []
+    reason: str | None = None
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+        elif agent != "root":
+            continue
+        elif type_ == "stage/exit":
+            stages.append(str(data.get("stage")))
+        elif type_ == "turn/end":
+            kind = (data.get("reason") or {}).get("kind")
+            reason = None if kind is None else str(kind)
+    return {"stages": stages, "reason": reason}
 
 
 def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:

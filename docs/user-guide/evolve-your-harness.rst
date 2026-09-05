@@ -171,9 +171,10 @@ Two more settings shape the search itself. ``evolution.min_win_margin: M``
 than ``M`` task pairings beyond its losses, so on a stochastic episode a
 single lucky flip does not publish. ``evolution.max_rejected_history: N``
 (25 by default, 0 off) keeps the last ``N`` rejected proposals in the
-scenario state, each with its step, its mutations, and the verdict's reason;
-a ``propose`` whose signature names ``rejected`` receives them and can stop
-re-proposing what the gate already refused.
+scenario state, each with its step, its mutations with the options they
+carried, and the verdict's reason; a ``propose`` whose signature names
+``rejected`` receives them and can stop re-proposing what the gate already
+refused.
 
 By default a gate win is served at once. ``evolution.publish: review`` holds
 every win as a pending release instead, and ``evolution.review_kinds`` (a
@@ -216,7 +217,41 @@ episode that could not run ranks below every real score, so a candidate
 cannot win on a crash, and when both sides fail the step is a tie. When the
 verdict is a rejection, Reef restores the snapshot it took before the
 mutation. Every verdict is recorded in the scenario's commit log together
-with its mutation and both score vectors.
+with its mutation (op, id and the full options, so a rejected rewrite is
+readable too), both score vectors, how many model calls the proposer made
+and the seconds they took (``proposer_calls``, ``proposer_seconds``), and per
+side and task the path each episode took: on the native harness the stage
+names the loop exited in order and the reason its turn ended
+(``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
+episode, beside ``candidate_agents``).
+
+The commit log holds the verdict; the step record holds what decided it.
+``evolution.step_record_dir`` (off by default) names a directory, made
+absolute at build, under which each scenario's steps write
+``<scenario>/<step>/proposer.json``, one entry per model call the proposer
+made: the ``model``, the ``messages`` and ``params`` of a ``chat`` or the
+``body`` of a ``complete``, then the ``reply`` or ``response`` or the
+``error``, and the ``seconds`` it took; ``<scenario>/<step>/mutations.json``,
+the parsed proposal with its options, written before admission so a refused
+proposal is on file; and ``<scenario>/<step>/episodes/<side>-<task index>/``,
+each gate episode's trajectory files as the adapter writes them
+(``session.jsonl`` and ``agents/*.jsonl`` on native, the vendor's own session
+tree on pi and the others) copied out of the throwaway root before it is
+removed, beside an ``episode.json`` with the task, the exit code, stdout and
+stderr, the residue, the score, the failure and the stage path, so a scorer
+can be replayed from the record alone. Long text is clipped with a marker
+naming what was dropped, and a credential shaped literal anywhere in the
+record is replaced by ``[redacted credential]``: the record holds what the
+tree boundary has not seen yet. A recheck step asks the proposer nothing, so
+it writes ``episodes/`` only and counts zero proposer calls; a step skipped
+on the step cap or the failure streak writes nothing and names no
+``step_record``. A step directory is never reused: a step retried after a
+crash lands in ``<step>-2``, so the earlier attempt stays on file, and
+nothing prunes the directory. A reader can rebuild why the tree changed, or
+did not, from those files and the commit record, which names the step's
+directory as ``step_record``. The record is the proposer's raw traffic and
+the episodes' full logs, so keep the directory where the commit log lives; a
+copy that fails (a full disk) aborts the step rather than scoring it.
 
 When it fits
 ------------
@@ -250,7 +285,7 @@ From a Reef checkout:
 .. code:: bash
 
    export REEF_UPSTREAM_API_KEY=sk-...    # only if your endpoint needs one
-   cd tutorials/harness_evolve
+   cd tutorials/evolve-your-harness
    ./run.sh
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
@@ -262,8 +297,8 @@ them there to point at your own. The model name appears twice, as
 the step records ``skipped: no proposal``. The provider key is the one value
 ``serve.yaml`` does not hold.
 
-`1_evolve_your_harness.ipynb
-<../../tutorials/harness_evolve/1_evolve_your_harness.ipynb>`__ is the same
+`evolve-your-harness.ipynb
+<../../tutorials/evolve-your-harness/evolve-your-harness.ipynb>`__ is the same
 pass as a notebook, cell by cell, with the service managed as a subprocess;
 its committed outputs are a full local run on ollama with no GPU.
 
@@ -364,6 +399,101 @@ with the same five settings the script bakes into ``reef-pi``:
 The wrapper points the loop at its capture proxy through a temp copy of
 the tree, keeps the loop's session log under ``native/sessions`` beside
 the installed tree, and ``report`` works as for any adapter.
+
+Serve the harness as a resident process
+---------------------------------------
+
+The native adapter has a second form. ``reef-native -p`` is the episode
+form: one process, one turn, what the gate runs. ``reef-native serve`` is
+the serve form: one resident process per installed tree that holds the tree
+as a live composition and follows the release Reef serves while it runs. A
+publish reaches the process as a mount between two steps of the open turn,
+or at once when no turn is open. No reinstall, no restart.
+
+.. code:: bash
+
+   reef-native serve --tree ./reef-harness --scenario harness-evolve-demo &
+   reef-native turn --tree ./reef-harness -p "fix the failing test in auth.py"
+   reef-native turn --tree ./reef-harness -p "now add a test for it" --session 3f9a1c2b7d4e
+   reef-native status --tree ./reef-harness
+   python3 -m reef.harness.harness_wrapper report --score 1 --feedback "fixed"
+
+``--tree`` names the pulled tree, the directory that holds ``native/`` and
+the release sidecar. The process boots from ``native/tree.json``, the
+entries list Reef renders into every native release (a tree pulled before
+that file existed runs in the episode form only). It reads the Reef URL and
+the token from ``native/models.json``; ``--reef-url`` and ``REEF_TOKEN``
+override them. It starts the wrapper's capture proxy in process and listens
+on ``native/serve.sock``; ``status`` prints the socket, which moves under
+``/tmp`` when the tree's path is too long for a socket address. The receipts
+of each turn are spooled as a run of their own, so ``report`` works per
+turn, with the wrapper's five settings in the environment as above.
+
+``turn`` prints every event of the turn as one JSON line each, then
+``turn/result`` with the exit status, the session id, the turn number and
+the last assistant text; ``--quiet`` prints the text alone. A turn without
+``--session`` starts a new session. A session keeps its messages across
+turns, its log lands under ``native/sessions/<session>/session.jsonl``,
+and every turn runs on the graph's step budget and on ``--turn-timeout``
+seconds of wall clock (600), checked before each model call.
+
+With ``--follow head``, the default, the process polls
+``GET /reef/harness/releases`` every ``--poll-interval`` seconds (60) and
+reads the ``x-reef-release-id`` header of every inference answer, so a
+process with traffic learns of a publish on its next model call. A new head
+is mounted between two steps of the open turn, or at once when the process
+is idle. The mount is one line in the open turn's session, else in
+``native/sessions/serve.jsonl``:
+
+.. code:: text
+
+   {"type": "harness/mount", "seq": 41, "time": 1788600000000, "data": {"release_id": "6f1c...", "parent_release_id": "2a9b...", "source": "release", "entries": 8}}
+
+The next step runs on the new tools, hooks, rules, skills and window, and
+writes a new ``request/header`` when what the model sees changed; the next
+turn runs the new graph. A mount that leaves an entry FAILED (a tool whose
+code does not import, a kind this reef has no plugin for, a name a self tool
+owns) is rolled back whole before the next step: ``harness/mount-failed``
+names the release, the entry and the error, and the previous composition
+keeps serving. On success the sidecar and ``native/tree.json`` name the new
+release, so a restart boots from it with ``source: boot``.
+
+With ``--follow pinned`` the process logs ``release/available`` with the
+new head and waits for a person. ``reef-native mount <release_id> --tree
+./reef-harness`` applies one release by hand, an older one included, which
+rolls the process back locally; under ``head`` too, a release mounted by
+hand stands until the head moves again. A Reef that does not answer logs
+``release/poll-failed`` with the error and the next retry, doubling up to
+ten minutes, and the process keeps serving.
+
+``--self-tools`` gives the model three host plane tools. The tree cannot
+remove them or take their names, and they are absent in the episode form,
+so a candidate cannot win the gate by calling them:
+
+- ``harness_inspect(what)``: ``tree`` is the live entries and the mounted
+  release; ``graph`` is ``main`` and every named graph; ``verdicts`` is the
+  newest releases with the gate metrics that admitted each, and the
+  rejected proposals when Reef exposes them; ``status`` is the status above.
+- ``harness_try(mutations)``: mounts the served entries plus the mutations
+  on this process for the rest of the turn. The change applies from the
+  next step, the model calls carry ``x-reef-tag-trial`` so ``report`` skips
+  their receipts, and at ``turn/end`` the served entries are mounted back
+  (``harness/unmount``). Nothing is published.
+- ``harness_propose(mutations, reason)``: sends ``POST
+  /reef/harness/proposals`` with the mounted release and the session id.
+  Reef admits or refuses at once, and an admitted proposal goes through the
+  gate like the method's own before it is served. A Reef without the route
+  answers a tool error and the turn continues.
+
+The order is inspect, then try, then propose. Every call is a ``tool/call``
+and ``tool/result`` pair in the session log, so what the model learned about
+itself and what it changed is in the record.
+
+The serve process runs on your machine with your privileges and imports
+tree code in process, as the episode form does; the gate's sandbox does not
+apply to it. Under ``--follow head``, whoever can publish to the scenario
+runs code on the machine the process serves on. ``--follow pinned`` keeps a
+person in that loop.
 
 Write a method
 --------------

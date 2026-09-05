@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from reef.core.errors import ReefError
@@ -31,7 +32,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector, tree_files
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
@@ -49,6 +50,8 @@ _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
     "score_comparison": ScoreComparisonSelector(),
     "always": AlwaysSelect(),
 }
+#: Where a scenario's proposal inbox lands when the recipe names no directory: beside the service's other state.
+DEFAULT_PROPOSALS_DIR = ".reef/proposals"
 
 
 def _resolve_callable(value: Any, what: str) -> Any:
@@ -116,10 +119,19 @@ class CordisRecipe(Recipe):
     or a dotted reference to an object implementing ``decide``), optional
     ``episode_workers`` (how many evaluation episodes run at once, default
     one; a large task set is one wave instead of a long turn-taking pass),
+    optional ``step_record_dir`` (a directory under which every scenario's
+    steps write the proposer's model calls, the parsed proposal and each gate
+    episode's trajectory files, so the decision is reconstructible; off by
+    default),
     and optional ``version_check``
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
-    the channel head; adapters without a shipped extension refuse boot).
+    the channel head; adapters without a shipped extension refuse boot),
+    and the agent proposal inbox: ``proposals_dir`` (default
+    ``.reef/proposals``, one directory per scenario under it, created when
+    the first proposal arrives) and ``max_pending_proposals`` (default 8,
+    the number of admitted proposals a scenario holds before the route
+    refuses more).
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
@@ -178,6 +190,9 @@ class CordisRecipe(Recipe):
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
     episode_workers: int = 1
+    proposals_dir: str = DEFAULT_PROPOSALS_DIR
+    max_pending_proposals: int = 8
+    step_record_dir: str | None = None
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
@@ -218,6 +233,14 @@ class CordisRecipe(Recipe):
             raise ValueError("publish must be 'auto' or 'review'")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
+        if not isinstance(self.proposals_dir, str) or not self.proposals_dir.strip():
+            raise ValueError("proposals_dir must be a non-empty path")
+        if isinstance(self.max_pending_proposals, bool) or self.max_pending_proposals < 1:
+            raise ValueError("max_pending_proposals must be an integer of at least 1")
+        if self.step_record_dir is not None and (
+            not isinstance(self.step_record_dir, str) or not self.step_record_dir
+        ):
+            raise ValueError("step_record_dir must be a non-empty path when set")
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
@@ -330,7 +353,18 @@ class CordisRecipe(Recipe):
         if isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1:
             raise RecipeConfigError("evolution.episode_workers must be a positive integer")
         episode_workers = raw_workers
+        proposals_dir = evolution.get("proposals_dir", DEFAULT_PROPOSALS_DIR)
+        if not isinstance(proposals_dir, str) or not proposals_dir.strip():
+            raise RecipeConfigError("evolution.proposals_dir must be a non-empty path")
+        max_pending = evolution.get("max_pending_proposals", 8)
+        if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
+            raise RecipeConfigError("evolution.max_pending_proposals must be an integer of at least 1")
+        step_record_dir = evolution.get("step_record_dir")
+        if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
+            raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
         return {
+            "proposals_dir": proposals_dir.strip(),
+            "max_pending_proposals": max_pending,
             "propose": resolve_proposer(evolution.get("propose")),
             "promote": resolve_promoter(evolution["promote"]) if "promote" in evolution else None,
             "score_episode": resolve_episode_scorer(evolution.get("evaluate")),
@@ -352,6 +386,7 @@ class CordisRecipe(Recipe):
             "models": models,
             "candidate_selector": candidate_selector,
             "episode_workers": episode_workers,
+            "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
     def model_binding(self) -> ModelBinding:
@@ -378,11 +413,16 @@ class CordisRecipe(Recipe):
         )
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
-        """The seed rendered for the adapter: a fresh scenario serves it before any step publishes."""
+        """The seed rendered for the adapter, with its entries list where the adapter carries one: a fresh scenario serves it before any step publishes."""
         if not self.seed:
             return None
+        descriptor = get_adapter(self.adapter)
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
-        return render_composition(nodes, get_adapter(self.adapter))
+        return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
+
+    def proposals_path(self, scenario: str) -> Path:
+        """The scenario's proposal inbox: ``proposals_dir`` made absolute, one directory per scenario under it."""
+        return Path(self.proposals_dir).expanduser().resolve() / scenario
 
     def build(
         self,
@@ -392,7 +432,12 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = CordisBackend(**self._backend_kwargs())
+        kwargs = self._backend_kwargs()
+        # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
+        # so the path a commit record names resolves from any working directory.
+        if kwargs["step_record_dir"] is not None:
+            kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
+        training_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
             records,
@@ -427,6 +472,8 @@ class CordisRecipe(Recipe):
             "review_kinds": self.review_kinds,
             "seed": self.seed,
             "episode_workers": self.episode_workers,
+            "max_pending_proposals": self.max_pending_proposals,
+            "step_record_dir": self.step_record_dir,
         }
 
     def _build_trainer(

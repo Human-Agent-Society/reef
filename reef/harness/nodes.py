@@ -43,6 +43,8 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
+#: Tool names the serve form's host plane owns (``reef.harness.native.selftools``); no tree entry may take one.
+NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
 #: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
 NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "model": ((), ("tool_calls", "text")),
@@ -188,6 +190,11 @@ def secret_shaped(text: str) -> bool:
     return _SECRET_TEXT.search(text) is not None
 
 
+def redact_secret_shaped(text: str) -> str:
+    """``text`` with every credential-shaped literal replaced; for records that persist model traffic the tree boundary never saw."""
+    return _SECRET_TEXT.sub("[redacted credential]", text)
+
+
 def directive_shaped(text: str) -> bool:
     """Whether free text carries an instruction-override phrasing or a chat-template control token; the task ledger's second tripwire."""
     return _DIRECTIVE_TEXT.search(text) is not None
@@ -238,7 +245,10 @@ def code_extension_node(ctx: Any, config: Any) -> None:
 def native_tool_node(ctx: Any, config: Any) -> None:
     """A named tool the native harness loads: a description, a JSON schema, and code defining ``run(args, workdir)``."""
     options = _require_mapping(config)
-    _require_name(options)
+    name = _require_name(options)
+    if name in NATIVE_RESERVED_TOOL_NAMES:
+        # The serve form's self tools own these names; a tree that took one would win a gate it could never serve.
+        raise ValueError(f"native_tool node name {name!r} is reserved for the host plane's self tools")
     _require_text(options, "description")
     if not isinstance(options.get("parameters", {}), Mapping):
         raise ValueError("native_tool node 'parameters' must be an object")

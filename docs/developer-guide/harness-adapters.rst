@@ -199,8 +199,42 @@ defines no ``listen``, or names an unknown event ends the episode with
 ``loop_guard`` at ``post_execute``, which reminds the model when the same call
 repeats three, five, or eight times in a row; it is a node, so a tree can
 retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
-``tutorials/harness_evolve/serve-native.yaml`` seeds them by reference to
+``tutorials/evolve-your-harness/configs/serve-native.yaml`` seeds them by reference to
 run the tutorial on this adapter.
+
+The native descriptor declares no path for ``agent_command`` or
+``code_extension``: the loop never reads either, so a mutation of those kinds
+is refused at admission ("does not render") instead of rendering a file
+nothing loads. ``config`` keeps both targets, since the render needs
+``primary``; the loop reads ``models`` only, and a live tree boot refuses a
+``config`` entry with target ``primary`` or one that sets a pinned binding
+field (``api``, ``base_url``, ``api_key``, ``model``).
+
+The tree travels as a file
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The native descriptor also declares ``files.tree: native/tree.json``. Every
+tree the backend renders for this adapter carries that file beside the
+rendered ones: the release's entries list, verbatim, as one JSON array of
+``{id, name, config}`` objects, the same list the commit log persists under
+``algorithm_state["entries"]``. It reaches the evaluation episodes, the
+published artifact, the manifest, the install script and a pulled tree
+through the existing channel; the base release a seeded recipe serves before
+any step carries the seed's list. The binding nodes never enter it: the
+pinned model fields stay in ``native/models.json``.
+
+At boot the loop reads the file when it exists: a fresh compose context, a
+``Loader`` over ``NATIVE_PLUGINS``, ``root.update(entries)``, every entry
+admitted again by its kind's plugin and installed into the host through the
+same effects a resident process uses, with the tool and hook modules written
+under ``sessions/mounts/boot/`` (the one writable path under the sandbox).
+An entry that does not end ACTIVE ends the episode with ``LOAD_ERROR``
+naming the entry id, its kind and the fiber's error, or ``no plugin for kind
+X`` for a kind the loop never reads, so a hand edited list cannot run
+unchecked. Without the file the loop reads the rendered files as before, so
+an older pulled tree runs unchanged. The two boots produce the same events;
+the session header's ``tree`` field says which ran, ``tree.json`` or
+``files``.
 
 The loop's own control flow is a ``native_graph`` node, rendered to
 ``native/graphs/main.json``: named stages from a closed vocabulary and edges
@@ -264,12 +298,19 @@ off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
 turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
 the parent graph is the one that can answer. The gate's verdict carries
 ``candidate_agents`` and ``current_agents``, the turns, steps, tool calls and
-tool errors per agent summed over each side's episodes.
+tool errors per agent summed over each side's episodes. It also carries
+``candidate_paths`` and ``current_paths``, one entry per episode in pairing
+order (task by task, then repeat by repeat): the root session's
+``stage/exit`` stage names in order and the ``turn/end`` reason kind; a
+delegated agent's stages under ``agents/`` stay out of it; an episode that
+could not run is ``None`` and a format without stage events gives an empty
+list and a ``None`` reason.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, hooks (name to
-event), and the ``enforcement`` mode; then ``turn/start``, per step
+event), the ``enforcement`` mode, and ``tree``, where the composition came
+from (``tree.json`` or ``files``); then ``turn/start``, per step
 ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
@@ -292,6 +333,57 @@ the decision), a hook that raised logs ``hook/error``, and a text a hook
 injected lands as ``user/message`` with ``source.kind`` ``hook`` and the
 ``event``.
 
+The native loop has two forms over the same entries, the same plugins and
+the same interpreter. The episode form (``reef-native -p``) is one process
+and one turn: ``run_episode`` launches it and the sandbox executor confines
+it. The serve form (``reef-native serve``, ``reef/harness/native/serve.py``)
+is one resident process per installed tree: it boots a compose ``Loader``
+over ``NATIVE_PLUGINS`` from ``native/tree.json``, keeps one ``Run`` per
+session across turns, starts the wrapper's capture proxy in process
+(``harness_wrapper.CaptureProxy``), and follows the head through
+``release_client.HeadWatch``, which polls the catalog and reads the
+``x-reef-release-id`` header of every inference answer. The interpreter
+calls ``loop.before_step(run)`` at the top of every model stage; the
+episode form's loop does nothing there, the serve form's lands the queued
+mount and checks the turn's wall clock. Tool and hook modules are written
+under ``native/mounts/live/`` and unchanged entries keep their modules and
+their in memory state across mounts; a changed entry is reinstalled through
+its inverse, and a mount whose entries do not all end ACTIVE is rolled back
+with ``root.update`` to the served entries.
+
+The serve form adds these events, with the same ``{type, seq, time, data}``
+shape, to the open turn's session when there is one and else to
+``native/sessions/serve.jsonl``: ``harness/mount`` (``release_id``,
+``parent_release_id``, ``source`` of ``boot``, ``release`` or ``try``,
+``entries``; a trial adds ``try_id`` and ``mutations``),
+``harness/mount-failed`` (``release_id``, ``source``, ``entry``, ``kind``,
+``error``), ``harness/unmount`` (``try_id``, ``release_id``, ``source``
+``rollback``, ``entries``), ``release/available`` (``release_id``, under
+``--follow pinned``) and ``release/poll-failed`` (``error``,
+``retry_in_s``). The ``session`` header gains ``mode`` (``serve``),
+``session``, ``release_id`` and ``tree``; ``turn/start`` carries the turn
+number, the ``prompt`` and the ``cwd``; ``request/header`` repeats whenever
+the prompt or the declarations changed since the last one; a turn the wall
+clock ended has ``turn/end`` with reason ``turn-timeout``. Steps restart at
+1 each turn, so a turn's spill files land under ``.reef/spill/t<turn>/``.
+
+The socket protocol is one request per connection, JSON lines, UTF-8, on a
+Unix domain socket at ``native/serve.sock`` (or under ``/tmp`` when that
+path exceeds 100 bytes). A turn request is ``{"turn": {"prompt": str,
+"session": str | null, "workdir": str}}``; the answer is every event of the
+turn as written, then ``{"type": "turn/result", "data": {"exit", "session",
+"turn", "text"}}``. ``{"control": "status"}`` answers ``{"type":
+"control/result", "data": {"release_id", "parent_release_id", "follow",
+"entries", "pending_mount", "sessions", "socket", "self_tools"}}`` and
+``{"control": "mount", "release_id": str}`` answers ``{"type":
+"control/result", "data": {"mounted", "release_id", "error"}}``. A
+malformed request answers ``{"type": "error", "data": {"message"}}``.
+Turns are served one at a time; a second connection waits. The three self
+tools (``reef/harness/native/selftools.py``) are ``ToolModule`` instances
+built in code with ``host_plane`` set, run in process whatever
+``REEF_NATIVE_ENFORCE`` says, and registered only under ``--self-tools``;
+a tree entry named like one fails to mount with ``reserved name``.
+
 The descriptor
 --------------
 
@@ -303,7 +395,7 @@ agent.
    name | the adapter's id
    binary | the executable an episode runs
    argv | the argument list for one headless prompt; ``{prompt}`` is substituted
-   files | where each node kind renders, like ``skills/{name}/SKILL.md``
+   files | where each node kind renders, like ``skills/{name}/SKILL.md``; ``rules`` and ``skill`` are required, every other kind is optional and a mutation of a kind left out is refused; ``tree`` names the file the entries list travels in, for a binary that reconciles the tree live
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix

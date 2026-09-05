@@ -193,13 +193,13 @@ current version without restarting Reef.
 ### Harness-evolving deployment
 
 Improve harness skills using a model API instead of GPUs. Set `model.path`
-in [deployment.yaml](tutorials/harness_evolve/deployment.yaml) to your model name,
+in [deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) to your model name,
 then run from your Reef checkout and activated Python environment:
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-reef serve -c tutorials/harness_evolve/deployment.yaml
+reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
 
 For another provider, use its base URL, model name, and API key. This config deploys Reef on `8901` with `reef-local` as its access token.
@@ -219,7 +219,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 Failed reports trigger a candidate skill update. Reef evaluates it against the
 current harness on the tutorial's three coding tasks and publishes it only if
-it wins. See the [tutorial](tutorials/harness_evolve/README.md) to customize the
+it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
 tasks and evaluation.
 
 
@@ -239,7 +239,7 @@ are selected by dotted class reference, and do not ship in the Reef wheel.
 | Scores and transcripts used to improve prompts and instructions | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness; fixed model weights | [Example and results](recipes/gepa/examples/aime/README.md) |
 
 For a small walkthrough of feedback, candidate edits, and publication, start with
-[the coding harness tutorial](tutorials/harness_evolve/README.md). Each result
+[the coding harness tutorial](tutorials/evolve-your-harness/README.md). Each result
 page documents its task, evaluation setup, measurements, and limitations.
 
 

@@ -3,20 +3,23 @@
 The interpreter reads a ``NativeHost`` at every use instead of holding the
 tools, hooks, agents, graphs and prompt it was built with, so a change to the
 registries between two steps is what the next step runs on. The episode form
-fills one from the rendered root at boot and never changes it; the node
-plugins in ``reef.harness.native.plugins`` fill one entry by entry and take
-each entry out again when it leaves (RFC #269).
+fills one at boot and never changes it: from the root's ``tree.json`` through
+the node plugins in ``reef.harness.native.plugins`` when the render carried
+one, else from the rendered files; the plugins fill one entry by entry and
+take each entry out again when it leaves (RFC #269).
 """
 
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
 from reef.harness.native import (
     DEFAULT_SYSTEM_PROMPT,
+    TREE_FILE,
     HookModule,
     LoadError,
     ToolModule,
@@ -58,6 +61,9 @@ class NativeHost:
         self.mount_dir = mount_dir
         #: Where rules and windows take their order from; without one, the order they were added in.
         self.order = order
+        #: The compose loader a tree boot reconciled the entries through, so a later mount is one more
+        #: ``root.update``; None when the host was filled from the rendered files.
+        self.loader: Any = None
         self._tools: dict[str, ToolModule] = {}
         self._hooks: dict[str, HookModule] = {}
         self._graphs: dict[str, Graph] = {}
@@ -232,11 +238,26 @@ class NativeHost:
 
         return uninstall
 
+    def dispose(self) -> None:
+        """Take every entry out and remove the mount directory; the episode form calls it when the turn ends."""
+        if self.loader is not None:
+            self.loader.root.update([])
+        if self.mount_dir is not None:
+            shutil.rmtree(self.mount_dir, ignore_errors=True)
+
     # -- the episode form ----------------------------------------------------------------------------------------
 
     @classmethod
-    def from_root(cls, root: Path) -> NativeHost:
-        """The rendered root's files read once at boot; a file that cannot load raises LoadError or GraphError."""
+    def from_root(cls, root: Path, mount_dir: Path | None = None) -> NativeHost:
+        """The rendered root read once at boot: its entries list through the node plugins when it carries one, else its files.
+
+        A tree boot needs ``mount_dir`` for the tool and hook modules and
+        needs every entry ACTIVE; a file that cannot load raises LoadError or
+        GraphError either way. The pinned model fields stay host state in
+        ``models.json`` whichever way the host was filled."""
+        tree = root / TREE_FILE
+        if tree.is_file():
+            return cls._from_tree(tree, mount_dir)
         host = cls()
         for tool in load_tools(root / "tools").values():
             host.add_tool(tool)
@@ -257,3 +278,66 @@ class NativeHost:
         if models.is_file():
             host.set_context_window("models.json", context_window_from(models))
         return host
+
+    @classmethod
+    def _from_tree(cls, tree: Path, mount_dir: Path | None) -> NativeHost:
+        """One fresh compose context over the entries list; the loader stays on the host for later mounts."""
+        # Late: the training package imports the harness, and the episode form pays for it only on a tree boot.
+        from reef.harness.native.plugins import NATIVE_PLUGINS
+        from reef.train.cordis_backend.compose import Context
+        from reef.train.cordis_backend.compose.loader import Loader
+
+        entries = tree_entries(tree)
+        if mount_dir is None:
+            raise LoadError(f"{tree.name} needs a mount directory for its tool and hook modules")
+        ctx = Context()
+        host = cls(mount_dir=mount_dir)
+        ctx.provide("native", host)
+        loader = Loader(ctx, NATIVE_PLUGINS.get)
+        loader.root.update(entries)
+        failure = tree_failure(loader)
+        if failure is not None:
+            # A boot that fails leaves nothing behind: the siblings that did load come out with their modules.
+            loader.root.update([])
+            raise LoadError(f"{tree.name} entry {failure[0]!r} cannot load: {failure[1]}")
+        host.loader = loader
+        return host
+
+
+def tree_entries(path: Path) -> list[dict[str, Any]]:
+    """The entries list a ``tree.json`` carries: a JSON array of objects with a string ``id`` and ``name``."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise LoadError(f"{path.name} cannot be read: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(entry, dict) for entry in data):
+        raise LoadError(f"{path.name} must be a JSON array of entry objects")
+    seen: set[str] = set()
+    for entry in data:
+        for key in ("id", "name"):
+            if not isinstance(entry.get(key), str) or not entry[key]:
+                raise LoadError(f"{path.name} entry {entry!r} requires a non-empty string {key!r}")
+        if entry["id"] in seen:
+            # The loader would keep the last one silently; a tree with two entries under one id is not one tree.
+            raise LoadError(f"{path.name} names entry {entry['id']!r} twice")
+        seen.add(entry["id"])
+    return [dict(entry) for entry in data]
+
+
+def tree_failure(loader: Any) -> tuple[str, str] | None:
+    """The first enabled entry that did not end ACTIVE, as (id, what went wrong); None when every entry stands."""
+    from reef.train.cordis_backend.compose import FiberState  # late: see _from_tree
+
+    for options in loader.root.data:
+        entry = loader.store.get(str(options.get("id")))
+        if entry is None or entry.disabled:
+            continue
+        kind = str(entry.options.get("name"))
+        if entry.fiber is None:
+            return entry.id, f"no plugin for kind {kind}"
+        if entry.fiber.state is not FiberState.ACTIVE:
+            return (
+                entry.id,
+                f"{kind}: {entry.fiber.error if entry.fiber.error is not None else entry.fiber.state.name}",
+            )
+    return None

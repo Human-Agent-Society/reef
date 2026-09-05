@@ -1478,3 +1478,68 @@ def test_git_install_kind_reinstalls_when_the_binary_carries_no_recorded_pin(tmp
     assert result.returncode == 0, result.stderr
     assert "already installed" not in result.stdout
     assert "git clone" in log.read_text()
+
+
+@pytest.mark.unit
+def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(tmp_path) -> None:
+    """The push half of the update channel: a resident harness learns of a new head on its next model call."""
+
+    async def run() -> None:
+        client = TestClient(
+            TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
+        )
+        await client.start_server()
+        try:
+            rows = (await (await client.get("/reef/scenarios/delivery/releases")).json())["releases"]
+            current = next(row["release_id"] for row in rows if row["current"])
+            body = {"messages": [{"role": "user", "content": "hi"}]}
+            response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "delivery"}, json=body)
+            assert response.status == 200 and response.headers["x-reef-release-id"] == current
+            manifest = await _gate_step(client)
+            assert manifest["release_id"] != current
+            for stream in (False, True):
+                response = await client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "delivery"},
+                    json={**body, "stream": stream},
+                )
+                assert response.status == 200
+                await response.read()
+                assert response.headers["x-reef-release-id"] == manifest["release_id"]
+                assert response.headers["x-reef-agent-record-id"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one(tmp_path, monkeypatch) -> None:
+    """``files.tree``: the base release carries the seed's list, a published release the commit's, byte for byte."""
+    carrying = dataclasses.replace(get_adapter("pi"), tree_path="pi-agent/tree.json")
+    monkeypatch.setitem(reef.harness.adapters._cache, "pi", carrying)
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=seed)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            base = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
+            assert base.status == 200
+            files = (await base.json())["files"]
+            assert json.loads(files["pi-agent/tree.json"]) == [dict(entry) for entry in seed]
+            manifest = await _gate_step(client)
+            text = manifest["files"]["pi-agent/tree.json"]
+            entries = json.loads(text)
+            assert [entry["id"] for entry in entries] == ["answer-style", "r1"]
+            assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
+            scenario = dispatcher.get_or_create_scenario("delivery")
+            assert scenario is not None
+            committed = scenario.entries_for_version(manifest["release_id"])
+            assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
+            assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
+        finally:
+            await client.close()
+
+    asyncio.run(run())

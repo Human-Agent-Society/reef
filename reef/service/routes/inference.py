@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from aiohttp import web
@@ -16,8 +17,15 @@ from reef.service.streaming import (
     receipt_sse_events,
     stream_record,
 )
+from reef.service.wire import RELEASE_ID_HEADER
 
 logger = logging.getLogger(__name__)
+
+
+async def _release_header(request_service: RequestService, headers: Mapping[str, str]) -> dict[str, str]:
+    """``x-reef-release-id`` on a file serving scenario's inference responses, so a resident harness learns of a new head on its next call."""
+    head = await asyncio.to_thread(request_service.harness_head, headers)
+    return {} if head is None else {RELEASE_ID_HEADER: head}
 
 
 class _SSERelay:
@@ -78,8 +86,11 @@ async def _relay_inference_stream(
         inference_backend,
     )
     response_headers = {
-        name: value for name, value in upstream.headers.items() if name.lower() != "x-reef-agent-record-id"
+        name: value
+        for name, value in upstream.headers.items()
+        if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
+    response_headers.update(await _release_header(request_service, request.headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),
         "",
@@ -168,7 +179,9 @@ def register_inference_routes(
             request.path,
             inference_backend,
         )
-        return web.json_response(response_payload, headers={"x-reef-agent-record-id": item.agent_record_id})
+        headers = {"x-reef-agent-record-id": item.agent_record_id}
+        headers.update(await _release_header(request_service, request.headers))
+        return web.json_response(response_payload, headers=headers)
 
     app.router.add_post("/v1/chat/completions", inference)
     app.router.add_post("/v1/messages", inference)

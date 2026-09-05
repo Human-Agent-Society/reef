@@ -331,11 +331,15 @@ NATIVE_HOOK = (
 
 
 def test_native_render_matches_the_golden_tree() -> None:
-    # The native harness loads Python extensions, so its golden carries a Python body.
-    nodes = [node for node in NODES if node[0] != "code_extension"]
-    extension = ("code_extension", {"name": "tracer", "code": "def tracer():\n    pass\n"})
-    rendered = render_composition([*nodes, extension, NATIVE_TOOL, NATIVE_HOOK], get_adapter("native"))
+    # The loop never reads a command or an extension, so native declares no path for either kind.
+    nodes = [node for node in NODES if node[0] not in ("agent_command", "code_extension")]
+    rendered = render_composition([*nodes, NATIVE_TOOL, NATIVE_HOOK], get_adapter("native"))
     assert rendered == golden_tree("native")
+    descriptor = get_adapter("native")
+    assert descriptor.tree_path == "native/tree.json" and get_adapter("pi").tree_path is None
+    for kind, node in (("agent_command", "summarize"), ("code_extension", "tracer")):
+        with pytest.raises(RenderError, match=f"does not render {kind} nodes"):
+            render_composition([node_ for node_ in NODES if node_[1].get("name") == node], descriptor)
 
 
 def test_config_nodes_deep_merge_in_tree_order() -> None:

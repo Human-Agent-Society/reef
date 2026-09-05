@@ -234,6 +234,8 @@ class Run:
     def model(self, graph: Graph, stage: Mapping[str, Any]) -> str:
         loop = self.loop
         self.close_step()
+        # Between two steps the serve form lands a queued mount, so what the host holds below is what this step runs on.
+        loop.before_step(self)
         if self.step >= graph.max_steps:
             self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1
@@ -325,7 +327,10 @@ class Run:
             if result.get("is_error") and (result.get("error") or {}).get("code") != "SANDBOX_FAILED":
                 self.tool_errors += 1
             # The log says what was enforced on this tool, whether or not the call reached its run.
-            enforcement = loop.enforcer.describe(tools.get(name))
+            called = tools.get(name)
+            # A host plane tool ran in process whatever the enforcer; the log says so.
+            enforcer = loop.enforcer if called is None else loop.enforcer_for(called, loop.enforcer)
+            enforcement = enforcer.describe(called)
             self.session.write(
                 "tool/result",
                 {"step": step, "call_id": call_id, "name": name, **result, "enforcement": enforcement},
@@ -521,7 +526,7 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
         return "ask", ask.reason
     run.close_step()
     failure = {"code": "GRAPH_ERROR", "message": f"graph {graph.name!r} took more than {limit} transitions"}
-    run.loop._abort(session, failure)
+    run.loop._abort(session, failure, turn=run.turn)
     raise _Stop(1)
 
 

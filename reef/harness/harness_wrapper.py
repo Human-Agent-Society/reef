@@ -48,13 +48,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Mapping
-from dataclasses import dataclass
-from http.server import ThreadingHTTPServer
+from collections.abc import Iterator, Mapping, MutableMapping
+from dataclasses import asdict, dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
-from reef_client.serve import CaptureStore, ServeConfig, build_handler
+from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
 from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import AdapterDescriptor
@@ -312,6 +312,144 @@ def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
+#: The response header Reef sets on every inference answer of a file serving scenario: the head release id.
+RELEASE_HEADER = "x-reef-release-id"
+#: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
+#: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed. Reef has no
+#: Responses route yet, so a codex tree bound to Reef sends its calls to a path nothing answers.
+CAPTURE_PATHS = ("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true")
+
+
+class ReleaseObserver(Protocol):
+    """Where the proxy hands the release id an inference response names."""
+
+    def observe(self, release_id: str) -> None: ...
+
+
+class _Tags(MutableMapping[str, str]):
+    """The proxy's tag channel: each name rides every forwarded call as ``x-reef-tag-<name>``."""
+
+    def __init__(self, config: ServeConfig, fixed: Mapping[str, str]) -> None:
+        self._config = config
+        self._fixed = dict(fixed)
+        self._tags: dict[str, str] = {}
+        self._publish()
+
+    def _publish(self) -> None:
+        # A fresh dict per change: a handler reads config.override_headers whole per request, never a torn one.
+        tagged = {f"x-reef-tag-{name}": value for name, value in self._tags.items()}
+        self._config.override_headers = {**self._fixed, **tagged}
+
+    def __getitem__(self, name: str) -> str:
+        return self._tags[name]
+
+    def __setitem__(self, name: str, value: str) -> None:
+        self._tags[name] = value
+        self._publish()
+
+    def __delitem__(self, name: str) -> None:
+        self._tags.pop(name)
+        self._publish()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(dict(self._tags))
+
+    def __len__(self) -> int:
+        return len(self._tags)
+
+
+class _TaggedStore(CaptureStore):
+    """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart."""
+
+    def __init__(self, tags: Mapping[str, str]) -> None:
+        super().__init__()
+        self._tags = tags
+        self._tagged: list[dict[str, Any]] = []
+        self._guard = threading.Lock()
+
+    def add(self, turn: CapturedTurn) -> None:
+        with self._guard:
+            super().add(turn)
+            self._tagged.append({**asdict(turn), "tags": dict(self._tags)})
+
+    def drain(self) -> list[dict[str, Any]]:
+        """The captures since the last drain, with their tags; what one publish carries."""
+        with self._guard:
+            turns, self._tagged = self._tagged, []
+            return turns
+
+
+def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObserver) -> type[BaseHTTPRequestHandler]:
+    class Handler(base):  # type: ignore[valid-type,misc]
+        def _relay(self, response: Any, *args: Any) -> None:
+            # Before the body reaches the agent: a head the answer names is queued by the time the agent reads it.
+            release = response.getheader(RELEASE_HEADER)
+            if release:
+                observer.observe(str(release))
+            super()._relay(response, *args)
+
+    return Handler
+
+
+class CaptureProxy:
+    """The capture proxy between an agent and Reef, in process.
+
+    Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
+    call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
+    and hands the release id an answer names to ``observer``."""
+
+    def __init__(
+        self,
+        upstream: str,
+        scenario: str,
+        token: str | None = None,
+        *,
+        tags: Mapping[str, str] | None = None,
+        observer: ReleaseObserver | None = None,
+    ) -> None:
+        self.upstream = upstream
+        self.scenario = scenario
+        fixed: dict[str, str] = {"x-reef-scenario": scenario}
+        if token:
+            fixed["authorization"] = f"Bearer {token}"
+        self._config = ServeConfig(upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS)
+        #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
+        self.tags: MutableMapping[str, str] = _Tags(self._config, fixed)
+        for name, value in (tags or {}).items():
+            self.tags[name] = value
+        self._store = _TaggedStore(self.tags)
+        handler = build_handler(self._config, self._store)
+        self._handler = handler if observer is None else _observing_handler(handler, observer)
+        self._server: ThreadingHTTPServer | None = None
+
+    @property
+    def port(self) -> int:
+        if self._server is None:
+            raise WrapperError("the capture proxy is not running")
+        return int(self._server.server_address[1])
+
+    def start(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), self._handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self._server = server
+        if not _wait_for_proxy(self.port):
+            self.stop()
+            raise WrapperError("capture proxy failed to start")
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+
+    def publish_turn(self) -> int:
+        """Spool the receipts captured since the last publish, so ``report`` claims them; the count written."""
+        turns = self._store.drain()
+        if turns:
+            _publish_captures(self.upstream, self.scenario, turns)
+        return len(turns)
+
+
 #: The release sidecar the install script and harness_pull write at the tree
 #: root; version_check.ts reads the same name.
 HARNESS_RELEASE_SIDECAR = ".reef-harness-release"
@@ -336,34 +474,16 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         sys.exit(f"reef-{adapter}: no Reef URL in the tree's model binding files")
     upstream = _strip_v1(reef_url)
 
-    store = CaptureStore()
-    override: dict[str, str] = {"x-reef-scenario": scenario}
     release = _installed_release(compose_dir)
-    if release:
-        # The opaque tag channel: the record keeps which release answered on
-        # the client, under metadata.tags.release.
-        override["x-reef-tag-release"] = release
-    token = os.environ.get("REEF_TOKEN")
-    if token:
-        override["authorization"] = f"Bearer {token}"
-
-    config = ServeConfig(
-        upstream=upstream,
-        listen_port=0,
-        override_headers=override,
-        # The inference paths Reef serves; a receipt rides on each. The proxy matches the path with its
-        # query, and the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
-        # Reef has no Responses route yet, so a codex tree bound to Reef sends its calls to a path nothing answers.
-        capture_paths=("/v1/chat/completions", "/v1/messages", "/v1/messages?beta=true"),
+    proxy = CaptureProxy(
+        upstream, scenario, os.environ.get("REEF_TOKEN"), tags={"release": release} if release else {}
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), build_handler(config, store))
-    proxy_port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    if not _wait_for_proxy(proxy_port):
-        sys.exit(f"reef-{adapter}: capture proxy failed to start")
+    try:
+        proxy.start()
+    except WrapperError as exc:
+        sys.exit(f"reef-{adapter}: {exc}")
 
-    temp_dir = _create_temp_composition(adapter, compose_dir, proxy_port)
+    temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
     env = os.environ.copy()
     env[env_var] = temp_dir
     # The update notice extension needs the service address, the scenario,
@@ -378,11 +498,16 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     try:
         result = subprocess.run([binary, *args], env=env)
     finally:
-        _publish_captures(upstream, scenario, store.snapshot())
-        server.shutdown()
+        proxy.publish_turn()
+        proxy.stop()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     sys.exit(result.returncode)
+
+
+def _reportable(turn: Mapping[str, Any]) -> bool:
+    """A captured exchange with a receipt that was not a trial's: a trial never reaches the gate."""
+    return bool(turn.get("receipt")) and "trial" not in (turn.get("tags") or {})
 
 
 def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt: bool = False) -> None:
@@ -395,7 +520,7 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
         try:
             data = json.loads(captures_file.read_text(encoding="utf-8"))
             reef_url = data["reef_url"]
-            receipts = [t["receipt"] for t in data["turns"] if t.get("receipt")]
+            receipts = [t["receipt"] for t in data["turns"] if _reportable(t)]
         except BaseException:
             os.replace(captures_file, pending_file)
             raise

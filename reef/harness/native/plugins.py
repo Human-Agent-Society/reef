@@ -14,7 +14,7 @@ instead of installing nothing.
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.harness import nodes
@@ -125,27 +125,39 @@ class ConfigPlugin(NodePlugin):
 
     def apply(self, ctx: Any, config: Any) -> None:
         nodes.config_node(ctx, config)
-        target = config.get("target", "primary")
-        if target != "models":
-            raise ValueError(
-                f"config node target {target!r} renders to a file the native loop never reads; the host reads "
-                "target 'models' only"
-            )
-        data = config["data"]
-        pinned = sorted(set(data) & set(PINNED_MODEL_FIELDS))
-        if pinned:
-            raise ValueError(
-                f"config node target 'models' cannot set {', '.join(pinned)}: the host pins the binding from the "
-                "installed models.json"
-            )
-        window = data.get("context_window")
+        window = check_native_config(config)
         if window is None:
             return
-        if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
-            raise ValueError("config node 'context_window' must be a positive integer")
         host: NativeHost = ctx.native
         key = _key(ctx, host)
         ctx.effect(lambda: host.set_context_window(key, int(window)), f"config {key}")
+
+
+def check_native_config(config: Mapping[str, Any]) -> int | None:
+    """The context window a config node sets, None when it sets none; a ValueError for one the host cannot serve.
+
+    Admission calls this for a native tree so a config the boot would refuse
+    never wins a gate: a target the loop never reads, a pinned binding field,
+    a window that is not a positive integer."""
+    target = config.get("target", "primary")
+    if target != "models":
+        raise ValueError(
+            f"config node target {target!r} renders to a file the native loop never reads; the host reads "
+            "target 'models' only"
+        )
+    data = config.get("data") or {}
+    pinned = sorted(set(data) & set(PINNED_MODEL_FIELDS))
+    if pinned:
+        raise ValueError(
+            f"config node target 'models' cannot set {', '.join(pinned)}: the host pins the binding from the "
+            "installed models.json"
+        )
+    window = data.get("context_window")
+    if window is None:
+        return None
+    if isinstance(window, bool) or not isinstance(window, int) or window <= 0:
+        raise ValueError("config node 'context_window' must be a positive integer")
+    return window
 
 
 NATIVE_PLUGINS: dict[str, NodePlugin] = {
