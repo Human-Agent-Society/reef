@@ -1,4 +1,4 @@
-"""Spawned CPU worker ranks with ordered, non-retrying control RPC.
+"""Spawned worker ranks with ordered, non-retrying control RPC.
 
 No Ray/Torch dependency, forked CUDA state, or model parallel rendezvous.
 Workers and RPC arguments must be pickleable/importable under Python spawn.
@@ -20,7 +20,7 @@ from typing import Any, Literal, overload
 
 from reef.runtime.executor.base import Executor, ExecutorFuture, resolve_class
 from reef.runtime.executor.failure import ExecutorFailure, FailureState
-from reef.runtime.executor.local import LocalExecutorFuture
+from reef.runtime.executor.uniproc import ConcurrentExecutorFuture
 
 
 def _terminate_worker(signum, frame) -> None:
@@ -42,7 +42,10 @@ def _reply(connection: Connection, ok: bool, value: Any) -> None:
     connection.send_bytes(data)
 
 
-def _worker_main(connection: Connection, spec_data: bytes) -> None:
+def _worker_main(connection: Connection, spec_data: bytes, cuda_visible_devices: str | None) -> None:
+    # Set visibility before unpickling/importing the worker or scorer module.
+    if cuda_visible_devices is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
     signal.signal(signal.SIGTERM, _terminate_worker)
     threading.Thread(target=_watch_parent, daemon=True, name="reef-worker-owner").start()
     worker = None
@@ -75,11 +78,15 @@ def _worker_main(connection: Connection, spec_data: bytes) -> None:
 
 
 class _Rank:
-    def __init__(self, context, spec_data: bytes, index: int, failure_state: FailureState) -> None:
+    def __init__(
+        self, context, spec_data: bytes, index: int, failure_state: FailureState, cuda_visible_devices=None
+    ) -> None:
         self.failure_state = failure_state
         self.index = index
         self.connection, child = context.Pipe()
-        self.process = context.Process(target=_worker_main, args=(child, spec_data), name=f"reef-worker-{index}")
+        self.process = context.Process(
+            target=_worker_main, args=(child, spec_data, cuda_visible_devices), name=f"reef-worker-{index}"
+        )
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"reef-rpc-{index}")
         try:
             self.process.start()
@@ -132,22 +139,33 @@ class MultiprocExecutor(Executor):
         self._shutdown_lock = threading.Lock()
         self._shutdown_complete = threading.Event()
         self._monitor_thread: threading.Thread | None = None
-        if self.config.options or any(spec.options for spec in self.config.workers):
-            raise ValueError("MultiprocExecutor does not reserve GPU/cluster resources or accept worker options")
+        if self.config.options or any(set(spec.options) - {"cuda_visible_devices"} for spec in self.config.workers):
+            raise ValueError("MultiprocExecutor accepts only per-worker cuda_visible_devices, not cluster options")
+        for spec in self.config.workers:
+            if "cuda_visible_devices" in spec.options and not isinstance(spec.options["cuda_visible_devices"], str):
+                raise ValueError("cuda_visible_devices must be a string")
         # Serialize every worker before starting any child; no silent fallback
         # to fork, cloudpickle or shared in-process objects for closures/locks.
         try:
             specs = [pickle.dumps(spec) for spec in self.config.workers]
         except Exception as exc:
             raise TypeError(
-                "mp workers must be spawn-pickleable; use importable classes/scorers or explicit local"
+                "mp workers must be spawn-pickleable; use importable classes/scorers or one uni worker"
             ) from exc
         context = multiprocessing.get_context("spawn")
         timeout = self.config.launch_timeout_s
         deadline = None if timeout is None else monotonic() + timeout
         try:
-            for index, spec in enumerate(specs):
-                self._ranks.append(_Rank(context, spec, index, self._failure_state))
+            for index, spec_data in enumerate(specs):
+                self._ranks.append(
+                    _Rank(
+                        context,
+                        spec_data,
+                        index,
+                        self._failure_state,
+                        self.config.workers[index].options.get("cuda_visible_devices"),
+                    )
+                )
             for rank in self._ranks:
                 remaining = None if deadline is None else max(0.0, deadline - monotonic())
                 if not rank.connection.poll(remaining):
@@ -224,7 +242,7 @@ class MultiprocExecutor(Executor):
         self._ensure_open()
         data = pickle.dumps((method, args, dict(kwargs or {})))
         pending = [self._failure_state.track(rank.pool.submit(rank.call, data)) for rank in self._ranks]
-        future = LocalExecutorFuture(pending, timeout=timeout)
+        future = ConcurrentExecutorFuture(pending, timeout=timeout)
         return future if non_block else future.result()
 
     def rpc(
@@ -243,7 +261,7 @@ class MultiprocExecutor(Executor):
         data = pickle.dumps((method, args, dict(kwargs or {})))
         worker = self._ranks[rank]
         pending = self._failure_state.track(worker.pool.submit(worker.call, data))
-        future = LocalExecutorFuture([pending], single=True, timeout=timeout)
+        future = ConcurrentExecutorFuture([pending], single=True, timeout=timeout)
         return future if non_block else future.result()
 
     def check_health(self, timeout: float | None = None) -> None:

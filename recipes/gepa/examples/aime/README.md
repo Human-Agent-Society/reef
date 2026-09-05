@@ -60,14 +60,53 @@ comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
 tree; the Pi episodes authenticate to the local service with a placeholder.
 
-The validation pool explicitly uses `execution.evolution.backend: local`: its
-workers are persistent in-process objects with RPC threads, not 128 spawned
-processes. The scorer reads the AIME answer table registered by this driver,
-so switching to `mp` or Ray also requires making that table available in each
-worker; changing only the YAML backend would lose the answers. Episode
-subprocesses and temporary directories remain isolated. The driver forwards
-optional top-level `execution` and `executors` sections, including named
-profiles containing the backend, worker count, and per-worker CPU/GPU requests.
+The validation pool defaults to `auto`: one worker selects `uni`, multiple
+workers select `mp` (or Ray in an existing multi-worker placement group).
+The former `local` thread-pool executor has been removed. The retained
+concurrency default of 128 now means 128 persistent Python worker processes;
+reduce `REEF_GEPA_WORKERS` to fit host memory and provider rate limits, for
+example `REEF_GEPA_WORKERS=4 ./run.sh`. Set `REEF_GEPA_EXECUTOR=ray` for Ray
+actors, or `REEF_GEPA_EXECUTOR=uni REEF_GEPA_WORKERS=1` for one in-process
+worker. At recipe construction,
+the driver binds the scoring/feedback hooks to a serializable snapshot of the
+answer and context tables. Workers do not rely on driver globals, and later
+registrations do not change an existing recipe. Labels stay in scorer state,
+not in the task prompts or rendered harness files. Episode subprocesses and
+temporary directories remain isolated. Custom hooks are preserved; they must
+carry their own serializable state when used across processes.
+
+For example, a two-worker local Ray run:
+
+```bash
+pip install 'ray[default]'
+REEF_GEPA_EXECUTOR=ray REEF_GEPA_WORKERS=2 ./run.sh
+```
+
+To use an existing cluster, also set `RAY_ADDRESS` to its connection address
+(for example `ray://head-node:10001`). Use compatible Python/Ray versions and
+install the same Reef revision, Node.js, and Pi `0.84.2` on every worker node.
+`REEF_PI_BINARY` must resolve on every node (use `pi` on PATH or a common
+absolute installation path). The driver uploads only this example's
+`harness/` Python package through Ray's runtime environment, not the work
+directory or credentials. If embedding the driver in an already initialized
+Ray runtime, provision that package there yourself; the driver neither
+reconfigures nor shuts down a runtime it does not own.
+
+Ray affects **only the mechanism's candidate/current validation pool**. The
+driver's minibatch and held-out test passes still use local threads. Validation
+workers call the configured upstream model directly; they do not need access
+to the embedded loopback service. They do need network access to the provider,
+and receive the model credential in their transient episode binding, so use
+only trusted Ray nodes. The embedded service remains bound to `127.0.0.1`.
+
+Size the Ray pool to available resources and provider rate limits: each worker
+requests one logical CPU and zero GPUs by default, so the default 128 workers
+would require 128 available logical CPUs for the whole pool to become ready.
+Override `execution.evolution.resources.cpus_per_worker` only when appropriate
+for the workload. Worker count is fixed for a run, not autoscaling.
+The driver still forwards top-level `execution` and `executors`, including
+named profiles and Ray actor options such as `runtime_env`. `--dry-run`
+validates the recipe but does not launch workers or check remote dependencies.
 
 One round is: pull the served tree, take the method's plan for the iteration
 (its parent choice and its three training problems), run each as a Pi episode against that tree with a

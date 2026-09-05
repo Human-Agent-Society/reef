@@ -32,10 +32,10 @@ EVOLUTION_CONFIGS = (
 @pytest.mark.parametrize("relative", SERVICE_CONFIGS)
 def test_examples_keep_service_processes_local_and_slime_workers_on_ray(relative):
     config = yaml.safe_load((ROOT / relative).read_text())
-    assert config["execution"]["services"] == "local"
+    assert config["execution"]["services"] == "auto"
     services = validate_services(config, relative)
     for service in services:
-        assert service_executor_selection(config, service).settings.backend == "local"
+        assert service_executor_selection(config, service).settings.backend == "uni"
     if any(service["name"] == "slime-driver" for service in services):
         for role in ("training", "rollout"):
             assert config["execution"][role] == "ray"
@@ -47,10 +47,18 @@ def test_cpu_evolution_examples_select_uni_then_mp_without_changing_isolation(re
     config = yaml.safe_load((ROOT / relative).read_text())
     evolution = config["evolution"]
     assert config["execution"]["evolution"]["workers"] == 1
-    assert config["execution"]["evolution"]["backend"] == "auto"
+    assert set(config["execution"]["evolution"]) == {"workers"}
     assert not {"episode_workers", "worker_executor", "worker_resources"} & evolution.keys()
     assert evolution.get("executor", "local") == "local"
     for workers, expected in ((1, "uni"), (2, "mp")):
         config["execution"]["evolution"]["workers"] = workers
         settings = role_executor_settings(config, "evolution")
+        assert settings.backend == "auto"
         assert select_executor(settings, role="evolution").settings.backend == expected
+
+
+def test_gepa_allows_backend_selection_without_default_resource_boilerplate():
+    config = yaml.safe_load((ROOT / "recipes/gepa/examples/aime/gepa.yaml").read_text())
+    execution = config["execution"]["evolution"]
+    assert set(execution) == {"backend", "workers"}
+    assert execution["backend"] == "${REEF_GEPA_EXECUTOR}"

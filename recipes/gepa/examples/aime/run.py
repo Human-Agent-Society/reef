@@ -33,11 +33,13 @@ import threading
 import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from aiohttp import web
 
+import harness
 from harness import aime
 from harness.heldout import CheckpointedEvaluator
 from recipes.gepa.archive import Archive
@@ -55,6 +57,7 @@ from reef.runtime.inference import HttpInferenceBackend, provider_request_header
 from reef.service.app import create_app
 from reef.service.deploy.config import load_config
 from reef.service.wire import SCENARIO_HEADER
+from reef.train.cordis_backend.execution import evaluation_selection
 
 HERE = Path(__file__).resolve().parent
 # run.sh exports these; the defaults repeat here so the module imports (and
@@ -64,6 +67,7 @@ os.environ.setdefault("REEF_WORK", str(HERE / "work"))
 os.environ.setdefault("REEF_MODEL", "gpt-4.1-mini-2025-04-14")
 os.environ.setdefault("REEF_PI_BINARY", "pi")
 os.environ.setdefault("REEF_GEPA_WORKERS", "128")
+os.environ.setdefault("REEF_GEPA_EXECUTOR", "auto")
 
 WORK = Path(os.environ["REEF_WORK"])
 SCENARIO = os.environ.get("REEF_GEPA_SCENARIO", "gepa-aime")
@@ -77,7 +81,7 @@ COMPONENTS = ["rules", "skill"] if MULTI else ["rules"]
 EMBEDDED_KEY = "reef-embedded"
 EPISODE_TIMEOUT_S = 600.0
 # Episodes are independent: the mechanism's validation pass (gepa.yaml's
-# episode_workers), the driver's minibatch, and the test passes all run this
+# execution.evolution.workers), the driver's minibatch, and the test passes all run this
 # many at once. It only changes wall time, never sampling or scoring.
 WORKERS = int(os.environ["REEF_GEPA_WORKERS"])
 STEP_TIMEOUT_S = 7200.0
@@ -96,6 +100,14 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     sections.update({key: config[key] for key in ("execution", "executors") if key in config})
     evolution = dict(sections["evolution"])
     evolution["tasks"] = tasks
+    # Importable functions alone do not carry the driver's populated globals
+    # into spawn/Ray workers. Bind the example hooks to explicit task data;
+    # preserve user-supplied hooks when a config overrides either one.
+    scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
+    if evolution.get("evaluate") == "harness.aime:evaluate":
+        evolution["evaluate"] = scorer.evaluate
+    if evolution.get("feedback") == "harness.aime:feedback":
+        evolution["feedback"] = scorer.feedback
     # One --seed drives both random draws: the proposer's parent sampling
     # (evolution.gepa.seed) and the driver's minibatch order.
     evolution["gepa"] = {**evolution["gepa"], "seed": seed}
@@ -118,6 +130,29 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     )
     recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
     return recipe.name, recipe
+
+
+@contextmanager
+def worker_runtime(recipe):
+    """Ship only the example's harness package; nodes provide Reef and Pi.
+
+    Ray reads RAY_ADDRESS when set; without it, start a local Ray runtime.
+    Do not tear down an externally owned runtime when embedding this driver.
+    """
+    selection, _ = evaluation_selection(recipe.score_episode, None, recipe.worker_executor)
+    if selection.settings.backend != "ray":
+        yield
+        return
+    import ray
+
+    owned = not ray.is_initialized()
+    if owned:
+        ray.init(runtime_env={"py_modules": [harness]})
+    try:
+        yield
+    finally:
+        if owned:
+            ray.shutdown()
 
 
 def provider_key() -> str:
@@ -469,41 +504,42 @@ def main() -> None:
         for relative, text in seed_tree(recipe).items():
             (bootstrap / relative).parent.mkdir(parents=True, exist_ok=True)
             (bootstrap / relative).write_text(text, encoding="utf-8")
-    service = RunService(
-        scenario=SCENARIO,
-        recipe_name=recipe_name,
-        recipe=recipe,
-        bootstrap_tree=bootstrap,
-        run_dir=WORK,
-        upstream_url=aime.OPENAI_BASE_URL,
-        upstream_key=key,
-        port=0,
-    )
-    service.start()
-    try:
-        client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
-        search(service, client, binary, trainset, len(valset), args.budget, args.seed)
-        scores = test_passes(service, recipe, client, binary, testset)
-        final = archive()
-        summary = {
-            "scenario": SCENARIO,
-            "seed": args.seed,
-            "components": COMPONENTS,
-            "candidates": len(final.candidates),
-            "metric_calls": final.metric_calls,
-            "steps": final.steps,
-            "validation_seed_score": final.mean_val(0),
-            "validation_selected_score": None if final.served is None else final.mean_val(final.served),
-            "frozen_test_score": scores["frozen"],
-            "selected_test_score": scores["selected"],
-            "test_delta": scores["selected"] - scores["frozen"],
-            # The retained official arm, so the run reads beside its target.
-            "official_reference": json.loads(RESULTS.read_text(encoding="utf-8"))["results"]["reference"],
-        }
-        (WORK / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        print(json.dumps(summary, indent=2, sort_keys=True))
-    finally:
-        service.stop()
+    with worker_runtime(recipe):
+        service = RunService(
+            scenario=SCENARIO,
+            recipe_name=recipe_name,
+            recipe=recipe,
+            bootstrap_tree=bootstrap,
+            run_dir=WORK,
+            upstream_url=aime.OPENAI_BASE_URL,
+            upstream_key=key,
+            port=0,
+        )
+        try:
+            service.start()
+            client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
+            search(service, client, binary, trainset, len(valset), args.budget, args.seed)
+            scores = test_passes(service, recipe, client, binary, testset)
+            final = archive()
+            summary = {
+                "scenario": SCENARIO,
+                "seed": args.seed,
+                "components": COMPONENTS,
+                "candidates": len(final.candidates),
+                "metric_calls": final.metric_calls,
+                "steps": final.steps,
+                "validation_seed_score": final.mean_val(0),
+                "validation_selected_score": None if final.served is None else final.mean_val(final.served),
+                "frozen_test_score": scores["frozen"],
+                "selected_test_score": scores["selected"],
+                "test_delta": scores["selected"] - scores["frozen"],
+                # The retained official arm, so the run reads beside its target.
+                "official_reference": json.loads(RESULTS.read_text(encoding="utf-8"))["results"]["reference"],
+            }
+            (WORK / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            print(json.dumps(summary, indent=2, sort_keys=True))
+        finally:
+            service.stop()
 
 
 if __name__ == "__main__":

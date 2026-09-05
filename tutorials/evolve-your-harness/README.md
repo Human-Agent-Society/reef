@@ -60,11 +60,14 @@ serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 s
 
 ## Worker execution
 
-The configs launch the Reef service locally (`execution.services: local`).
+The configs default to `auto`; the single service controller resolves to `uni`.
 Worker placement defaults to `execution.evolution.backend: auto` with
 `execution.evolution.workers: 1`: one CPU worker uses `uni`; increasing the count selects
 spawned `mp` workers. Model inference still runs at the configured upstream
 endpoint, so these scorers do not reserve GPUs.
+
+The YAML only needs the worker count; `backend: auto` and resource requests
+can be omitted. Local workers are not pinned or limited to one CPU core.
 
 The worker/scorer pool is reused across evaluations and released when its
 scenario closes. Each episode still starts a separate harness process in a
@@ -77,15 +80,11 @@ The demo's materializer also preserves optional top-level `execution` and
 
 ```yaml
 execution:
-  services: local
+  services: auto
   evolution: cpu-pool
 executors:
   cpu-pool:
-    backend: auto
     workers: 8
-    resources:
-      cpus_per_worker: 1
-      gpus_per_worker: 0
 ```
 
 CPU requests do not enforce core limits on local workers. Ray uses CPU/GPU

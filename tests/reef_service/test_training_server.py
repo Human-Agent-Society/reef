@@ -732,7 +732,7 @@ def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, retur
     from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
-    from reef.runtime.executor.local import LocalExecutor
+    from reef.runtime.executor.uniproc import UniProcExecutor
 
     class Worker:
         def status(self):
@@ -741,7 +741,7 @@ def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, retur
         def read_log(self, *args):
             return "", 0
 
-    stack._executors["service"] = LocalExecutor.from_workers([Worker()])
+    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
 
     stack._watchdog()
 
@@ -755,7 +755,7 @@ def test_watchdog_does_not_reclassify_a_signal_driven_child_exit(tmp_path: Path)
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
     # Simulate a signal arriving after the watchdog began its polling pass but
     # before shutdown made the child exit.
-    from reef.runtime.executor.local import LocalExecutor
+    from reef.runtime.executor.uniproc import UniProcExecutor
 
     class Worker:
         def status(self):
@@ -765,7 +765,7 @@ def test_watchdog_does_not_reclassify_a_signal_driven_child_exit(tmp_path: Path)
         def read_log(self, *args):
             return "", 0
 
-    stack._executors["service"] = LocalExecutor.from_workers([Worker()])
+    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
 
     stack._watchdog()
 

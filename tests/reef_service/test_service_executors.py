@@ -12,14 +12,14 @@ import yaml
 
 from reef.runtime.executor import ExecutorConfig
 from reef.runtime.executor.config import executor_settings, role_executor_settings
-from reef.runtime.executor.local import LocalExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service.deploy.config import DeployConfigError, validate_services
 from reef.service.deploy.execution import service_executor_config
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 
 
-class RecordingExecutor(LocalExecutor):
+class RecordingExecutor(UniProcExecutor):
     created: list[ExecutorConfig] = []
 
     def _init_executor(self):
@@ -105,7 +105,7 @@ def test_startup_failure_rolls_back_healthy_dependencies(tmp_path):
         ({"executor": "missing"}, "invalid class import path"),
         ({"executor": "ray", "cuda": "0"}, "num_gpus"),
         ({"executor": "ray", "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "num_gpus"),
-        ({"executor": "local", "resources": {"num_gpus": 1}}, "reservations require"),
+        ({"executor": "uni", "resources": {"num_gpus": 1}}, "reservations require"),
         ({"ready_timeout": 0}, "positive"),
         ({"executor": {"backend": "ray", "options": {"max_restarts": -1}}}, "replay"),
     ],
@@ -145,7 +145,7 @@ def test_named_role_selectors_share_one_configuration_contract():
     }
     assert role_executor_settings(config, "training", "ray") == executor_settings(config, "custom")
     assert role_executor_settings(config, "rollout", "ray").options == {"queue": "gpu"}
-    assert role_executor_settings(config, "services", "local").backend == "local"
+    assert role_executor_settings(config, "services", "uni").backend == "uni"
 
 
 @pytest.mark.parametrize("cli", [False, True])
@@ -241,7 +241,7 @@ def test_shutdown_reaches_all_executors_even_if_one_fails(tmp_path):
 
     stack = _Stack({}, [], tmp_path, 5, tmp_path / "config.yaml")
     for name in ("dependency", "dependent"):
-        stack._executors[name] = LocalExecutor.from_workers([Worker(name)])
+        stack._executors[name] = UniProcExecutor.from_workers([Worker(name)])
     stack.shutdown(grace=0)
     assert events == [
         ("dependent", "stop"),

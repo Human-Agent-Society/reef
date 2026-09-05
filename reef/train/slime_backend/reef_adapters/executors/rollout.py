@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from reef.runtime.executor.delegating import DelegatingExecutor
-from reef.runtime.executor.local import LocalExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_ROLLOUT_EXECUTOR as DEFAULT_ROLLOUT_EXECUTOR,
 )
@@ -26,7 +26,7 @@ class SlimeRayRolloutExecutor(DelegatingExecutor):
         from reef.train.slime_backend.reef_adapters.executors.rollout_worker import SlimeRayRolloutWorker
 
         self._worker = SlimeRayRolloutWorker(**dict(self.config.options))
-        self._rpc = LocalExecutor.from_workers([self._worker], owned=True)
+        self._rpc = UniProcExecutor.from_workers([self._worker], owned=True)
 
     def check_health(self, timeout: float | None = None) -> None:
         self._rpc.rpc(0, "check_health", timeout=timeout)

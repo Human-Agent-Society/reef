@@ -458,7 +458,7 @@ def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
             raise RuntimeConfigError("runtime.executor.workers entries must be WorkerSpec objects or mappings")
     try:
         return ExecutorConfig(
-            backend=value.get("backend", "ray"),
+            backend=value.get("backend", "auto"),
             workers=tuple(specs),
             options=value.get("options", {}),
         )

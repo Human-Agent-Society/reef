@@ -727,8 +727,8 @@ class CordisBackend(TrainingBackend):
                     self._episode_timeout_s,
                     self._executor,
                     forbid_residue,
-                    self._worker_selection.settings.backend not in ("uni", "local"),
-                    self._worker_selection.settings.backend not in ("uni", "local", "mp"),
+                    self._worker_selection.settings.backend != "uni",
+                    self._worker_selection.settings.backend not in ("uni", "mp"),
                 ),
             ),
         )

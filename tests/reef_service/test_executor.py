@@ -4,16 +4,38 @@ import pickle
 import subprocess
 import sys
 import threading
+from concurrent.futures import CancelledError, Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec, resolve
-from reef.runtime.executor.local import LocalExecutor
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.executor.uniproc import ConcurrentExecutorFuture, UniProcExecutor
 
 pytestmark = pytest.mark.unit
+
+
+def test_concurrent_future_normalizes_only_wait_timeouts():
+    pending = Future()
+    wrapped = ConcurrentExecutorFuture([pending], single=True)
+    with pytest.raises(TimeoutError, match="executor RPC timed out"):
+        wrapped.result(timeout=0)
+    assert not pending.cancelled()
+    error = FutureTimeoutError("worker deadline")
+    pending.set_exception(error)
+    with pytest.raises(FutureTimeoutError) as caught:
+        wrapped.result(timeout=0)
+    assert caught.value is error
+
+
+def test_concurrent_future_preserves_cancellation():
+    pending = Future()
+    pending.cancel()
+    with pytest.raises(CancelledError):
+        ConcurrentExecutorFuture([pending]).result(timeout=0)
 
 
 class Worker:
@@ -35,7 +57,7 @@ class Worker:
         self.stopped += 1
 
 
-class CustomExecutor(LocalExecutor):
+class CustomExecutor(UniProcExecutor):
     pass
 
 
@@ -157,10 +179,10 @@ def fake_ray(monkeypatch):
     return ray
 
 
-def test_factory_launches_local_workers_and_dispatches_ranked_rpc():
+def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rpc():
     executor = Executor.create(
         ExecutorConfig(
-            backend="local",
+            backend="auto",
             workers=(WorkerSpec(Worker, (0,)), WorkerSpec(Worker, (1,), {"offset": 3})),
         )
     )
@@ -172,7 +194,6 @@ def test_factory_launches_local_workers_and_dispatches_ranked_rpc():
             executor.reinitialize_distributed({"world_size": 1})
     finally:
         executor.shutdown()
-    assert all(worker.stopped == 1 for worker in executor.workers)
 
 
 @pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor", f"{__name__}.CustomExecutor"])
@@ -237,26 +258,22 @@ from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 class Worker:
     def value(self):
         return 42
-executor = Executor.create(ExecutorConfig(backend='local', workers=(WorkerSpec(Worker),)))
+executor = Executor.create(ExecutorConfig(backend='uni', workers=(WorkerSpec(Worker),)))
 assert executor.collective_rpc('value') == [42]
 executor.shutdown()
 """
     subprocess.run([sys.executable, "-c", code], check=True, capture_output=True, text=True)
 
 
-def test_local_collective_fans_out_before_waiting():
-    barrier = threading.Barrier(3)
-    executor = LocalExecutor.from_workers([RendezvousWorker(rank, barrier) for rank in range(3)])
-    try:
-        assert executor.collective_rpc("rendezvous", timeout=2) == [0, 1, 2]
-    finally:
-        executor.shutdown()
+def test_uni_rejects_multiple_attached_workers():
+    with pytest.raises(ValueError, match="at most one worker"):
+        UniProcExecutor.from_workers([Worker(), Worker()])
 
 
 def test_local_timeout_does_not_retry_or_cancel_worker():
     event = threading.Event()
     worker = WaitingWorker(event)
-    executor = LocalExecutor.from_workers([worker])
+    executor = UniProcExecutor.from_workers([worker])
     try:
         future = executor.rpc(0, "wait", non_block=True)
         assert isinstance(future, ExecutorFuture)
@@ -297,7 +314,7 @@ def test_resolve_preserves_values_shapes_and_shares_timeout_deadline(monkeypatch
 @pytest.mark.parametrize("owned", [False, True])
 def test_local_attachment_ownership_and_shutdown_are_explicit(owned):
     worker = Worker()
-    executor = LocalExecutor.from_workers([worker], owned=owned)
+    executor = UniProcExecutor.from_workers([worker], owned=owned)
     executor.shutdown()
     executor.shutdown()
     assert worker.stopped == int(owned)
@@ -307,25 +324,14 @@ def test_local_attachment_ownership_and_shutdown_are_explicit(owned):
         executor.rpc(0, "compute", args=(0,))
 
 
-def test_local_launch_rolls_back_created_workers():
-    created = Worker()
-
-    class CreatedWorker:
-        def __new__(cls):
-            return created
-
-    class BrokenWorker:
-        def __init__(self):
-            raise ValueError("launch failed")
-
-    with pytest.raises(ValueError, match="launch failed"):
-        Executor.create(ExecutorConfig(backend="local", workers=(WorkerSpec(CreatedWorker), WorkerSpec(BrokenWorker))))
-    assert created.stopped == 1
+def test_uni_rejects_multiple_specs_before_launch():
+    with pytest.raises(ValueError, match="at most one worker"):
+        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
 
 
 def test_local_rejects_gpu_resource_options():
     with pytest.raises(ValueError, match="resource or backend options"):
-        Executor.create(ExecutorConfig(backend="local", workers=(WorkerSpec(Worker, options={"num_gpus": 1}),)))
+        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker, options={"num_gpus": 1}),)))
 
 
 def test_ray_launch_passes_resource_options_and_collective_fans_out(fake_ray):
@@ -369,7 +375,7 @@ def test_ray_launch_rolls_back_partial_allocation(fake_ray):
             raise ValueError("launch failed")
 
     with pytest.raises(ValueError, match="launch failed"):
-        Executor.create(ExecutorConfig(workers=(WorkerSpec(Worker), WorkerSpec(BrokenWorker))))
+        Executor.create(ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(BrokenWorker))))
     assert len(fake_ray.created) == 1
     assert fake_ray.killed == fake_ray.created
 
@@ -384,7 +390,7 @@ def test_ray_launch_rolls_back_async_constructor_failure(fake_ray, monkeypatch):
 
     monkeypatch.setattr(FakeActorBuilder, "remote", fail_ready)
     with pytest.raises(ValueError, match="async constructor failed"):
-        Executor.create(ExecutorConfig(workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
+        Executor.create(ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
     assert len(fake_ray.created) == 2
     assert fake_ray.killed == fake_ray.created
 
@@ -459,7 +465,7 @@ def test_ray_rejects_automatic_mutation_retries(fake_ray):
     assert fake_ray.created == []
 
 
-@pytest.mark.parametrize("executor_cls", [LocalExecutor, RayExecutor])
+@pytest.mark.parametrize("executor_cls", [UniProcExecutor, RayExecutor])
 @pytest.mark.parametrize("rank", [-1, 1, True, "0"])
 def test_rpc_rejects_invalid_rank(executor_cls, rank):
     executor = executor_cls.from_workers([Worker()])

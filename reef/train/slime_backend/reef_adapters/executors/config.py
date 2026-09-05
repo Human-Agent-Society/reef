@@ -17,7 +17,7 @@ def slime_executor_class(
     if isinstance(backend, type):
         return Executor.get_class(backend)
     selected = select_executor(ExecutorSettings(backend or "auto"), role=role).settings.backend
-    if selected in ("local", "mp", "uni"):
+    if selected in ("mp", "uni"):
         raise ValueError(
             f"Slime {role} requires ray or a Slime-compatible executor; {selected!r} is not a GPU launcher"
         )

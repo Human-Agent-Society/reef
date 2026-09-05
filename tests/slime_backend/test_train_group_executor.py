@@ -5,9 +5,9 @@ from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
+from executor_helpers import AttachedTestGroup
 
 from reef.runtime.executor import Executor, ExecutorFuture, resolve
-from reef.runtime.executor.local import LocalExecutor
 from reef.train.slime_backend.reef_adapters import train_groups
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 
@@ -63,7 +63,7 @@ class CpuSlimeExecutor(Executor):
         self.launch_options = dict(self.config.options)
         count = self.launch_options["num_nodes"] * self.launch_options["num_gpus_per_node"]
         self.workers = [self.launch_options["actor_cls"](rank) for rank in range(count)]
-        self._local = LocalExecutor.from_workers(self.workers, owned=True)
+        self._local = AttachedTestGroup.from_workers(self.workers, owned=True)
         self.launch_options["args"].launches.append(self)
 
     def collective_rpc(self, method, *, args=(), kwargs=None, timeout=None, non_block=False):
@@ -389,7 +389,7 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
     attached = []
 
     def attach(workers):
-        executor = LocalExecutor.from_workers(workers)
+        executor = AttachedTestGroup.from_workers(workers)
         attached.append(executor)
         return executor
 

@@ -147,8 +147,8 @@ preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
 A preset's ``runtime.type: executor_training`` selects an executor-backed
-training coordinator. Its ``executor`` mapping accepts ``backend`` (``ray``,
-``local`` or a custom executor import path), ordered ``workers`` and backend
+training coordinator. Its ``executor`` mapping accepts ``backend`` (default
+``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
 ``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
 configuration still connects to a named bridge. The Slime driver's separate
 ``--reef-executor-backend`` selects the model worker executor and defaults to
@@ -171,7 +171,12 @@ be finite nonnegative numbers. Numeric environment interpolation is accepted.
 ``execution.evolution`` selects harness evaluation workers (default ``auto``).
 Unlike Slime, ordinary harness evolution calls external model endpoints and
 does not need local GPUs: one worker selects ``uni``, multiple workers select
-``mp``. Component-declared GPU/cluster needs select ``ray``.
+``mp``. Local GPU worker requirements follow the same topology rule after
+checking visible CUDA capacity; insufficient GPUs fail with a prompt to
+explicitly select ``ray``. Multiple workers inside a Ray placement group or
+declared cluster/actor options select ``ray``. Local allocations require whole
+GPUs; fractional reservations require explicit Ray. The former worker-level
+``local`` executor is removed (the separate episode-isolation option is unchanged).
 Omitted resources retain component defaults (normally one CPU and no GPUs).
 CPU-only local executors do not reserve cores or enforce CPU quotas.
 
@@ -182,9 +187,9 @@ model-parallel topology and placement groups still come from Slime's existing
 training configuration. Resource declarations are never silently treated as
 model-parallel resizing.
 
-For services, ``auto`` selects local execution unless resource/worker options
+For services, ``auto`` selects ``uni`` unless resource/worker options
 or an existing Ray placement group call for Ray. Explicit local CUDA visibility
-selects local execution and cannot be combined with cluster resource options.
+selects ``uni`` and cannot be combined with cluster resource options.
 Explicit service selectors and Slime CLI flags override the corresponding role
 defaults. Backend startup failures never silently fall back to another backend.
 

@@ -60,7 +60,7 @@ class Rendezvous:
 
 class EpisodeSleeper:
     def run(self, directory):
-        from reef.harness.executor import EPISODE_OWNER_LEASE, LocalExecutor
+        from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, LocalExecutor
 
         root = Path(directory)
         token = EPISODE_OWNER_LEASE.set(True)

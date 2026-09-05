@@ -15,8 +15,8 @@ from reef.runtime.executor.config import (
     role_executor_settings,
     select_executor,
 )
-from reef.runtime.executor.local import LocalExecutor
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 
 
@@ -78,7 +78,7 @@ def service_executor_config(
     settings = selected.settings
     backend = Executor.get_class(settings.backend)
     resources = _service_resources(settings, service)
-    if issubclass(backend, LocalExecutor) and (settings.options or resources):
+    if issubclass(backend, UniProcExecutor) and (settings.options or resources):
         raise ValueError("local service execution uses cuda for visibility; resource reservations require Ray/custom")
     if issubclass(backend, RayExecutor):
         if service.get("cuda") is not None or "CUDA_VISIBLE_DEVICES" in (service.get("env") or {}):

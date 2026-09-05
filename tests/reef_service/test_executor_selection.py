@@ -9,9 +9,9 @@ import pytest
 
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings, executor_settings, select_executor
-from reef.runtime.executor.local import LocalExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service.deploy.execution import service_executor_config, service_executor_selection
 from reef.train.slime_backend.reef_adapters.executors.config import (
     DEFAULT_EXECUTOR_BACKEND,
@@ -23,11 +23,11 @@ from reef.train.slime_backend.reef_adapters.executors.config import (
 @pytest.mark.parametrize(
     "context, expected",
     [
-        ({}, "local"),
+        ({}, "uni"),
         ({"requires_resources": True}, "ray"),
         ({"in_ray_placement_group": True}, "ray"),
-        ({"local_cuda": True}, "local"),
-        ({"local_cuda": True, "in_ray_placement_group": True}, "local"),
+        ({"local_cuda": True}, "uni"),
+        ({"local_cuda": True, "in_ray_placement_group": True}, "uni"),
     ],
 )
 def test_service_auto_policy(context, expected):
@@ -36,7 +36,7 @@ def test_service_auto_policy(context, expected):
     assert decision.reason
 
 
-@pytest.mark.parametrize("backend", ["local", "ray", "custom:Executor"])
+@pytest.mark.parametrize("backend", ["uni", "ray", "custom:Executor"])
 def test_explicit_selection_is_never_replaced(backend):
     settings = ExecutorSettings(backend, {"custom_option": 1})
     assert select_executor(settings, role="services", local_cuda=True, requires_resources=True).settings == settings
@@ -59,17 +59,17 @@ def test_only_existing_ray_placement_context_changes_default(monkeypatch, placem
     util.get_current_placement_group = lambda: placement_group
     monkeypatch.setitem(sys.modules, "ray", ray)
     monkeypatch.setitem(sys.modules, "ray.util", util)
-    assert service_executor_selection({}, {}).settings.backend == ("ray" if placement_group else "local")
-    assert service_executor_selection({}, {"executor": "local"}).settings.backend == "local"
-    assert service_executor_selection({}, {"cuda": 0}).settings.backend == "local"
+    assert service_executor_selection({}, {}).settings.backend == ("ray" if placement_group else "uni")
+    assert service_executor_selection({}, {"executor": "uni"}).settings.backend == "uni"
+    assert service_executor_selection({}, {"cuda": 0}).settings.backend == "uni"
     ray.is_initialized = lambda: False
-    assert service_executor_selection({}, {}).settings.backend == "local"
+    assert service_executor_selection({}, {}).settings.backend == "uni"
 
 
 def test_ray_address_alone_does_not_import_or_select_ray(monkeypatch):
     monkeypatch.delitem(sys.modules, "ray", raising=False)
     monkeypatch.setenv("RAY_ADDRESS", "ray://cluster:10001")
-    assert service_executor_selection({}, {}).settings.backend == "local"
+    assert service_executor_selection({}, {}).settings.backend == "uni"
     assert "ray" not in sys.modules
 
 
@@ -80,7 +80,7 @@ def test_service_resources_auto_select_ray_without_starting_it(tmp_path, monkeyp
     assert config.workers[0].options == {"num_gpus": 2}
     assert "ray" not in sys.modules
     config = service_executor_config({}, {"cuda": 0}, tmp_path, 30, tmp_path / "config.yaml")
-    assert config.backend is LocalExecutor
+    assert config.backend is UniProcExecutor
 
 
 @pytest.mark.parametrize(
@@ -94,7 +94,7 @@ def test_slime_auto_maps_to_specialized_backend_before_launch(monkeypatch, role,
 
 
 @pytest.mark.parametrize("role", ["training", "rollout"])
-@pytest.mark.parametrize("backend", ["local", "mp", "uni"])
+@pytest.mark.parametrize("backend", ["mp", "uni"])
 def test_slime_rejects_unsupported_builtin_gpu_launchers(role, backend):
     with pytest.raises(ValueError, match="not a GPU launcher"):
         slime_executor_class(backend, role=role)
@@ -144,7 +144,6 @@ def test_unknown_service_backend_does_not_fall_back(tmp_path):
     [
         (ExecutionRequirements(), "uni"),
         (ExecutionRequirements(workers=4), "mp"),
-        (ExecutionRequirements(gpus_per_worker=1), "ray"),
         (ExecutionRequirements(cluster=True), "ray"),
     ],
 )
@@ -161,7 +160,7 @@ def test_unsupported_component_launcher_is_rejected():
         select_executor(ExecutorSettings(), role="evolution", requirements=requirements)
 
 
-def test_scorer_can_declare_gpu_needs_without_yaml():
+def test_scorer_can_declare_gpu_needs_without_yaml(monkeypatch):
     from reef.train.cordis_backend.execution import evaluation_selection
     from reef.train.cordis_backend.strategies import EpisodeScorer
 
@@ -172,8 +171,9 @@ def test_scorer_can_declare_gpu_needs_without_yaml():
         def __call__(self, task, result):
             return 1.0
 
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1"))
     selected, requirements = evaluation_selection(GPUScorer(), 2, ExecutorSettings())
-    assert selected.settings.backend == "ray"
+    assert selected.settings.backend == "mp"
     assert requirements.workers == 2 and requirements.gpus_per_worker == 1
     with pytest.raises(ValueError, match="below"):
         evaluation_selection(GPUScorer(), 2, ExecutorSettings(), 0)
@@ -183,3 +183,47 @@ def test_scorer_can_declare_gpu_needs_without_yaml():
 def test_invalid_gpu_requirement_is_rejected(value):
     with pytest.raises(ValueError, match="gpus_per_worker"):
         ExecutionRequirements(gpus_per_worker=value)
+
+
+@pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
+def test_local_gpu_topology_uses_uni_or_mp(monkeypatch, workers, expected):
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("GPU-a", "GPU-b"))
+    requirements = ExecutionRequirements(workers=workers, gpus_per_worker=1)
+    assert (
+        select_executor(ExecutorSettings(), role="evolution", requirements=requirements).settings.backend == expected
+    )
+
+
+def test_insufficient_local_gpus_do_not_silently_switch_to_ray(monkeypatch):
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0",))
+    requirements = ExecutionRequirements(workers=2, gpus_per_worker=1)
+    with pytest.raises(ValueError, match="explicitly select ray"):
+        select_executor(ExecutorSettings(), role="evolution", requirements=requirements)
+    assert (
+        select_executor(ExecutorSettings("ray"), role="evolution", requirements=requirements).settings.backend == "ray"
+    )
+
+
+def test_cpu_selection_never_probes_cuda(monkeypatch):
+    def forbidden():
+        raise AssertionError("CPU-only execution probed GPUs")
+
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", forbidden)
+    assert select_executor(ExecutorSettings(workers=2), role="evolution").settings.backend == "mp"
+
+
+@pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "ray")])
+def test_worker_topology_honors_existing_ray_placement_group(monkeypatch, workers, expected):
+    monkeypatch.setattr("reef.runtime.executor.config.in_ray_placement_group", lambda: True)
+    assert select_executor(ExecutorSettings(workers=workers), role="evolution").settings.backend == expected
+    assert select_executor(ExecutorSettings("mp", workers=workers), role="evolution").settings.backend == "mp"
+
+
+def test_fractional_gpu_reservations_require_ray():
+    with pytest.raises(ValueError, match="fractional reservations"):
+        select_executor(ExecutorSettings(), role="evolution", requirements=ExecutionRequirements(gpus_per_worker=0.5))
+
+
+def test_removed_backend_uses_normal_unknown_backend_resolution():
+    with pytest.raises(ValueError, match="invalid class import path"):
+        Executor.get_class("local")

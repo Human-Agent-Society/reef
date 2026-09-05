@@ -41,7 +41,7 @@ class ExecutorConfig:
     options, overridden per worker by ``WorkerSpec.options``.
     """
 
-    backend: str | type[Executor] = "ray"
+    backend: str | type[Executor] = "auto"
     workers: tuple[WorkerSpec, ...] = ()
     options: Mapping[str, Any] = field(default_factory=dict)
     launch_timeout_s: float | None = 300.0
@@ -149,10 +149,6 @@ class Executor(ABC):
             from reef.runtime.executor.ray import RayExecutor
 
             return RayExecutor
-        if backend == "local":
-            from reef.runtime.executor.local import LocalExecutor
-
-            return LocalExecutor
         candidate = resolve_class(backend)
         if not issubclass(candidate, Executor):
             raise TypeError("executor backend must be an Executor subclass")
@@ -160,6 +156,17 @@ class Executor(ABC):
 
     @classmethod
     def create(cls, config: ExecutorConfig) -> Executor:
+        if config.backend == "auto":
+            from dataclasses import replace
+
+            from reef.runtime.executor.config import ExecutorSettings, select_worker_executor
+            from reef.runtime.executor.requirements import ExecutionRequirements
+
+            options = bool(config.options or any(worker.options for worker in config.workers))
+            selected = select_worker_executor(
+                ExecutorSettings(), ExecutionRequirements(workers=max(1, len(config.workers)), cluster=options)
+            )
+            config = replace(config, backend=selected.settings.backend)
         return cls.get_class(config.backend)(config)
 
     @abstractmethod

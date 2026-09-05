@@ -10,7 +10,7 @@
 #   export REEF_UPSTREAM_API_KEY=sk-...
 
 execution:
-  services: local
+  services: auto
 
 reef:
   host: 0.0.0.0

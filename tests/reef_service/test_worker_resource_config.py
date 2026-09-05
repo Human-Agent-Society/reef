@@ -58,7 +58,9 @@ def test_unknown_resource_schema_rejected(resources):
 
 
 def test_gpu_resources_and_cpu_reservations_reach_ray_without_initializing_it():
-    settings = executor_settings({}, {"workers": 3, "resources": {"cpus_per_worker": 2, "gpus_per_worker": 0.5}})
+    settings = executor_settings(
+        {}, {"backend": "ray", "workers": 3, "resources": {"cpus_per_worker": 2, "gpus_per_worker": 0.5}}
+    )
     selection, needs = evaluation_selection(resolve_episode_scorer(scorer), None, settings)
     config = evaluation_executor_config(selection, needs, WorkerSpec(dict), needs.workers)
     assert selection.settings.backend == "ray"
@@ -66,11 +68,12 @@ def test_gpu_resources_and_cpu_reservations_reach_ray_without_initializing_it():
     assert config.options == {"num_cpus": 2, "num_gpus": 0.5}
 
 
-def test_omitted_gpu_request_preserves_component_requirement():
+def test_omitted_gpu_request_preserves_component_requirement(monkeypatch):
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1"))
     selected = select_executor(
         executor_settings({}, {"workers": 2}), role="evolution", requirements=ExecutionRequirements(gpus_per_worker=1)
     )
-    assert selected.settings.backend == "ray"
+    assert selected.settings.backend == "mp"
     with pytest.raises(ValueError, match="below"):
         select_executor(
             executor_settings({}, {"resources": {"gpus_per_worker": 0}}),
@@ -86,11 +89,44 @@ def test_conflicting_raw_actor_options_are_rejected(resource, option):
         evaluation_selection(resolve_episode_scorer(scorer), None, settings)
 
 
-def test_legacy_aliases_warn_and_normalize_into_generic_settings():
+def test_legacy_aliases_warn_and_normalize_into_generic_settings(monkeypatch):
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1", "2", "3"))
     config = recipe_config("auto", episode_workers="4", worker_resources={"num_gpus": 1})
     with pytest.warns(DeprecationWarning, match="deprecated"):
         recipe = CordisRecipe.from_environment({}, config=config)
     assert recipe.worker_executor == ExecutorSettings(workers=4, resources=WorkerResources(gpus_per_worker=1))
+
+
+class VisibleDeviceWorker:
+    def __init__(self):
+        import os
+
+        self.devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        self.pid = os.getpid()
+
+    def placement(self):
+        return self.pid, self.devices
+
+
+def test_mp_assigns_disjoint_gpu_masks_before_worker_construction(monkeypatch):
+    import os
+
+    from reef.runtime.executor import Executor
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second")
+    monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("GPU-first", "GPU-second"))
+    settings = executor_settings({}, {"workers": 2, "resources": {"gpus_per_worker": 1}})
+    selection, needs = evaluation_selection(resolve_episode_scorer(scorer), None, settings)
+    config = evaluation_executor_config(selection, needs, WorkerSpec(VisibleDeviceWorker), needs.workers)
+    executor = Executor.create(config)
+    try:
+        placements = executor.collective_rpc("placement")
+        assert [devices for _, devices in placements] == ["GPU-first", "GPU-second"]
+        assert len({pid for pid, _ in placements}) == 2
+        assert all(pid != os.getpid() for pid, _ in placements)
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-first,GPU-second"
+    finally:
+        executor.shutdown()
 
 
 @pytest.mark.parametrize(
@@ -98,7 +134,7 @@ def test_legacy_aliases_warn_and_normalize_into_generic_settings():
     [
         ({"workers": 4}, {"episode_workers": 2}),
         ({"resources": {"gpus_per_worker": 1}}, {"worker_resources": {"num_gpus": 2}}),
-        ({"workers": 4}, {"worker_executor": "local"}),
+        ({"workers": 4}, {"worker_executor": "mp"}),
     ],
 )
 def test_mixed_configs_never_silently_drop_resource_requests(execution, legacy):

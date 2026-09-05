@@ -25,6 +25,7 @@ from reef.harness.episodes.vendor_install import (
     install_prefix,
     resolve_binary,
 )
+from reef.runtime.executor.config import ExecutorSettings
 from reef.service.install_script import render_install_script
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -209,7 +210,7 @@ def _counting_resolver(monkeypatch, result):
     return calls
 
 
-def _backend(binary, propose, *, executor=None):
+def _backend(binary, propose, *, executor=None, worker_executor=None):
     return CordisBackend(
         descriptor=get_adapter("pi"),
         propose=resolve_proposer(propose),
@@ -218,6 +219,7 @@ def _backend(binary, propose, *, executor=None):
         models=MODEL,
         binary=binary,
         executor=executor,
+        worker_executor=worker_executor,
     )
 
 
@@ -231,11 +233,12 @@ def _propose(nodes, samples, models):
 
 
 @pytest.mark.unit
-def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("workers", [1, 2])
+def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch, tmp_path, workers) -> None:
     """Startup resolves the agent, and every episode reuses that result."""
     calls = _counting_resolver(monkeypatch, str(make_binary(tmp_path)))
 
-    backend = _backend(None, _propose)
+    backend = _backend(None, _propose, worker_executor=ExecutorSettings(workers=workers))
     assert calls == ["pi"]
 
     result = _step(backend)
@@ -244,6 +247,7 @@ def test_an_unset_binary_resolves_once_at_construction_and_is_reused(monkeypatch
 
     _step(backend)
     assert calls == ["pi"]
+    backend.close()
 
 
 @pytest.mark.unit
@@ -312,6 +316,7 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
         return LocalExecutor().launch(argv, **kwargs)
 
     monkeypatch.setattr(SandboxExecutor, "launch", launch)
+    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     original = SandboxExecutor(egress_hosts=("localhost",))
     backend = _backend(None, _propose, executor=original)
     result = _step(backend)

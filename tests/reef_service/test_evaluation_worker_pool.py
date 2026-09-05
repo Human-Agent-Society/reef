@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.records import RecordStore
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
@@ -44,7 +44,7 @@ def make_pool(backend):
     return EvaluationWorkerPool(selection, requirements, WorkerSpec(StatefulWorker))
 
 
-@pytest.mark.parametrize("backend", ["mp", "local"])
+@pytest.mark.parametrize("backend", ["mp", "auto"])
 def test_pool_reuses_workers_preserves_order_and_drains_business_failures(backend):
     pool = make_pool(backend)
     assert pool._executor is None
@@ -64,8 +64,7 @@ def test_pool_reuses_workers_preserves_order_and_drains_business_failures(backen
     pool.close()
     with pytest.raises(RuntimeError, match="closed"):
         pool.evaluate([("new",)])
-    if backend == "mp":
-        assert not {row[0] for row in first} & {child.pid for child in multiprocessing.active_children()}
+    assert not {row[0] for row in first} & {child.pid for child in multiprocessing.active_children()}
 
 
 def test_pool_failure_is_not_restarted_or_replayed():

@@ -25,7 +25,7 @@ run_dir: work/stack
 
 # Service processes launch locally; Slime owns distributed GPU model workers.
 execution:
-  services: local
+  services: auto
   training: ray
   rollout: ray
 
