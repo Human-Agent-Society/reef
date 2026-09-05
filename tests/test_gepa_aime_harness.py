@@ -111,9 +111,9 @@ def test_default_driver_pool_keeps_registered_answers_visible(load, monkeypatch,
         try:
             backend = trainer.training_backend
             assert backend._worker_selection.settings.backend == "local"
-            assert [row[0] for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
+            assert [row.score for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert backend._evaluate_pairings([({}, "problem")])[0][0] == 0.0
+            assert backend._evaluate_pairings([({}, "problem")])[0].score == 0.0
         finally:
             trainer.close()
 

@@ -28,6 +28,8 @@ class EvaluationWorkerPool:
         # Drain a batch before admitting the next, including ordinary scorer errors.
         with self._lock:
             if self._closed:
+                if self._executor is not None and self._executor.failure is not None:
+                    self._executor.check_health()
                 raise RuntimeError("evolution worker pool is closed")
             if not pairings:
                 return []

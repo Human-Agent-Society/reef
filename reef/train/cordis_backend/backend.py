@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import math
+import tarfile
 import tempfile
 import time
 import weakref
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,7 @@ from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
@@ -62,11 +64,25 @@ class EpisodeEvaluationWorker:
     executor: EpisodeExecutor
     forbid_residue: bool
     owner_lease: bool = False
+    transfer_records: bool = False
 
     def __post_init__(self) -> None:
         self.executor.preflight()
 
     def run(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
+        if keep_dir is None or not self.transfer_records:
+            return self._run_and_score(files, task, keep_dir)
+        # Remote workers must not interpret the driver's path as a local path.
+        # Keep the trajectory on the worker, then return it with the scored result.
+        with tempfile.TemporaryDirectory(prefix="reef-worker-record-") as temporary:
+            record_dir = Path(temporary) / "episode"
+            scored = self._run_and_score(files, task, record_dir)
+            buffer = BytesIO()
+            with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+                archive.add(record_dir, arcname=".")
+            return replace(scored, record_archive=buffer.getvalue())
+
+    def _run_and_score(self, files: Mapping[str, str], task: str, keep_dir: Path | None) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A nonzero
@@ -122,6 +138,7 @@ class EpisodeEvaluationWorker:
                 score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
             )
         return _ScoredEpisode(score, None, residue, agents, path)
+
 
 @dataclass(frozen=True, kw_only=True)
 class HarnessCandidate(UpdateCandidate):
@@ -711,6 +728,7 @@ class CordisBackend(TrainingBackend):
                     self._executor,
                     forbid_residue,
                     self._worker_selection.settings.backend not in ("uni", "local"),
+                    self._worker_selection.settings.backend not in ("uni", "local", "mp"),
                 ),
             ),
         )
@@ -1169,13 +1187,26 @@ class CordisBackend(TrainingBackend):
         with open(step_dir / name, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
-
     @staticmethod
     def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
         return _agent_work(trajectory)
 
     def _evaluate_pairings(self, pairings):
-        return self._evaluation_pool.evaluate(pairings)
+        scored = self._evaluation_pool.evaluate(pairings)
+        for pairing, result in zip(pairings, scored, strict=True):
+            if result.record_archive is not None:
+                keep_dir = pairing[2]
+                try:
+                    # Never merge into an earlier episode's record. Extraction
+                    # rejects path traversal, escaping links and special files.
+                    keep_dir.mkdir(parents=True)
+                    with tarfile.open(fileobj=BytesIO(result.record_archive), mode="r:gz") as archive:
+                        archive.extractall(keep_dir, filter="data")
+                except (OSError, tarfile.TarError) as exc:
+                    raise TrajectoryKeepError(
+                        f"cannot keep remote episode trajectory under {keep_dir}: {exc}"
+                    ) from exc
+        return scored
 
     @staticmethod
     def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:
@@ -1245,6 +1276,8 @@ class _ScoredEpisode:
     agents: dict[str, dict[str, int]] = field(default_factory=dict)
     #: The root's stage path and end reason; ``None`` when no trajectory was read.
     path: dict[str, Any] | None = None
+    #: Remote workers return the kept trajectory; the driver owns its durable path.
+    record_archive: bytes | None = field(default=None, repr=False)
 
 
 def _write_episode_record(

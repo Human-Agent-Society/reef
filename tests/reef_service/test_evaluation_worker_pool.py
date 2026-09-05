@@ -140,7 +140,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
             pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate"), ({}, "")]
             scores = backend._evaluate_pairings(pairings)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
-            assert [row[0] for row in scores] == expected
+            assert [row.score for row in scores] == expected
         paths = roots.read_text().splitlines()
         assert len(paths) == len(set(paths)) == 4
         assert all(not Path(path).exists() for path in paths)

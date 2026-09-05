@@ -270,6 +270,13 @@ results retain pairing order. Each backend/scenario lazily starts one fixed
 pool of ``execution.evolution.workers`` ranks on its first nonempty evaluation and reuses
 it across evaluations. Workers and lazy scorer/model initialization persist;
 each episode still gets a fresh harness subprocess and temporary directory.
+Upstream step records and per-episode stage paths are retained. Local/MP
+workers write records on the same host; Ray/custom workers return a compressed
+record with each successful RPC so the driver owns the durable path, without
+requiring shared storage. Archives are extracted with Python's ``data`` filter
+and cannot replace an existing record directory. A failed RPC or lost remote
+worker may leave no returned trajectory; this is not a durable artifact-transfer
+protocol, and large records add RPC memory/transfer overhead.
 RPC is ordered within each rank. A scorer error drains the submitted batch
 before the next evaluation, while worker death terminally fails the pool.
 Failed pools are not automatically rebuilt and evaluations are never replayed.
