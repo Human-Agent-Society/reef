@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Protocol
 
 from reef.core.errors import ReefError
+from reef.harness.native.enforce import ISOLATION as TOOL_ISOLATION
 
 
 class SandboxUnavailable(ReefError):
@@ -141,6 +142,25 @@ class LocalExecutor:
         return _run(argv, cwd=workspace, env={**_inherited_env(), **env}, timeout=timeout)
 
 
+#: What every jail unshares and mounts before its binds; the episode jail and the nesting probe share it.
+_ISOLATION: tuple[str, ...] = (
+    "--unshare-user",
+    "--unshare-ipc",
+    "--unshare-pid",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
+    "--die-with-parent",
+    "--new-session",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--clearenv",
+)
+
+
 #: Resource limits every sandboxed episode gets unless the config overrides one.
 @dataclass(frozen=True)
 class SandboxLimits:
@@ -160,7 +180,10 @@ class SandboxExecutor:
     dies with its parent. Network is unshared (no egress) unless
     ``egress_hosts`` lists the model endpoint the episode must reach, in which
     case the network namespace is shared so the endpoint is reachable; a
-    single-host firewall is the follow-up (issue #18).
+    single-host firewall is the follow-up (issue #18). The jail also carries
+    ``REEF_NATIVE_ENFORCE=bwrap``, so the native loop runs each tool call in
+    a nested jail derived from the tool's declared capabilities; preflight
+    proves the host can nest one.
     """
 
     egress_hosts: tuple[str, ...] = ()
@@ -174,6 +197,34 @@ class SandboxExecutor:
                 "the sandbox executor requires bubblewrap (bwrap) on PATH; install it or set "
                 "evolution.executor: local for development"
             )
+        # The native loop nests one jail per tool call inside the episode's, so a host that refuses a user namespace
+        # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
+        try:
+            done = subprocess.run(
+                self._nested_probe_argv(),
+                env={"PATH": os.environ.get("PATH", "")},
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxUnavailable(
+                f"the sandbox executor cannot nest a bubblewrap jail on this host: {exc}"
+            ) from exc
+        if done.returncode != 0:
+            raise SandboxUnavailable(
+                "the sandbox executor cannot nest a bubblewrap jail on this host, which every sandboxed native "
+                f"tool call needs: {done.stderr.strip()[-600:]}"
+            )
+
+    def _nested_probe_argv(self) -> list[str]:
+        """An episode jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
+        bwrap = shutil.which("bwrap") or "bwrap"
+        binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
+        episode = [bwrap, *_ISOLATION, "--unshare-net", *binds]
+        tool = [bwrap, *TOOL_ISOLATION, "--unshare-net", *binds]
+        return [*episode, "--", *tool, "--", "/bin/true"]
 
     def _bwrap_argv(
         self,
@@ -185,23 +236,7 @@ class SandboxExecutor:
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> list[str]:
-        cmd = [
-            "bwrap",
-            "--unshare-user",
-            "--unshare-ipc",
-            "--unshare-pid",
-            "--unshare-uts",
-            "--unshare-cgroup-try",
-            "--die-with-parent",
-            "--new-session",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--clearenv",
-        ]
+        cmd = ["bwrap", *_ISOLATION]
         if not self.egress_hosts:
             cmd.append("--unshare-net")
         for base in self.base_paths:
@@ -218,7 +253,7 @@ class SandboxExecutor:
                 cmd += ["--ro-bind", str(path), str(path)]
         cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
-        for key, value in {**_inherited_env(), **env}.items():
+        for key, value in {**_inherited_env(), **env, "REEF_NATIVE_ENFORCE": "bwrap"}.items():
             cmd += ["--setenv", key, value]
         cmd += ["--", *argv]
         return cmd

@@ -19,7 +19,8 @@ At a glance
 +-------------------+--------------------------------------------------------------+
 | What evolves      | Config, rules, prompt templates, skills, and extension code; |
 |                   | on the native harness also its tools, its hook listeners,    |
-|                   | and the graph that is its control loop.                      |
+|                   | the graph that is its control loop, and the agents the loop  |
+|                   | delegates to.                                                |
 +-------------------+--------------------------------------------------------------+
 | Which agents      | pi, opencode, Claude Code, Codex, DeepSeek Harness, Hermes   |
 |                   | Agent, Terminus 2, and ``native``, Reef's own loop. One      |
@@ -54,7 +55,7 @@ fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
 ``native_hook``), ``config.name`` is the file name the entry renders to.
-Eight kinds are registered in
+Nine kinds are registered in
 `reef/harness/nodes.py <../../reef/harness/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
@@ -77,6 +78,9 @@ Eight kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``native_graph``   | the native loop's control flow: stages and edges (data)  |
 +--------------------+----------------------------------------------------------+
+| ``native_agent``   | one agent of the native loop: its prompt, graph, tools,  |
+|                    | skills, budget, and the agents it hands its text to      |
++--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
@@ -84,11 +88,12 @@ Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
 are ``native_tool`` nodes, whose loop events listen to ``native_hook``
-nodes, and whose control flow is a ``native_graph`` node, so the agent can
-evolve the tools it runs, how its loop reacts, and the loop itself, not
+nodes, whose control flow is a ``native_graph`` node, and whose helpers are
+``native_agent`` nodes a graph can call, so the agent can evolve the tools
+it runs, how its loop reacts, the loop itself, and who it delegates to, not
 only the text around a vendor binary; and ``terminus``, Terminal-Bench's
 Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those three kinds.
+those four kinds.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 ``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
@@ -193,7 +198,12 @@ hosted service that evaluates model-proposed trees sets ``evolution.executor:
 sandbox`` so each episode runs in a bubblewrap jail (a fresh non-root
 namespace, a read-only base filesystem, no host credentials, resource limits,
 and no network unless a model endpoint is allowlisted); a deployment that
-requires it refuses to start without the sandbox runtime.
+requires it refuses to start without the sandbox runtime. On the native
+adapter the sandbox also runs each tool call in a nested jail that withholds
+the network, workspace writes, or the shell and system binaries a tool did
+not declare in its capabilities; it cannot withhold the tool's own
+interpreter, or reads. The adapter guide states the full boundary. The
+local executor enforces none of this.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -386,7 +396,8 @@ the model calls. The bundled descriptors cover these agents:
 | ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill    |
 +---------------+----------------------------------+----------------------------------------+
 | ``native``    | Reef's own loop                  | the five above plus native_tool,       |
-|               |                                  | native_hook, native_graph              |
+|               |                                  | native_hook, native_graph,             |
+|               |                                  | native_agent                           |
 +---------------+----------------------------------+----------------------------------------+
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and

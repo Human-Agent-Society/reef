@@ -3,12 +3,13 @@
 One episode is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``
 and ``models.json``; the loop reads them, talks to the served model through
-the rendered binding, dispatches tool calls to the tool modules, asks the
-hook modules at four events, and appends one JSONL session the
-``native-jsonl`` trajectory reader decodes. Everything the model saw is in
-that log: the rendered system prompt, the tool declarations, every message,
-every call, every result, and every hook decision that changed the loop's
-course.
+the rendered binding, dispatches tool calls to the tool modules through the
+capability enforcer ``REEF_NATIVE_ENFORCE`` selects, asks the hook modules
+at four events, and appends one JSONL session the ``native-jsonl``
+trajectory reader decodes. Everything the model saw is in that log: the
+rendered system prompt, the tool declarations, every message, every call,
+every result with what was enforced on it, and every hook decision that
+changed the loop's course.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from types import ModuleType
 from typing import Any, Protocol
 
 from reef.harness.model_binding import ModelBinding, ModelBindingError
+from reef.harness.native.enforce import Enforcer, InProcessEnforcer, SandboxFailed, ToolFailed, select_enforcer
 from reef.harness.nodes import NATIVE_EVENTS
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
@@ -91,12 +93,15 @@ class ToolModule:
         parameters: Mapping[str, Any],
         run: ToolRunner,
         capabilities: Sequence[str] = (),
+        path: Path | None = None,
     ) -> None:
         self.name = name
         self.description = description
         self.parameters = dict(parameters) or {"type": "object", "properties": {}}
         self.run = run
         self.capabilities = tuple(str(item) for item in capabilities)
+        # The module file, which a sandboxing enforcer imports afresh in its child; a tool built in code has none.
+        self.path = path
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -155,7 +160,7 @@ def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
         capabilities = getattr(module, "CAPABILITIES", ())
         description = str(getattr(module, "DESCRIPTION", ""))
         tools[name] = ToolModule(
-            name, description, parameters, run, capabilities if isinstance(capabilities, list) else ()
+            name, description, parameters, run, capabilities if isinstance(capabilities, list) else (), path=path
         )
     return tools
 
@@ -172,11 +177,30 @@ def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
     return hooks
 
 
-def system_prompt(root: Path) -> str:
-    """Rules first, then every skill, in path order."""
-    files = [root / "RULES.md", *sorted((root / "skills").glob("*/SKILL.md"))]
+def system_prompt(root: Path, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str:
+    """Rules first, then every skill in path order (or the named ones), then an agent's own prompt."""
+    skill_files = sorted((root / "skills").glob("*/SKILL.md"))
+    if skills is not None:
+        skill_files = [path for path in skill_files if path.parent.name in skills]
+    files = [root / "RULES.md", *skill_files]
     parts = [path.read_text(encoding="utf-8").strip() for path in files if path.exists()]
+    if prompt:
+        parts.append(prompt.strip())
     return "\n\n".join(part for part in parts if part) or DEFAULT_SYSTEM_PROMPT
+
+
+def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
+    """Every ``*.json`` under ``agents/`` by name, admitted again here so a hand edited file cannot run unchecked."""
+    from reef.harness.nodes import validate_native_agent
+
+    agents: dict[str, Mapping[str, Any]] = {}
+    for path in sorted(agents_dir.glob("*.json")) if agents_dir.is_dir() else []:
+        try:
+            options = validate_native_agent(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as exc:
+            raise LoadError(f"agent {path.name} cannot run: {exc}") from exc
+        agents[str(options["name"])] = options
+    return agents
 
 
 def binding_from(models_path: Path) -> ModelBinding:
@@ -187,6 +211,17 @@ def binding_from(models_path: Path) -> ModelBinding:
         api_key=str(data.get("api_key") or ""),
         api=str(data.get("api") or "openai"),
     )
+
+
+def context_window_from(models_path: Path) -> int:
+    """``context_window`` in models.json (a config node with target ``models`` sets it), else the default."""
+    from reef.harness.native.graph import DEFAULT_CONTEXT_WINDOW  # late: graph.py imports this module
+
+    data = json.loads(models_path.read_text(encoding="utf-8"))
+    value = data.get("context_window")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return DEFAULT_CONTEXT_WINDOW
+    return value
 
 
 class Session:
@@ -373,24 +408,32 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         try:
             tools = load_tools(root / "tools")
             hooks = load_hooks(root / "hooks")
+            agents = load_agents(root / "agents")
             graph = graphs.load_graph(root)
+            enforcer = select_enforcer(os.environ)
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
+        header["enforcement"] = enforcer.mode
         session.write(
             "session",
             {
                 **header,
+                "agent": "root",
+                "turn": 1,
                 "tools": sorted(tools),
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                 "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
                 "graph": graph.source,
+                "agents": sorted(agents),
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root)
-        return graphs.run_graph(graphs.Run(loop, prompt, binding, tools, hooks, workdir), graph)
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
+        window = context_window_from(root / "models.json")
+        run = graphs.Run(loop, prompt, binding, tools, hooks, workdir, context_window=window, agents=agents)
+        return graphs.run_graph(run, graph)
     finally:
         session.close()
 
@@ -441,8 +484,9 @@ def _invoke(
     *,
     spill: Path | None = None,
     gate: Callable[[ToolModule, dict[str, Any]], Mapping[str, Any]] | None = None,
+    enforcer: Enforcer | None = None,
 ) -> dict[str, Any]:
-    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments the gate allowed."""
+    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments the gate allowed, under the enforcer's profile."""
     try:
         arguments = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
@@ -471,7 +515,11 @@ def _invoke(
                 return _error("INVALID_ARGS", f"rewritten by a hook: {violation}", arguments)
     started = time.monotonic()
     try:
-        result = tool.run(arguments, str(workdir))
+        result = (enforcer or InProcessEnforcer()).run(tool, arguments, workdir)
+    except SandboxFailed as exc:
+        return _error("SANDBOX_FAILED", str(exc), arguments)
+    except ToolFailed as exc:
+        return _error("TOOL_FAILED", str(exc), arguments)
     except Exception as exc:
         return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
@@ -490,12 +538,32 @@ class _Loop:
     SPILL_DIR = SPILL_DIR
     MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
-    def __init__(self, session: Session, root: Path) -> None:
+    def __init__(
+        self,
+        session: Session,
+        root: Path,
+        session_dir: Path,
+        header: Mapping[str, Any] = {},
+        enforcer: Enforcer | None = None,
+    ) -> None:
         self.session = session
         self.root = root
+        self.session_dir = session_dir
+        self.header = dict(header)
+        self.enforcer = enforcer or InProcessEnforcer()
+        self.turns = 1
+        self.open: list[Session] = []
+
+    def open_turn(self, agent: str) -> tuple[Session, int]:
+        """A session file for one agent turn, numbered in run order under ``agents/``; the root's file sorts last."""
+        self.turns += 1
+        session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
+        self.open.append(session)
+        return session, self.turns
 
     system_prompt = staticmethod(system_prompt)
     _decide = staticmethod(_decide)
+    _complete = staticmethod(_complete)
     _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
     _judged = staticmethod(_judged)

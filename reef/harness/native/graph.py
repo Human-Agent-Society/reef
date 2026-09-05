@@ -8,10 +8,11 @@ the ``stage/enter`` and ``stage/exit`` events that now name the path.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native.seed import SEED_GRAPH
@@ -19,6 +20,15 @@ from reef.harness.nodes import validate_native_graph
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
 TRANSITIONS_PER_STEP = 16
+#: The context window a compact stage measures against when models.json names none.
+DEFAULT_CONTEXT_WINDOW = 32_768
+#: One token per this many characters of a serialized message: the closed estimate the compact stage uses.
+CHARS_PER_TOKEN = 4
+#: What a compact stage asks the model for over the span it drops.
+SUMMARY_PROMPT = (
+    "Summarize the work so far for a coding agent that will continue it: what the task asked, what was tried, "
+    "what the tools returned, what is settled, and what is still open. Be concrete and short."
+)
 
 
 class GraphError(Exception):
@@ -40,25 +50,34 @@ class Graph:
         }
 
 
-def load_graph(root: Path) -> Graph:
-    """The tree's ``graphs/main.json`` when present, else the seed graph; a bad file is a GraphError."""
-    path = root / "graphs" / "main.json"
-    if not path.is_file():
+def load_graph(root: Path, name: str = "main") -> Graph:
+    """The tree's ``graphs/<name>.json``; ``seed`` is the built in loop and ``main`` falls back to it; else a GraphError."""
+    path = root / "graphs" / f"{name}.json"
+    if name == "seed" or (name == "main" and not path.is_file()):
         return Graph(SEED_GRAPH, source="seed")
+    if not path.is_file():
+        raise GraphError(f"graphs/{name}.json is missing")
     try:
-        import json
-
-        return Graph(json.loads(path.read_text(encoding="utf-8")), source="main")
+        return Graph(json.loads(path.read_text(encoding="utf-8")), source=name)
     except (OSError, ValueError) as exc:
-        raise GraphError(f"graphs/main.json cannot run: {exc}") from exc
+        raise GraphError(f"graphs/{name}.json cannot run: {exc}") from exc
 
 
 class _Stop(Exception):
-    """The run ended inside a stage; carries the exit status."""
+    """The run ended inside a stage; carries the exit status and, for an agent's turn, its outcome."""
 
-    def __init__(self, exit_code: int) -> None:
+    def __init__(self, exit_code: int, outcome: str = "completed") -> None:
         super().__init__(exit_code)
         self.exit_code = exit_code
+        self.outcome = outcome
+
+
+class _Escalate(Exception):
+    """A pre_execute hook asked inside an agent's turn; the parent graph is the one to answer."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _last_assistant_text(messages: list[dict[str, Any]]) -> str:
@@ -73,6 +92,41 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _tokens(messages: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(message, ensure_ascii=False, default=str)) // CHARS_PER_TOKEN for message in messages)
+
+
+def _split(messages: list[dict[str, Any]], keep_tokens: float) -> tuple[list, list, list]:
+    """Head (the system prompt and the task), the older span to summarize, and the tail that stays verbatim.
+
+    The tail is the last messages that fit ``keep_tokens``, grown backwards so
+    it never opens on a tool result whose call was dropped."""
+    head, rest = messages[:2], messages[2:]
+    cut = len(rest)
+    used = 0
+    while cut > 0:
+        size = len(json.dumps(rest[cut - 1], ensure_ascii=False, default=str)) // CHARS_PER_TOKEN
+        if used + size > keep_tokens:
+            break
+        used += size
+        cut -= 1
+    while cut > 0 and cut < len(rest) and rest[cut].get("role") == "tool":
+        cut -= 1
+    return head, rest[:cut], rest[cut:]
+
+
+def _transcript(messages: list[dict[str, Any]]) -> str:
+    lines = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        content = message.get("content")
+        calls = [call.get("function", {}) for call in message.get("tool_calls") or []]
+        if calls:
+            content = f"{content or ''}\n" + "\n".join(f"call {c.get('name')}({c.get('arguments')})" for c in calls)
+        lines.append(f"[{role}] {content if isinstance(content, str) else json.dumps(content, default=str)}")
+    return "\n".join(lines)
+
+
 class Run:
     """One turn's state, shared by every stage handler: the messages, the step counter, the log."""
 
@@ -84,6 +138,14 @@ class Run:
         tools: Mapping[str, Any],
         hooks: Mapping[str, list],
         workdir: Path,
+        context_window: int = DEFAULT_CONTEXT_WINDOW,
+        agents: Mapping[str, Mapping[str, Any]] | None = None,
+        parent: Run | None = None,
+        agent: str = "root",
+        turn: int = 1,
+        session: Any = None,
+        system: str | None = None,
+        max_tool_calls: int | None = None,
     ) -> None:
         self.loop = loop
         self.prompt = prompt
@@ -91,8 +153,17 @@ class Run:
         self.tools = tools
         self.hooks = hooks
         self.workdir = workdir
-        self.session = loop.session
-        self.system = loop.system_prompt(loop.root)
+        self.context_window = context_window
+        self.agents = dict(agents or {})
+        self.parent = parent
+        self.agent = agent
+        self.turn = turn
+        self.max_tool_calls = max_tool_calls
+        self.max_steps = 0
+        self.tool_calls = 0
+        self.tool_errors = 0
+        self.session = session or loop.session
+        self.system = system if system is not None else loop.system_prompt(loop.root)
         self.declarations = [tool.declaration() for tool in tools.values()]
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system},
@@ -108,8 +179,16 @@ class Run:
 
     def close_step(self) -> None:
         if self.step_open:
-            self.session.write("step/end", {"turn": 1, "step": self.step})
+            self.session.write("step/end", {"turn": self.turn, "step": self.step})
             self.step_open = False
+
+    def end_turn(self, reason: Mapping[str, Any], outcome: str) -> NoReturn:
+        self.end_turn_quietly(reason)
+        raise _Stop(0, outcome)
+
+    def end_turn_quietly(self, reason: Mapping[str, Any]) -> None:
+        self.close_step()
+        self.session.write("turn/end", {"turn": self.turn, "reason": dict(reason)})
 
     # -- stage handlers, one per kind; each returns the outcome its edges name ------------------------
 
@@ -117,17 +196,15 @@ class Run:
         loop = self.loop
         self.close_step()
         if self.step >= graph.max_steps:
-            self.session.write("turn/end", {"turn": 1, "reason": {"kind": "max-steps", "steps": graph.max_steps}})
-            raise _Stop(0)
+            self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1
         step = self.step
         payload = {"step": step, "task": self.prompt, "messages": self.messages}
         entry = loop._decide(self.session, self.hooks["pre_step"], "pre_step", step, payload)
         if entry.get("kind") == "reject":
             reason = {"kind": "rejected", "step": step, "message": str(entry.get("reason") or "")}
-            self.session.write("turn/end", {"turn": 1, "reason": reason})
-            raise _Stop(0)
-        self.session.write("step/start", {"turn": 1, "step": step})
+            self.end_turn(reason, "gave_up")
+        self.session.write("step/start", {"turn": self.turn, "step": step})
         self.step_open = True
         if step == 1:
             self.session.write(
@@ -166,8 +243,13 @@ class Run:
             name = str(function.get("name", ""))
             raw = function.get("arguments") or "{}"
             call_id = str(call.get("id") or name)
+            if self.max_tool_calls is not None and self.tool_calls >= self.max_tool_calls:
+                self.end_turn({"kind": "max-tool-calls", "tool_calls": self.max_tool_calls}, "budget")
+            self.tool_calls += 1
             self.session.write("tool/call", {"step": step, "call_id": call_id, "name": name, "arguments": raw})
-            spill = self.workdir / loop.SPILL_DIR / f"{step}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
+            # An agent turn's spill carries its turn number, so two turns' step 1 do not share a file.
+            prefix = f"{step}" if self.parent is None else f"t{self.turn}-{step}"
+            spill = self.workdir / loop.SPILL_DIR / f"{prefix}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
 
             def gate(tool: Any, arguments: dict[str, Any], call_id: str = call_id) -> dict[str, Any]:
                 payload = {
@@ -177,9 +259,13 @@ class Run:
                     "arguments": arguments,
                     "capabilities": list(tool.capabilities),
                 }
-                return loop._decide(self.session, self.hooks["pre_execute"], "pre_execute", step, payload)
+                decision = loop._decide(self.session, self.hooks["pre_execute"], "pre_execute", step, payload)
+                if decision.get("kind") == "ask" and self.parent is not None:
+                    # An agent's turn has an answerer above it: the parent graph reads ask as an outcome.
+                    raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
+                return decision
 
-            result = loop._invoke(tools, name, raw, self.workdir, spill=spill, gate=gate)
+            result = loop._invoke(tools, name, raw, self.workdir, spill=spill, gate=gate, enforcer=loop.enforcer)
             payload = {
                 "step": step,
                 "call_id": call_id,
@@ -189,7 +275,14 @@ class Run:
             }
             verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
             result = loop._judged(result, verdict)
-            self.session.write("tool/result", {"step": step, "call_id": call_id, "name": name, **result})
+            if result.get("is_error"):
+                self.tool_errors += 1
+            # The log says what was enforced on this tool, whether or not the call reached its run.
+            enforcement = loop.enforcer.describe(tools.get(name))
+            self.session.write(
+                "tool/result",
+                {"step": step, "call_id": call_id, "name": name, **result, "enforcement": enforcement},
+            )
             self.messages.append({"role": "tool", "tool_call_id": call_id, "content": result["content"]})
             contexts.extend(loop._texts(verdict.get("contexts")))
         # Contexts land after the batch's results, in call order, so the model reads them as one note.
@@ -215,17 +308,139 @@ class Run:
         self.say(str(stage["text"]), {"kind": "stage", "stage": name})
         return "done"
 
-    def end(self, graph: Graph, stage: Mapping[str, Any]) -> None:
-        self.close_step()
-        self.session.write("turn/end", {"turn": 1, "reason": {"kind": str(stage.get("reason", "completed"))}})
-        raise _Stop(0)
+    def branch(self, graph: Graph, stage: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        """The first case that holds names the outcome; none, ``else``."""
+        text = _last_assistant_text(self.messages)
+        for case in stage["cases"]:
+            when, value = str(case["when"]), case["value"]
+            if when == "steps_used_at_least":
+                hit = self.step >= int(value)
+            elif when == "tool_errors_at_least":
+                hit = self.tool_errors >= int(value)
+            else:
+                hit = re.search(str(value), text) is not None
+            if hit:
+                return str(case["outcome"]), {"case": when, "value": value}
+        return "else", {"case": "else"}
+
+    def compact(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
+        """Above ``fire_ratio`` of the window, one model call summarizes the older span; ``keep_ratio`` stays verbatim."""
+        loop = self.loop
+        policy = {"fire_ratio": float(stage["fire_ratio"]), "keep_ratio": float(stage["keep_ratio"])}
+        before = _tokens(self.messages)
+        if before <= policy["fire_ratio"] * self.context_window:
+            return "done", {"fired": False, "tokens": before}
+        head, older, tail = _split(self.messages, policy["keep_ratio"] * self.context_window)
+        if not older:
+            return "done", {"fired": False, "tokens": before}
+        body = {
+            "messages": [
+                {"role": "system", "content": SUMMARY_PROMPT},
+                {"role": "user", "content": _transcript(older)},
+            ],
+            "max_tokens": loop.MAX_COMPLETION_TOKENS,
+        }
+        message, failure = loop._complete(self.binding, body)
+        record: dict[str, Any] = {"step": self.step, "stage": name, "policy": policy, "tokens_before": before}
+        if message is None:
+            # The span stays as it was: a summary that did not arrive drops nothing the model saw.
+            self.session.write("context/compacted", {**record, "fired": False, "error": failure})
+            return "done", {"fired": False, "tokens": before, "error": str((failure or {}).get("code", ""))}
+        summary = str(message.get("content") or "").strip()
+        note = {"role": "user", "content": f"Summary of the earlier steps:\n{summary}"}
+        self.messages = [*head, note, *tail]
+        after = _tokens(self.messages)
+        self.session.write(
+            "context/compacted",
+            {**record, "fired": True, "tokens_after": after, "dropped": len(older), "summary": summary},
+        )
+        return "done", {"fired": True, "tokens_before": before, "tokens_after": after, "dropped": len(older)}
+
+    def end(self, graph: Graph, stage: Mapping[str, Any]) -> NoReturn:
+        reason = str(stage.get("reason", "completed"))
+        self.end_turn({"kind": reason}, reason)
+
+    def subagent(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
+        """Hand the last assistant text (or the task) to an agent, then down its ``then`` pipeline; its text comes back."""
+        first = str(stage["agent"])
+        text = _last_assistant_text(self.messages) or self.prompt
+        outcome = "completed"
+        ran: list[str] = []
+        queue = [first]
+        while queue and outcome == "completed":
+            agent = queue.pop(0)
+            outcome, text, _ = self.run_agent(agent, text)
+            ran.append(agent)
+            queue = [*(self.agents[agent].get("then") or ()), *queue]
+        content = text or f"{ran[-1]} ended with {outcome}"
+        if outcome == "ask":
+            content = f"{ran[-1]} asks: {text}"
+        self.say(content, {"kind": "agent", "agent": ran[-1], "outcome": outcome})
+        return outcome, {"agent": first, "agents": ran, "steps": self.step}
+
+    def run_agent(self, name: str, prompt: str) -> tuple[str, str, int]:
+        """One agent's turn in its own session file, on the parent's remaining step budget; (outcome, text, steps)."""
+        loop = self.loop
+        agent = self.agents[name]
+        remaining = self.max_steps - self.step
+        if remaining <= 0:
+            return "budget", "", 0
+        graph = load_graph(loop.root, str(agent.get("graph", "seed")))
+        graph.max_steps = min(int(agent.get("max_steps") or remaining), remaining)
+        allow = agent.get("tools")
+        tools = self.tools if allow is None else {n: t for n, t in self.tools.items() if n in allow}
+        session, turn = loop.open_turn(name)
+        child = Run(
+            loop,
+            prompt,
+            self.binding,
+            tools,
+            self.hooks,
+            self.workdir,
+            context_window=self.context_window,
+            agents=self.agents,
+            parent=self,
+            agent=name,
+            turn=turn,
+            session=session,
+            system=loop.system_prompt(loop.root, skills=agent.get("skills"), prompt=str(agent.get("prompt", ""))),
+            max_tool_calls=agent.get("max_tool_calls"),
+        )
+        session.write(
+            "session",
+            {
+                **loop.header,
+                "task": prompt,
+                "agent": name,
+                "turn": turn,
+                "parent": self.agent,
+                "tools": sorted(tools),
+                "capabilities": {n: list(tools[n].capabilities) for n in sorted(tools)},
+                "hooks": {hook.name: event for event, listeners in self.hooks.items() for hook in listeners},
+                "graph": graph.source,
+                "max_steps": graph.max_steps,
+            },
+        )
+        session.write("turn/start", {"turn": turn, "parent": self.agent})
+        try:
+            outcome, text = _walk(child, graph)
+        finally:
+            # Steps are drawn from the episode total, so the parent's budget shrinks by what the child spent.
+            self.step += child.step
+            session.close()
+        return outcome, text, child.step
 
 
-def run_graph(run: Run, graph: Graph) -> int:
-    """Walk the graph from its start until an end stage, a budget stop, or a failure; the exit status."""
+def _walk(run: Run, graph: Graph) -> tuple[str, str]:
+    """Walk the graph from its start to an end stage or a budget stop; (outcome, the last assistant text).
+
+    A failure (a model call that ended in error, a graph that exceeded its
+    transition bound) raises ``_Stop`` with a nonzero exit status, which the
+    root turns into the episode's exit and an agent's turn propagates."""
     session = run.session
     name = graph.start
     limit = (graph.max_steps + 1) * TRANSITIONS_PER_STEP
+    run.max_steps = graph.max_steps
     try:
         for _ in range(limit):
             stage = graph.stages[name]
@@ -240,14 +455,37 @@ def run_graph(run: Run, graph: Graph) -> int:
                 outcome, detail = run.verify(graph, stage, name)
             elif kind == "message":
                 outcome = run.message(graph, stage, name)
+            elif kind == "branch":
+                outcome, detail = run.branch(graph, stage)
+            elif kind == "compact":
+                outcome, detail = run.compact(graph, stage, name)
+            elif kind == "subagent":
+                outcome, detail = run.subagent(graph, stage, name)
             else:
                 run.end(graph, stage)
-                return 0
             target = graph.edges[(name, outcome)]
             session.write("stage/exit", {"step": run.step, "stage": name, "outcome": outcome, "to": target, **detail})
             name = target
     except _Stop as stop:
-        return stop.exit_code
+        if stop.exit_code != 0:
+            raise
+        return stop.outcome, _last_assistant_text(run.messages)
+    except _Escalate as ask:
+        run.end_turn_quietly({"kind": "ask", "reason": ask.reason})
+        return "ask", ask.reason
     run.close_step()
     failure = {"code": "GRAPH_ERROR", "message": f"graph {graph.name!r} took more than {limit} transitions"}
-    return run.loop._abort(session, failure)
+    run.loop._abort(session, failure)
+    raise _Stop(1)
+
+
+def run_graph(run: Run, graph: Graph) -> int:
+    """The root turn: walk the graph and map its end to the episode's exit status."""
+    try:
+        _walk(run, graph)
+    except _Stop as stop:
+        return stop.exit_code
+    finally:
+        for session in run.loop.open:
+            session.close()
+    return 0

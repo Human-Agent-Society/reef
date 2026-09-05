@@ -598,8 +598,8 @@ class CordisBackend(TrainingBackend):
             scored = [self._run_and_score(files, task) for files, task in pairings]
         candidate_runs = scored[0::2]
         current_runs = scored[1::2]
-        candidate_scores = tuple(score for score, _, _ in candidate_runs)
-        current_scores = tuple(score for score, _, _ in current_runs)
+        candidate_scores = tuple(score for score, _, _, _ in candidate_runs)
+        current_scores = tuple(score for score, _, _, _ in current_runs)
         return EvaluationResult(
             evaluator="harness_episode_pairs",
             evaluator_version="1",
@@ -608,14 +608,17 @@ class CordisBackend(TrainingBackend):
                 "current_scores": current_scores,
                 # Failure observations ride the evaluation so settlement can
                 # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(f.to_dict() for _, f, _ in candidate_runs if f is not None),
-                "current_failures": tuple(f.to_dict() for _, f, _ in current_runs if f is not None),
+                "candidate_failures": tuple(f.to_dict() for _, f, _, _ in candidate_runs if f is not None),
+                "current_failures": tuple(f.to_dict() for _, f, _, _ in current_runs if f is not None),
                 "episode_failures": sum(score is None for score in candidate_scores + current_scores),
                 "episode_repeats": self._episode_repeats,
-                "candidate_residue": sum(residue for _, _, residue in candidate_runs),
-                "current_residue": sum(residue for _, _, residue in current_runs),
+                "candidate_residue": sum(residue for _, _, residue, _ in candidate_runs),
+                "current_residue": sum(residue for _, _, residue, _ in current_runs),
                 "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
                 "current_score": float(sum(score for score in current_scores if score is not None)),
+                # Per agent sums over the side's episodes, so a verdict says which agent did the work.
+                "candidate_agents": _sum_agents(agents for _, _, _, agents in candidate_runs),
+                "current_agents": _sum_agents(agents for _, _, _, agents in current_runs),
             },
         )
 
@@ -747,14 +750,14 @@ class CordisBackend(TrainingBackend):
 
     def _run_and_score(
         self, files: Mapping[str, str], task: str
-    ) -> tuple[float | None, FailureObservation | None, int]:
+    ) -> tuple[float | None, FailureObservation | None, int, dict[str, dict[str, int]]]:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A nonzero
         exit still scores, as before, and is observed alongside the score.
         The third element counts files the episode left outside the cleanup
         whitelist; with ``forbid_residue`` a littering episode scores as one
-        that could not run."""
+        that could not run. The fourth is the trajectory's work per agent."""
         try:
             result = run_episode(
                 self._descriptor,
@@ -765,25 +768,32 @@ class CordisBackend(TrainingBackend):
                 executor=self._executor,
             )
         except EpisodeError as error:
-            return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0
+            return None, FailureObservation(task=task, stage="launch", cause=str(error)), 0, {}
         except TrajectoryError as error:
-            return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0
+            return None, FailureObservation(task=task, stage="trajectory", cause=str(error)), 0, {}
         residue = len(result.residue)
+        agents = _agent_work(result.trajectory)
         if residue and self._forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return None, FailureObservation(task=task, stage="residue", cause=cause), residue
+            return None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return score, FailureObservation(task=task, stage="exit", cause=cause), residue
-        return score, None, residue
+            return score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents
+        return score, None, residue, agents
+
+    @staticmethod
+    def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+        return _agent_work(trajectory)
 
     @staticmethod
     def _mutation_kinds(candidate: HarnessCandidate) -> frozenset[str]:
         """Node kinds the mutations touch; update and remove read the kind off the pre-mutation tree."""
+        # The kind after the mutation: an update cannot change it (_apply refuses), and a remove reads it
+        # off the tree it left, so the pre-mutation entries answer for every op that is not a create.
         by_id = {str(entry.get("id")): str(entry.get("name")) for entry in candidate.current_entries}
         kinds: set[str] = set()
         for mutation in candidate.mutations:
@@ -830,9 +840,17 @@ class CordisBackend(TrainingBackend):
                 raise MutationError("create mutation must carry options")
             self._loader.create({**mutation.options, "id": mutation.id})
         elif mutation.op == "update":
-            self._resolve(mutation.id)
+            entry = self._resolve(mutation.id)
             if mutation.options is None:
                 raise MutationError("update mutation must carry options")
+            # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
+            # update that renamed the kind would validate under the old one; a kind change is remove + create.
+            kind = mutation.options.get("name")
+            if kind is not None and str(kind) != str(entry.options.get("name")):
+                raise MutationError(
+                    f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
+                    f"to {kind!r}; remove the entry and create it under the new kind"
+                )
             self._loader.update(mutation.id, dict(mutation.options))
         else:
             self._resolve(mutation.id)
@@ -881,6 +899,36 @@ class CordisBackend(TrainingBackend):
         if fiber.state is not FiberState.ACTIVE:
             return f"node fiber is {fiber.state.name}"
         return None
+
+
+def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Turns, steps, tool calls and tool errors per agent of a native-jsonl trajectory; empty for other formats."""
+    work: dict[str, dict[str, int]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+            work.setdefault(agent, {"turns": 0, "steps": 0, "tool_calls": 0, "tool_errors": 0})["turns"] += 1
+        elif agent is None:
+            continue
+        elif type_ == "step/start":
+            work[agent]["steps"] += 1
+        elif type_ == "tool/call":
+            work[agent]["tool_calls"] += 1
+        elif type_ == "tool/result" and data.get("is_error"):
+            work[agent]["tool_errors"] += 1
+    return work
+
+
+def _sum_agents(runs: Any) -> dict[str, dict[str, int]]:
+    total: dict[str, dict[str, int]] = {}
+    for work in runs:
+        for agent, counts in work.items():
+            sums = total.setdefault(agent, {"turns": 0, "steps": 0, "tool_calls": 0, "tool_errors": 0})
+            for key, value in counts.items():
+                sums[key] += value
+    return {agent: total[agent] for agent in sorted(total)}
 
 
 def _write_rendered_files(files: Mapping[str, str]) -> Path:

@@ -115,12 +115,41 @@ defines ``run(args, workdir) -> str``, and after it ``NAME``,
 the tree's values are what the module ends with whatever the code assigned.
 ``capabilities`` is optional: distinct names from ``read``, ``write``,
 ``exec`` and ``network`` that say what the tool does. The loop reports them
-in the session header and hands them to ``pre_execute`` hooks, and the
-sandbox will read them when it enforces policy per tool. The seed tools
-declare theirs; ``run_bash`` declares all three a shell can do.
+in the session header and hands them to ``pre_execute`` hooks. Under the
+``local`` executor nothing enforces them: the tool runs in the loop's own
+process. Under the ``sandbox`` executor, which sets
+``REEF_NATIVE_ENFORCE=bwrap`` for the episodes it launches, the loop runs
+each call in a child process under a bubblewrap profile derived from the
+declaration (it binds the episode's ``/proc`` read only, since a jail inside
+the episode's cannot mount a fresh one): without ``network`` the call gets an
+empty network namespace;
+without ``write`` the workspace is bound read only; without ``exec`` only
+library directories, the interpreter file running the tool and its prefixes
+are bound, so no directory that holds a shell (``/bin``, ``/usr/bin``,
+``/usr/local/bin``) exists in the jail, and ``PATH`` is unset besides.
+``subprocess.run(["bash", ...])`` then fails with a missing file: Python
+falls back to searching ``/bin:/usr/bin`` when ``PATH`` is absent, and
+those directories are not there. The absent directories are the denial;
+binding one of them for any reason reopens ``exec``. bwrap
+cannot deny the rest: the tool can still start ``sys.executable``, run an
+executable installed under a library directory or under a path it can write
+(``/tmp`` inside the jail is a private tmpfs), and read the workspace, so
+``read`` is never withheld. The loop refuses to start when the variable
+names ``bwrap`` and no ``bwrap`` is on ``PATH``, and a call the jail could
+not run at all ends in ``SANDBOX_FAILED`` rather than passing as a tool
+failure; the sandbox executor's preflight runs one jail inside another, so
+a host that cannot nest them fails at build, not at the first call. Every
+``tool/result`` event carries ``enforcement`` with the
+``mode`` (``none`` or ``bwrap``) and ``denied``, the declaration's
+complement over ``write``, ``exec`` and ``network`` (empty under ``none``).
+The seed tools declare theirs; ``run_bash`` declares all three a shell can
+do.
 ``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
-``write_file``, and ``run_bash`` tools as entries a recipe can seed and the
-loop can then evolve. An adapter that declares no ``files.native_tool`` path
+``write_file``, ``run_bash``, and ``execute`` tools as entries a recipe can
+seed and the loop can then evolve; ``execute`` runs a Python block in the
+workspace with the other tools importable by name (``import read_file;
+read_file.run({"path": "x"}, WORKDIR)``), so a tree can move from one call
+per tool to code that calls tools without a loop change. An adapter that declares no ``files.native_tool`` path
 refuses to render that kind, so the mutation fails under it instead of
 silently dropping the tool. The admission gate refuses ``code`` that does not
 compile; a module that fails to import, or defines no ``run``, ends the
@@ -176,6 +205,9 @@ tool the tree lacks fails at render. The stages:
    tools | runs the pending calls of the last assistant message, each behind ``pre_execute`` then ``post_execute``; optional ``allow`` restricts them to named tools; outcome ``done``
    verify | reads the last assistant text: ``check`` is ``last_line_integer``, ``last_line_matches`` with a ``pattern``, or ``nonempty``; an optional ``message`` is appended as a user message on failure; outcomes ``pass``, ``fail``
    message | appends ``text`` as a user message; outcome ``done``
+   branch | routes on the run so far: ``cases`` is a list of ``{when, value, outcome}`` (at most 8) where ``when`` is ``steps_used_at_least`` or ``tool_errors_at_least`` with an integer ``value``, or ``last_text_matches`` with a regular expression; the first case that holds names the outcome, none names ``else``; every case outcome and ``else`` need an edge
+   subagent | hands the last assistant text (or the task) to the ``native_agent`` named by ``agent``, then down that agent's ``then`` pipeline; the last agent's text comes back as a user message with ``source.kind`` ``agent``; outcomes ``completed``, ``gave_up``, ``budget`` (the agent spent its steps or tool calls), ``ask`` (a ``pre_execute`` hook asked inside the agent's turn, and the reason is what comes back)
+   compact | when the messages pass ``fire_ratio`` of the model's context window, one model call summarizes the older span into a user message and the last ``keep_ratio`` of the window stays verbatim (a tool result never opens the kept tail without its call); ``0 < keep_ratio < fire_ratio <= 1``; the window is ``context_window`` in ``models.json`` (a ``config`` node with target ``models`` sets it), 32,768 tokens when unset, at four characters a token; the summary call is not a step, and a cycle must pass a model stage, so a run spends at most one per step; outcome ``done``
    end | ends the turn with ``reason`` ``completed`` or ``gave_up``
 
 Each model stage is one step, so ``max_steps`` bounds model calls as before,
@@ -184,23 +216,50 @@ a single slot local server for every other caller;
 entering a model stage with the budget spent ends the turn with
 ``max-steps``. The log names the path: ``stage/enter`` (``step``, ``stage``,
 ``kind``) and ``stage/exit`` (``outcome``, ``to``, and for a verify stage
-``check`` and ``last_line``), text a stage injects is a ``user/message`` with
+``check`` and ``last_line``, for a branch the ``case`` that held, for a
+compact whether it ``fired`` and the token counts), a compact that fired
+writes ``context/compacted`` (the ``policy``, ``tokens_before``,
+``tokens_after``, the ``dropped`` message count, and the ``summary``; a
+summary call that failed is logged with its ``error`` and drops nothing),
+text a stage injects is a ``user/message`` with
 ``source.kind`` ``stage``, the session header's ``graph`` says whether
 ``main`` or the ``seed`` ran, and a graph that cannot load is a
 ``LOAD_ERROR`` like a tool. A run that somehow exceeds
 ``(max_steps + 1) * 16`` transitions ends with ``GRAPH_ERROR``; admission
 proves that cannot happen, the guard is the backstop.
 
+A ``native_agent`` node is one more agent inside the same tree, rendered to
+``native/agents/<name>.json``: its own ``prompt`` (appended to the rules and
+skills as its system prompt), the ``graph`` it runs (``seed``, the built in
+loop, by default; ``main`` or any graph node by name), the ``tools`` and
+``skills`` it alone sees (all of the tree's when unset), ``max_steps`` and
+``max_tool_calls``, and ``then``, the agents its final text is handed to in
+order, each receiving the previous one's text. A graph calls an agent from a
+``subagent`` stage; the tree stays flat, agents are root entries, and render
+refuses a name the tree lacks and any cycle through ``then`` lists and
+subagent stages, so every delegation is a finite tree. An agent's turn runs
+on the parent's remaining step budget (its steps come out of the episode
+total) in its own session file under ``sessions/agents/``, numbered in run
+order and sorting before the root's ``session.jsonl``, so the trajectory's
+last assistant text stays the root's answer and which agent did what is read
+off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
+``pre_execute`` hook that answers ``ask`` inside an agent's turn ends the
+turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
+the parent graph is the one that can answer. The gate's verdict carries
+``candidate_agents`` and ``current_agents``, the turns, steps, tool calls and
+tool errors per agent summed over each side's episodes.
+
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
-``session`` header line names the task, model, tools, and hooks (name to
-event); then ``turn/start``, per step ``step/start``, ``request/header`` (the
+``session`` header line names the task, model, tools, hooks (name to
+event), and the ``enforcement`` mode; then ``turn/start``, per step
+``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
 ``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
-``tool/result`` (``content``, ``is_error``, and on error a closed ``code``:
-``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``, ``HOOK_DENIED``,
-``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
+``tool/result`` (``content``, ``is_error``, ``enforcement``, and on error a
+closed ``code``: ``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``,
+``SANDBOX_FAILED``, ``HOOK_DENIED``, ``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
 ``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
 or ``LOAD_ERROR``). Arguments are validated against the tool's declared
