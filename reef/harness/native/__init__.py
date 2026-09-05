@@ -406,16 +406,17 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
     }
     try:
         try:
+            # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
+            enforcer = select_enforcer(os.environ)
+            header["enforcement"] = enforcer.mode
             tools = load_tools(root / "tools")
             hooks = load_hooks(root / "hooks")
             agents = load_agents(root / "agents")
             graph = graphs.load_graph(root)
-            enforcer = select_enforcer(os.environ)
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
-        header["enforcement"] = enforcer.mode
         session.write(
             "session",
             {
