@@ -303,6 +303,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
         "read_file",
         "write_file",
         "run_bash",
+        "execute",
         "loop_guard",
         "main",
         "answer-style",
