@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
 from reef.harness.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -142,6 +142,24 @@ def test_episode_templates_follow_the_dialect() -> None:
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up"
     for files in (openai, anthropic):
         assert json.loads(files["pi-agent/settings.json"])["defaultModel"] == "reef/m"
+
+
+def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> None:
+    """A local endpoint needs no key, but pi refuses to start without one.
+
+    Rendering the empty string made every evaluation episode exit 1 with
+    "No API key found for the selected model" before reaching the endpoint,
+    so both sides of the gate scored 0 and no proposal could ever publish.
+    """
+    pi = get_adapter("pi")
+    files = render_composition(ModelBinding("http://127.0.0.1:11434", "m").compose_nodes(pi), pi)
+    assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == NO_KEY_PLACEHOLDER
+
+
+def test_a_real_key_is_rendered_verbatim_over_the_placeholder() -> None:
+    pi = get_adapter("pi")
+    files = render_composition(ModelBinding("http://up", "m", api_key="sk-real").compose_nodes(pi), pi)
+    assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == "sk-real"
 
 
 def test_the_dialect_rides_the_proxy_runtime_into_the_binding() -> None:

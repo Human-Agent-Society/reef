@@ -143,9 +143,13 @@ def _wrapper_lines(
         'exec python3 -m reef.harness.harness_wrapper "\\$@"',
         "REEF_WRAPPER_EOF",
         f'    chmod +x "$DEST/{_double_quoted(wrapper_name)}"',
-        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH.",
+        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH. The link target",
+        "    # must be absolute: DEST defaults to the relative ./reef-harness, and a",
+        "    # relative target resolves against the link's own directory, so the link",
+        f"    # dangles and {wrapper_name} is not runnable from anywhere.",
+        '    DEST_ABS="$(cd "$DEST" && pwd)"',
         '    mkdir -p "$HOME/.local/bin"',
-        f'    ln -sf "$DEST/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        f'    ln -sf "$DEST_ABS/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
         '    case ":$PATH:" in',
         '        *":$HOME/.local/bin:"*) ;;',
         f"        *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
@@ -211,9 +215,20 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "esac",
         "",
         "# Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.",
+        # The distribution is `reef-infra`; naming it `reef` here makes pip
+        # reject the requirement ("produced metadata for project name
+        # reef-infra") on every run. The install stays best effort - a managed
+        # interpreter (PEP 668) refuses it too - so the import is rechecked
+        # after and the wrapper's own failure is named here rather than
+        # surfacing later as a bare ModuleNotFoundError from the launcher.
         (
             "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
-            'python3 -m pip install --quiet --user reef-client "reef @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+            'python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+        ),
+        (
+            "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
+            'echo "reef: warning: reef-client and reef-infra are not importable by python3; '
+            'install them into the environment that runs the wrapper" >&2'
         ),
     ]
 
