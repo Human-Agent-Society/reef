@@ -77,8 +77,13 @@ class _GitWorkspace:
             self._run(("git", "clone", "--no-checkout", self.repository, str(self.clone_dir)))
         self.git("config", "user.name", "Reef Repository Backend")
         self.git("config", "user.email", "reef-artifacts@localhost")
-        self.git("config", "core.hooksPath", str(self.clone_dir / ".git" / "hooks"))
-        self.git("lfs", "install", "--local", "--skip-smudge")
+        self._install_lfs(self.clone_dir)
+
+    def _install_lfs(self, repository: Path) -> None:
+        # Keep LFS hooks separate from global hooks and hooks copied by Git templates.
+        hooks = repository.resolve() / ".git" / "reef-hooks"
+        self._run(("git", "config", "--local", "core.hooksPath", str(hooks)), cwd=repository)
+        self._run(("git", "lfs", "install", "--local", "--skip-smudge"), cwd=repository)
 
     def checkout(self, version: str) -> None:
         self.git("fetch", "origin", version)
@@ -146,7 +151,7 @@ class _GitWorkspace:
 
     def clone_for_materialize(self, destination: Path, version: str) -> None:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
-        self._run(("git", "lfs", "install", "--local", "--skip-smudge"), cwd=destination)
+        self._install_lfs(destination)
         self._run(("git", "fetch", "origin", version), cwd=destination)
         self._run(("git", "checkout", "--detach", "FETCH_HEAD"), cwd=destination)
         self._run(("git", "lfs", "pull"), cwd=destination)
