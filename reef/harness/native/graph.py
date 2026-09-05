@@ -8,6 +8,7 @@ the ``stage/enter`` and ``stage/exit`` events that now name the path.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,6 +20,15 @@ from reef.harness.nodes import validate_native_graph
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
 TRANSITIONS_PER_STEP = 16
+#: The context window a compact stage measures against when models.json names none.
+DEFAULT_CONTEXT_WINDOW = 32_768
+#: One token per this many characters of a serialized message: the closed estimate the compact stage uses.
+CHARS_PER_TOKEN = 4
+#: What a compact stage asks the model for over the span it drops.
+SUMMARY_PROMPT = (
+    "Summarize the work so far for a coding agent that will continue it: what the task asked, what was tried, "
+    "what the tools returned, what is settled, and what is still open. Be concrete and short."
+)
 
 
 class GraphError(Exception):
@@ -73,6 +83,41 @@ def _last_line(text: str) -> str:
     return lines[-1] if lines else ""
 
 
+def _tokens(messages: list[dict[str, Any]]) -> int:
+    return sum(len(json.dumps(message, ensure_ascii=False, default=str)) // CHARS_PER_TOKEN for message in messages)
+
+
+def _split(messages: list[dict[str, Any]], keep_tokens: float) -> tuple[list, list, list]:
+    """Head (the system prompt and the task), the older span to summarize, and the tail that stays verbatim.
+
+    The tail is the last messages that fit ``keep_tokens``, grown backwards so
+    it never opens on a tool result whose call was dropped."""
+    head, rest = messages[:2], messages[2:]
+    cut = len(rest)
+    used = 0
+    while cut > 0:
+        size = len(json.dumps(rest[cut - 1], ensure_ascii=False, default=str)) // CHARS_PER_TOKEN
+        if used + size > keep_tokens:
+            break
+        used += size
+        cut -= 1
+    while cut > 0 and cut < len(rest) and rest[cut].get("role") == "tool":
+        cut -= 1
+    return head, rest[:cut], rest[cut:]
+
+
+def _transcript(messages: list[dict[str, Any]]) -> str:
+    lines = []
+    for message in messages:
+        role = str(message.get("role", ""))
+        content = message.get("content")
+        calls = [call.get("function", {}) for call in message.get("tool_calls") or []]
+        if calls:
+            content = f"{content or ''}\n" + "\n".join(f"call {c.get('name')}({c.get('arguments')})" for c in calls)
+        lines.append(f"[{role}] {content if isinstance(content, str) else json.dumps(content, default=str)}")
+    return "\n".join(lines)
+
+
 class Run:
     """One turn's state, shared by every stage handler: the messages, the step counter, the log."""
 
@@ -84,6 +129,7 @@ class Run:
         tools: Mapping[str, Any],
         hooks: Mapping[str, list],
         workdir: Path,
+        context_window: int = DEFAULT_CONTEXT_WINDOW,
     ) -> None:
         self.loop = loop
         self.prompt = prompt
@@ -91,6 +137,8 @@ class Run:
         self.tools = tools
         self.hooks = hooks
         self.workdir = workdir
+        self.context_window = context_window
+        self.tool_errors = 0
         self.session = loop.session
         self.system = loop.system_prompt(loop.root)
         self.declarations = [tool.declaration() for tool in tools.values()]
@@ -189,6 +237,8 @@ class Run:
             }
             verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
             result = loop._judged(result, verdict)
+            if result.get("is_error"):
+                self.tool_errors += 1
             self.session.write("tool/result", {"step": step, "call_id": call_id, "name": name, **result})
             self.messages.append({"role": "tool", "tool_call_id": call_id, "content": result["content"]})
             contexts.extend(loop._texts(verdict.get("contexts")))
@@ -215,6 +265,54 @@ class Run:
         self.say(str(stage["text"]), {"kind": "stage", "stage": name})
         return "done"
 
+    def branch(self, graph: Graph, stage: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        """The first case that holds names the outcome; none, ``else``."""
+        text = _last_assistant_text(self.messages)
+        for case in stage["cases"]:
+            when, value = str(case["when"]), case["value"]
+            if when == "steps_used_at_least":
+                hit = self.step >= int(value)
+            elif when == "tool_errors_at_least":
+                hit = self.tool_errors >= int(value)
+            else:
+                hit = re.search(str(value), text) is not None
+            if hit:
+                return str(case["outcome"]), {"case": when, "value": value}
+        return "else", {"case": "else"}
+
+    def compact(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
+        """Above ``fire_ratio`` of the window, one model call summarizes the older span; ``keep_ratio`` stays verbatim."""
+        loop = self.loop
+        policy = {"fire_ratio": float(stage["fire_ratio"]), "keep_ratio": float(stage["keep_ratio"])}
+        before = _tokens(self.messages)
+        if before <= policy["fire_ratio"] * self.context_window:
+            return "done", {"fired": False, "tokens": before}
+        head, older, tail = _split(self.messages, policy["keep_ratio"] * self.context_window)
+        if not older:
+            return "done", {"fired": False, "tokens": before}
+        body = {
+            "messages": [
+                {"role": "system", "content": SUMMARY_PROMPT},
+                {"role": "user", "content": _transcript(older)},
+            ],
+            "max_tokens": loop.MAX_COMPLETION_TOKENS,
+        }
+        message, failure = loop._complete(self.binding, body)
+        record: dict[str, Any] = {"step": self.step, "stage": name, "policy": policy, "tokens_before": before}
+        if message is None:
+            # The span stays as it was: a summary that did not arrive drops nothing the model saw.
+            self.session.write("context/compacted", {**record, "fired": False, "error": failure})
+            return "done", {"fired": False, "tokens": before, "error": str((failure or {}).get("code", ""))}
+        summary = str(message.get("content") or "").strip()
+        note = {"role": "user", "content": f"Summary of the earlier steps:\n{summary}"}
+        self.messages = [*head, note, *tail]
+        after = _tokens(self.messages)
+        self.session.write(
+            "context/compacted",
+            {**record, "fired": True, "tokens_after": after, "dropped": len(older), "summary": summary},
+        )
+        return "done", {"fired": True, "tokens_before": before, "tokens_after": after, "dropped": len(older)}
+
     def end(self, graph: Graph, stage: Mapping[str, Any]) -> None:
         self.close_step()
         self.session.write("turn/end", {"turn": 1, "reason": {"kind": str(stage.get("reason", "completed"))}})
@@ -240,6 +338,10 @@ def run_graph(run: Run, graph: Graph) -> int:
                 outcome, detail = run.verify(graph, stage, name)
             elif kind == "message":
                 outcome = run.message(graph, stage, name)
+            elif kind == "branch":
+                outcome, detail = run.branch(graph, stage)
+            elif kind == "compact":
+                outcome, detail = run.compact(graph, stage, name)
             else:
                 run.end(graph, stage)
                 return 0

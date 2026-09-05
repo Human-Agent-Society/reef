@@ -1522,7 +1522,13 @@ def test_recipe_seed_expands_a_dotted_reference_in_place(tmp_path: Path, monkeyp
 
     starter = {"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# a\n"}}
     recipe = CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:SEED_TOOLS", starter]))
-    assert [entry["id"] for entry in recipe.seed] == ["read_file", "write_file", "run_bash", "answer-style"]
+    assert [entry["id"] for entry in recipe.seed] == [
+        "read_file",
+        "write_file",
+        "run_bash",
+        "execute",
+        "answer-style",
+    ]
     with pytest.raises(RecipeConfigError, match=r"cannot import evolution\.seed reference"):
         CordisRecipe.from_environment({}, config=config(["reef.harness.native.seed:NO_SUCH"]))
     with pytest.raises(RecipeConfigError, match="must name a sequence of entry option mappings"):
