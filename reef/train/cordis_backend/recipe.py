@@ -22,6 +22,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.descriptor import DescriptorError
 from reef.harness.executor import EpisodeExecutor, build_executor
 from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.render import render_composition
 from reef.harness.version_check import version_check_entry
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
@@ -368,7 +369,18 @@ class CordisRecipe(Recipe):
         return ModelBindings(served=self.model_binding(), named=dict(self.models))
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
+        model = self.model_name or getattr(self.runtime, "model_path", None)
+        return create_harness_surface(
+            seed_entries=tuple(dict(entry) for entry in self.seed),
+            served_model=model if isinstance(model, str) and model else None,
+        )
+
+    def base_artifact_files(self) -> Mapping[str, str] | None:
+        """The seed rendered for the adapter: a fresh scenario serves it before any step publishes."""
+        if not self.seed:
+            return None
+        nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
+        return render_composition(nodes, get_adapter(self.adapter))
 
     def build(
         self,
