@@ -4,12 +4,13 @@ One episode is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
 ``graphs/``, ``agents/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.native.host``), talks to the served model
-through the rendered binding, dispatches tool calls to the tool modules, asks
-the hook modules at four events, and appends one JSONL session the
+through the rendered binding, dispatches tool calls to the tool modules
+through the capability enforcer ``REEF_NATIVE_ENFORCE`` selects, asks the
+hook modules at four events, and appends one JSONL session the
 ``native-jsonl`` trajectory reader decodes. Everything the model saw is in
 that log: the rendered system prompt, the tool declarations, every message,
-every call, every result, and every hook decision that changed the loop's
-course.
+every call, every result with what was enforced on it, and every hook
+decision that changed the loop's course.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from types import ModuleType
 from typing import Any, Protocol
 
 from reef.harness.model_binding import ModelBinding, ModelBindingError
+from reef.harness.native.enforce import Enforcer, InProcessEnforcer, SandboxFailed, ToolFailed, select_enforcer
 from reef.harness.nodes import NATIVE_EVENTS
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
@@ -92,12 +94,15 @@ class ToolModule:
         parameters: Mapping[str, Any],
         run: ToolRunner,
         capabilities: Sequence[str] = (),
+        path: Path | None = None,
     ) -> None:
         self.name = name
         self.description = description
         self.parameters = dict(parameters) or {"type": "object", "properties": {}}
         self.run = run
         self.capabilities = tuple(str(item) for item in capabilities)
+        # The module file, which a sandboxing enforcer imports afresh in its child; a tool built in code has none.
+        self.path = path
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -163,7 +168,9 @@ def tool_from_module(path: Path, module: ModuleType) -> ToolModule:
     parameters = getattr(module, "PARAMETERS", {})
     capabilities = getattr(module, "CAPABILITIES", ())
     description = str(getattr(module, "DESCRIPTION", ""))
-    return ToolModule(name, description, parameters, run, capabilities if isinstance(capabilities, list) else ())
+    return ToolModule(
+        name, description, parameters, run, capabilities if isinstance(capabilities, list) else (), path=path
+    )
 
 
 def hook_from_module(path: Path, module: ModuleType) -> HookModule:
@@ -412,10 +419,12 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         try:
             host = NativeHost.from_root(root)
             graph = host.graph("main")
+            enforcer = select_enforcer(os.environ)
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
+        header["enforcement"] = enforcer.mode
         tools, hooks = host.tools, host.hooks
         session.write(
             "session",
@@ -431,7 +440,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root, session_dir, header)
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
         run = graphs.Run(loop, prompt, binding, host, workdir)
         return graphs.run_graph(run, graph)
     finally:
@@ -484,8 +493,9 @@ def _invoke(
     *,
     spill: Path | None = None,
     gate: Callable[[ToolModule, dict[str, Any]], Mapping[str, Any]] | None = None,
+    enforcer: Enforcer | None = None,
 ) -> dict[str, Any]:
-    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments the gate allowed."""
+    """One result for one call: content, is_error, and a closed error code; run only sees valid arguments the gate allowed, under the enforcer's profile."""
     try:
         arguments = json.loads(raw) if raw.strip() else {}
     except json.JSONDecodeError:
@@ -514,7 +524,11 @@ def _invoke(
                 return _error("INVALID_ARGS", f"rewritten by a hook: {violation}", arguments)
     started = time.monotonic()
     try:
-        result = tool.run(arguments, str(workdir))
+        result = (enforcer or InProcessEnforcer()).run(tool, arguments, workdir)
+    except SandboxFailed as exc:
+        return _error("SANDBOX_FAILED", str(exc), arguments)
+    except ToolFailed as exc:
+        return _error("TOOL_FAILED", str(exc), arguments)
     except Exception as exc:
         return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
@@ -533,11 +547,19 @@ class _Loop:
     SPILL_DIR = SPILL_DIR
     MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
-    def __init__(self, session: Session, root: Path, session_dir: Path, header: Mapping[str, Any] = {}) -> None:
+    def __init__(
+        self,
+        session: Session,
+        root: Path,
+        session_dir: Path,
+        header: Mapping[str, Any] = {},
+        enforcer: Enforcer | None = None,
+    ) -> None:
         self.session = session
         self.root = root
         self.session_dir = session_dir
         self.header = dict(header)
+        self.enforcer = enforcer or InProcessEnforcer()
         self.turns = 1
         self.open: list[Session] = []
 

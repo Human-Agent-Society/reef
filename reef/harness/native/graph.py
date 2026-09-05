@@ -311,7 +311,7 @@ class Run:
                     raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
                 return decision
 
-            result = loop._invoke(tools, name, raw, self.workdir, spill=spill, gate=gate)
+            result = loop._invoke(tools, name, raw, self.workdir, spill=spill, gate=gate, enforcer=loop.enforcer)
             payload = {
                 "step": step,
                 "call_id": call_id,
@@ -323,7 +323,12 @@ class Run:
             result = loop._judged(result, verdict)
             if result.get("is_error"):
                 self.tool_errors += 1
-            self.session.write("tool/result", {"step": step, "call_id": call_id, "name": name, **result})
+            # The log says what was enforced on this tool, whether or not the call reached its run.
+            enforcement = loop.enforcer.describe(tools.get(name))
+            self.session.write(
+                "tool/result",
+                {"step": step, "call_id": call_id, "name": name, **result, "enforcement": enforcement},
+            )
             self.messages.append({"role": "tool", "tool_call_id": call_id, "content": result["content"]})
             contexts.extend(loop._texts(verdict.get("contexts")))
         # Contexts land after the batch's results, in call order, so the model reads them as one note.

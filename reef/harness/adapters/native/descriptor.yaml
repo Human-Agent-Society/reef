@@ -27,6 +27,9 @@ files:
 trajectory:
   format: native-jsonl
   path: "native/sessions"
+# The loop writes its session here, so the sandbox executor opens it while the rest of the root stays read only.
+writable_paths:
+  - "native/sessions"
 cleanup_whitelist:
   - "native/sessions/**"
   - "native/tools/__pycache__/**"
