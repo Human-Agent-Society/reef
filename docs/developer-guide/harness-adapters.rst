@@ -301,10 +301,12 @@ the parent graph is the one that can answer. The gate's verdict carries
 tool errors per agent summed over each side's episodes. It also carries
 ``candidate_paths`` and ``current_paths``, one entry per episode in pairing
 order (task by task, then repeat by repeat): the root session's
-``stage/exit`` stage names in order and the ``turn/end`` reason kind; a
-delegated agent's stages under ``agents/`` stay out of it; an episode that
-could not run is ``None`` and a format without stage events gives an empty
-list and a ``None`` reason.
+``stage/exit`` stage names in order and the ``turn/end`` reason kind, plus
+``error`` when the turn ended on one and ``errored_agent`` when a delegated
+agent's error ended the run before the root wrote its end; a delegated
+agent's stages under ``agents/`` stay out of it; an episode that could not
+run is ``None`` and a format without stage events gives an empty list and a
+``None`` reason.
 
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A

@@ -225,7 +225,8 @@ and the seconds they took (``proposer_calls``, ``proposer_seconds``), and per
 side and task the path each episode took: on the native harness the stage
 names the loop exited in order and the reason its turn ended
 (``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
-episode, beside ``candidate_agents``).
+episode, with ``error`` and ``errored_agent`` when a turn ended on an error,
+beside ``candidate_agents``).
 
 The commit log holds the verdict; the step record holds what decided it.
 ``evolution.step_record_dir`` (off by default) names a directory, made

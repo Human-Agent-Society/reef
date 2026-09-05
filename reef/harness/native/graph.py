@@ -32,30 +32,40 @@ _SEARCH_CHILD = (
 )
 
 
-def bounded_search(pattern: str, text: str, timeout_s: float = NATIVE_PATTERN_TIMEOUT_S) -> bool | None:
-    """Whether ``pattern`` matches ``text``, decided within ``timeout_s`` in a child process; None on timeout.
+def bounded_search(pattern: str, text: str, timeout_s: float | None = None) -> bool | str:
+    """Whether ``pattern`` matches ``text``, decided within ``timeout_s`` in a child process.
 
     Python's matcher cannot be interrupted, so a pattern that backtracks
     without end would hold the loop until the episode's wall clock; the
-    child is killed instead and the caller treats None as a miss."""
+    child is killed instead. The answer is ``True`` or ``False``, or the
+    reason there is none: ``"timeout"`` when the clock ran out, and
+    ``"unavailable"`` when the child could not start or answer (a process
+    limit on the episode, say). Either one is a miss to the caller, named
+    in the stage's detail."""
     try:
         done = subprocess.run(
             [sys.executable, "-I", "-c", _SEARCH_CHILD],
-            input=json.dumps([pattern, text]),
+            input=json.dumps([pattern, text], ensure_ascii=True),
             capture_output=True,
             text=True,
-            timeout=timeout_s,
+            timeout=NATIVE_PATTERN_TIMEOUT_S if timeout_s is None else timeout_s,
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return None
-    if done.returncode != 0:
-        return None
+        return "timeout"
+    except (OSError, ValueError):
+        return "unavailable"
+    if done.returncode != 0 or done.stdout not in ("0", "1"):
+        return "unavailable"
     return done.stdout == "1"
 
 
-def _timeouts(patterns: list[str]) -> dict[str, Any]:
-    return {"timeout": list(patterns)} if patterns else {}
+def _unanswered(misses: dict[str, str]) -> dict[str, Any]:
+    """The branch cases whose search gave no answer, by reason: ``{"timeout": [...]}``, ``{"unavailable": [...]}``."""
+    detail: dict[str, list[str]] = {}
+    for value, reason in misses.items():
+        detail.setdefault(reason, []).append(value)
+    return detail
 
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
@@ -383,7 +393,7 @@ class Run:
         text = _last_assistant_text(self.messages)
         line = _last_line(text)
         check = stage["check"]
-        hit: bool | None = False
+        hit: bool | str = False
         if check == "last_line_integer":
             passed = re.fullmatch(r"-?\d+", line) is not None
         elif check == "last_line_matches":
@@ -394,8 +404,8 @@ class Run:
         if not passed and isinstance(stage.get("message"), str):
             self.say(stage["message"], {"kind": "stage", "stage": name})
         detail: dict[str, Any] = {"check": check, "last_line": line[:200]}
-        if check == "last_line_matches" and hit is None:
-            detail["pattern"] = "timeout"
+        if isinstance(hit, str):
+            detail["pattern"] = hit
         return ("pass" if passed else "fail"), detail
 
     def message(self, graph: Graph, stage: Mapping[str, Any], name: str) -> str:
@@ -405,7 +415,7 @@ class Run:
     def branch(self, graph: Graph, stage: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         """The first case that holds names the outcome; none, ``else``."""
         text = _last_assistant_text(self.messages)
-        timeouts: list[str] = []
+        misses: dict[str, str] = {}
         for case in stage["cases"]:
             when, value = str(case["when"]), case["value"]
             if when == "steps_used_at_least":
@@ -413,14 +423,14 @@ class Run:
             elif when == "tool_errors_at_least":
                 hit = self.tool_errors >= int(value)
             else:
-                # A search that outlives its clock is a case that does not hold, named in the outcome's detail.
+                # A search with no answer is a case that does not hold, named with its reason in the detail.
                 found = bounded_search(str(value), text[-NATIVE_MATCH_WINDOW:])
-                if found is None:
-                    timeouts.append(str(value))
+                if isinstance(found, str):
+                    misses[str(value)] = found
                 hit = found is True
             if hit:
-                return str(case["outcome"]), {"case": when, "value": value, **_timeouts(timeouts)}
-        return "else", {"case": "else", **_timeouts(timeouts)}
+                return str(case["outcome"]), {"case": when, "value": value, **_unanswered(misses)}
+        return "else", {"case": "else", **_unanswered(misses)}
 
     def compact(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
         """Above ``fire_ratio`` of the window, one model call summarizes the older span; ``keep_ratio`` stays verbatim."""
