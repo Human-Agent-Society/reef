@@ -300,6 +300,9 @@ class _Stack:
         _log(f"{name}: ready")
 
     def start(self) -> None:
+        # A crashed run can leave this behind. Clear it before any service
+        # starts so readiness can only come from the current bridge driver.
+        (self.run_dir / "bridge.ready").unlink(missing_ok=True)
         for svc in self.services:
             self._start_service(svc)
         _log(f"stack up. logs: {self.run_dir}/*.log")
