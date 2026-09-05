@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1120,6 +1121,9 @@ def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> Non
         ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
         ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
+        # A proposer's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
+        ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
+        ({"kind": "verify", "check": "last_line_matches", "pattern": "a" * 201}, "at most 200"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": 2, "outcome": "else"}]}, "other than else"),
         (
             {**route, "cases": [{"when": "steps_used_at_least", "value": 1, "outcome": "x"}] * 2},
@@ -1933,3 +1937,87 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     entries = json.loads((published / "native" / "tree.json").read_text(encoding="utf-8"))
     assert entries == settled.state["entries"] and [entry["id"] for entry in entries][-1] == "brief"
     assert "base_url" not in (published / "native" / "models.json").read_text(encoding="utf-8")
+
+
+def test_bounded_search_answers_ordinary_patterns_and_gives_up_on_one_that_never_finishes() -> None:
+    from reef.harness.runners.native.graph import bounded_search
+
+    assert bounded_search(r"-?\d+(\.\d+)?", "the answer is 9592.5") is True
+    assert bounded_search(r"^\s*(yes|no)\s*$", "maybe") is False
+    started = time.monotonic()
+    assert bounded_search("(a|a)+b", "a" * 40, timeout_s=0.5) == "timeout"
+    assert time.monotonic() - started < 5.0
+    # The optional group a proposer writes for a numeric answer is admitted and runs.
+    NODE_KINDS["native_graph"](
+        None,
+        {
+            "name": "g",
+            "start": "think",
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "check": {"kind": "verify", "check": "last_line_matches", "pattern": r"-?\d+(\.\d+)?"},
+                "done": {"kind": "end"},
+            },
+            "edges": [
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "check"},
+                {"from": "act", "when": "done", "to": "think"},
+                {"from": "check", "when": "pass", "to": "done"},
+                {"from": "check", "when": "fail", "to": "think"},
+            ],
+        },
+    )
+
+
+def test_a_search_with_no_answer_is_a_miss_named_in_the_stage_detail(tmp_path: Path, monkeypatch) -> None:
+    """A pattern that never finishes, in a branch case and in a verify check: the turn goes on, the case does not
+    hold, the check fails, and each stage's detail says why; a child that cannot start reads the same way."""
+    from reef.harness.runners.native import graph as graphs
+
+    class _LongA(_FakeModel):
+        def script(self, body: dict) -> dict:
+            return _reply(content="a" * 40)
+
+    graph = {
+        "name": "main",
+        "start": "think",
+        "max_steps": 4,
+        "stages": {
+            "think": {"kind": "model"},
+            "act": {"kind": "tools"},
+            "route": {
+                "kind": "branch",
+                "cases": [{"when": "last_text_matches", "value": "(a|a)+b", "outcome": "boom"}],
+            },
+            "check": {"kind": "verify", "check": "last_line_matches", "pattern": "(a|a)+b", "message": "again"},
+            "done": {"kind": "end"},
+        },
+        "edges": [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "route"},
+            {"from": "act", "when": "done", "to": "think"},
+            {"from": "route", "when": "boom", "to": "done"},
+            {"from": "route", "when": "else", "to": "check"},
+            {"from": "check", "when": "pass", "to": "done"},
+            {"from": "check", "when": "fail", "to": "done"},
+        ],
+    }
+    monkeypatch.setattr(graphs, "NATIVE_PATTERN_TIMEOUT_S", 0.3)
+    model = _LongA()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)], prompt="go")
+    finally:
+        model.shutdown()
+    exits = {e["data"]["stage"]: e["data"] for e in _events(result.trajectory, "stage/exit")}
+    assert result.exit_code == 0 and result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    assert exits["route"]["outcome"] == "else" and exits["route"]["timeout"] == ["(a|a)+b"]
+    assert exits["check"]["outcome"] == "fail" and exits["check"]["pattern"] == "timeout"
+    # The message a failed verify appends went out even though the search gave no answer.
+    assert any(e["data"].get("source", {}).get("stage") == "check" for e in _events(result.trajectory, "user/message"))
+
+    def refuse(*args, **kwargs):
+        raise BlockingIOError(35, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(graphs.subprocess, "run", refuse)
+    assert graphs.bounded_search(r"\d+", "42") == "unavailable"

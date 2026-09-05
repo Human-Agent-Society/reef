@@ -69,6 +69,13 @@ NATIVE_GRAPH_MAX_STEPS = 32
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
+#: A proposed pattern's length limit, how much of the last assistant text a branch matches against, and the wall
+#: clock one search gets. Python's matcher has no step budget and no static test tells a pattern that finishes
+#: from one that never does ((a|a)+b hangs on forty characters), so the interpreter runs each search in a child
+#: process and a search that outlives the clock is a check that failed, never a step that stalls.
+NATIVE_PATTERN_MAX_LENGTH = 200
+NATIVE_MATCH_WINDOW = 4096
+NATIVE_PATTERN_TIMEOUT_S = 1.0
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
 #: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
@@ -305,13 +312,7 @@ def _graph_stage(name: str, stage: Any) -> str:
                 f"native_graph stage {name!r} takes 'pattern' exactly when its check is last_line_matches"
             )
         if "pattern" in stage:
-            pattern = stage["pattern"]
-            if not isinstance(pattern, str) or not pattern:
-                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression")
-            try:
-                re.compile(pattern)
-            except re.error as exc:
-                raise ValueError(f"native_graph stage {name!r} 'pattern' must be a regular expression: {exc}") from exc
+            _admit_pattern(stage["pattern"], f"native_graph stage {name!r} 'pattern'")
         if "message" in stage:
             _reject_secret_shaped_text(_require_text(stage, "message"), f"native_graph stage {name!r} 'message'")
     elif kind == "message":
@@ -329,6 +330,19 @@ def _graph_stage(name: str, stage: Any) -> str:
     return kind
 
 
+def _admit_pattern(value: Any, where: str) -> None:
+    """A proposed regular expression the loop may run: it compiles and it is short; its running time is bounded
+    where it runs, not here."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{where} must be a regular expression")
+    if len(value) > NATIVE_PATTERN_MAX_LENGTH:
+        raise ValueError(f"{where} must be at most {NATIVE_PATTERN_MAX_LENGTH} characters")
+    try:
+        re.compile(value)
+    except re.error as exc:
+        raise ValueError(f"{where} must be a regular expression: {exc}") from exc
+
+
 def _branch_cases(name: str, cases: Any) -> None:
     """A branch's cases: a closed predicate each, a value of that predicate's type, and a distinct outcome."""
     if not isinstance(cases, Sequence) or isinstance(cases, str) or not 1 <= len(cases) <= NATIVE_GRAPH_MAX_CASES:
@@ -343,14 +357,7 @@ def _branch_cases(name: str, cases: Any) -> None:
                 f"native_graph stage {name!r} case 'when' must be one of {', '.join(NATIVE_BRANCH_PREDICATES)}"
             )
         if when == "last_text_matches":
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"native_graph stage {name!r} case 'value' must be a regular expression")
-            try:
-                re.compile(value)
-            except re.error as exc:
-                raise ValueError(
-                    f"native_graph stage {name!r} case 'value' must be a regular expression: {exc}"
-                ) from exc
+            _admit_pattern(value, f"native_graph stage {name!r} case 'value'")
         elif isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= NATIVE_GRAPH_MAX_STEPS:
             raise ValueError(
                 f"native_graph stage {name!r} case 'value' must be an integer from 0 to {NATIVE_GRAPH_MAX_STEPS}"
