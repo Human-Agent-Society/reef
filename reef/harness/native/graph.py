@@ -3,16 +3,19 @@
 The graph is data from the tree (``graphs/main.json``, or the seed graph when
 the tree carries none); the stage handlers are fixed code here. The seed
 graph reproduces the fixed loop this replaced, event for event, apart from
-the ``stage/enter`` and ``stage/exit`` events that now name the path.
+the ``stage/enter`` and ``stage/exit`` events that now name the path. The
+tools, hooks, agents, graphs and prompt come from a ``NativeHost`` read at
+each use, so what a step runs on is what the host holds when the step starts.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any, NoReturn, Protocol
 
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native.seed import SEED_GRAPH
@@ -50,17 +53,24 @@ class Graph:
         }
 
 
-def load_graph(root: Path, name: str = "main") -> Graph:
-    """The tree's ``graphs/<name>.json``; ``seed`` is the built in loop and ``main`` falls back to it; else a GraphError."""
-    path = root / "graphs" / f"{name}.json"
-    if name == "seed" or (name == "main" and not path.is_file()):
-        return Graph(SEED_GRAPH, source="seed")
-    if not path.is_file():
-        raise GraphError(f"graphs/{name}.json is missing")
-    try:
-        return Graph(json.loads(path.read_text(encoding="utf-8")), source=name)
-    except (OSError, ValueError) as exc:
-        raise GraphError(f"graphs/{name}.json cannot run: {exc}") from exc
+class Host(Protocol):
+    """What the interpreter reads at each use; ``reef.harness.native.host.NativeHost`` is the one implementation."""
+
+    @property
+    def tools(self) -> Mapping[str, Any]: ...
+
+    @property
+    def hooks(self) -> Mapping[str, list]: ...
+
+    @property
+    def agents(self) -> Mapping[str, Mapping[str, Any]]: ...
+
+    @property
+    def context_window(self) -> int: ...
+
+    def graph(self, name: str = "main") -> Graph: ...
+
+    def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str: ...
 
 
 class _Stop(Exception):
@@ -115,6 +125,13 @@ def _split(messages: list[dict[str, Any]], keep_tokens: float) -> tuple[list, li
     return head, rest[:cut], rest[cut:]
 
 
+def narrow_allow(parent: Sequence[str] | None, own: Sequence[str] | None) -> tuple[str, ...] | None:
+    """An agent sees its own tools list within what its parent sees; no list on either side is no restriction there."""
+    if own is None:
+        return None if parent is None else tuple(parent)
+    return tuple(own) if parent is None else tuple(name for name in own if name in parent)
+
+
 def _transcript(messages: list[dict[str, Any]]) -> str:
     lines = []
     for message in messages:
@@ -128,43 +145,46 @@ def _transcript(messages: list[dict[str, Any]]) -> str:
 
 
 class Run:
-    """One turn's state, shared by every stage handler: the messages, the step counter, the log."""
+    """One turn's state, shared by every stage handler: the messages, the step counter, the log.
+
+    The tools, hooks, agents and prompt are read from the host at each use;
+    ``allow`` narrows the tools to the names an agent may see."""
 
     def __init__(
         self,
         loop: Any,
         prompt: str,
         binding: ModelBinding,
-        tools: Mapping[str, Any],
-        hooks: Mapping[str, list],
+        host: Host,
         workdir: Path,
-        context_window: int = DEFAULT_CONTEXT_WINDOW,
-        agents: Mapping[str, Mapping[str, Any]] | None = None,
+        *,
+        allow: Sequence[str] | None = None,
         parent: Run | None = None,
         agent: str = "root",
         turn: int = 1,
         session: Any = None,
-        system: str | None = None,
+        skills: Sequence[str] | None = None,
+        agent_prompt: str | None = None,
         max_tool_calls: int | None = None,
     ) -> None:
         self.loop = loop
         self.prompt = prompt
         self.binding = binding
-        self.tools = tools
-        self.hooks = hooks
+        self.host = host
         self.workdir = workdir
-        self.context_window = context_window
-        self.agents = dict(agents or {})
+        self.allow = None if allow is None else tuple(allow)
         self.parent = parent
         self.agent = agent
         self.turn = turn
+        self.skills = None if skills is None else tuple(skills)
+        self.agent_prompt = agent_prompt
         self.max_tool_calls = max_tool_calls
         self.max_steps = 0
         self.tool_calls = 0
         self.tool_errors = 0
         self.session = session or loop.session
-        self.system = system if system is not None else loop.system_prompt(loop.root)
-        self.declarations = [tool.declaration() for tool in tools.values()]
+        self.system = host.system_prompt(skills=self.skills, prompt=agent_prompt)
+        self.declarations: list[dict[str, Any]] = []
         self.messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system},
             {"role": "user", "content": prompt},
@@ -172,6 +192,25 @@ class Run:
         self.step = 0
         self.step_open = False
         self.last: dict[str, Any] = {}
+        # What the last request/header said the model sees; the next step writes a new one when it differs.
+        self._header: tuple[str, str] | None = None
+
+    @property
+    def tools(self) -> Mapping[str, Any]:
+        tools = self.host.tools
+        return tools if self.allow is None else {name: tool for name, tool in tools.items() if name in self.allow}
+
+    @property
+    def hooks(self) -> Mapping[str, list]:
+        return self.host.hooks
+
+    @property
+    def agents(self) -> Mapping[str, Mapping[str, Any]]:
+        return self.host.agents
+
+    @property
+    def context_window(self) -> int:
+        return self.host.context_window
 
     def say(self, content: str, source: Mapping[str, Any]) -> None:
         self.session.write("user/message", {"step": self.step, "source": dict(source), "content": content})
@@ -199,6 +238,10 @@ class Run:
             self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1
         step = self.step
+        # What the host holds now is what this step runs on; the hooks see the same messages the model will.
+        self.system = self.host.system_prompt(skills=self.skills, prompt=self.agent_prompt)
+        self.messages[0] = {"role": "system", "content": self.system}
+        self.declarations = [tool.declaration() for tool in self.tools.values()]
         payload = {"step": step, "task": self.prompt, "messages": self.messages}
         entry = loop._decide(self.session, self.hooks["pre_step"], "pre_step", step, payload)
         if entry.get("kind") == "reject":
@@ -206,7 +249,10 @@ class Run:
             self.end_turn(reason, "gave_up")
         self.session.write("step/start", {"turn": self.turn, "step": step})
         self.step_open = True
-        if step == 1:
+        # Model visible means logged: the header is written at step 1 and again whenever what the model sees changed.
+        seen = (self.system, json.dumps(self.declarations, sort_keys=True, default=str))
+        if seen != self._header:
+            self._header = seen
             self.session.write(
                 "request/header", {"model": self.binding.model, "system": self.system, "tools": self.declarations}
             )
@@ -386,27 +432,26 @@ class Run:
         remaining = self.max_steps - self.step
         if remaining <= 0:
             return "budget", "", 0
-        graph = load_graph(loop.root, str(agent.get("graph", "seed")))
+        # A copy: the budget below is this turn's, and the host's graph outlives the turn.
+        graph = copy.copy(self.host.graph(str(agent.get("graph", "seed"))))
         graph.max_steps = min(int(agent.get("max_steps") or remaining), remaining)
-        allow = agent.get("tools")
-        tools = self.tools if allow is None else {n: t for n, t in self.tools.items() if n in allow}
         session, turn = loop.open_turn(name)
         child = Run(
             loop,
             prompt,
             self.binding,
-            tools,
-            self.hooks,
+            self.host,
             self.workdir,
-            context_window=self.context_window,
-            agents=self.agents,
+            allow=narrow_allow(self.allow, agent.get("tools")),
             parent=self,
             agent=name,
             turn=turn,
             session=session,
-            system=loop.system_prompt(loop.root, skills=agent.get("skills"), prompt=str(agent.get("prompt", ""))),
+            skills=agent.get("skills"),
+            agent_prompt=str(agent.get("prompt", "")),
             max_tool_calls=agent.get("max_tool_calls"),
         )
+        tools = child.tools
         session.write(
             "session",
             {
