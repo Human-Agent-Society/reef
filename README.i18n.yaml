@@ -1,5 +1,5 @@
 # Last human-confirmed consistent README pair.
 # After updating and reviewing both files, run:
 #   python .github/scripts/check_readme_i18n.py --write
-README.md: 14062c9a5a424cac080ed27ddbdd132ac4207165
-README.zh.md: 524d2668b83f00ab608fa4b34520a1979aa274f6
+README.md: 37a897f42bfed6b6cf16b2b2b8161f87489492f7
+README.zh.md: 086d4bfc45f5bbcaa26975907fe3d8058f5aadd4
