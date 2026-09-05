@@ -1,15 +1,16 @@
 """Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
 One episode is one process and one turn. The rendered composition root
-(``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``
-and ``models.json``; the loop reads them, talks to the served model through
-the rendered binding, dispatches tool calls to the tool modules through the
-capability enforcer ``REEF_NATIVE_ENFORCE`` selects, asks the hook modules
-at four events, and appends one JSONL session the ``native-jsonl``
-trajectory reader decodes. Everything the model saw is in that log: the
-rendered system prompt, the tool declarations, every message, every call,
-every result with what was enforced on it, and every hook decision that
-changed the loop's course.
+(``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
+``graphs/``, ``agents/`` and ``models.json``; the loop reads them once into a
+``NativeHost`` (``reef.harness.native.host``), talks to the served model
+through the rendered binding, dispatches tool calls to the tool modules
+through the capability enforcer ``REEF_NATIVE_ENFORCE`` selects, asks the
+hook modules at four events, and appends one JSONL session the
+``native-jsonl`` trajectory reader decodes. Everything the model saw is in
+that log: the rendered system prompt, the tool declarations, every message,
+every call, every result with what was enforced on it, and every hook
+decision that changed the loop's course.
 """
 
 from __future__ import annotations
@@ -135,33 +136,57 @@ class HookModule:
         self.listen = listen
 
 
+def import_module_file(path: Path, prefix: str) -> ModuleType:
+    """Import one rendered module outside ``sys.modules``; a failure is a LoadError naming the file.
+
+    The source is compiled directly rather than through the bytecode cache: a
+    module rewritten in place within the same second and at the same length
+    would otherwise run its previous code."""
+    spec = importlib.util.spec_from_file_location(f"{prefix}_{path.stem}", path)
+    if spec is None or spec.loader is None:
+        raise LoadError(f"{path.name} is not an importable module")
+    module = importlib.util.module_from_spec(spec)
+    try:
+        exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # bytes: the coding cookie and BOM apply
+    except Exception as exc:
+        raise LoadError(f"{path.name} failed to import: {type(exc).__name__}: {exc}") from exc
+    return module
+
+
 def _modules(directory: Path, prefix: str) -> Iterator[tuple[Path, ModuleType]]:
     """Import every ``*.py`` in name order; a module that fails to import fails the episode, so the tree that carries it loses."""
     for path in sorted(directory.glob("*.py")):
-        spec = importlib.util.spec_from_file_location(f"{prefix}_{path.stem}", path)
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(module)
-        except Exception as exc:
-            raise LoadError(f"{path.name} failed to import: {type(exc).__name__}: {exc}") from exc
-        yield path, module
+        yield path, import_module_file(path, prefix)
+
+
+def tool_from_module(path: Path, module: ModuleType) -> ToolModule:
+    """The tool a rendered module declares: ``run`` plus the constants the render wrote after the code."""
+    run = getattr(module, "run", None)
+    if not callable(run):
+        raise LoadError(f"tool {path.name} defines no run(args, workdir)")
+    name = str(getattr(module, "NAME", path.stem))
+    parameters = getattr(module, "PARAMETERS", {})
+    capabilities = getattr(module, "CAPABILITIES", ())
+    description = str(getattr(module, "DESCRIPTION", ""))
+    return ToolModule(
+        name, description, parameters, run, capabilities if isinstance(capabilities, list) else (), path=path
+    )
+
+
+def hook_from_module(path: Path, module: ModuleType) -> HookModule:
+    """The hook a rendered module declares: ``listen`` at the event the render wrote after the code."""
+    listen = getattr(module, "listen", None)
+    event = str(getattr(module, "EVENT", ""))
+    if not callable(listen) or event not in NATIVE_EVENTS:
+        raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
+    return HookModule(str(getattr(module, "NAME", path.stem)), event, listen)
 
 
 def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
     tools: dict[str, ToolModule] = {}
     for path, module in _modules(tools_dir, "reef_native_tool"):
-        run = getattr(module, "run", None)
-        if not callable(run):
-            raise LoadError(f"tool {path.name} defines no run(args, workdir)")
-        name = str(getattr(module, "NAME", path.stem))
-        parameters = getattr(module, "PARAMETERS", {})
-        capabilities = getattr(module, "CAPABILITIES", ())
-        description = str(getattr(module, "DESCRIPTION", ""))
-        tools[name] = ToolModule(
-            name, description, parameters, run, capabilities if isinstance(capabilities, list) else (), path=path
-        )
+        tool = tool_from_module(path, module)
+        tools[tool.name] = tool
     return tools
 
 
@@ -169,24 +194,9 @@ def load_hooks(hooks_dir: Path) -> dict[str, list[HookModule]]:
     """Every hook under its event, in file name order: that order is the waterfall order."""
     hooks: dict[str, list[HookModule]] = {event: [] for event in NATIVE_EVENTS}
     for path, module in _modules(hooks_dir, "reef_native_hook"):
-        listen = getattr(module, "listen", None)
-        event = str(getattr(module, "EVENT", ""))
-        if not callable(listen) or event not in hooks:
-            raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
-        hooks[event].append(HookModule(str(getattr(module, "NAME", path.stem)), event, listen))
+        hook = hook_from_module(path, module)
+        hooks[hook.event].append(hook)
     return hooks
-
-
-def system_prompt(root: Path, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str:
-    """Rules first, then every skill in path order (or the named ones), then an agent's own prompt."""
-    skill_files = sorted((root / "skills").glob("*/SKILL.md"))
-    if skills is not None:
-        skill_files = [path for path in skill_files if path.parent.name in skills]
-    files = [root / "RULES.md", *skill_files]
-    parts = [path.read_text(encoding="utf-8").strip() for path in files if path.exists()]
-    if prompt:
-        parts.append(prompt.strip())
-    return "\n\n".join(part for part in parts if part) or DEFAULT_SYSTEM_PROMPT
 
 
 def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
@@ -394,6 +404,7 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
 def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
     """One turn: the tree's graph (or the seed graph) walked stage by stage; each model stage is one step."""
     from reef.harness.native import graph as graphs  # late: graph.py imports this module
+    from reef.harness.native.host import NativeHost
 
     binding = binding_from(root / "models.json")
     session = Session(session_dir / "session.jsonl")
@@ -406,16 +417,16 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
     }
     try:
         try:
-            tools = load_tools(root / "tools")
-            hooks = load_hooks(root / "hooks")
-            agents = load_agents(root / "agents")
-            graph = graphs.load_graph(root)
+            # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
             enforcer = select_enforcer(os.environ)
+            header["enforcement"] = enforcer.mode
+            host = NativeHost.from_root(root)
+            graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
-        header["enforcement"] = enforcer.mode
+        tools, hooks = host.tools, host.hooks
         session.write(
             "session",
             {
@@ -426,13 +437,12 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                 "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
                 "graph": graph.source,
-                "agents": sorted(agents),
+                "agents": sorted(host.agents),
             },
         )
         session.write("turn/start", {"turn": 1})
         loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
-        window = context_window_from(root / "models.json")
-        run = graphs.Run(loop, prompt, binding, tools, hooks, workdir, context_window=window, agents=agents)
+        run = graphs.Run(loop, prompt, binding, host, workdir)
         return graphs.run_graph(run, graph)
     finally:
         session.close()
@@ -561,7 +571,6 @@ class _Loop:
         self.open.append(session)
         return session, self.turns
 
-    system_prompt = staticmethod(system_prompt)
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
     _request = staticmethod(_request)

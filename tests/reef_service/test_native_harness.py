@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from reef_service.test_native_enforce import PROBE
+from reef_service.test_native_enforce import PROBE, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episode import run_episode
@@ -537,6 +536,7 @@ def test_a_module_that_cannot_load_ends_the_episode_in_error(tmp_path: Path, fak
     reason = result.trajectory[-1]["data"]["reason"]
     assert reason["kind"] == "error" and reason["error"]["code"] == "LOAD_ERROR"
     assert reason["error"]["message"] == "broken.py failed to import: RuntimeError: no"
+    assert result.trajectory[0]["data"]["enforcement"] == "none"  # the mode is chosen before any module runs
 
 
 def test_seed_loop_guard_reminds_the_model_at_the_third_repeat(tmp_path: Path) -> None:
@@ -1387,6 +1387,57 @@ def test_the_loop_runs_every_call_through_the_enforcer_the_environment_names(
     assert results[1]["content"] == "hello" and (work / "notes.txt").read_text() == "hello"
 
 
+class _PersistentModel(_FakeModel):
+    """Calls write_file three times whatever comes back, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) <= 3:
+            call = _call("write_file", {"path": "n.txt", "content": "x"}, f"c{len(self.requests)}")
+            return _reply(tool_calls=[call])
+        return _reply(content="done")
+
+
+def test_a_call_the_jail_could_not_run_is_no_tool_error(tmp_path: Path, monkeypatch) -> None:
+    model = _PersistentModel()
+    try:
+        descriptor = get_adapter("native")
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        graph = _branch_graph([{"when": "tool_errors_at_least", "value": 1, "outcome": "stuck"}], [])
+        graph["edges"] = [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "done"},
+            {"from": "act", "when": "done", "to": "route"},
+            {"from": "route", "when": "stuck", "to": "quit"},
+            {"from": "route", "when": "else", "to": "think"},
+        ]
+        nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), *binding.compose_nodes(descriptor)]
+        root = tmp_path / "root"
+        for relative, text in render_composition(nodes, descriptor).items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text)
+        work = tmp_path / "work"
+        work.mkdir()
+        # A bwrap the host refuses: every call ends in SANDBOX_FAILED, which is the sandbox's failure, not the tool's.
+        fake = tmp_path / "fakebin"
+        fake.mkdir()
+        (fake / "bwrap").write_text(
+            f"#!{sys.executable}\nimport sys\nprint('bwrap: No permissions to create a new namespace', file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        )
+        (fake / "bwrap").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+        assert run_loop("write it", root / "native", tmp_path / "s", work) == 0
+    finally:
+        model.shutdown()
+        model.server_close()
+    events = [json.loads(line) for line in (tmp_path / "s" / "session.jsonl").read_text().splitlines()]
+    results = [event["data"] for event in events if event["type"] == "tool/result"]
+    assert [result["error"]["code"] for result in results] == ["SANDBOX_FAILED"] * 3
+    exits = [e["data"]["outcome"] for e in events if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+    assert exits == ["else"] * 3 and events[-1]["data"]["reason"] == {"kind": "completed"}
+
+
 class _ProbingModel(_FakeModel):
     """Calls probe (declares nothing), then write_file, then read_file, then answers, one tool per turn."""
 
@@ -1401,8 +1452,8 @@ class _ProbingModel(_FakeModel):
         return _reply(content=f"done: {body['messages'][-1]['content']}")
 
 
-@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap (bwrap) is not on PATH")
 def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+    require_nested_jail()
     model = _ProbingModel()
     try:
         descriptor = get_adapter("native")

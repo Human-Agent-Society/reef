@@ -125,25 +125,42 @@ the episode's cannot mount a fresh one): without ``network`` the call gets an
 empty network namespace;
 without ``write`` the workspace is bound read only; without ``exec`` only
 library directories, the interpreter file running the tool and its prefixes
-are bound, so no directory that holds a shell (``/bin``, ``/usr/bin``,
-``/usr/local/bin``) exists in the jail, and ``PATH`` is unset besides.
-``subprocess.run(["bash", ...])`` then fails with a missing file: Python
-falls back to searching ``/bin:/usr/bin`` when ``PATH`` is absent, and
-those directories are not there. The absent directories are the denial;
-binding one of them for any reason reopens ``exec``. bwrap
-cannot deny the rest: the tool can still start ``sys.executable``, run an
-executable installed under a library directory or under a path it can write
-(``/tmp`` inside the jail is a private tmpfs), and read the workspace, so
-``read`` is never withheld. The loop refuses to start when the variable
-names ``bwrap`` and no ``bwrap`` is on ``PATH``, and a call the jail could
-not run at all ends in ``SANDBOX_FAILED`` rather than passing as a tool
-failure; the sandbox executor's preflight runs one jail inside another, so
-a host that cannot nest them fails at build, not at the first call. Every
-``tool/result`` event carries ``enforcement`` with the
+are bound, so no shell exists in the jail (``/bin`` and ``/usr/bin`` are
+absent; the interpreter's own prefix may put an empty ``/usr/local/bin``
+there) and ``PATH`` is unset besides. ``subprocess.run(["bash", ...])`` then
+fails with a missing file: Python falls back to searching ``/bin:/usr/bin``
+when ``PATH`` is absent, and those directories are not there. The absent
+directories are the denial; binding one of them for any reason reopens
+``exec``. bwrap cannot deny the rest: the tool can still start
+``sys.executable``, run an executable installed under a library directory
+or under a path it can write (``/tmp`` inside the jail is a private tmpfs),
+and read the workspace, so ``read`` is never withheld. The enforcer is
+chosen before any module of the tree runs in the loop's process, so a tree
+cannot choose it; the loop refuses to start when the variable names
+``bwrap`` and no ``bwrap`` is on ``PATH``, and a call the jail could not run
+at all ends in ``SANDBOX_FAILED`` rather than passing as a tool failure and
+counts as no tool error; the sandbox executor's preflight runs one jail
+inside another, so a host that cannot nest them fails at build, not at the
+first call. Every ``tool/result`` event carries ``enforcement`` with the
 ``mode`` (``none`` or ``bwrap``) and ``denied``, the declaration's
-complement over ``write``, ``exec`` and ``network`` (empty under ``none``).
-The seed tools declare theirs; ``run_bash`` declares all three a shell can
-do.
+complement over ``write``, ``exec`` and ``network`` (empty under ``none``);
+``denied`` is what the profile withholds, not an observation of what the
+call tried. The seed tools declare theirs; ``run_bash`` declares all three a
+shell can do.
+
+The per call jail confines a tool's ``run`` and nothing else. Two things a
+tree carries still run in the loop's own process: the top level of every
+tool and hook module, once, when the loop imports it at start, and every
+hook's ``listen`` at every event. Under the sandbox executor that process
+is the episode jail, which holds the writable workspace and session
+directory, the network namespace the model endpoint needs, and the
+executor's base directories with their shells; under the local executor it
+is the host. So a hook, and a tool module's import time code, are loop code
+with the loop's reach: ``review_kinds`` with ``native_hook`` and
+``native_tool`` is how a deployment puts a person between a proposal of
+either and the tree, and the trajectory's ``enforcement`` field describes
+the profile the run got, not what the module did at import. Moving a tool's
+import out of the loop's process is tracked as a follow up.
 ``reef.harness.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, ``run_bash``, and ``execute`` tools as entries a recipe can
 seed and the loop can then evolve; ``execute`` runs a Python block in the
@@ -182,7 +199,7 @@ defines no ``listen``, or names an unknown event ends the episode with
 ``loop_guard`` at ``post_execute``, which reminds the model when the same call
 repeats three, five, or eight times in a row; it is a node, so a tree can
 retune or drop it. ``SEED_NODES`` is the tools and the hooks together, and
-``tutorials/harness_evolve/serve-native.yaml`` seeds them by reference to
+``tutorials/evolve-your-harness/configs/serve-native.yaml`` seeds them by reference to
 run the tutorial on this adapter.
 
 The loop's own control flow is a ``native_graph`` node, rendered to

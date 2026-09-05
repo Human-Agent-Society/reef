@@ -68,6 +68,15 @@ jobs:
         with:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
+      # bubblewrap so the sandbox executor's live tests run here rather than
+      # skip: the nested tool jail is only ever proven on a host that has it.
+      # The runner's AppArmor confines unprivileged user namespaces, which the
+      # jail's loopback setup needs; lifting it is what makes the jail nest.
+      # The live tests skip with the preflight's reason on a host that still
+      # refuses, so the step never fails the job by itself.
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
