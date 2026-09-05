@@ -323,14 +323,11 @@ def test_driver_preserves_executor_profiles(driver, monkeypatch, selector):
     monkeypatch.setenv("REEF_SC_SKILLS", "")
     config = driver.load_config(EXAMPLE_DIR / "skillclaw.yaml")
     config["evolution"]["seed_skills"] = ""
-    config["executors"] = {"cpu-pool": {"backend": "mp"}}
+    config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
-    if selector == "role":
-        config["evolution"].pop("worker_executor")
-    else:
+    if selector == "worker":
         config["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"
-    config["evolution"]["episode_workers"] = 2
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr(driver, "read_key", lambda: "dummy")
     recipe = driver.load_recipe()

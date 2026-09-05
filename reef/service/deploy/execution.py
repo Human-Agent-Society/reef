@@ -8,10 +8,35 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.executor.config import ExecutorSelection, executor_settings, role_executor_settings, select_executor
+from reef.runtime.executor.config import (
+    ExecutorSelection,
+    ExecutorSettings,
+    executor_settings,
+    role_executor_settings,
+    select_executor,
+)
 from reef.runtime.executor.local import LocalExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
+
+
+def _service_resources(settings: ExecutorSettings, service: Mapping[str, Any]) -> dict[str, Any]:
+    resources = service.get("resources", {})
+    if not isinstance(resources, Mapping):
+        raise ValueError("service.resources must be an object of worker launch options")
+    result = dict(resources)
+    for name, value in (
+        ("num_cpus", settings.resources.cpus_per_worker),
+        ("num_gpus", settings.resources.gpus_per_worker),
+    ):
+        if value is None:
+            continue
+        if (name in result and result[name] != value) or (
+            name in settings.options and settings.options[name] != value
+        ):
+            raise ValueError(f"service {name} conflicts with executor resources")
+        result[name] = value
+    return result
 
 
 def service_executor_selection(config: Mapping[str, Any], service: Mapping[str, Any]) -> ExecutorSelection:
@@ -20,9 +45,7 @@ def service_executor_selection(config: Mapping[str, Any], service: Mapping[str, 
         if "executor" in service
         else role_executor_settings(config, "services")
     )
-    resources = service.get("resources", {})
-    if not isinstance(resources, Mapping):
-        raise ValueError("service.resources must be an object of worker launch options")
+    resources = _service_resources(settings, service)
     local_cuda = service.get("cuda") is not None or "CUDA_VISIBLE_DEVICES" in (service.get("env") or {})
     in_placement_group = False
     # Importing Reef must not import/init Ray. An existing placement context,
@@ -54,9 +77,7 @@ def service_executor_config(
     selected = selection or service_executor_selection(config, service)
     settings = selected.settings
     backend = Executor.get_class(settings.backend)
-    resources = service.get("resources", {})
-    if not isinstance(resources, Mapping):
-        raise ValueError("service.resources must be an object of worker launch options")
+    resources = _service_resources(settings, service)
     if issubclass(backend, LocalExecutor) and (settings.options or resources):
         raise ValueError("local service execution uses cuda for visibility; resource reservations require Ray/custom")
     if issubclass(backend, RayExecutor):
