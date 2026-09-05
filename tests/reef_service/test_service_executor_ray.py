@@ -12,8 +12,8 @@ import urllib.request
 import pytest
 
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFailedError, WorkerSpec
-from reef.runtime.executor.local import LocalExecutor
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service.deploy.config import validate_services
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import RayProcessWorker
@@ -115,7 +115,7 @@ def test_ray_service_publishes_address_and_passes_it_to_local_consumer(tmp_path,
     try:
         stack.start()
         assert isinstance(stack._executors["prm"], RayExecutor)
-        assert isinstance(stack._executors["consumer"], LocalExecutor)
+        assert isinstance(stack._executors["consumer"], UniProcExecutor)
         endpoint = stack.config["endpoints"]["prm"]
         assert output.read_text() == endpoint
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))

@@ -5,13 +5,9 @@
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
 execution:
-  services: local
+  services: auto
   evolution:
-    backend: auto  # uni for one CPU worker, mp for multiple workers.
-    workers: 1
-    resources:
-      cpus_per_worker: 1
-      gpus_per_worker: 0
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
 
 model:
   path: qwen3-8b

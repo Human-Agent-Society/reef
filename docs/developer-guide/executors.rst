@@ -38,16 +38,20 @@ Built-in executors
 ------------------
 
 ``uni``
-   One ordinary CPU worker in the caller's process. RPC may use one local
-   thread; this is not a GPU model launcher. More than one worker is rejected.
+   One worker in the caller's process. RPC may use one local thread. More
+   than one worker is rejected. A GPU scorer uses the caller's CUDA visibility;
+   no global visibility mask or cluster resource reservation is changed.
+   For services, one ``ProcessWorker`` starts the actual service subprocess.
 
 ``mp``
-   Independent CPU worker ranks launched with Python ``spawn``. Each rank has
+   Independent worker ranks launched with Python ``spawn``. Each rank has
    ordered RPC, constructor readiness, health checks and bounded shutdown.
    Worker classes, scorers and arguments must be spawn-pickleable (normally
    module-level classes/functions), not closures or objects holding locks.
-   No Ray installation is needed, and this does not implement distributed
-   GPU model ranks. Timeouts stop waiting, not the work, and never retry RPC.
+   No Ray installation is needed. Declared GPU scorer requirements produce
+   disjoint per-rank CUDA masks before worker imports/construction. This does
+   not implement model-parallel collectives. Timeouts stop waiting, not the
+   work, and never retry RPC.
 
 ``ray``
    Launches Ray actors from ordered ``WorkerSpec`` objects. Worker options
@@ -56,16 +60,15 @@ Built-in executors
    attaches existing handles; it borrows them unless ``owned=True`` is explicit.
    Borrowed shutdown closes the executor without terminating its actors.
 
-``local``
-   Runs ordinary CPU workers in one process with concurrent RPC threads. It
-   supports contract tests and in-process integrations. For deployment, the
-   worker is a ``ProcessWorker`` that starts the actual service as a separate
-   process; that service can itself run SGLang on GPUs. LocalExecutor itself
-   does not implement multi-process model ranks or GPU resource reservations.
+``auto`` (default)
+   Resolves to ``uni`` for one worker or ``mp`` for multiple local workers.
+   Existing multi-worker Ray placement context or explicit cluster/Ray actor
+   options select ``ray``. The former thread-pool ``local`` backend is removed,
+   not an alias: migrate it to ``auto`` or ``uni`` with one worker.
 
 A Python class or ``package.module:ExecutorSubclass`` / ``package.module.Class``
-selects a custom executor. Importing the interface or using the local executor
-does not import Ray, Slime, Torch or SGLang.
+selects a custom executor. CPU-only execution does not import Ray, Slime,
+Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
@@ -80,15 +83,15 @@ does not import Ray, Slime, Torch or SGLang.
            self.value += amount
            return self.rank, self.value
 
-   executor = Executor.create(ExecutorConfig(
-       backend="local",
-       workers=tuple(WorkerSpec(Counter, args=(rank,)) for rank in range(2)),
-   ))
-   try:
-       pending = executor.collective_rpc("increment", args=(3,), non_block=True)
-       results = resolve(pending, timeout=10)  # [(0, 3), (1, 3)]
-   finally:
-       executor.shutdown()
+   if __name__ == "__main__":  # required for spawn
+       executor = Executor.create(ExecutorConfig(
+           workers=tuple(WorkerSpec(Counter, args=(rank,)) for rank in range(2)),
+       ))  # auto -> mp
+       try:
+           pending = executor.collective_rpc("increment", args=(3,), non_block=True)
+           results = resolve(pending, timeout=10)  # [(0, 3), (1, 3)]
+       finally:
+           executor.shutdown()
 
 RPC and lifetime contracts
 -------------------------
@@ -207,7 +210,7 @@ Slime's bridge/manager actors and payload/weight transport still use Ray.
 Alternative rollout executors must support the existing Slime weight-transport
 contract (including engine/lock handles); selecting a backend does not rewrite
 that data plane. There is no built-in torchrun, Slurm or Kubernetes backend,
-and no online TP/PP resizing. ``local`` is rejected for Slime GPU worker roles;
+and no online TP/PP resizing. ``uni/mp`` are rejected for Slime GPU worker roles;
 it remains valid for launching standalone SGLang/PRM service processes.
 
 ``ReefRayTrainGroup`` remains an import alias for ``SlimeTrainGroup``. Its
@@ -223,19 +226,17 @@ Harness evolution evaluates external model endpoints; that does not require
 a local GPU. ``EpisodeScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
 supplies worker count/resources from ``execution.evolution``; the selector
-chooses ``uni`` for one CPU worker, ``mp`` for multiple local CPU workers, and
-``ray`` for GPU/cluster requests. Installed GPUs or ``RAY_ADDRESS`` alone do
-not select Ray or reserve GPUs for this role.
+chooses ``uni`` for one local worker and ``mp`` for multiple local workers.
+An existing multi-worker Ray placement context or declared cluster/actor
+options selects ``ray``. Installed GPUs or ``RAY_ADDRESS`` alone do not select
+Ray. Like vLLM's local-topology default, insufficient local CUDA capacity is
+an error, not an implicit switch to Ray: select ``ray`` explicitly for a cluster.
 
 .. code:: yaml
 
    execution:
      evolution:
-       backend: auto
        workers: 8
-       resources:
-         cpus_per_worker: 1
-         gpus_per_worker: 0
    evolution:
      # Existing adapter/propose/evaluate/tasks/models/seed remain unchanged.
      executor: sandbox      # independent isolation policy; requires bubblewrap
@@ -244,7 +245,7 @@ not select Ray or reserve GPUs for this role.
 Its backend defaults to ``auto``; omitted resources preserve component defaults
 (normally one CPU and zero GPUs). ``workers`` is the fixed worker-group size,
 not an episode count or a separate business-level concurrency limit. For
-``uni/mp/local``, CPU requests describe capacity but do not reserve cores or
+``uni/mp``, CPU requests describe capacity but do not reserve cores or
 enforce a CPU quota. Ray maps them to ``num_cpus``/``num_gpus`` per actor;
 these are scheduling reservations, not hard CPU limits.
 
@@ -261,8 +262,9 @@ owner-loss cleanup. Built-in local episodes in remote/process workers use a
 POSIX owner lease so loss of a worker also kills the episode process group;
 commands must not detach. Worker loss can leave temporary episode directories.
 
-To retain shared-memory callbacks, explicitly choose ``execution.evolution.backend: local``
-(the previous thread-based behavior). With ``mp`` the scorer is copied per
+To retain an in-process callback, choose ``uni`` with exactly one worker.
+The former multi-worker shared-memory backend is no longer available.
+With ``mp`` the scorer is copied per
 rank: mutable scorer state is not shared or merged back into the recipe.
 The parent retains proposal, composition, selection and publication ownership;
 only episode execution/scoring crosses the worker boundary. Candidate/current
@@ -270,7 +272,7 @@ results retain pairing order. Each backend/scenario lazily starts one fixed
 pool of ``execution.evolution.workers`` ranks on its first nonempty evaluation and reuses
 it across evaluations. Workers and lazy scorer/model initialization persist;
 each episode still gets a fresh harness subprocess and temporary directory.
-Upstream step records and per-episode stage paths are retained. Local/MP
+Upstream step records and per-episode stage paths are retained. Uni/MP
 workers write records on the same host; Ray/custom workers return a compressed
 record with each successful RPC so the driver owns the durable path, without
 requiring shared storage. Archives are extracted with Python's ``data`` filter
@@ -289,9 +291,9 @@ scale-to-zero; no YAML change is needed to enable it.
 Python launchers must use the usual ``if __name__ == "__main__":`` guard.
 
 A GPU scorer can override ``execution_requirements()`` to return
-``ExecutionRequirements(gpus_per_worker=1)``; ``auto`` then selects Ray without
-an executor setting in YAML. Initialize the scorer's GPU model lazily inside
-the allocated worker, not in its constructor in the recipe process. For a
+``ExecutionRequirements(gpus_per_worker=1)``; ``auto`` selects ``uni/mp`` when
+local CUDA capacity is sufficient. Initialize the scorer's GPU model lazily
+inside the worker, not in its constructor in the recipe process. For a
 plain evaluator function without that interface, declare its needs explicitly:
 
 .. code:: yaml
@@ -301,14 +303,18 @@ plain evaluator function without that interface, declare its needs explicitly:
        workers: 2
        resources:
          cpus_per_worker: 2
-         gpus_per_worker: 1  # per worker: two workers reserve two GPUs
+         gpus_per_worker: 1  # per worker: two local workers need two visible GPUs
 
-This reserves worker/scorer GPUs, not the external inference server's GPUs.
+This describes worker/scorer GPUs, not the external inference server's GPUs.
+Local GPU allocations require whole GPUs. MP assigns disjoint CUDA masks
+within its worker group; uni leaves the caller's visibility unchanged. These
+are not exclusive reservations against other programs on the host. Choose
+``backend: ray`` for cluster scheduling or fractional GPU reservations.
 Sandbox device access is unchanged; declaring a GPU for the scorer does not
 expose it inside a sandboxed harness. CPU workers don't reserve GPUs, but the
 selector is not a hardware-access security boundary. Explicit settings cannot
-reduce a scorer's declared GPU needs; ``uni/mp/local`` cannot fulfill GPU or
-cluster reservations. Ray nodes need the same modules, binaries, models and
+reduce a scorer's declared GPU needs; ``uni/mp`` cannot fulfill cluster
+reservations. Ray nodes need the same modules, binaries, models and
 reachable model endpoints. Arbitrary Python/commands are not inspected to
 guess GPU needs. Slime training/rollout still require specialized Ray launchers.
 
@@ -336,11 +342,11 @@ Service startup and the Slime driver log the selected backend and reason.
 Explicit backend/profile selections take precedence over automatic decisions.
 For ``auto``, the policy is:
 
-* Services with ``cuda`` or declared ``env.CUDA_VISIBLE_DEVICES`` use ``local``.
+* Services with ``cuda`` or declared ``env.CUDA_VISIBLE_DEVICES`` use ``uni``.
   Combining that visibility pin with resource/worker options is an error.
 * Services with nonempty ``resources`` or executor ``options`` use ``ray``.
 * Otherwise, services already running inside a Ray placement group use ``ray``;
-  remaining services use ``local``. This selects the backend, not a new placement
+  remaining services use ``uni``. This selects the backend, not a new placement
   strategy; Ray's normal placement/capture rules and explicit worker options apply.
 * Slime training and rollout use their specialized Ray executors, even with one
   GPU. Reef has no built-in ``mp``/``uni`` Slime GPU launcher yet.
@@ -350,8 +356,10 @@ group does not by itself change a service to Ray. The selector does not import
 or initialize Ray to probe it, count GPUs, change TP/PP, or retry a failed backend
 using another backend. Resource requests must describe the intended scheduling.
 Standalone SGLang/PRM commands still control their own model parallelism. ``auto``
-is a role-aware configuration policy, not an ``ExecutorConfig.backend`` accepted
-by the low-level worker factory or the coordinator runtime.
+is also the default ``ExecutorConfig.backend`` for the low-level worker factory
+and coordinator runtime. A service controller is not a model rank: Slime's
+specialized Ray requirement and service resource reservations remain
+component-specific, rather than pretending to implement vLLM's TP/PP launcher.
 
 Each selector accepts a built-in name, import path, inline ``backend/options``
 object, or a named profile under ``executors``. ``services[].executor``
@@ -367,7 +375,7 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
 .. code:: yaml
 
    execution:
-     services: local
+     services: auto
      training: ray
      rollout: ray
 
@@ -400,7 +408,7 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
 
 Connect the orchestrator to an existing Ray cluster using ``RAY_ADDRESS``.
 A locally declared ``ray-head`` can still bootstrap it; keep that service on
-``executor: local`` and declare it as a dependency of Ray services. Reef does
+``executor: uni`` and declare it as a dependency of Ray services. Reef does
 not create cloud machines or install software on Ray nodes. The command,
 working directory, Python environment, models and recipe modules must exist
 on the selected nodes; use shared storage/images or Ray runtime environments.

@@ -16,12 +16,9 @@ model:
 
 execution:
   evolution:
-    # The scorer shares the driver's mutable AIME answer registry.
-    backend: local
-    workers: ${REEF_GEPA_WORKERS}  # run.sh defaults to 128 RPC threads.
-    resources:
-      cpus_per_worker: 1
-      gpus_per_worker: 0
+    # auto selects uni for one worker, mp for multiple workers; ray is explicit.
+    backend: ${REEF_GEPA_EXECUTOR}
+    workers: ${REEF_GEPA_WORKERS}  # Default 128; override to fit host memory or Ray cluster capacity.
 
 evolution:
   adapter: pi
@@ -29,7 +26,8 @@ evolution:
   binary: ${REEF_PI_BINARY}
   # The task side, in the harness/ package: evaluate is the quickstart's
   # containment score over one episode, feedback is the wording GEPA's own
-  # default evaluator writes into the reflective records.
+  # default evaluator writes into the reflective records. run.py binds these
+  # hooks to a serializable answer/context snapshot before building the recipe.
   evaluate: harness.aime:evaluate
   feedback: harness.aime:feedback
   # The validation set, which is what the mechanism scores every candidate on.

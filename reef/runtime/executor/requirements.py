@@ -13,7 +13,7 @@ class ExecutionRequirements:
     workers: int = 1
     gpus_per_worker: float = 0
     cluster: bool = False
-    supported_backends: tuple[str, ...] = ("uni", "mp", "local", "ray")
+    supported_backends: tuple[str, ...] = ("uni", "mp", "ray")
     cpus_per_worker: float = 1
 
     def __post_init__(self) -> None:
@@ -36,6 +36,6 @@ class ExecutionRequirements:
         ):
             raise ValueError("cpus_per_worker must be a finite nonnegative number")
         if not self.supported_backends or any(
-            backend not in ("uni", "mp", "local", "ray") for backend in self.supported_backends
+            backend not in ("uni", "mp", "ray") for backend in self.supported_backends
         ):
             raise ValueError("supported_backends must list supported built-in worker launchers")
