@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -72,12 +73,18 @@ def test_evolution_auto_places_scorer_on_declared_ray_gpu(tmp_path):
             candidate_entries=(),
             current_entries=(),
             mutations=(),
+            record_dir=tmp_path / "first-record",
         )
         assert backend._worker_selection.settings.backend == "ray"
         result = backend.evaluate(candidate)
         assert result.metrics["candidate_scores"] == (1.0,)
         assert result.metrics["current_scores"] == (1.0,)
-        assert backend.evaluate(candidate).metrics["candidate_scores"] == (1.0,)
+        assert (tmp_path / "first-record/episodes/candidate-0/session.jsonl").is_file()
+        assert (tmp_path / "first-record/episodes/current-0/episode.json").is_file()
+        assert backend.evaluate(replace(candidate, record_dir=tmp_path / "second-record")).metrics[
+            "candidate_scores"
+        ] == (1.0,)
+        assert (tmp_path / "second-record/episodes/candidate-0/session.jsonl").is_file()
         backend.close()
         # Shutdown is asynchronous in Ray: a following actor must be able to
         # acquire the same GPU, proving that backend.close released its workers.
