@@ -1761,6 +1761,7 @@ def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path, monkeypatch)
         tasks=("task one", "task two"),
         models=MODEL,
         episode_workers=4,
+        binary="fake-pi",
     )
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     assert prepared.candidate is not None

@@ -197,7 +197,6 @@ in [deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) to y
 then run from your Reef checkout and activated Python environment:
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent@0.84.2
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
 reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
