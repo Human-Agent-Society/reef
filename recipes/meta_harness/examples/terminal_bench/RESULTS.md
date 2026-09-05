@@ -171,7 +171,35 @@ partitions; it does not recommend.
 
 ## What the live runs show
 
-### Run B (Reef, current)
+### Run C (Reef, final)
+
+The run with every guard in place. Seed **0.3667**, never beaten:
+
+| Iteration | Candidate | Seed | Decision | Episodes not measuring the agent |
+| --- | --- | --- | --- | --- |
+| 1 | 0.2833 | 0.3667 | reject | 21 of 120 |
+| 2 | 0.3333 | 0.3667 | reject | 21 |
+| 3 | 0.3000 | 0.3667 | reject | 16 |
+| 4 | 0.3167 | 0.3667 | reject | 22 |
+| 5 | 0.1500 | 0.3667 | **refused** | **75** |
+
+531 episodes, $14.24. The served candidate at the end is the seed itself: five
+proposals, none selected.
+
+Iteration 5 is the guard working. 65 of its episodes produced a score without
+reaching the model -- against 0 in every previous iteration -- because the
+candidate slowed episodes enough to hit the 1800s ceiling en masse. The run
+stopped and named the three tasks rather than averaging 0.15 into the record,
+which is exactly what run B's 0.017 and upstream's 0.033 did before the guards
+existed.
+
+Iterations 1 to 4 are usable but truncated: roughly a sixth of each one's
+episodes were cut at 1800s, so the candidate figures and the seed are all
+lower bounds. Candidate and incumbent were truncated alike within each pair,
+so the *decisions* stand; the absolute values do not transfer to upstream's
+scale.
+
+### Run B (Reef, superseded)
 
 Seed 0.3833. Every candidate so far scores below it and is rejected:
 
