@@ -407,6 +407,57 @@ cut short and scored zero. Its selections are still meaningful -- candidate
 and incumbent were truncated alike within each pair -- but its absolute means
 are not comparable to upstream's.
 
+## Final: both arms, complete
+
+| | Reef | Upstream |
+| --- | --- | --- |
+| Baseline / seed | 0.3667 | 0.2833 |
+| Final frontier | **0.3667** (seed, never beaten) | **0.350** |
+| Candidates proposed | 5 | 3 |
+| Candidates selected | 0 | 1 |
+| Iterations refused by a guard | 1 (iteration 5) | 1 (iteration 3) |
+| Episodes | 531 | ~380 |
+| Spend | $14.24 | $45.39 |
+| Ended by | failure guard | outage guard |
+
+Neither arm demonstrated an improvement. Upstream recorded one selection at
++6.7%, which is four episodes out of sixty -- smaller than the six-episode
+spread between two runs of its own unchanged baseline. Reef's seed was never
+beaten. The two final frontiers are one episode apart, which is coincidence at
+this resolution rather than a fidelity result.
+
+The cost asymmetry is not a Reef efficiency win. Upstream's
+`evidence_gated_completion` cost $37.59 on its own by making the agent verify
+and re-verify; Reef's 1800s ceiling would have truncated the same behaviour
+and charged a fraction of it. Reef looks cheaper partly because it was cutting
+episodes short.
+
+### Both guards fired, and one of them is wrong
+
+Each arm stopped on a guard added during this work rather than finishing five
+iterations, and in both cases the trigger was a candidate that slowed episodes
+until they stopped completing:
+
+| Arm | Candidate | What the guard saw |
+| --- | --- | --- |
+| Reef | iteration 5 | 65 of 120 episodes scored without reaching the model |
+| Upstream | `stalled_terminal_watchdog` | 36 of 63 trials never ran: 32 `TimeoutException` |
+
+Stopping was right for the outages these guards were built for -- a full
+sandbox account, a provider refusing every call. It is **wrong here**. A
+candidate that breaks episodes is a candidate to reject, not a reason to halt
+the search: upstream would have scored it low and moved on, and the guard's
+own message ("rerun when the environment has capacity") misdiagnoses it.
+
+The guards cannot currently tell an environment outage from a destructive
+candidate, because both produce trials that never ran. The distinguishing
+signal is available and unused: under Cordis's pairing, an outage takes down
+the incumbent's episodes too, while a destructive candidate leaves them
+healthy. Halting only when *both* sides fail, and otherwise rejecting the
+candidate and continuing, would fix it. Upstream's Phase 0 has no paired
+incumbent, so it would need the previous iteration's failure rate as its
+reference instead.
+
 ## Defects this found
 
 Each produced a plausible result rather than an error, which is why running it

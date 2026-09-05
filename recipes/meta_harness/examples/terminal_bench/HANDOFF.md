@@ -30,12 +30,20 @@ propose the same candidate.
 | | Result |
 | --- | --- |
 | Reef arm (run C, `/tmp/tb2-reef5`) | **finished**. Seed 0.3667, five candidates, none selected. 531 episodes, $14.24 |
-| Upstream arm (`/tmp/upstream5.log`) | **running iteration 3**, frontier 0.350, $44.21 of a $50 cap |
+| Upstream arm (`/tmp/upstream5.log`) | **stopped** by the outage guard in iteration 3. Frontier 0.350, $45.39 |
 | Sandbox reaper (`/tmp/reaper2.log`) | running, `--older-than 9000 --watch 600` |
 
-Upstream will stop with `SpendCapReached` when iteration 3's job completes,
-unless someone raises `META_HARNESS_MAX_COST_USD` in `/tmp/run_upstream.sh`.
-The user was asked and had not decided.
+Both arms are finished. Upstream stopped on the outage guard before it
+reached its spend cap, so the cap question is moot.
+
+**A guard I added is wrong, and this is the second thing to fix.** Both arms
+were halted by a candidate that slowed episodes until they stopped completing
+-- Reef's iteration 5, upstream's `stalled_terminal_watchdog` with 32
+`TimeoutException`. That is a candidate to reject, not a reason to stop the
+search, and the guard's message misdiagnoses it as an environment problem. The
+signal to separate them exists and is unused: under Cordis's pairing an outage
+takes down the incumbent's episodes too, while a destructive candidate leaves
+them healthy. Halt only when both sides fail; otherwise reject and continue.
 
 ## The finding that matters most for the Reef numbers
 
