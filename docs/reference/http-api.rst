@@ -241,6 +241,13 @@ file and reads the rendered files as before.
 Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
 
+Catalog and manifest reads do not wait for an evolve step's proposer or
+evaluation episodes: they continue serving the existing releases while a
+candidate is being prepared. Reads still serialize with publication and
+rollback so a manifest's artifact and gate metrics come from the same
+release: reads do not interleave with head movement and its commit-log
+update.
+
 Proposals
 ~~~~~~~~~
 

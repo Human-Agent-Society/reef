@@ -189,15 +189,8 @@ class Scenario:
         self,
         release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Freeze one artifact and its gate metrics outside an in-flight commit."""
-        with self._commit_protocol.lock:
-            artifact = (
-                Artifact(self.repository.require_current_artifact(), self.repository)
-                if release_id is None
-                else self._commit_protocol.artifact_for_version(release_id)
-            )
-            metrics = self._commit_protocol.metrics_for_version(artifact.ref.release_id)
-            return artifact, metrics
+        """Freeze one artifact and its gate metrics without waiting for preparation."""
+        return self._commit_protocol.artifact_snapshot(release_id)
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
