@@ -8,6 +8,7 @@ of a half-started cluster.
 from __future__ import annotations
 
 import os
+from array import array
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
@@ -57,20 +58,36 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
 def configure_sglang_runtime(args) -> None:
     """Apply Reef's serving invariants through generic Slime/SGLang options.
 
-    Disjoint/PD weight updates preserve each active request's private KV state.
-    Colocated regular engines retract instead, because their KV allocation
-    must leave the GPU during training, and recompute it after publication. A
-    shared radix-cache entry has no runtime-load-ID identity, so Reef disables
-    cross-request prefix reuse. SGLang's native plugin hook installs Reef's
-    token metadata and colocated suspension policy inside each scheduler.
+    A radix-cache entry carries no runtime-load-ID identity, so reusing one
+    across a publication would let a request generate under new weights from a
+    prefix the previous weights encoded — contamination in the prefix's
+    encoding, which the rollout's runtime-load spans cannot express. Prefix
+    sharing is therefore one decision with retracting publication, which
+    releases every in-flight request's KV and clears the cache before the
+    weights change, so no entry outlives the weights that built it.
+
+    Colocated engines retract already, because their KV allocation must leave
+    the GPU during training and be recomputed after publication. A disjoint
+    engine preserves in-flight KV by default and shares nothing;
+    ``--disjoint-prefix-sharing`` opts it into retracting instead, trading a
+    re-prefill at each publication for reuse in between. Under LoRA, sharing
+    also requires SGLang to fold the adapter into the entry's key, because one
+    engine holds several scenarios' adapters and the same prefix has different
+    KV under each.
+
+    SGLang's native plugin hook installs Reef's token metadata and colocated
+    suspension policy inside each scheduler.
     """
     colocate = bool(getattr(args, "colocate", False))
-    args.sglang_disable_radix_cache = True
+    uses_lora = int(getattr(args, "megatron_lora_rank", 0) or 0) > 0
+    retracts_at_publication = colocate or bool(getattr(args, "disjoint_prefix_sharing", False))
+    args.weight_update_pause_mode = "retract" if retracts_at_publication else "in_place"
+    shares_prefixes = retracts_at_publication and (not uses_lora or _adapter_scoped_prefix_cache_supported())
+    args.sglang_disable_radix_cache = not shares_prefixes
     # Reef consumes /generate as a token-native SSE source. Disjoint chunks
     # keep text, ids, log-probs, and scheduler metadata linear in rollout
     # length and give the capture path one unambiguous wire contract.
     args.sglang_incremental_streaming_output = True
-    args.weight_update_pause_mode = "retract" if colocate else "in_place"
     os.environ[REEF_SGLANG_PLUGIN_ENV] = "1"
     configured_plugins = os.environ.get("SGLANG_PLUGINS")
     plugins = (
@@ -78,12 +95,12 @@ def configure_sglang_runtime(args) -> None:
     )
     os.environ["SGLANG_PLUGINS"] = ",".join(dict.fromkeys((*plugins, SGLANG_PLUGIN_NAME)))
 
-    if int(getattr(args, "megatron_lora_rank", 0) or 0) > 0:
+    if uses_lora:
         require_lora_tensor_request_schema()
         require_lora_distributed_request_schema()
 
-    if colocate and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
+    if retracts_at_publication and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
+        raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
 
     config_path = getattr(args, "sglang_config", None)
     if config_path is None:
@@ -92,16 +109,53 @@ def configure_sglang_runtime(args) -> None:
     from slime.backends.sglang_utils.sglang_config import SglangConfig
 
     config = SglangConfig.from_yaml(config_path)
-    if colocate and config.has_pd_disaggregation:
-        raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
+    if retracts_at_publication and config.has_pd_disaggregation:
+        raise ValueError("Reef retracting publication requires a regular SGLang engine, not PD disaggregation")
+    if shares_prefixes:
+        # Sharing is already safe here, so a group's overrides may set
+        # disable_radix_cache either way.
+        return
     for model in config.models:
         for group in model.server_groups:
             overrides = {key.replace("-", "_"): value for key, value in group.overrides.items()}
             if overrides.get("disable_radix_cache", True) is not True:
                 raise ValueError(
-                    "Reef weight updates require disable_radix_cache=true "
+                    "Reef serving without safe prefix sharing requires disable_radix_cache=true "
                     f"for SGLang model {model.name!r} group {group.worker_type!r}"
                 )
+
+
+def _adapter_scoped_prefix_cache_supported() -> bool:
+    """Whether SGLang keys radix-cache entries per LoRA adapter.
+
+    Exercise the request and radix-key APIs with identical tokens: requests
+    using one adapter must share a key, while another adapter must not. These
+    CPU-side request objects allocate no serving KV or model weights.
+
+    Any failure answers "no". The probe exists to survive a pin bump, so a
+    build whose request API raises something unforeseen must leave sharing off
+    rather than abort the deployment before it starts.
+    """
+    try:
+        from sglang.srt.managers.schedule_batch import Req
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+        from sglang.srt.sampling.sampling_params import SamplingParams
+
+        keys = []
+        for index, adapter in enumerate(("reef-probe-a", "reef-probe-a", "reef-probe-b")):
+            tokens = array("q", [1])
+            request = Req(
+                rid=f"reef-prefix-probe-{index}",
+                origin_input_text="",
+                origin_input_ids=tokens,
+                sampling_params=SamplingParams(max_new_tokens=1),
+                lora_id=adapter,
+            )
+            keys.append(RadixKey(token_ids=tokens, extra_key=request.extra_key).child_key())
+    except Exception:
+        return False
+    first_key, same_adapter_key, other_adapter_key = keys
+    return first_key == same_adapter_key and first_key != other_adapter_key
 
 
 def configure_megatron_runtime(args) -> None:

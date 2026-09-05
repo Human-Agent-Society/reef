@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -213,11 +212,13 @@ def install_colocated_retract_offload() -> None:
     used by weight updates from consuming that already-released state.
 
     Reef closes admission before this pause, so no new durable request can
-    bind the old head.  While the engine is paused, treat the waiting queue as
-    CPU-resident suspended work for destructive GPU-memory operations.  All
-    other scheduler queues and outstanding batches still have to satisfy
-    SGLang's original idle predicate.  On resume, SGLang re-prefills these
-    requests under the newly committed weights.
+    bind the old head. While the engine is paused, waiting requests and requests
+    awaiting grammar compilation are CPU-resident work without GPU KV. Grammar
+    polling stops during a pause, so requiring that queue to drain would prevent
+    every subsequent flush. Preserve both queues while checking all outstanding
+    GPU work with SGLang's original predicate. Its grammar-cache reset clears
+    compiled cache entries, not queued requests or their compilation futures.
+    On resume, those requests continue through normal grammar polling and prefill.
     """
     from sglang.srt.managers.scheduler import Scheduler
 
@@ -225,8 +226,6 @@ def install_colocated_retract_offload() -> None:
         return
 
     original_is_fully_idle = Scheduler.is_fully_idle
-    idle_signature = inspect.signature(original_is_fully_idle)
-    supports_ignore_waiting = "ignore_waiting" in idle_signature.parameters
     original_pause_generation = Scheduler.pause_generation
     original_continue_generation = Scheduler.continue_generation
 
@@ -243,27 +242,20 @@ def install_colocated_retract_offload() -> None:
         return result
 
     @wraps(original_is_fully_idle)
-    def is_offload_idle_with_suspended_requests(self: Any, *args: Any, **kwargs: Any) -> bool:
-        bound = idle_signature.bind(self, *args, **kwargs)
-        bound.apply_defaults()
-        for_health_check = bool(bound.arguments.get("for_health_check", False))
+    def is_offload_idle_with_suspended_requests(
+        self: Any, for_health_check: bool = False, ignore_waiting: bool = False
+    ) -> bool:
         if for_health_check or getattr(self, "_reef_pause_mode", None) != "retract":
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
-        if supports_ignore_waiting:
-            bound.arguments["ignore_waiting"] = True
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
-        waiting = self.waiting_queue
-        if not waiting:
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
+            return original_is_fully_idle(self, for_health_check=for_health_check, ignore_waiting=ignore_waiting)
         # Scheduler control messages run serially on this process. Temporarily
-        # hide only the CPU-side suspended queue while the upstream predicate
-        # proves that no GPU batch, overlap result, grammar task, or
-        # disaggregation transfer remains active.
-        self.waiting_queue = []
+        # hide the CPU-only grammar queue and use the pinned SGLang API to
+        # ignore waiting requests. All GPU idle checks remain active.
+        grammar_queue = self.grammar_manager.grammar_queue
+        self.grammar_manager.grammar_queue = []
         try:
-            return original_is_fully_idle(*bound.args, **bound.kwargs)
+            return original_is_fully_idle(self, for_health_check=False, ignore_waiting=True)
         finally:
-            self.waiting_queue = waiting
+            self.grammar_manager.grammar_queue = grammar_queue
 
     Scheduler.pause_generation = pause_generation_with_mode
     Scheduler.continue_generation = continue_generation_with_mode

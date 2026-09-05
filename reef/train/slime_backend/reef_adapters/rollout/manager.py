@@ -130,9 +130,29 @@ class ReefRolloutManagerImpl:
         return None if not ip or not port else f"http://{ip}:{port}"
 
     def pause_generation_for_update(self):
+        """Stop generation for a publication, leaving no reusable cache entry.
+
+        A ``retract`` pause releases every in-flight request's KV, which is
+        what lets the shared prefix cache be cleared: an entry the previous
+        weights built must not be matchable by a request running under the
+        next ones. A colocated engine drops the cache with its KV allocation
+        anyway; clearing it here extends the same guarantee to a disjoint
+        engine that opted into sharing prefixes.
+        """
         mode = getattr(self.args, "weight_update_pause_mode", "retract")
-        result = ray.get([engine.pause_generation.remote(mode) for engine in self.updatable_rollout_engines])
-        self._generation_paused_for_update = True
+        engines = self.updatable_rollout_engines
+        try:
+            result = ray.get([engine.pause_generation.remote(mode) for engine in engines])
+            self._generation_paused_for_update = True
+            if mode == "retract":
+                ray.get([engine.flush_cache.remote() for engine in engines])
+        except BaseException:
+            # A partial pause or failed flush leaves an unusable publication
+            # barrier. Retire the engines even for callers outside the bridge's
+            # publication path; recovery will create and pause fresh engines.
+            with suppress(Exception):
+                self.terminate_updatable_engines()
+            raise
         return result
 
     def continue_generation_after_update(self):
