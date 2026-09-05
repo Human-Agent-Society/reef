@@ -58,6 +58,32 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
+## Worker execution
+
+The configs launch the Reef service locally (`execution.services: local`).
+Episode scoring defaults to `evolution.worker_executor: auto` with
+`episode_workers: 1`: one CPU worker uses `uni`; increasing the count selects
+spawned `mp` workers. Model inference still runs at the configured upstream
+endpoint, so these scorers do not reserve GPUs.
+
+The worker/scorer pool is reused across evaluations and released when its
+scenario closes. Each episode still starts a separate harness process in a
+fresh temporary directory. This is a fixed-size pool, not autoscaling.
+`evolution.executor` is a separate episode-isolation option (`local` or
+`sandbox`), not a worker backend selector.
+
+The demo's materializer also preserves optional top-level `execution` and
+`executors` sections. An explicit `evolution.worker_executor` wins over
+`execution.evolution`; remove the former to use the role-level setting.
+For example, replace `worker_executor: auto` with `worker_executor: cpu-pool`
+and add this top-level profile (increase `episode_workers` as needed):
+
+```yaml
+executors:
+  cpu-pool:
+    backend: mp
+```
+
 ## Keep a deployment running
 
 Set `model.path` in [deployment.yaml](configs/deployment.yaml) to your provider's model

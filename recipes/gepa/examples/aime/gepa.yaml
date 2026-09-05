@@ -21,6 +21,10 @@ evolution:
   # The validation pass is 45 episodes a side; they are independent, so they
   # run this many at once. run.sh defaults it to 128.
   episode_workers: ${REEF_GEPA_WORKERS}
+  # Keep threaded evaluation: harness.aime registers its answer table in the
+  # driver process. Spawned mp workers would not inherit that mutable registry.
+  # This also avoids turning the default 128 threads into 128 persistent processes.
+  worker_executor: local
   # The task side, in the harness/ package: evaluate is the quickstart's
   # containment score over one episode, feedback is the wording GEPA's own
   # default evaluator writes into the reflective records.

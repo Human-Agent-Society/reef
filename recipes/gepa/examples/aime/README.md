@@ -60,6 +60,15 @@ comparison. The credential is read once, handed to the embedded service as its
 upstream, and never written into a candidate, a checkpoint, or a published
 tree; the Pi episodes authenticate to the local service with a placeholder.
 
+The validation pool explicitly uses `evolution.worker_executor: local`: its
+workers are persistent in-process objects with RPC threads, not 128 spawned
+processes. The scorer reads the AIME answer table registered by this driver,
+so switching to `mp` or Ray also requires making that table available in each
+worker; changing only the YAML backend would lose the answers. Episode
+subprocesses and temporary directories remain isolated. The driver forwards
+optional top-level `execution` and `executors` sections, including named
+profiles; an explicit `evolution.worker_executor` overrides `execution.evolution`.
+
 One round is: pull the served tree, take the method's plan for the iteration
 (its parent choice and its three training problems), run each as a Pi episode against that tree with a
 model binding pointed back at the embedded service, score it, find its recorded

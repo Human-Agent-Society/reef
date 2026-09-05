@@ -79,6 +79,47 @@ def test_an_unregistered_task_refuses_rather_than_scoring_zero(aime):
         aime.evaluate("never seen", pi_episode("### 17"))
 
 
+@pytest.mark.parametrize("selector", ["role", "worker"])
+def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selector):
+    driver = load("run")
+    config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
+    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["executors"] = {"cpu-pool": {"backend": "local"}}
+    config["execution"] = {"evolution": "cpu-pool"}
+    if selector == "role":
+        config["evolution"].pop("worker_executor")
+    else:
+        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["execution"]["evolution"] = "uni"
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    assert recipe.worker_executor.backend == "local"
+
+
+def test_default_driver_pool_keeps_registered_answers_visible(load, monkeypatch, tmp_path):
+    from reef.records import RecordStore
+
+    driver = load("run")
+    driver.aime.register([{"input": "problem", "answer": "### 17"}])
+    config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
+    assert config["evolution"]["worker_executor"] == "local"
+    config["evolution"]["episode_workers"] = 2
+    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    with RecordStore() as records:
+        trainer = recipe.build("test", records)
+        try:
+            backend = trainer.training_backend
+            assert backend._worker_selection.settings.backend == "local"
+            assert [row[0] for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
+            driver.aime.register([{"input": "problem", "answer": "### 18"}])
+            assert backend._evaluate_pairings([({}, "problem")])[0][0] == 0.0
+        finally:
+            trainer.close()
+
+
 def test_feedback_reproduces_the_upstream_evaluator_wording(aime):
     aime.register(
         [

@@ -4,10 +4,16 @@
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
+execution:
+  services: local
 model:
   path: &model your-model-name  # Set once; shared by serving and evaluation.
 
 evolution:
+  # CPU scoring: auto selects uni for one worker, mp for multiple workers.
+  # Workers persist between evaluations; each episode still has its own directory.
+  worker_executor: auto
+  episode_workers: 1
   adapter: pi
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate
