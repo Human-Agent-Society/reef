@@ -546,6 +546,9 @@ class Fiber:
         old = self._epoch
         if epoch == old:
             return
+        # A failed fiber recovers only through update(), which clears the error (fiber.ts:402, cordis 10194de).
+        if self.error is not None:
+            return
         self._epoch = epoch
         if self._inertia is not None:
             return  # the running chain reads the new epoch at its next decision point
