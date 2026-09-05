@@ -15,6 +15,7 @@ free-threaded Python and multi-loop use are out of scope.
 """
 
 from .context import Context, RealmKey, ServiceAccessError
+from .events import EventName
 from .fiber import EffectMeta, FiberState, InactiveEffectError, ValidationError
 from .registry import CycleError, MissingProviderError
 from .service import Service
@@ -23,6 +24,7 @@ __all__ = [
     "Context",
     "CycleError",
     "EffectMeta",
+    "EventName",
     "FiberState",
     "InactiveEffectError",
     "MissingProviderError",
