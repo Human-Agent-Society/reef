@@ -330,9 +330,10 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
         files
     )
     assert "upstream" not in files["native/models.json"]  # the seed carries no provider
-    surface = built.build_surface("demo")
-    assert [entry["id"] for entry in surface.seed_entries][:3] == ["read_file", "write_file", "run_bash"]
-    assert surface.served_model == "qwen3-8b"
+    info = built.build_surface("demo").harness
+    assert info is not None
+    assert [entry["id"] for entry in info.seed_entries][:3] == ["read_file", "write_file", "run_bash"]
+    assert info.served_model == "qwen3-8b"
     assert (
         CordisRecipe.from_environment(
             {},
