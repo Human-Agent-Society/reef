@@ -681,7 +681,7 @@ def test_install_script_golden_structure() -> None:
 set -eu
 
 DEST="${1:-./reef-harness}"
-PREFIX="${2:-$HOME/.local/share/reef-harness/pi}"
+PREFIX="${2:-${REEF_HARNESS_PREFIX:-$HOME/.local/share/reef-harness}/pi}"
 BINARY="$PREFIX/node_modules/.bin/pi"
 CHECKSUM="@CHECKSUM@"
 SIDECAR_CHECKSUM="@SIDECAR_CHECKSUM@"
@@ -698,7 +698,7 @@ fi
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
 installed=""
 if [ -x "$BINARY" ]; then
-    installed="$("$BINARY" --version 2>/dev/null || true)"
+    installed="$(PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
 fi
 case " $installed " in
     *" 0.84.2 "*)
@@ -843,6 +843,25 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
     assert sidecar.stat().st_mtime_ns == before
     for relative, text in HOSTILE_FILES.items():
         assert (dest / relative).read_bytes() == text.encode("utf-8")
+
+
+@pytest.mark.unit
+def test_install_script_version_probe_disables_network_and_updates(tmp_path) -> None:
+    npm_log = tmp_path / "npm.log"
+    script, dest, prefix, env = _install_fixture(
+        tmp_path,
+        binary_version="0.84.2",
+        npm=f'#!/bin/sh\nprintf called > "{npm_log}"\nexit 1\n',
+    )
+    _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\n[ "$PI_SKIP_VERSION_CHECK" = 1 ] && [ "$PI_OFFLINE" = 1 ] && echo 0.84.2\n',
+    )
+    env.update(PI_SKIP_VERSION_CHECK="0", PI_OFFLINE="0")
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "0.84.2 already installed" in result.stdout
+    assert not npm_log.exists()
 
 
 @pytest.mark.unit

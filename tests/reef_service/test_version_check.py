@@ -55,6 +55,7 @@ def test_version_check_entry_passes_the_backends_seed_validation() -> None:
         tasks=("probe",),
         models=ModelBinding(base_url="http://localhost:8000", model="demo-model"),
         seed=(version_check_entry("pi"),),
+        binary="fake-pi",
     )
 
 
