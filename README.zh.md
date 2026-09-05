@@ -189,7 +189,6 @@ reef.post(
 模型名称，然后在 Reef 源码目录及已激活的 Python 环境中运行：
 
 ```bash
-npm install -g @earendil-works/pi-coding-agent@0.84.2
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
 reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml

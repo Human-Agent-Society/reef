@@ -17,7 +17,9 @@ evolution:
   # these dotted references because run.sh starts it with this cwd.
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate
-  binary: pi  # the coding agent episodes run headless
+  # No binary: at startup reef installs the descriptor's pinned pi under
+  # ~/.local/share/reef-harness/pi, shared with the client install script.
+  # Set evolution.binary to a path to use an install of your own instead.
   # Three exact-answer coding tasks. Each prefix keys the expected answer
   # in harness/evolution.py's answer table; each prompt pins the reply
   # format the grader checks (the answer alone on the last line).
