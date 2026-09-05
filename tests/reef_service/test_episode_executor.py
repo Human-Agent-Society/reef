@@ -111,6 +111,45 @@ def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
         build_executor({"executor": "sandbox"})
 
 
+def _probe_result(monkeypatch, returncode: int, stderr: str = "") -> list[list[str]]:
+    """Stand in for the nesting probe: record the argv and answer with the given exit."""
+    seen: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, returncode, "", stderr)
+
+    monkeypatch.setattr("reef.harness.executor.subprocess.run", run)
+    return seen
+
+
+def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
+    monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
+    with pytest.raises(SandboxUnavailable, match=r"cannot nest a bubblewrap jail.*No permissions"):
+        SandboxExecutor().preflight()
+    # An episode jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
+    argv = seen[0]
+    episode, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
+    assert episode[0] == tool[0] == "/usr/bin/bwrap" and tool[-2:] == ["--", "/bin/true"]
+    for flag in ("--unshare-user", "--unshare-pid", "--unshare-net", "--dev", "--clearenv"):
+        assert flag in episode and flag in tool
+    # The episode jail mounts a fresh /proc; the tool jail cannot nest that, so it binds the episode's read only.
+    assert "--proc" in episode and "--proc" not in tool
+    assert tool[tool.index("/proc") - 1 : tool.index("/proc") + 2] == ["--ro-bind", "/proc", "/proc"]
+    for jail in (episode, tool):
+        assert jail[jail.index("/usr") - 1 : jail.index("/usr") + 2] == ["--ro-bind", "/usr", "/usr"]
+    _probe_result(monkeypatch, 0)
+    SandboxExecutor().preflight()
+
+    def refuse(argv, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr("reef.harness.executor.subprocess.run", refuse)
+    with pytest.raises(SandboxUnavailable, match="cannot nest a bubblewrap jail on this host: boom"):
+        SandboxExecutor().preflight()
+
+
 def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
     monkeypatch.setattr("reef.harness.executor.os.environ", {"PATH": "/usr/bin"})
@@ -133,6 +172,8 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
     assert "--setenv" in argv
     joined = " ".join(argv)
     assert "A b" in joined
+    # The native loop reads this and holds each tool call to its declared capabilities.
+    assert "--setenv REEF_NATIVE_ENFORCE bwrap" in joined
 
 
 def test_sandbox_opens_runtime_state_but_rebinds_rendered_inputs_read_only(monkeypatch, tmp_path: Path) -> None:
@@ -174,6 +215,7 @@ def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
     monkeypatch.setattr("reef.harness.executor.shutil.which", lambda name: "/usr/bin/bwrap")
+    _probe_result(monkeypatch, 0)
     executor = build_executor(
         {
             "executor": "sandbox",

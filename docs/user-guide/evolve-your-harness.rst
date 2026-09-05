@@ -199,7 +199,12 @@ hosted service that evaluates model-proposed trees sets ``evolution.executor:
 sandbox`` so each episode runs in a bubblewrap jail (a fresh non-root
 namespace, a read-only base filesystem, no host credentials, resource limits,
 and no network unless a model endpoint is allowlisted); a deployment that
-requires it refuses to start without the sandbox runtime.
+requires it refuses to start without the sandbox runtime. On the native
+adapter the sandbox also runs each tool call in a nested jail that withholds
+the network, workspace writes, or the shell and system binaries a tool did
+not declare in its capabilities; it cannot withhold the tool's own
+interpreter, or reads. The adapter guide states the full boundary. The
+local executor enforces none of this.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
