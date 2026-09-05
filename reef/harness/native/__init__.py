@@ -20,6 +20,7 @@ import copy
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -45,6 +46,8 @@ MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
+#: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
+TREE_FILE = "tree.json"
 _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "string": str,
     "integer": int,
@@ -95,6 +98,7 @@ class ToolModule:
         run: ToolRunner,
         capabilities: Sequence[str] = (),
         path: Path | None = None,
+        host_plane: bool = False,
     ) -> None:
         self.name = name
         self.description = description
@@ -103,6 +107,9 @@ class ToolModule:
         self.capabilities = tuple(str(item) for item in capabilities)
         # The module file, which a sandboxing enforcer imports afresh in its child; a tool built in code has none.
         self.path = path
+        # Reef's own code rather than the tree's (the serve form's self tools): it runs in process whatever
+        # enforcer the environment names, since the enforcer confines what a tree entry may do.
+        self.host_plane = host_plane
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -379,9 +386,9 @@ def _request(
     return None
 
 
-def _abort(session: Session, failure: Mapping[str, Any], **detail: Any) -> int:
+def _abort(session: Session, failure: Mapping[str, Any], turn: int = 1, **detail: Any) -> int:
     """End the turn in error: the closed failure in the log, its message on stderr, exit status 1."""
-    session.write("turn/end", {"turn": 1, "reason": {"kind": "error", "error": dict(failure), **detail}})
+    session.write("turn/end", {"turn": turn, "reason": {"kind": "error", "error": dict(failure), **detail}})
     print(f"[reef-native] {failure['message']}", file=sys.stderr)
     return 1
 
@@ -414,13 +421,20 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         "model": binding.model,
         "base_url": binding.base_url,
         "cwd": str(workdir),
+        # Where the composition came from: the entries list a newer render carries, else the rendered files.
+        "tree": TREE_FILE if (root / TREE_FILE).is_file() else "files",
     }
     try:
         try:
             # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
             enforcer = select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
-            host = NativeHost.from_root(root)
+            # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
+            # One directory per process, cleared on the way out: the wrapper reuses the sessions directory
+            # across runs and a mount refuses a module file that is already there.
+            mount_dir = session_dir / "mounts" / f"boot-{os.getpid()}"
+            shutil.rmtree(mount_dir, ignore_errors=True)
+            host = NativeHost.from_root(root, mount_dir)
             graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
@@ -443,7 +457,10 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         session.write("turn/start", {"turn": 1})
         loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
         run = graphs.Run(loop, prompt, binding, host, workdir)
-        return graphs.run_graph(run, graph)
+        try:
+            return graphs.run_graph(run, graph)
+        finally:
+            host.dispose()
     finally:
         session.close()
 
@@ -486,6 +503,13 @@ def _refused(decision: Mapping[str, Any], arguments: dict[str, Any]) -> dict[str
     return None
 
 
+def enforcer_for(tool: ToolModule, enforcer: Enforcer | None) -> Enforcer:
+    """The enforcer one call runs under: the environment's, except a host plane tool always runs in process."""
+    if tool.host_plane or enforcer is None:
+        return InProcessEnforcer()
+    return enforcer
+
+
 def _invoke(
     tools: Mapping[str, ToolModule],
     name: str,
@@ -525,7 +549,7 @@ def _invoke(
                 return _error("INVALID_ARGS", f"rewritten by a hook: {violation}", arguments)
     started = time.monotonic()
     try:
-        result = (enforcer or InProcessEnforcer()).run(tool, arguments, workdir)
+        result = enforcer_for(tool, enforcer).run(tool, arguments, workdir)
     except SandboxFailed as exc:
         return _error("SANDBOX_FAILED", str(exc), arguments)
     except ToolFailed as exc:
@@ -571,10 +595,14 @@ class _Loop:
         self.open.append(session)
         return session, self.turns
 
+    def before_step(self, run: Any) -> None:
+        """Called at the top of every model stage; the episode form has nothing to land between steps."""
+
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
     _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
+    enforcer_for = staticmethod(enforcer_for)
     _judged = staticmethod(_judged)
     _texts = staticmethod(_texts)
     _abort = staticmethod(_abort)

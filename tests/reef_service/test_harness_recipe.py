@@ -37,6 +37,7 @@ from reef.train.cordis_backend import (
     Promoter,
     ScoreComparisonSelector,
 )
+from reef.train.cordis_backend.backend import admit_mutations
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -421,66 +422,115 @@ def test_episode_scorer_failure_reverts_before_it_propagates(tmp_path: Path) -> 
 # -- tree mutation mechanics ----------------------------------------------
 
 
-def test_create_duplicate_id_is_rejected(tmp_path: Path) -> None:
-    b = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(b, batch(), b.initial_state())
-    b._apply(Mutation("create", "r1", RULES))
-    with pytest.raises(MutationError, match="already exists"):
-        b._apply(Mutation("create", "r1", SKILL))
+PI = get_adapter("pi")
 
 
-def test_update_missing_id_is_rejected(tmp_path: Path) -> None:
-    b = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(b, batch(), b.initial_state())
-    with pytest.raises(MutationError, match="cannot resolve"):
-        b._apply(Mutation("update", "x", RULES))
+def _admit(entries, *mutations: Mutation, descriptor=PI) -> tuple[list[dict], str | None]:
+    return admit_mutations(entries, mutations, descriptor)
 
 
-def test_update_cannot_change_an_entrys_kind(tmp_path: Path) -> None:
+def _nodes(entries) -> tuple:
+    return tuple((entry["name"], entry["config"]) for entry in entries if not entry.get("disabled"))
+
+
+def test_create_duplicate_id_is_rejected() -> None:
+    entries, refusal = _admit([], Mutation("create", "r1", RULES))
+    assert refusal is None and [entry["id"] for entry in entries] == ["r1"]
+    same, refusal = _admit(entries, Mutation("create", "r1", SKILL))
+    assert refusal == "entry 'r1' already exists" and same == entries
+
+
+def test_update_missing_id_is_rejected() -> None:
+    entries, refusal = _admit([], Mutation("update", "x", RULES))
+    assert entries == [] and refusal is not None and "cannot resolve" in refusal
+
+
+def test_update_cannot_change_an_entrys_kind() -> None:
     """A kind change through update would validate the new config under the old kind's plugin and hide
     the new kind from review_kinds; it is refused, and remove plus create is the way to change a kind."""
-    b = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(b, batch(), b.initial_state())
-    b._apply(Mutation("create", "notes", SKILL))
+    entries, _ = _admit([], Mutation("create", "notes", SKILL))
     swapped = {"name": "native_tool", "config": {**SKILL["config"], "description": "d", "parameters": {}, "code": "("}}
-    with pytest.raises(MutationError, match="cannot change the entry's kind from 'skill' to 'native_tool'"):
-        b._apply(Mutation("update", "notes", swapped))
-    assert [entry["name"] for entry in b._entries()] == ["skill"]
+    same, refusal = _admit(entries, Mutation("update", "notes", swapped))
+    assert refusal is not None and "cannot change the entry's kind from 'skill' to 'native_tool'" in refusal
+    assert [entry["name"] for entry in same] == ["skill"]
     # The same kind, restated, is an ordinary update.
-    b._apply(Mutation("update", "notes", {"name": "skill", "config": {**SKILL["config"], "text": "# more"}}))
-    assert b._entries()[0]["config"]["text"] == "# more"
+    restated = Mutation("update", "notes", {"name": "skill", "config": {**SKILL["config"], "text": "# more"}})
+    entries, refusal = _admit(entries, restated)
+    assert refusal is None and entries[0]["config"]["text"] == "# more"
 
 
-def test_update_merges_and_disabled_hides(tmp_path: Path) -> None:
-    b = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(b, batch(), b.initial_state())
-    b._apply(Mutation("create", "r1", RULES))
-    b._apply(Mutation("update", "r1", {"config": {"text": "Be verbose."}}))
-    assert b._nodes() == (("rules", {"text": "Be verbose."}),)
-    b._apply(Mutation("update", "r1", {"disabled": True}))
-    assert b._nodes() == ()
+def test_update_merges_and_disabled_hides() -> None:
+    entries, _ = _admit(
+        [], Mutation("create", "r1", RULES), Mutation("update", "r1", {"config": {"text": "Be verbose."}})
+    )
+    assert _nodes(entries) == (("rules", {"text": "Be verbose."}),)
+    entries, refusal = _admit(entries, Mutation("update", "r1", {"disabled": True}))
+    assert refusal is None and _nodes(entries) == () and entries[0]["disabled"] is True
 
 
-def test_remove_deletes_entry(tmp_path: Path) -> None:
-    b = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(b, batch(), b.initial_state())
-    b._apply(Mutation("create", "r1", RULES))
-    b._apply(Mutation("create", "s1", SKILL))
-    b._apply(Mutation("remove", "r1"))
-    assert b._nodes() == (("skill", SKILL["config"]),)
+def test_remove_deletes_entry() -> None:
+    entries, _ = _admit([], Mutation("create", "r1", RULES), Mutation("create", "s1", SKILL))
+    entries, refusal = _admit(entries, Mutation("remove", "r1"))
+    assert refusal is None and _nodes(entries) == (("skill", SKILL["config"]),)
+    same, refusal = _admit(entries, Mutation("remove", "r1"))
+    assert refusal is not None and "cannot resolve" in refusal and same == entries
+
+
+def test_admission_refuses_a_failing_entry_and_a_kind_the_adapter_does_not_render() -> None:
+    """The one admission every proposal meets: the kind's plugin, the fiber, the adapter's paths, then the render."""
+    broken = Mutation("create", "s1", {"name": "skill", "config": {"name": "notes"}})
+    entries, refusal = _admit([], broken)
+    assert entries == [] and refusal == "mutation create 's1' rejected: node config requires a non-empty string 'text'"
+    tool = Mutation(
+        "create",
+        "t1",
+        {
+            "name": "native_tool",
+            "config": {
+                **SKILL["config"],
+                "description": "d",
+                "parameters": {},
+                "code": "def run(a, w):\n    return 1\n",
+            },
+        },
+    )
+    _, refusal = _admit([], tool)
+    assert refusal == "mutation create 't1' rejected: adapter 'pi' does not render native_tool nodes"
+    _, refusal = _admit([], tool, descriptor=get_adapter("native"))
+    assert refusal is None
+    # Disabled entries meet the same two gates without a fiber.
+    _, refusal = _admit([], Mutation("create", "t2", {**tool.options, "disabled": True}))
+    assert refusal == "mutation create 't2' rejected: adapter 'pi' does not render native_tool nodes"
+    # The render's own checks refuse too: two skills at one path.
+    _, refusal = _admit([], Mutation("create", "a", SKILL), Mutation("create", "b", SKILL))
+    assert refusal is not None and "two nodes render to the same path" in refusal
+    # The native host's boot rules meet admission too, so a config the serve process would only roll back
+    # never wins a gate; pi renders the same config to a file and takes it.
+    primary = Mutation("create", "c1", {"name": "config", "config": {"data": {"theme": "dark"}}})
+    _, refusal = _admit([], primary)
+    assert refusal is None
+    _, refusal = _admit([], primary, descriptor=get_adapter("native"))
+    assert refusal == (
+        "entry 'c1' rejected: config node target 'primary' renders to a file the native loop never reads; "
+        "the host reads target 'models' only"
+    )
+    window = Mutation(
+        "create", "c2", {"name": "config", "config": {"target": "models", "data": {"context_window": 0}}}
+    )
+    _, refusal = _admit([], window, descriptor=get_adapter("native"))
+    assert refusal == "entry 'c2' rejected: config node 'context_window' must be a positive integer"
+    _, refusal = _admit(
+        [], Mutation("create", "c3", {**window.options, "disabled": True}), descriptor=get_adapter("native")
+    )
+    assert refusal is None
 
 
 def test_entries_and_load_round_trip(tmp_path: Path) -> None:
+    entries, _ = _admit([], Mutation("create", "r1", RULES), Mutation("create", "s1", SKILL))
     b = backend(tmp_path, lambda n, s, m: None)
     run_backend_step(b, batch(), b.initial_state())
-    b._apply(Mutation("create", "r1", RULES))
-    b._apply(Mutation("create", "s1", SKILL))
-    serialized = b._entries()
-
-    fresh = backend(tmp_path, lambda n, s, m: None)
-    run_backend_step(fresh, batch(), fresh.initial_state())
-    fresh._loader.root.update(serialized)
-    assert fresh._nodes() == b._nodes()
+    b._loader.root.update(entries)
+    assert b._entries() == entries and b._nodes() == _nodes(entries)
 
 
 # -- revert exactness and ledger hygiene ----------------------------------
@@ -583,6 +633,9 @@ def test_invalid_seed_refuses_boot_naming_the_entry(tmp_path: Path) -> None:
         backend(tmp_path, lambda n, s, m: None, seed=({"id": "r1", "name": "rules", "config": {}},))
     with pytest.raises(ValueError, match="non-empty string 'id'"):
         backend(tmp_path, lambda n, s, m: None, seed=({"name": "rules", "config": {"text": "hi"}},))
+    twice = {"id": "r1", "name": "rules", "config": {"text": "hi"}}
+    with pytest.raises(ValueError, match="seed names entry 'r1' twice"):
+        backend(tmp_path, lambda n, s, m: None, seed=(twice, dict(twice)))
 
 
 def test_seed_with_an_inline_key_refuses_boot(tmp_path: Path) -> None:
@@ -2092,3 +2145,94 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
             scenario.commit(held)
     finally:
         dispatcher.close()
+
+
+# -- the tree travels as a file, and the adapter's kinds are an admission rule ----------
+
+
+def test_a_kind_the_adapter_does_not_render_refuses_the_seed_and_the_recovered_state(tmp_path: Path) -> None:
+    tool = {
+        "id": "shout",
+        "name": "native_tool",
+        "config": {"name": "shout", "description": "d", "parameters": {}, "code": "def run(a, w):\n    return 1\n"},
+    }
+    with pytest.raises(
+        ValueError, match="seed entry 'shout' rejected: adapter 'pi' does not render native_tool nodes"
+    ):
+        backend(tmp_path, lambda n, s, m: None, seed=(tool,))
+    b = backend(tmp_path, lambda n, s, m: None)
+    with pytest.raises(ValueError, match="recovered state entry 'shout' rejected: adapter 'pi' does not render"):
+        b.prepare_step(batch(), {"steps": 1, "entries": [tool]}, 0)
+    # Disabled entries meet the same rule: the tree persists them verbatim.
+    with pytest.raises(ValueError, match="recovered state entry 'shout' rejected: adapter 'pi' does not render"):
+        b.prepare_step(batch(), {"steps": 1, "entries": [{**tool, "disabled": True}]}, 0)
+
+
+def test_a_published_tree_carries_the_entries_list_where_the_adapter_declares_one(tmp_path: Path) -> None:
+    carrying = dataclasses.replace(get_adapter("pi"), tree_path="pi-agent/tree.json")
+    marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+    b = CordisBackend(
+        descriptor=carrying,
+        propose=resolve_proposer(lambda nodes, samples, models: marker),
+        score_episode=resolve_episode_scorer(evaluate),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+    )
+    entries = seeded_state()["entries"]
+    assert json.loads(b._render_for_episode(entries)["pi-agent/tree.json"]) == entries
+    result = run_backend_step(b, batch(), b.initial_state())
+    assert result.metrics["published"] is True and result.artifact is not None
+    assert result.artifact.local_path is not None
+    published = json.loads((result.artifact.local_path / "pi-agent" / "tree.json").read_text(encoding="utf-8"))
+    assert published == result.state["entries"] == [{"id": "r1", "name": "rules", "config": {"text": "marker"}}]
+    # The adapter as shipped declares no list, so its trees stay as they were.
+    plain = backend(tmp_path, lambda nodes, samples, models: marker)
+    assert "pi-agent/tree.json" not in plain._render_for_episode(entries)
+    result = run_backend_step(plain, batch(), plain.initial_state())
+    assert result.artifact is not None and result.artifact.local_path is not None
+    assert not (result.artifact.local_path / "pi-agent" / "tree.json").exists()
+
+
+def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_inbox.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_inbox:propose",
+                "evaluate": "demo_inbox:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    default = CordisRecipe.from_environment({}, config=config())
+    assert default.proposals_dir == ".reef/proposals" and default.max_pending_proposals == 8
+    assert default.proposals_path("code-repair") == Path(".reef/proposals").resolve() / "code-repair"
+    built = CordisRecipe.from_environment({}, config=config(proposals_dir=" ~/inbox ", max_pending_proposals=2))
+    assert built.proposals_dir == "~/inbox" and built.max_pending_proposals == 2
+    assert built.proposals_path("s") == Path("~/inbox").expanduser().resolve() / "s"
+    for bad in (
+        {"proposals_dir": ""},
+        {"proposals_dir": 3},
+        {"max_pending_proposals": 0},
+        {"max_pending_proposals": True},
+    ):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.(proposals_dir|max_pending_proposals)"):
+            CordisRecipe.from_environment({}, config=config(**bad))
+    with pytest.raises(ValueError, match="max_pending_proposals must be an integer of at least 1"):
+        dataclasses.replace(default, max_pending_proposals=0)
+    with pytest.raises(ValueError, match="proposals_dir must be a non-empty path"):
+        dataclasses.replace(default, proposals_dir=" ")
+    # The backend gets the scenario's own directory; nothing is created until a proposal arrives.
+    trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
+        "demo", RecordStore()
+    )
+    inbox = trainer.training_backend.proposals
+    assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
+    assert not inbox.directory.exists()

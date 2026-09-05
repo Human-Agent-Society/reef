@@ -6,7 +6,10 @@ everything the shared engines need to drive one harness binary:
 - ``config_targets``: named JSON config files with their enforced defaults
   (a ``primary`` target is required; ``config`` nodes merge into targets).
 - ``node_paths``: root-relative render paths for the other node kinds;
-  named kinds carry a ``{name}`` placeholder.
+  named kinds carry a ``{name}`` placeholder. A kind the adapter leaves out
+  is refused at admission and at render, never dropped.
+- ``tree_path`` (optional, ``files.tree``): where the entries list travels
+  beside the rendered files, for a binary that reconciles the tree live.
 - ``argv``/``env``: the headless invocation (``{prompt}`` substituted per
   episode) and the relocation environment (``{root}`` substituted per
   episode) that points the binary's whole composition at the episode root.
@@ -48,9 +51,17 @@ from reef.core.errors import ReefError
 ENTRY_POINT_GROUP = "reef.harness_adapters"
 
 #: Node kinds rendered to one path per named node; templates need ``{name}``.
-NAMED_NODE_KINDS = ("agent_command", "skill", "code_extension")
+NAMED_NODE_KINDS = (
+    "agent_command",
+    "skill",
+    "code_extension",
+    "native_tool",
+    "native_hook",
+    "native_graph",
+    "native_agent",
+)
 #: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
-OPTIONAL_NODE_KINDS = ("native_tool", "native_hook", "native_graph", "native_agent")
+OPTIONAL_NODE_KINDS = ("agent_command", "code_extension", "native_tool", "native_hook", "native_graph", "native_agent")
 
 
 class DescriptorError(ReefError):
@@ -124,6 +135,10 @@ class AdapterDescriptor:
     #: the matching set when it runs evaluation episodes, so the served tree
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
+    #: ``files.tree``: where the entries list travels with the rendered files (a JSON
+    #: array of ``{id, name, config}``), so a resident process can reconcile the
+    #: tree entry by entry; None for an adapter whose binary reads files only.
+    tree_path: str | None = None
 
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
@@ -210,7 +225,15 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
+        tree_path=_parse_tree_path(files, where),
     )
+
+
+def _parse_tree_path(files: Mapping[str, Any], where: str) -> str | None:
+    if "tree" not in files:
+        return None
+    (path,) = _relative_paths([files["tree"]], f"{where} files.tree")
+    return path
 
 
 def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
@@ -303,12 +326,7 @@ def _parse_install(raw: Any, where: str) -> InstallSpec | None:
 def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
     node_paths = {"rules": _require_str(files, "rules", f"{where} files")}
     for kind in NAMED_NODE_KINDS:
-        template = _require_str(files, kind, f"{where} files")
-        if "{name}" not in template:
-            raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
-        node_paths[kind] = template
-    for kind in OPTIONAL_NODE_KINDS:
-        if kind not in files:
+        if kind in OPTIONAL_NODE_KINDS and kind not in files:
             continue
         template = _require_str(files, kind, f"{where} files")
         if "{name}" not in template:

@@ -30,6 +30,7 @@ from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
+from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
     Mutation,
@@ -59,6 +60,8 @@ class HarnessCandidate(UpdateCandidate):
     gate_tasks: tuple[str, ...] = ()
     #: The candidate is the rollback target, so selecting it rolls back.
     recheck: bool = False
+    #: The inbox proposal these mutations came from, settled with the verdict; None for the method's own.
+    proposal_id: str | None = None
     #: The step record directory claimed for it at prepare time; ``None`` with the record off.
     record_dir: Path | None = None
 
@@ -279,6 +282,149 @@ def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, A
     )
 
 
+def tree_files(descriptor: AdapterDescriptor, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
+    """The entries list as the file ``files.tree`` names, verbatim; empty for an adapter that declares none."""
+    if descriptor.tree_path is None:
+        return {}
+    return {descriptor.tree_path: json.dumps([dict(entry) for entry in entries], indent=2, sort_keys=True) + "\n"}
+
+
+def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
+    return tuple((str(options["name"]), options.get("config")) for options in entries if not options.get("disabled"))
+
+
+def _loader_entries(loader: Loader) -> list[EntryOptions]:
+    """Live entry options in tree order."""
+    result = []
+    for options in loader.root.data:
+        entry = loader.store.get(str(options.get("id")))
+        if entry is not None:
+            result.append(dict(entry.options))
+    return result
+
+
+def _unrenderable(descriptor: AdapterDescriptor, kind: str) -> str | None:
+    """Why the adapter cannot render an entry of ``kind``; config nodes render through the config targets."""
+    if kind == "config" or kind in descriptor.node_paths:
+        return None
+    return f"adapter {descriptor.name!r} does not render {kind} nodes"
+
+
+def _load_error(loader: Loader, id_: str, descriptor: AdapterDescriptor) -> str | None:
+    """Why the entry cannot serve: its kind's admission, its fiber's state, then whether the adapter renders it."""
+    entry = loader.resolve(id_)
+    kind = str(entry.options.get("name"))
+    if entry.disabled:
+        # Disabled is a serving state, not a validation bypass (#476): a
+        # disabled entry builds no fiber, but its options persist in the
+        # state verbatim, so its kind's admission gate runs directly here.
+        plugin = NODE_KINDS.get(kind)
+        if plugin is None:
+            return f"unknown node kind {kind!r}"
+        try:
+            plugin(None, entry.options.get("config"))
+        except ValueError as error:
+            return str(error)
+        return _unrenderable(descriptor, kind)
+    fiber = entry.fiber
+    if fiber is None:
+        return f"unknown node kind {kind!r}"
+    if fiber.error is not None:
+        return str(fiber.error)
+    if fiber.state is not FiberState.ACTIVE:
+        return f"node fiber is {fiber.state.name}"
+    return _unrenderable(descriptor, kind)
+
+
+def _resolve(loader: Loader, id_: str) -> Any:
+    try:
+        return loader.resolve(id_)
+    except LookupError as exc:
+        raise MutationError(str(exc)) from exc
+
+
+def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
+    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id."""
+    if mutation.op == "create":
+        try:
+            loader.resolve(mutation.id)
+        except LookupError:
+            pass
+        else:
+            raise MutationError(f"entry {mutation.id!r} already exists")
+        if mutation.options is None:
+            raise MutationError("create mutation must carry options")
+        loader.create({**mutation.options, "id": mutation.id})
+    elif mutation.op == "update":
+        entry = _resolve(loader, mutation.id)
+        if mutation.options is None:
+            raise MutationError("update mutation must carry options")
+        # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
+        # update that renamed the kind would validate under the old one; a kind change is remove + create.
+        kind = mutation.options.get("name")
+        if kind is not None and str(kind) != str(entry.options.get("name")):
+            raise MutationError(
+                f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
+                f"to {kind!r}; remove the entry and create it under the new kind"
+            )
+        loader.update(mutation.id, dict(mutation.options))
+    else:
+        _resolve(loader, mutation.id)
+        loader.remove(mutation.id)
+        loader.root.data[:] = [options for options in loader.root.data if str(options.get("id")) != mutation.id]
+
+
+def admit_mutations(
+    entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation], descriptor: AdapterDescriptor
+) -> tuple[list[EntryOptions], str | None]:
+    """Apply ``mutations`` over a fresh admission loader and try the render: the new entries and None, or the old entries and the refusal.
+
+    The one admission every proposal meets, the method's in ``prepare_step``
+    and an agent's at the proposals route: each mutation under the rules of
+    ``_apply_mutation``, a FAILED fiber refused with its error, a kind the
+    adapter renders no path for refused naming the kind, and a render error
+    refused with its message."""
+    previous = [dict(entry) for entry in entries]
+    loader = Loader(Context(), NODE_KINDS.get)
+    loader.root.update([dict(entry) for entry in entries])
+    try:
+        for mutation in mutations:
+            _apply_mutation(loader, mutation)
+            if mutation.op == "remove":
+                continue
+            error = _load_error(loader, mutation.id, descriptor)
+            if error is not None:
+                raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
+        admitted = _loader_entries(loader)
+        render_composition(_nodes_from(admitted), descriptor)
+        refusal = _native_refusal(admitted, descriptor)
+        if refusal is not None:
+            raise MutationError(refusal)
+    except (MutationError, RenderError) as error:
+        return previous, str(error)
+    return admitted, None
+
+
+def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDescriptor) -> str | None:
+    """The first config entry a native host would refuse at boot, None when the tree is not native or all pass.
+
+    The boot rules of the config plugin (target ``models`` only, no pinned
+    binding field, a positive window) are checked here too, so a tree the
+    serve process would roll back never wins a gate."""
+    if descriptor.tree_path is None:
+        return None
+    from reef.harness.native.plugins import check_native_config
+
+    for entry in entries:
+        if entry.get("name") != "config" or entry.get("disabled"):
+            continue
+        try:
+            check_native_config(entry.get("config") or {})
+        except ValueError as error:
+            return f"entry {entry.get('id')!r} rejected: {error}"
+    return None
+
+
 class ScoreComparisonSelector(CandidateSelector):
     """Select a candidate when its wins exceed its losses by more than ``min_win_margin`` (0: plain majority)."""
 
@@ -375,6 +521,8 @@ class CordisBackend(TrainingBackend):
         review_kinds: tuple[str, ...] = (),
         seed: tuple[Mapping[str, Any], ...] = (),
         episode_workers: int = 1,
+        proposals_dir: str | Path | None = None,
+        max_pending_proposals: int = 8,
         step_record_dir: str | Path | None = None,
     ) -> None:
         if not tasks:
@@ -454,6 +602,8 @@ class CordisBackend(TrainingBackend):
         # Track only trees created by this backend so a durable commit can
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}
+        # Agent proposals wait here between the route that admitted them and the step that takes them.
+        self.proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         if self._step_record_dir is not None:
@@ -463,6 +613,16 @@ class CordisBackend(TrainingBackend):
                 raise ValueError(f"step_record_dir {self._step_record_dir} cannot be created: {exc}") from exc
         self._validate_seed()
 
+    @property
+    def descriptor(self) -> AdapterDescriptor:
+        return self._descriptor
+
+    def admit(
+        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
+    ) -> tuple[list[EntryOptions], str | None]:
+        """The route's admission: ``admit_mutations`` under this backend's adapter, touching no live state."""
+        return admit_mutations(entries, mutations, self._descriptor)
+
     def _validate_seed(self) -> None:
         """Load the seed into the tree once so a bad seed refuses construction.
 
@@ -471,16 +631,23 @@ class CordisBackend(TrainingBackend):
         recipe build time, naming the failing entry - instead of an empty
         or broken composition tying every comparison at run time.
         """
+        seen: set[str] = set()
         for options in self._seed:
             for key in ("id", "name"):
                 value = options.get(key)
                 if not isinstance(value, str) or not value:
                     raise ValueError(f"seed entry {options!r} requires a non-empty string {key!r}")
+            if options["id"] in seen:
+                raise ValueError(f"seed names entry {options['id']!r} twice")
+            seen.add(str(options["id"]))
         self._loader.root.update([dict(options) for options in self._seed])
         for options in self._seed:
             error = self._load_error(str(options["id"]))
             if error is not None:
                 raise ValueError(f"seed entry {options['id']!r} rejected: {error}")
+        refusal = _native_refusal(self._seed, self._descriptor)
+        if refusal is not None:
+            raise ValueError(f"seed {refusal}")
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
@@ -614,68 +781,65 @@ class CordisBackend(TrainingBackend):
                 state={"steps": steps, **carried},
                 metrics=metrics,
             )
+        snapshot = tuple(dict(entry) for entry in self._entries())
+        skipped_state = {"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried}
         record: list[dict[str, Any]] = []
-        models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
-        extra: dict[str, Any] = {}
-        if self._propose_accepts_manifest:
-            extra["manifest"] = manifest
-        if self._propose_accepts_rejected:
-            extra["rejected"] = tuple(rejected)
-        if self._propose_accepts_sources:
-            extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
-        try:
-            proposal = self._propose(self._nodes(), batch.samples, models, **extra)
-        finally:
-            # Written even when propose raised: the calls before the failure are the decision's record.
+        # An agent's pending proposal goes first; the method proposes only when none waits.
+        inbox = self.proposals
+        claimed = None if inbox is None else inbox.claim()
+        if inbox is not None and claimed is not None:
+            metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "release_id": claimed.release_id}
+            # An agent's proposal asks the method nothing, so the step's proposer record is empty.
             self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
-        metrics["proposer_calls"] = len(record)
-        metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
-        mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
+            metrics["proposer_calls"] = 0
+            metrics["proposer_seconds"] = 0.0
+            try:
+                mutations = _proposal_mutations(claimed)
+            except MutationError as error:
+                inbox.refuse(claimed.id, str(error))
+                self._write_record(step_dir, RECORD_MUTATIONS_FILE, [])
+                return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
+        else:
+            models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
+            extra: dict[str, Any] = {}
+            if self._propose_accepts_manifest:
+                extra["manifest"] = manifest
+            if self._propose_accepts_rejected:
+                extra["rejected"] = tuple(rejected)
+            if self._propose_accepts_sources:
+                extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+            try:
+                proposal = self._propose(self._nodes(), batch.samples, models, **extra)
+            finally:
+                # Written even when propose raised: the calls before the failure are the decision's record.
+                self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
+            metrics["proposer_calls"] = len(record)
+            metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
+            mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
         self._write_record(step_dir, RECORD_MUTATIONS_FILE, [_bounded(_mutation_record(m)) for m in mutations])
         if not mutations:
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": self._entries(), **carried},
-                metrics={**metrics, "skipped": "no proposal"},
-            )
+            return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": "no proposal"})
 
         current_files = render_composition(self._nodes(), self._descriptor)
-        snapshot = tuple(dict(entry) for entry in self._entries())
-        try:
-            for mutation in mutations:
-                self._apply(mutation)
-        except MutationError as error:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried},
-                metrics={**metrics, "skipped": str(error)},
-            )
-        except BaseException:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            raise
-
-        try:
-            candidate_files = render_composition(self._nodes(), self._descriptor)
-        except RenderError as error:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            return PreparedStep.skipped(
-                state={"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried},
-                metrics={**metrics, "skipped": str(error)},
-            )
-        except BaseException:
-            self._loader.root.update([dict(entry) for entry in snapshot])
-            raise
-
+        # Admission runs again here even for a proposal the route admitted: the head may have moved since.
+        admitted, refusal = admit_mutations(snapshot, mutations, self._descriptor)
+        if refusal is not None:
+            if inbox is not None and claimed is not None:
+                inbox.refuse(claimed.id, refusal)
+            return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": refusal})
+        self._loader.root.update([dict(entry) for entry in admitted])
         return PreparedStep.with_candidate(
             HarnessCandidate(
                 candidate_id=f"{batch.batch_id}:candidate",
-                candidate_files=candidate_files,
+                candidate_files=render_composition(self._nodes(), self._descriptor),
                 current_files=current_files,
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
                 current_entries=snapshot,
                 mutations=mutations,
                 gate_tasks=gate_tasks,
+                proposal_id=None if claimed is None else claimed.id,
                 record_dir=step_dir,
             ),
             state={"steps": steps, **carried},
@@ -828,10 +992,16 @@ class CordisBackend(TrainingBackend):
         else:
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
+        if candidate.proposal_id is not None and self.proposals is not None:
+            verdict = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
+            self.proposals.settle(candidate.proposal_id, verdict)
+
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
             self._loader.root.update(entries)
-            artifact = Artifact.local(_write_rendered_files(candidate.candidate_files))
+            # The published tree carries its entries list too, so a resident process can mount it entry by entry.
+            published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
+            artifact = Artifact.local(_write_rendered_files(published))
             step = int(state["steps"])
             replaced = self._rendered_publications.get(step)
             if replaced is not None:
@@ -854,6 +1024,9 @@ class CordisBackend(TrainingBackend):
     def abort_step(self, prepared: PreparedStep) -> None:
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
+        if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+            self.proposals.refuse(candidate.proposal_id, "step aborted before a verdict")
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:
@@ -973,94 +1146,40 @@ class CordisBackend(TrainingBackend):
         }
 
     def _render_for_episode(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, str]:
-        return render_composition((*self._nodes_from(entries), *self._binding_nodes), self._descriptor)
+        """The tree plus the model binding, and the entries list beside them where the adapter carries one."""
+        files = render_composition((*_nodes_from(entries), *self._binding_nodes), self._descriptor)
+        return {**files, **tree_files(self._descriptor, entries)}
 
     def _nodes(self) -> tuple[tuple[str, Any], ...]:
         """The enabled composition in tree order, as (kind, config) pairs."""
-        return self._nodes_from(self._entries())
+        return _nodes_from(self._entries())
 
     @staticmethod
     def _nodes_from(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
-        return tuple(
-            (str(options["name"]), options.get("config")) for options in entries if not options.get("disabled")
-        )
+        return _nodes_from(entries)
 
     def _entries(self) -> list[EntryOptions]:
         """Live entry options in tree order."""
-        result = []
-        for options in self._loader.root.data:
-            entry = self._loader.store.get(str(options.get("id")))
-            if entry is not None:
-                result.append(dict(entry.options))
-        return result
-
-    def _apply(self, mutation: Mutation) -> None:
-        if mutation.op == "create":
-            if self._exists(mutation.id):
-                raise MutationError(f"entry {mutation.id!r} already exists")
-            if mutation.options is None:
-                raise MutationError("create mutation must carry options")
-            self._loader.create({**mutation.options, "id": mutation.id})
-        elif mutation.op == "update":
-            entry = self._resolve(mutation.id)
-            if mutation.options is None:
-                raise MutationError("update mutation must carry options")
-            # The kind's plugin is the entry's admission gate and stays bound to the live fiber, so an
-            # update that renamed the kind would validate under the old one; a kind change is remove + create.
-            kind = mutation.options.get("name")
-            if kind is not None and str(kind) != str(entry.options.get("name")):
-                raise MutationError(
-                    f"update {mutation.id!r} cannot change the entry's kind from {entry.options.get('name')!r} "
-                    f"to {kind!r}; remove the entry and create it under the new kind"
-                )
-            self._loader.update(mutation.id, dict(mutation.options))
-        else:
-            self._resolve(mutation.id)
-            self._loader.remove(mutation.id)
-            self._loader.root.data[:] = [
-                options for options in self._loader.root.data if str(options.get("id")) != mutation.id
-            ]
-
-        if mutation.op != "remove":
-            error = self._load_error(mutation.id)
-            if error is not None:
-                raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {error}")
-
-    def _exists(self, id_: str) -> bool:
-        try:
-            self._loader.resolve(id_)
-        except LookupError:
-            return False
-        return True
-
-    def _resolve(self, id_: str) -> Any:
-        try:
-            return self._loader.resolve(id_)
-        except LookupError as exc:
-            raise MutationError(str(exc)) from exc
+        return _loader_entries(self._loader)
 
     def _load_error(self, id_: str) -> str | None:
-        entry = self._loader.resolve(id_)
-        if entry.disabled:
-            # Disabled is a serving state, not a validation bypass (#476): a
-            # disabled entry builds no fiber, but its options persist in the
-            # state verbatim, so its kind's admission gate runs directly here.
-            plugin = NODE_KINDS.get(str(entry.options.get("name")))
-            if plugin is None:
-                return f"unknown node kind {entry.options.get('name')!r}"
-            try:
-                plugin(None, entry.options.get("config"))
-            except ValueError as error:
-                return str(error)
-            return None
-        fiber = entry.fiber
-        if fiber is None:
-            return f"unknown node kind {entry.options.get('name')!r}"
-        if fiber.error is not None:
-            return str(fiber.error)
-        if fiber.state is not FiberState.ACTIVE:
-            return f"node fiber is {fiber.state.name}"
-        return None
+        return _load_error(self._loader, id_, self._descriptor)
+
+
+def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
+    """The mutations an inbox proposal carries, in the shape the backend applies; a bad shape is a MutationError."""
+    mutations = []
+    for record in proposal.mutations:
+        op, id_ = record.get("op"), record.get("id")
+        if not isinstance(op, str) or not isinstance(id_, str):
+            raise MutationError(f"proposal {proposal.id} carries a mutation without a string op and id")
+        options = record.get("options")
+        if options is not None and not isinstance(options, Mapping):
+            raise MutationError(f"proposal {proposal.id} mutation {op} {id_!r} options must be an object")
+        mutations.append(Mutation(op, id_, None if options is None else dict(options)))
+    if not mutations:
+        raise MutationError(f"proposal {proposal.id} carries no mutations")
+    return tuple(mutations)
 
 
 @dataclass(frozen=True)
