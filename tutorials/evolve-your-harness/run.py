@@ -125,6 +125,18 @@ def main():
 
 
 def _manifest(client):
+    # A scenario exists once traffic has named it: the manifest route answers 404 for a name it has never
+    # seen, so one minimal inference creates the scenario, whose base release is the seed tree.
+    try:
+        return client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
+    except ReefClientError as exc:
+        if exc.status != 404:
+            raise
+    client.inference_with_record(
+        SCENARIO,
+        "/v1/chat/completions",
+        {"model": MODEL, "messages": [{"role": "user", "content": "Reply with one word."}], "max_tokens": 1},
+    )
     return client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
 
 
