@@ -121,6 +121,7 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | pi, notebook | Mac mini | ollama | `qwen2.5:7b` | pi 0.84.2 |
 | native | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout |
 | native + graph | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout, after #250 |
+| native, serve | Mac mini | ollama | `qwen2.5:7b` | `reef-native serve` from the checkout, #278 with #282 and #284 |
 
 ### Runs
 
@@ -134,6 +135,7 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | native | qwen2.5:7b | 2 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-skill` (skill) | 0.0 / 0.0 / 1.0 | 0.0 / 0.0 / 0.0 | 0 / 1 / 2 | rejected | 217 |
 | native + graph | qwen2.5:7b | 1 | 2026-09-05 | #258 | 1.0 / 0.0 / 1.0 | `update main` (native_graph) [5] | 1.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 645 |
 | native + graph | qwen2.5:7b | 2 | 2026-09-05 | #258 | 0.0 / 0.0 / 1.0 | `update main` (native_graph): a `check` stage | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 1.0 | 2 / 0 / 1 | published | 178 [6] |
+| native, serve | qwen2.5:7b | 1 | 2026-09-06 | #282 + #284 | 0.0 / 0.0 / 0.0 | `update main` (native_graph): a `check` stage | 0.0 / 0.0 / 0.0 | 0.0 / 1.0 / 0.0 | 1 / 0 / 2 | published, mounted [11] | 320 [12] |
 
 One run is one sample and no run was repeated, so the rows carry no spread. Gate episodes are stochastic: the seed tree scored `[sieve]` 1.0 on every recorded pass and 0.0 in four of the five gate episodes on the Mac, because with tools in hand the model runs the sieve and then answers in prose, so the integer is not alone on the last line.
 
@@ -203,6 +205,8 @@ The model name is set in three places, `model.path` and `upstream_model` in the 
 [8] 6 graphs carried a duplicated edge or an outcome the stage does not have.
 [9] qwen3:8b: 4 samples over the 120 s limit and 4 replies with no mutation; qwen3.5:9b: 9 over the limit and 1 with no mutation.
 [10] 1 graph had a stage unreachable from `think`.
+[11] The serve form. The resident process saw the new head on its next poll; its first manifest read waited behind step 2 and timed out (`harness/mount-failed`), and the mount landed 64 s after the publish, the moment step 3 (the last batched report, no proposal) released the catalog. The same process then ran the first task again on the mounted graph: 11 stages through `check`, answer 4921, score 0.0.
+[12] From the first turn's start to the step's commit: three turns (80 s), the proposer (25 s) and the paired episodes. Steps 2 and 3 followed with no proposal, 23 s and 42 s in the proposer.
 
 ### Known limitations
 
