@@ -32,6 +32,15 @@ from reef.runtime.base import InferenceRuntime
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.
 MODEL_APIS = ("openai", "responses", "anthropic")
+
+#: What an episode's rendered config carries where the key goes when the
+#: endpoint needs none (a local vllm or ollama, the tutorial's case). Agent
+#: binaries read the rendered key to decide a provider is usable and refuse
+#: to start on an empty one - pi exits 1 with "No API key found for the
+#: selected model" before it ever reaches the endpoint, so every episode
+#: fails and no gate can publish. Endpoints without auth ignore the value.
+NO_KEY_PLACEHOLDER = "no-key"
+
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
@@ -245,7 +254,7 @@ class ModelBinding:
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
                 f"(declared: {known}); episodes cannot reach a model"
             )
-        values = {"base_url": self.base_url, "api_key": self.api_key or "", "model": self.model}
+        values = {"base_url": self.base_url, "api_key": self.api_key or NO_KEY_PLACEHOLDER, "model": self.model}
         return tuple(("config", _substitute(node, values)) for node in templates)
 
 
