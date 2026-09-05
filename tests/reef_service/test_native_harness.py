@@ -7,15 +7,19 @@ and hook modules, and the trajectory run hermetically."""
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from reef_service.test_native_enforce import PROBE
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episode import run_episode
+from reef.harness.executor import SandboxExecutor
 from reef.harness.model_binding import ModelBinding
 from reef.harness.native import (
     _DEFAULTS,
@@ -28,6 +32,7 @@ from reef.harness.native import (
     _waterfall,
     load_hooks,
     load_tools,
+    run_loop,
 )
 from reef.harness.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.nodes import NODE_KINDS
@@ -202,6 +207,8 @@ def test_native_adapter_is_bundled_and_renders_tools_as_modules() -> None:
     assert "native" in available_adapters()
     descriptor = get_adapter("native")
     assert descriptor.binary == "reef-native" and descriptor.trajectory_format == "native-jsonl"
+    # The session directory is the one path the sandbox opens, so the loop can write its log inside the jail.
+    assert descriptor.writable_paths == ("native/sessions",) and descriptor.trajectory_path == "native/sessions"
     files = render_composition([("rules", {"text": "Be brief."}), TOOL, HOOK], descriptor)
     module = files["native/tools/shout.py"]
     assert "NAME = 'shout'" in module and "PARAMETERS = {" in module and "def run(args, workdir):" in module
@@ -425,6 +432,8 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     header = result.trajectory[0]["data"]
     assert header["version"] == 1 and header["tools"] == ["execute", "read_file", "run_bash", "write_file"]
     assert header["hooks"] == {"loop_guard": "post_execute"} and header["graph"] == "main"
+    # The local executor sets no enforcer, and the log says so on the header and on every result.
+    assert header["enforcement"] == "none"
     request = _events(result.trajectory, "request/header")[0]["data"]
     assert request["system"] == "Be brief."
     assert sorted(tool["function"]["name"] for tool in request["tools"]) == [
@@ -437,6 +446,7 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     assert written["name"] == "write_file" and written["content"] == "wrote 5 characters to notes.txt"
     assert written["is_error"] is False and written["arguments"] == {"path": "notes.txt", "content": "hello"}
     assert read["name"] == "read_file" and read["content"] == "hello"
+    assert written["enforcement"] == read["enforcement"] == {"mode": "none", "denied": []}
     assert _events(result.trajectory, "assistant/message")[-1]["data"]["content"] == "The file says: hello"
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
     # The first request the fake model saw is the one the log says it saw, with the reply cap on it.
@@ -1330,6 +1340,101 @@ def test_the_execute_seed_tool_runs_code_that_calls_the_other_tools(tmp_path: Pa
     failed = _invoke(tools, "execute", json.dumps({"code": "raise SystemExit(3)"}), workdir)
     assert failed["content"].startswith("exit 3")
     assert _invoke(tools, "execute", json.dumps({"code": "  "}), workdir)["content"] == "refused: empty code"
+
+
+def test_the_loop_runs_every_call_through_the_enforcer_the_environment_names(
+    tmp_path: Path, fake_model, monkeypatch
+) -> None:
+    root = tmp_path / "tree"
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = render_composition(
+        [*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(get_adapter("native"))], get_adapter("native")
+    )
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+    work = tmp_path / "work"
+    work.mkdir()
+    task = "put hello in notes.txt and read it back"
+
+    def session(name: str) -> list[dict]:
+        return [json.loads(line) for line in (tmp_path / name / "session.jsonl").read_text().splitlines()]
+
+    # A mode the loop has no enforcer for is a load error, not a run with nothing enforced.
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "seccomp")
+    assert run_loop(task, root / "native", tmp_path / "s1", work) == 1
+    assert session("s1")[-1]["data"]["reason"]["error"] == {
+        "code": "LOAD_ERROR",
+        "message": "REEF_NATIVE_ENFORCE='seccomp' names no enforcer; use none or bwrap",
+    }
+    # A bwrap that only runs the command after "--" stands in for the jail; the loop's side is what this checks.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "bwrap").write_text(
+        f"#!{sys.executable}\nimport os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]\nos.execv(argv[0], argv)\n"
+    )
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+    assert run_loop(task, root / "native", tmp_path / "s2", work) == 0
+    events = session("s2")
+    assert events[0]["data"]["enforcement"] == "bwrap"
+    results = [event["data"] for event in events if event["type"] == "tool/result"]
+    assert [(result["name"], result["enforcement"]) for result in results] == [
+        ("write_file", {"mode": "bwrap", "denied": ["exec", "network"]}),
+        ("read_file", {"mode": "bwrap", "denied": ["write", "exec", "network"]}),
+    ]
+    assert results[1]["content"] == "hello" and (work / "notes.txt").read_text() == "hello"
+
+
+class _ProbingModel(_FakeModel):
+    """Calls probe (declares nothing), then write_file, then read_file, then answers, one tool per turn."""
+
+    def script(self, body: dict) -> dict:
+        done = len([m for m in body["messages"] if m.get("role") == "tool"])
+        if done == 0:
+            return _reply(tool_calls=[_call("probe", {}, "c0")])
+        if done == 1:
+            return _reply(tool_calls=[_call("write_file", {"path": "notes.txt", "content": "hello"}, "c1")])
+        if done == 2:
+            return _reply(tool_calls=[_call("read_file", {"path": "notes.txt"}, "c2")])
+        return _reply(content=f"done: {body['messages'][-1]['content']}")
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap (bwrap) is not on PATH")
+def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+    model = _ProbingModel()
+    try:
+        descriptor = get_adapter("native")
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        probe = (
+            "native_tool",
+            {"name": "probe", "description": "probe", "parameters": {}, "code": PROBE, "capabilities": []},
+        )
+        files = render_composition([*_seed_nodes(SEED_TOOLS), probe, *binding.compose_nodes(descriptor)], descriptor)
+        # The launcher and the checkout live outside the episode root, so the jail binds them like a base path.
+        checkout = Path(__file__).resolve().parents[2]
+        executor = SandboxExecutor(
+            egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
+        )
+        result = run_episode(
+            descriptor, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
+        )
+    finally:
+        model.shutdown()
+        model.server_close()
+    assert result.exit_code == 0, result.stderr
+    assert result.trajectory[0]["data"]["enforcement"] == "bwrap"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["enforcement"]["denied"], r["is_error"]) for r in results] == [
+        ("probe", ["write", "exec", "network"], False),
+        ("write_file", ["exec", "network"], False),
+        ("read_file", ["write", "exec", "network"], False),
+    ]
+    # The loop keeps the model endpoint while the probe, one jail deeper, sees only loopback, a read only
+    # workspace and no shell; the file still round trips through two jails that declare write and read.
+    assert json.loads(results[0]["content"]) == {"exec": "FileNotFoundError", "network": "lo only", "write": "EROFS"}
+    assert results[2]["content"] == "hello"
 
 
 # -- native_agent: agents as root entries, called from a subagent stage ----------------------------

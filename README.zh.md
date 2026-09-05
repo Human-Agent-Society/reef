@@ -201,7 +201,8 @@ reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 在另一个终端中安装 harness 并运行任务：
 
 ```bash
-export REEF_TOKEN="reef-local"   # the script also writes it into the installed harness's model binding
+export REEF_TOKEN="reef-local"   # the script writes it into the installed harness's
+                                 # model binding; keep it exported for `report`
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
   'http://localhost:8901/reef/harness/install?adapter=pi' | bash
 reef-pi -p "fix the failing test in auth.py"
