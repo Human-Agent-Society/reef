@@ -13,8 +13,8 @@ from types import ModuleType
 import pytest
 import yaml
 
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBindingError
+from reef.harness.episodes.model_binding import ModelBindingError
+from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
 from reef.records import RecordStore
 from reef.service.deploy.config import load_config

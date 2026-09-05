@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from reef.harness.render import RenderError
+from reef.harness.tree.render import RenderError
 
 _CONFIG = "hermes/config.yaml"
 _MARKER = "hermes/.no-bundled-skills"

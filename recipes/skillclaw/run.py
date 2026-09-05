@@ -72,7 +72,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
+from reef.harness.tree.render import render_composition
 from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime

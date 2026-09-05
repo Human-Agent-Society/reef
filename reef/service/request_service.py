@@ -21,8 +21,8 @@ from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindingError
-from reef.harness.render import RenderError, render_composition
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
 from reef.records import AgentRecord
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime

@@ -13,9 +13,16 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
-from reef.harness.terminus import TerminusTreeError, instruction_paths, load_tree, runner, skill_roots, terminus_kwargs
-from reef.harness.trajectory import read_terminus_atif
+from reef.harness.episodes.trajectory import read_terminus_atif
+from reef.harness.runners.terminus import (
+    TerminusTreeError,
+    instruction_paths,
+    load_tree,
+    runner,
+    skill_roots,
+    terminus_kwargs,
+)
+from reef.harness.tree.render import render_composition
 
 
 def _tree(**nodes: str) -> dict[str, str]:

@@ -198,7 +198,7 @@ def report(score, feedback):
         [
             sys.executable,
             "-m",
-            "reef.harness.harness_wrapper",
+            "reef.harness.client.wrapper",
             "report",
             "--score",
             str(score),

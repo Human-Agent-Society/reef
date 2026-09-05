@@ -4,7 +4,7 @@ The interpreter reads a ``NativeHost`` at every use instead of holding the
 tools, hooks, agents, graphs and prompt it was built with, so a change to the
 registries between two steps is what the next step runs on. The episode form
 fills one at boot and never changes it: from the root's ``tree.json`` through
-the node plugins in ``reef.harness.native.plugins`` when the render carried
+the node plugins in ``reef.harness.runners.native.plugins`` when the render carried
 one, else from the rendered files; the plugins fill one entry by entry and
 take each entry out again when it leaves (RFC #269).
 """
@@ -17,7 +17,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
-from reef.harness.native import (
+from reef.harness.runners.native import (
     DEFAULT_SYSTEM_PROMPT,
     TREE_FILE,
     HookModule,
@@ -31,10 +31,10 @@ from reef.harness.native import (
     load_tools,
     tool_from_module,
 )
-from reef.harness.native.graph import DEFAULT_CONTEXT_WINDOW, Graph, GraphError
-from reef.harness.native.seed import SEED_GRAPH
-from reef.harness.nodes import NATIVE_EVENTS
-from reef.harness.render import render_native_module
+from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Graph, GraphError
+from reef.harness.runners.native.seed import SEED_GRAPH
+from reef.harness.tree.nodes import NATIVE_EVENTS
+from reef.harness.tree.render import render_native_module
 
 Remover = Callable[[], None]
 _MODULE_DIRS = {"native_tool": "tools", "native_hook": "hooks"}
@@ -283,7 +283,7 @@ class NativeHost:
     def _from_tree(cls, tree: Path, mount_dir: Path | None) -> NativeHost:
         """One fresh compose context over the entries list; the loader stays on the host for later mounts."""
         # Late: the training package imports the harness, and the episode form pays for it only on a tree boot.
-        from reef.harness.native.plugins import NATIVE_PLUGINS
+        from reef.harness.runners.native.plugins import NATIVE_PLUGINS
         from reef.train.cordis_backend.compose import Context
         from reef.train.cordis_backend.compose.loader import Loader
 

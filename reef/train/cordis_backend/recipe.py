@@ -20,11 +20,11 @@ from typing import Any
 from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
-from reef.harness.descriptor import DescriptorError
-from reef.harness.executor import EpisodeExecutor, build_executor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.render import render_composition
-from reef.harness.version_check import version_check_entry
+from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.episodes.executor import EpisodeExecutor, build_executor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.tree.render import render_composition
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
@@ -110,7 +110,7 @@ class CordisRecipe(Recipe):
     prompts scored per step), optional ``binary`` (a path to the harness
     binary; left unset, backend construction installs the adapter descriptor's
     pinned version through the vendor's own channel, into the same prefix a
-    client's install script uses - see :mod:`reef.harness.vendor_install`),
+    client's install script uses - see :mod:`reef.harness.episodes.vendor_install`),
     optional ``seed`` (a list of entry options - id, name, config -
     loaded into the composition tree on first boot, where an item may also
     be a dotted ``module:attribute`` naming a sequence of them; a recovered

@@ -24,12 +24,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from reef.harness import harness_wrapper
-from reef.harness.harness_wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy
-from reef.harness.native import serve
-from reef.harness.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
-from reef.harness.native.selftools import RESERVED_NAMES
-from reef.harness.native.serve import ServeError, Server, admit_mutations
+from reef.harness.client import wrapper as harness_wrapper
+from reef.harness.client.wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy
+from reef.harness.runners.native import serve
+from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
+from reef.harness.runners.native.selftools import RESERVED_NAMES
+from reef.harness.runners.native.serve import ServeError, Server, admit_mutations
 from reef.train.cordis_backend.strategies import Mutation
 
 SCENARIO = "serve-demo"
@@ -558,7 +558,7 @@ def _launcher(tmp_path: Path) -> Path:
     path = tmp_path / "reef-native"
     path.write_text(
         f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(root)!r})\n"
-        "from reef.harness.native.__main__ import main\nsys.exit(main())\n"
+        "from reef.harness.runners.native.__main__ import main\nsys.exit(main())\n"
     )
     path.chmod(0o755)
     return path
@@ -996,7 +996,7 @@ def test_the_release_client_poll_skips_rows_pending_review() -> None:
 
 
 def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:
-    from reef.harness.nodes import NODE_KINDS
+    from reef.harness.tree.nodes import NODE_KINDS
 
     for name in RESERVED_NAMES:
         config = {**_tool(name)["config"]}

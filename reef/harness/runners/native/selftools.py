@@ -16,11 +16,11 @@ import secrets
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from reef.harness.native import ToolModule
-from reef.harness.native.enforce import ToolFailed
-from reef.harness.native.release_client import ReleaseClient
-from reef.harness.native.seed import SEED_GRAPH
-from reef.harness.nodes import NATIVE_RESERVED_TOOL_NAMES
+from reef.harness.runners.native import ToolModule
+from reef.harness.runners.native.enforce import ToolFailed
+from reef.harness.runners.native.release_client import ReleaseClient
+from reef.harness.runners.native.seed import SEED_GRAPH
+from reef.harness.tree.nodes import NATIVE_RESERVED_TOOL_NAMES
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 #: The names the host plane owns; a tree entry that takes one fails to mount.
