@@ -50,7 +50,9 @@ SCENARIO = "harness-evolve-demo"  # this workload's isolated lane
 TOKEN = "reef-local"  # matches serve.yaml
 MODEL = "qwen3-8b"  # matches serve.yaml's upstream_model
 PULL_TIMEOUT_S = 900.0
-MOUNT_TIMEOUT_S = 60.0  # run.sh polls the head every 5 s
+# run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
+# lock until the client's 30 s timeout; the mount lands on the poll after that one.
+MOUNT_TIMEOUT_S = 120.0
 
 WORK = Path(__file__).resolve().parent / "work"
 # run.sh copies serve.yaml's evolution.tasks here; the recorded traffic and
