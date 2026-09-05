@@ -35,7 +35,7 @@ while ! curl -sf http://127.0.0.1:8900/healthz > /dev/null; do
     sleep 1
 done
 
-if [ "$SERVE" != serve-native.yaml ]; then
+if [ "${1:-}" != native ]; then
     python3 run.py
     exit 0
 fi
