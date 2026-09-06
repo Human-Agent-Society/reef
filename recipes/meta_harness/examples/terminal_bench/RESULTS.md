@@ -40,7 +40,7 @@ this check, and its results were not fed into either search. These are fresh
 executions on the same tasks, not held-out-task results or proof of statistical
 equivalence.
 
-Two trials lost infrastructure completion evidence and were replaced, one per
+Two trials lost infrastructure completion receipts and were replaced, one per
 arm; no admissible outcome was repeated. Both arms count verifier outcomes
 returned after agent timeout. Reef also has one completed, billed terminal-loss
 benchmark zero under the shared scoring policy, with its raw invalid/null
