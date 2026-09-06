@@ -539,6 +539,11 @@ captured receipts available for feedback, and registers nothing under
 ``skill`` ``reef-pi-extension-api`` (`reef/harness/adapters/pi/pi_extension_api.md
 <../../reef/harness/adapters/pi/pi_extension_api.md>`__, the pi extension
 API reference the service proposer reads before it writes an extension). The
+same extension's second command, ``/reef-versions [step]``, lists the release
+chain with each step's verdict and request, prints a step's page (``GET
+/reef/harness/releases/{step}/page``) and, for a pending release, the promote
+action and a trial install command, and ``/reef-versions <step> promote`` runs
+the promote after a confirmation. The
 agent only asks; the writing happens on the service, where the evolve step
 hands the request to the recipe's ``propose`` and the commit records it
 under ``training_request``, the merged ``requires`` list included.

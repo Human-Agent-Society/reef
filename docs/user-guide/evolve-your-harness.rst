@@ -522,6 +522,27 @@ notice prints the setup list instead of offering the install; a session
 that starts on a tree with an unmet item prints the list once and runs
 anyway. Nothing runs a check at install or at session start.
 
+See what a version is with ``/reef-versions`` in a ``reef-pi`` session: one
+line per catalog row, oldest first, with the step, the first eight characters
+of the release id, the verdict (``selected``, ``rejected``, ``skipped``,
+``pending``, ``promoted at step N`` once a later promote serves a pending
+release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
+``recovery``), ``current`` on the served head and the request text the step
+answered. ``/reef-versions <step>`` prints the URL of that step's page,
+``GET /reef/harness/releases/<step>/page``, one self contained HTML page with
+five sections: Why (the request, else the proposal's reason, else a failure
+in the batch), What changed (the mutations; an extension update as a line
+diff against the release it ran on), Verdict (the gate's verdict and numbers,
+and the step record directory when ``evolution.step_record_dir`` is set),
+Setup (what the release needs from you: the step's own items, then those
+carried from earlier steps) and Chain (the parent, this release, and its
+children: the steps gated on it and any promote or rollback made on it; for
+a rejected or skipped step, the head it ran on). For a pending release the
+command also prints the promote curl, a trial install with ``?release_id=``
+that replaces the tree at your install root, and the head's reinstall to
+return to it; ``/reef-versions <step> promote`` runs the promote from the
+TUI after you confirm it.
+
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
 name your Reef URL in its ``native/models.json``, and run the wrapper module
