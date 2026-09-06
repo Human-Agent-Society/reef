@@ -55,7 +55,7 @@ class _ToyProcessor(ComputedFeedbackProcessor):
     """A record tracks itself; a record whose payload names ``completes``
     finishes that receipt. Samples are one-token stubs."""
 
-    def ingest(self, item: AgentRecord) -> None:
+    def ingest_auto(self, item: AgentRecord) -> None:
         self.catch_up(time.monotonic())
         completes = item.payload.get("completes")
         if completes:

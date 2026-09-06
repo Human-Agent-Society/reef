@@ -3,7 +3,7 @@
 A computed-feedback recipe on the shared engine
 (:class:`~reef.train.processors.computed.ComputedFeedbackProcessor` owns the record
 lifecycle, the judging worker, and the batch cycle). This file is the
-method: ``ingest`` correlates main turns into sessions and hands each
+method: ``ingest_auto`` correlates main turns into sessions and hands each
 completed turn over for judgment, ``judge`` is upstream's combine
 dispatch, ``make_sample`` validates the tensors, ``make_batch`` shapes
 the batch. One turn, one judgment, one sample — rewards pass through raw
@@ -117,7 +117,7 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
     #  ingest (correlate sessions) → judge (async, on the worker)
     #  → make_sample → make_batch; lifecycle and the cycle are the engine's.
 
-    def ingest(self, item: AgentRecord) -> None:
+    def ingest_auto(self, item: AgentRecord) -> None:
         # 1. Catch up on derived state. Expiry runs before observing, so an
         #    expired session can never capture this request as its successor.
         now = time.monotonic()

@@ -116,9 +116,10 @@ For a dotted weight-training deployment this field is also accepted as
 ``reef.training_mode``. Named presets set it in their own ``data`` section.
 
 The processor receives ``ProcessorContext.training_mode`` and implements
-the selected mode's lifecycle. It declares ``supported_training_modes`` or
-selects separate implementations through ``ModeDataProcessor.mode_processors``;
-unsupported modes raise ``NotImplementedError`` at processor construction.
+the selected mode's lifecycle through ``*_auto`` / ``*_manual`` methods on
+the same class. It declares ``supported_training_modes``; unsupported modes
+raise ``NotImplementedError`` at processor construction. Missing manual
+hooks also raise ``NotImplementedError`` instead of running automatic logic.
 Harness evolution supports both modes and requires a proposer that explicitly
 accepts ``requests`` for manual operation. Setting ``manual`` on an
 inference-only recipe does not create a training backend.

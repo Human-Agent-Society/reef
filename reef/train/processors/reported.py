@@ -282,7 +282,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     # ---------------------------------------------------------------- ingest
 
-    def ingest(self, item: AgentRecord) -> None:
+    def ingest_auto(self, item: AgentRecord) -> None:
         # 1. An inference record: store it and re-judge the reports that
         #    were waiting on it, once their last reference has arrived.
         if item.request_type is RequestType.INFERENCE:
@@ -500,7 +500,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     def _live_references(self) -> set[str]:
         return {ref for report in self._reports.values() for ref in report.references}
 
-    def retention_decision(self) -> RetentionDecision:
+    def retention_decision_auto(self) -> RetentionDecision:
         """Derive retention from live state — a pure read, nothing mutates.
 
         The releasable-source set is recomputed here every time: a source is
@@ -518,7 +518,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             releasable_agent_record_ids=frozenset(releasable),
         )
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids

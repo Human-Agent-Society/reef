@@ -48,25 +48,51 @@ and never substitutes a manual wrapper.
 
 ``DataProcessor`` supports ``auto`` by default. A processor implementing
 both modes declares ``supported_training_modes = frozenset({"auto", "manual"})``
-and uses ``self.training_mode`` in its implementation. An unsupported mode
+and implements mode-specific methods on the same class. An unsupported mode
 raises ``NotImplementedError`` during initialization, before records are
 ingested or a backend step runs. An unknown mode name is a ``ValueError``.
 
-For separate implementations per mode, subclass the optional
-``ModeDataProcessor`` helper and declare ``mode_processors``:
-
 .. code:: python
 
-   class MyProcessor(ModeDataProcessor):
-       mode_processors = {
-           "auto": MyAutomaticProcessor,
-           "manual": MyManualProcessor,
-       }
+   class MyProcessor(DataProcessor):
+       supported_training_modes = frozenset({"auto", "manual"})
 
-It selects the implementation at construction and delegates its complete
-lifecycle, including retention, asynchronous derivation status and teardown.
-An omitted mode raises ``NotImplementedError``. Each selected implementation
-receives the same context and must support that mode.
+       def ingest_auto(self, record):
+           ...  # Collect inputs according to the automatic policy.
+
+       def ingest_manual(self, record):
+           ...  # Collect instructions and any required inference inputs.
+
+       def ready_auto(self):
+           ...  # Apply the recipe's batching policy.
+
+       def ready_manual(self):
+           ...  # Require an instruction and its inputs, independently of auto batching.
+
+       def build_batch_auto(self, batch_number):
+           ...  # Return the automatic training batch.
+
+       def build_batch_manual(self, batch_number):
+           ...  # Return the manual training batch with batch.request attached.
+
+The shared ``ingest``, ``ready`` and ``build_batch`` entry points dispatch to
+these methods using the instance's configuration snapshot. ``build_batch``
+caches the selected batch until acknowledgement, so repeated reservations do
+not rebuild it. There is no mapping to another processor class or instance.
+
+The processor also implements ``acknowledge_auto`` / ``acknowledge_manual``
+(return consumed receipt ids), ``retention_decision_auto`` /
+``retention_decision_manual``, and ``compaction_applied_auto`` /
+``compaction_applied_manual``. Missing manual hooks raise
+``NotImplementedError``; declaring support never falls back to automatic
+behavior. Existing automatic engines retain their ``_ready_count``,
+``_make_pending`` and ``_consume_pending`` hooks through the default auto
+methods. Computed-feedback subclasses implement ``ingest_auto`` for their
+correlation logic and inherit automatic readiness and retention from their
+engine. Processors overriding the shared entry points own their dispatch.
+Background work is polled through ``derivation_pending_auto`` /
+``derivation_pending_manual`` (both default to false); ``close`` remains a
+shared teardown hook for all resources owned by the instance.
 
 Manual ingestion must include ``RequestType.TRAIN``. The processor decides
 how an explicit instruction authorizes a batch: it may use the instruction
@@ -75,8 +101,9 @@ instruction to ``batch.request`` (``id``, ``text``, ``session``, ``release_id``)
 and acknowledge the instruction receipt with the input records it consumes.
 Trainer preserves batch reservation, commit and replay semantics.
 
-Harness evolution selects an implementation based on the optional
-``ManualTrainingProcessor`` engine. This engine queues instructions FIFO,
+Harness evolution inherits the reusable ``*_manual`` methods from the optional
+``ManualTrainingProcessor`` engine on the same processor instance. This engine
+queues instructions FIFO,
 retains ordinary traffic for audit, and creates one batch per instruction.
 Subclasses implement ``make_request_batch(request: AgentRecord)``; the engine
 attaches ``batch.request``, assigns a stable batch id and manages request
@@ -100,8 +127,8 @@ configuration and any backend-specific constraints. Implement
 ``prepare_reconfiguration(context)`` to return a separate, empty processor
 for the requested configuration, without changing the current processor or
 external state. The default raises ``NotImplementedError``.
-``ModeDataProcessor`` provides construction of a replacement as an optional
-helper; its subclasses still declare which fields can change dynamically.
+The harness processors implement this as ``return type(self)(context)``;
+the same processor class supplies the methods for the requested mode.
 
 At a step boundary, the trainer replays retained records up to its consumption
 cursor into the replacement, excluding records already consumed by committed
@@ -132,7 +159,7 @@ method compute it?**
 | ``judge`` is    | a plain method                              | an ``async def``                                   |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | called          | by the engine, inside its own ``ingest``    | on a private worker, after the recipe's            |
-|                 |                                             | ``ingest`` dispatches                              |
+|                 |                                             | ``ingest_auto`` dispatches                         |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | so it may       | only decide on data already in hand         | call models and take minutes                       |
 +-----------------+---------------------------------------------+----------------------------------------------------+
@@ -174,7 +201,7 @@ What a recipe writes
 groups, plus the class attributes ``output_schema``, ``exclusive_sources``,
 ``ordered_groups``.
 
-**Computed feedback:** In ``ingest``, the correlation *is* the method. It uses
+**Computed feedback:** In ``ingest_auto``, the correlation *is* the method. It uses
 the engine's ``catch_up`` / ``dispatch`` / ``track`` / ``retire`` verbs, as
 well as ``judge``, ``make_sample``, ``make_batch``, and ``expire`` for tracked
 records that time out.

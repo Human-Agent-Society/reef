@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import ClassVar
-
 from reef.core import AgentRecord, RequestType
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.manual import ManualTrainingProcessor
-from reef.train.processors.modes import ModeDataProcessor
 from reef.train.processors.reported import (
     NEVER,
     BatchUnit,
@@ -20,7 +16,7 @@ from reef.train.processors.reported import (
 from reef.train.types import ProcessorContext, TraceBatch, TraceSample
 
 
-class _ReportedTraceProcessor(ReportedFeedbackProcessor):
+class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
     """Pair recorded requests with reported scores and batch them unmodified.
 
     Requests are recorded post-transform, so a trace shows exactly what the
@@ -33,6 +29,16 @@ class _ReportedTraceProcessor(ReportedFeedbackProcessor):
     """
 
     output_schema = TraceBatch
+    supported_training_modes = frozenset({"auto", "manual"})
+    required_request_types = frozenset(RequestType)
+    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
+
+    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
+        """Manual instructions authorize a proposal without inference samples."""
+        return TraceBatch(request.agent_record_id, ())
+
+    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
+        return type(self)(context)
 
     def __init__(self, context: ProcessorContext) -> None:
         self._min_score = float(context.config.get("min_score", float("-inf")))
@@ -84,7 +90,7 @@ class _ReportedTraceProcessor(ReportedFeedbackProcessor):
         )
 
 
-class _RecordDrivenTraceProcessor(DataProcessor):
+class RecordDrivenTraceProcessor(ManualTrainingProcessor):
     """Batch recorded inference traffic every ``batch_size`` requests, unscored.
 
     The report-free half of harness evolution: a deployment that only serves
@@ -97,13 +103,23 @@ class _RecordDrivenTraceProcessor(DataProcessor):
     """
 
     output_schema = TraceBatch
+    supported_training_modes = frozenset({"auto", "manual"})
+    required_request_types = frozenset(RequestType)
+    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
+
+    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
+        """Manual instructions authorize a proposal without inference samples."""
+        return TraceBatch(request.agent_record_id, ())
+
+    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
+        return type(self)(context)
 
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
         self._records: list[AgentRecord] = []
         self._released: set[str] = set()
 
-    def ingest(self, item: AgentRecord) -> None:
+    def ingest_auto(self, item: AgentRecord) -> None:
         if item.request_type is RequestType.INFERENCE:
             self._records.append(item)
         else:
@@ -134,42 +150,11 @@ class _RecordDrivenTraceProcessor(DataProcessor):
         self._released |= consumed
         return consumed
 
-    def retention_decision(self) -> RetentionDecision:
+    def retention_decision_auto(self) -> RetentionDecision:
         return RetentionDecision(
             protected_agent_record_ids=frozenset(record.agent_record_id for record in self._records),
             releasable_agent_record_ids=frozenset(self._released),
         )
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
         self._released -= agent_record_ids
-
-
-class _RequestedTraceProcessor(ManualTrainingProcessor):
-    """Answer a user's harness instruction without requiring inference samples."""
-
-    output_schema = TraceBatch
-
-    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
-        return TraceBatch(request.agent_record_id, ())
-
-
-class CordisProcessor(ModeDataProcessor):
-    """Batch scored reports in auto mode; answer explicit harness requests in manual mode."""
-
-    output_schema = TraceBatch
-    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
-    mode_processors: ClassVar[Mapping[str, type[DataProcessor]]] = {
-        "auto": _ReportedTraceProcessor,
-        "manual": _RequestedTraceProcessor,
-    }
-
-
-class RecordDrivenTraceProcessor(ModeDataProcessor):
-    """Batch inference traffic in auto mode; answer explicit harness requests in manual mode."""
-
-    output_schema = TraceBatch
-    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
-    mode_processors: ClassVar[Mapping[str, type[DataProcessor]]] = {
-        "auto": _RecordDrivenTraceProcessor,
-        "manual": _RequestedTraceProcessor,
-    }

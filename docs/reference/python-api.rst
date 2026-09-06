@@ -244,6 +244,14 @@ thread, so they must not block on network or model latency.
 |                   | replay                        |                               |
 +-------------------+-------------------------------+-------------------------------+
 
+Training mode belongs to the processor. Declare ``supported_training_modes``
+and implement ``ingest_auto`` / ``ingest_manual``, ``ready_auto`` /
+``ready_manual``, and ``build_batch_auto`` / ``build_batch_manual`` on the
+same class. The public lifecycle dispatches using the configuration snapshot;
+reservation and acknowledgement remain shared. Manual hooks are unsupported
+by default. See :doc:`/developer-guide/processors` for consumption, retention,
+background derivation, and the reusable manual instruction queue.
+
 Every processor gets the scenario's experiment logger as
 ``self.experiment_logger``. Log finite numeric metrics under the ``processor``
 namespace; processor code never imports W&B, and the logger is a no-op when
@@ -314,7 +322,7 @@ calls a model or another slow service.
 +---------------------------------------+-----------------------------------+
 | Hook                                  | Contract                          |
 +=======================================+===================================+
-| ``ingest(record)``                    | correlate records; must not block |
+| ``ingest_auto(record)``               | correlate records; must not block |
 +---------------------------------------+-----------------------------------+
 | ``async judge(job)``                  | slow judgment, on the processor's |
 |                                       | own worker                        |

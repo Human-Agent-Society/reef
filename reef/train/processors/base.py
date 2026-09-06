@@ -40,8 +40,9 @@ class DataProcessor:
     Each processor owns the behavior of its supported training modes.
     ``context.training_mode`` selects the mode at construction;
     ``supported_training_modes`` defaults to auto only. A subclass can
-    implement additional modes in its lifecycle methods or compose separate
-    implementations using ``ModeDataProcessor``. Unsupported modes raise
+    implement additional modes with ``ingest_auto`` / ``ingest_manual``,
+    ``ready_auto`` / ``ready_manual`` and ``build_batch_auto`` /
+    ``build_batch_manual`` on the same instance. Unsupported modes raise
     ``NotImplementedError`` before any records are ingested.
 
     Which base a recipe builds on is one question — how does its feedback
@@ -56,10 +57,10 @@ class DataProcessor:
     * **Computed from the traffic itself** — correlated across records,
       judged by a model, landing asynchronously → subclass
       :class:`~reef.train.processors.computed.ComputedFeedbackProcessor` and write
-      ``ingest`` (the method's own correlation, built from the engine's
+      ``ingest_auto`` (the method's own correlation, built from the engine's
       ``catch_up``/``dispatch``/``track``/``retire`` verbs), ``judge``,
       ``make_sample``, and ``make_batch``; bulky machinery stays in the
-      method package. Here ``judge`` is an ``async def``: your ``ingest`` hands a
+      method package. Here ``judge`` is an ``async def``: your ``ingest_auto`` hands a
       job to ``dispatch`` and a private worker thread awaits it, so it may
       call models and take minutes without blocking serving.
 
@@ -137,7 +138,19 @@ class DataProcessor:
     output_schema: type[TrainingBatch] = PolicyBatch
 
     def ingest(self, item: AgentRecord) -> None:
+        """Dispatch record ingestion to the selected mode on this instance."""
+        if self.training_mode == "auto":
+            self.ingest_auto(item)
+        else:
+            self.ingest_manual(item)
+
+    def ingest_auto(self, item: AgentRecord) -> None:
+        """Retain audit ids by default; automatic engines override this hook."""
         self._agent_record_ids.add(item.agent_record_id)
+
+    def ingest_manual(self, item: AgentRecord) -> None:
+        """Ingest records according to the processor's manual input requirements."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement ingest_manual")
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -148,22 +161,53 @@ class DataProcessor:
     # consuming them releases.
 
     def ready(self) -> bool:
-        return self._pending is not None or self._ready_count() >= self._batch_size
+        """An outstanding reservation stays ready regardless of new arrivals."""
+        if self._pending is not None:
+            return True
+        return self.ready_auto() if self.training_mode == "auto" else self.ready_manual()
+
+    def ready_auto(self) -> bool:
+        """Apply the recipe's automatic batch-size gate."""
+        return self._ready_count() >= self._batch_size
+
+    def ready_manual(self) -> bool:
+        """Decide whether an instruction and its required inputs are available."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement ready_manual")
 
     def build_batch(self) -> TrainingBatch:
         if self._pending is None:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            self._pending = self._make_pending(self._batch_number)
+            self._pending = (
+                self.build_batch_auto(self._batch_number)
+                if self.training_mode == "auto"
+                else self.build_batch_manual(self._batch_number)
+            )
         return self._pending
+
+    def build_batch_auto(self, batch_number: int) -> TrainingBatch:
+        """Assemble an automatic batch; the caller caches it until acknowledgement."""
+        return self._make_pending(batch_number)
+
+    def build_batch_manual(self, batch_number: int) -> TrainingBatch:
+        """Assemble an instruction-authorized batch, including ``batch.request``."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement build_batch_manual")
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed = self._consume_pending()
+        consumed = self.acknowledge_auto() if self.training_mode == "auto" else self.acknowledge_manual()
         self._pending = None
         return consumed
+
+    def acknowledge_auto(self) -> frozenset[str]:
+        """Consume the reserved automatic batch and return its record ids."""
+        return self._consume_pending()
+
+    def acknowledge_manual(self) -> frozenset[str]:
+        """Consume the reserved instruction and any inputs selected with it."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement acknowledge_manual")
 
     def _ready_count(self) -> int:
         """How many batch-ready units are held.
@@ -188,6 +232,14 @@ class DataProcessor:
         return frozenset()
 
     def retention_decision(self) -> RetentionDecision:
+        """Read retention from the mode that owns the records."""
+        return self.retention_decision_auto() if self.training_mode == "auto" else self.retention_decision_manual()
+
+    def retention_decision_manual(self) -> RetentionDecision:
+        """Protect pending manual inputs and release only committed or terminal records."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement retention_decision_manual")
+
+    def retention_decision_auto(self) -> RetentionDecision:
         """Return the records the processor currently protects or releases.
 
         The no-update default protects every ingested id (audit-only retention).
@@ -198,9 +250,26 @@ class DataProcessor:
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
+        if self.training_mode == "auto":
+            self.compaction_applied_auto(agent_record_ids)
+        else:
+            self.compaction_applied_manual(agent_record_ids)
+
+    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
         self._agent_record_ids -= agent_record_ids
 
+    def compaction_applied_manual(self, agent_record_ids: frozenset[str]) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not implement compaction_applied_manual")
+
     def derivation_pending(self) -> bool:
+        """Poll only the selected mode's background derivation."""
+        return self.derivation_pending_auto() if self.training_mode == "auto" else self.derivation_pending_manual()
+
+    def derivation_pending_manual(self) -> bool:
+        """Override if manual input preparation finishes asynchronously."""
+        return False
+
+    def derivation_pending_auto(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
 
         The training worker sleeps until the next accepted record; a
