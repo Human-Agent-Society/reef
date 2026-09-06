@@ -148,19 +148,27 @@ complement over ``write``, ``exec`` and ``network`` (empty under ``none``);
 call tried. The seed tools declare theirs; ``run_bash`` declares all three a
 shell can do.
 
-The per call jail confines a tool's ``run`` and nothing else. Two things a
-tree carries still run in the loop's own process: the top level of every
-tool and hook module, once, when the loop imports it at start, and every
-hook's ``listen`` at every event. Under the sandbox executor that process
-is the episode jail, which holds the writable workspace and session
-directory, the network namespace the model endpoint needs, and the
-executor's base directories with their shells; under the local executor it
-is the host. So a hook, and a tool module's import time code, are loop code
-with the loop's reach: ``review_kinds`` with ``native_hook`` and
-``native_tool`` is how a deployment puts a person between a proposal of
-either and the tree, and the trajectory's ``enforcement`` field describes
-the profile the run got, not what the module did at import. Moving a tool's
-import out of the loop's process is tracked as a follow up.
+The per call jail confines a tool's ``run`` and the module that defines it.
+The loop reads a tool module's declaration (``NAME``, ``DESCRIPTION``,
+``PARAMETERS`` and ``CAPABILITIES``) from the source with
+``ast.literal_eval`` and imports the module only where the call runs: in
+the child under the profile, or, under the ``local`` executor, in the
+loop's process at the first call. So a tool's import time code no longer
+runs in the loop's process at load under any enforcer, and under the
+sandbox executor it never runs there at all; the trajectory's
+``enforcement`` field describes the profile the call got, which is also
+what the module's top level ran under. Hooks are the one thing a tree
+carries that still runs in the loop's own process, by design: every hook
+module is imported once at start and its ``listen`` runs at every event,
+since ``next`` is a call into the layer below and a decision steers the
+loop that is running. Under the sandbox executor that process is the
+episode jail, which holds the writable workspace and session directory, the
+network namespace the model endpoint needs, and the executor's base
+directories with their shells; under the local executor it is the host. So
+a hook is loop code with the loop's reach: ``review_kinds`` with
+``native_hook`` is how a deployment puts a person between a hook proposal
+and the tree; under the local executor, where nothing confines a tool
+either, ``native_tool`` belongs in that list too.
 ``reef.harness.runners.native.seed.SEED_TOOLS`` holds the starting ``read_file``,
 ``write_file``, ``run_bash``, and ``execute`` tools as entries a recipe can
 seed and the loop can then evolve; ``execute`` runs a Python block in the
@@ -169,9 +177,23 @@ read_file.run({"path": "x"}, WORKDIR)``), so a tree can move from one call
 per tool to code that calls tools without a loop change. An adapter that declares no ``files.native_tool`` path
 refuses to render that kind, so the mutation fails under it instead of
 silently dropping the tool. The admission gate refuses ``code`` that does not
-compile; a module that fails to import, or defines no ``run``, ends the
-episode with reason ``error`` and code ``LOAD_ERROR`` before any model call,
-so the tree that carries it loses the gate instead of running without it.
+compile; a tool module the loop cannot read (the file cannot be opened or
+does not parse, no top level statement binds ``run``, or the last top level
+assignment to a declaration constant is not a literal) ends the episode
+with reason ``error`` and code ``LOAD_ERROR`` before any model call, so the
+tree that carries it loses the gate instead of running without it; a file
+that parses but does not compile fails its first call like a top level that
+raises. The read takes the last binding at module scope in source order: it
+follows the bodies of ``if``, ``try``, ``with``, ``for``, ``while`` and
+``match`` statements, never a function or class body, and a ``def``,
+``class`` or ``import``, an assignment, ``for``, ``with``, ``except`` or
+walrus target, or a ``match`` capture binds a name; the render writes the
+constants last, so they win. A top level that raises, ``SystemExit``
+included, or one that binds ``run`` to something not callable, is not found
+at load, since nothing runs it there: the first call to that tool fails
+with ``TOOL_FAILED`` and the episode goes on. In the loop's process the
+module imports once, so every later call fails the same way without running
+the top level again; the child imports it afresh at every call.
 
 The loop has four events, and a ``native_hook`` node listens at one of them.
 It renders to ``native/hooks/{name}.py`` the same way: ``code`` defining
@@ -186,7 +208,7 @@ or returns anything but a plain object the log can carry, is skipped and the
 layer below stands; ``messages`` and ``contexts`` are read as lists of text
 and anything else in them is dropped. A hook module that fails to import,
 defines no ``listen``, or names an unknown event ends the episode with
-``LOAD_ERROR`` like a tool. Every event takes a plain object and returns one:
+``LOAD_ERROR`` like a tool the loop cannot read. Every event takes a plain object and returns one:
 
 .. config::
 
