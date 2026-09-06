@@ -78,7 +78,8 @@ def test_every_kind_installs_into_the_host_and_leaves_nothing_when_the_entry_lea
     host, loader = _live(tmp_path)
     loader.root.update(
         [
-            *SEED_NODES,
+            # The loader owns its rows and marks a removed one disabled; the seed constants must stay clean.
+            *(dict(entry) for entry in SEED_NODES),
             _entry("r1", "rules", text="Be brief."),
             _entry("s1", "skill", name="tidy", text="Keep files tidy.\n"),
             _entry("helper", "native_agent", name="helper", prompt="You check answers."),
@@ -198,9 +199,9 @@ def test_a_failing_entry_is_absent_from_the_host_and_its_siblings_stand(
             "broken",
             "native_tool",
             name="broken",
-            description="compiles, then fails to import",
+            description="compiles, but defines no run",
             parameters={},
-            code="raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n",
+            code="def helper(args, workdir):\n    return 1\n",
         ),
         _tool("good", id_="twin"),
         _entry("pinned", "config", target="models", data={"model": "other", "context_window": 8}),
@@ -212,7 +213,7 @@ def test_a_failing_entry_is_absent_from_the_host_and_its_siblings_stand(
     states = _states(loader)
     assert states["good"] is FiberState.ACTIVE
     assert {states[id_] for id_ in ("broken", "twin", "pinned", "primary", "window")} == {FiberState.FAILED}
-    assert "broken.py failed to import: RuntimeError: boom" in _error(loader, "broken")
+    assert "no top level statement of broken.py binds run(args, workdir)" in _error(loader, "broken")
     assert "one name, one module" in _error(loader, "twin")
     assert "cannot set model" in _error(loader, "pinned")
     assert "never reads" in _error(loader, "primary")

@@ -29,7 +29,7 @@ from reef.harness.runners.native import (
     load_agents,
     load_hooks,
     load_tools,
-    tool_from_module,
+    tool_from_source,
 )
 from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Graph, GraphError
 from reef.harness.runners.native.seed import SEED_GRAPH
@@ -57,7 +57,7 @@ class NativeHost:
     """The registries the loop reads; every ``add`` returns the call that takes the item out again."""
 
     def __init__(self, mount_dir: Path | None = None, order: TreeOrder | None = None) -> None:
-        #: Where ``mount_module`` writes tool and hook modules; the episode form imports the rendered files instead.
+        #: Where ``mount_module`` writes tool and hook modules; the episode form loads the rendered files instead.
         self.mount_dir = mount_dir
         #: Where rules and windows take their order from; without one, the order they were added in.
         self.order = order
@@ -202,9 +202,11 @@ class NativeHost:
         return remove
 
     def mount_module(self, kind: str, options: Mapping[str, Any]) -> Remover:
-        """Write a tool or hook node's module under the mount directory, import it and register it.
+        """Write a tool or hook node's module under the mount directory and register it.
 
-        A failure at any step leaves nothing behind; the inverse unregisters
+        A tool is read from its source and imported only where a call runs;
+        a hook is imported here, since ``listen`` runs in this process. A
+        failure at any step leaves nothing behind; the inverse unregisters
         the module and removes the file."""
         if self.mount_dir is None:
             raise LoadError("the native host has no mount directory to write tool and hook modules under")
@@ -216,11 +218,10 @@ class NativeHost:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render_native_module(kind, options), encoding="utf-8")
         try:
-            module = import_module_file(path, f"reef_{kind}")
             if kind == "native_tool":
-                remove = self.add_tool(tool_from_module(path, module))
+                remove = self.add_tool(tool_from_source(path))
             else:
-                remove = self.add_hook(hook_from_module(path, module))
+                remove = self.add_hook(hook_from_module(path, import_module_file(path, f"reef_{kind}")))
         except BaseException:
             path.unlink(missing_ok=True)
             raise

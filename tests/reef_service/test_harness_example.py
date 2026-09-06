@@ -391,7 +391,8 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
 
 
-def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(monkeypatch) -> None:
+@pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
+def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(monkeypatch, model_id) -> None:
     """The README deployment: ``reef.recipe: deployment`` is read back from the
     directory the service's own env names, and the harness package is on the
     PYTHONPATH the same env sets; a stale directory name here fails at boot, so
@@ -403,6 +404,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
 
     repo_root = EXAMPLE_DIR.parents[1]
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("REEF_UPSTREAM_MODEL", model_id)
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     monkeypatch.setenv("REEF_PYTHON", sys.executable)
     monkeypatch.setenv("PWD", str(repo_root))
@@ -418,12 +420,16 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
         assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
     service = service_settings_from_config(config)
+    monkeypatch.delenv("REEF_UPSTREAM_MODEL")  # Recipe construction uses the resolved runtime, not the environment.
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(recipe_dir)},
         default_runtime=_upstream_runtime(service),
     )
     assert isinstance(built, CordisRecipe) and built.adapter == "pi"
+    assert service.upstream_model == model_id
+    assert built.model_binding().model == model_id
+    assert built.build_surface("demo").harness.served_model == model_id
 
 
 def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:

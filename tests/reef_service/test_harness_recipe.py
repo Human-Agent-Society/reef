@@ -559,6 +559,29 @@ def test_losing_remove_revert_restores_the_entry_at_its_position(tmp_path: Path)
     assert [entry["id"] for entry in result.state["entries"]] == ["r1", "s1"]
 
 
+def test_selected_step_state_entries_are_not_the_loader_rows(tmp_path: Path) -> None:
+    # The loader writes live changes into its rows; the returned state must keep its own dicts.
+    winning = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+    b = backend(tmp_path, lambda nodes, samples, model: winning)
+    result = run_backend_step(b, batch(), b.initial_state())
+    assert result.metrics["published"] is True
+    rows = b._loader.root.data
+    assert [row["id"] for row in rows] == [entry["id"] for entry in result.state["entries"]] == ["r1"]
+    assert all(row is not entry for row, entry in zip(rows, result.state["entries"], strict=True))
+    assert all(row["config"] is not entry["config"] for row, entry in zip(rows, result.state["entries"], strict=True))
+
+
+def test_rejected_step_state_entries_are_not_the_loader_rows(tmp_path: Path) -> None:
+    upd = Mutation("update", "r1", {"config": {"text": "Be verbose."}, "disabled": True})
+    b = backend(tmp_path, lambda nodes, samples, model: upd)
+    result = run_backend_step(b, batch(), seeded_state())
+    assert result.metrics["published"] is False
+    rows = b._loader.root.data
+    assert [row["id"] for row in rows] == [entry["id"] for entry in result.state["entries"]] == ["r1"]
+    assert all(row is not entry for row, entry in zip(rows, result.state["entries"], strict=True))
+    assert all(row["config"] is not entry["config"] for row, entry in zip(rows, result.state["entries"], strict=True))
+
+
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # An unlaunchable episode loses its pairing but must not put -inf into
     # the metrics: the commit log serializes them as JSON, which has no

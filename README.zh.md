@@ -184,15 +184,22 @@ reef.post(
 
 ### Harness 进化部署
 
-使用模型 API 改进 harness 技能，无需 GPU。将
-[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) 中的 `model.path` 设置为你的
-模型名称，然后在 Reef 源码目录及已激活的 Python 环境中运行：
+使用模型 API 改进 harness 技能，无需 GPU。
+
+通过 `REEF_UPSTREAM_MODEL` 在启动时传入模型，无需编辑 YAML。
+[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) 的推理和评估
+共用这个变量。在 Reef 源码目录及已激活的 Python 环境中运行，
+将下面的模型 ID 和 API key 替换为提供商对应的值：
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
+export REEF_UPSTREAM_MODEL="REPLACE_WITH_YOUR_PROVIDER_MODEL_ID"
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
 reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
+
+请填写提供商接受的完整模型 ID，不要使用上面的占位符。
+如果未设置 `REEF_UPSTREAM_MODEL` 或其值为空，启动时会报错提示。
 
 如使用其他模型提供商，请填写对应的基础 URL、模型名称和 API key。此配置在 `8901`
 端口部署 Reef，并使用 `reef-local` 作为访问 token。
@@ -209,6 +216,10 @@ reef-pi -p "fix the failing test in auth.py"
 # After running your tests, report the actual result:
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
+
+如果已经使用 `your-model-name` 安装了 harness，请先设置 `REEF_UPSTREAM_MODEL`，停止服务并用上面的
+命令重新启动 `reef serve`，再重新执行 harness 安装命令，最后重试 `reef-pi`。
+安装过程会将模型 ID 写入本地 harness 配置。
 
 失败报告会触发候选技能更新。Reef 会在教程的三个编程任务上对候选技能和当前 harness
 进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
