@@ -253,7 +253,9 @@ class ScenarioCommitProtocol:
                     rollback_target_release_id=release_id,
                 )
                 if has_commit_log:
-                    self._commit_checkpoint(published_ref, expected=current_ref, expected_checkpoint=checkpoint)
+                    self._install_committed_checkpoint(
+                        published_ref, expected=current_ref, expected_checkpoint=checkpoint
+                    )
             except Exception:
                 artifacts.discard(staged)
                 raise
@@ -392,7 +394,7 @@ class ScenarioCommitProtocol:
                 )
             if not pending:
                 if checkpointed and has_commit_log:
-                    self._commit_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
+                    self._install_committed_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
                 elif not checkpointed:
                     artifacts.advance(local_artifact.ref, expected=head)
         except Exception:
@@ -407,8 +409,11 @@ class ScenarioCommitProtocol:
         self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
-    def _commit_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        self._artifacts.commit_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+    def _install_committed_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef
+    ) -> None:
+        """Install the refs already recorded in the commit log, then synchronize storage."""
+        self._artifacts.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
         self._refresh_committed_checkpoint()
 
     def _refresh_committed_checkpoint(self) -> None:
@@ -519,7 +524,7 @@ class ScenarioCommitProtocol:
             self._creation_artifact,
         )
         if record.checkpoint:
-            self._commit_checkpoint(
+            self._install_committed_checkpoint(
                 record.artifact_ref, expected=previous, expected_checkpoint=self._artifacts.checkpoint
             )
         else:
