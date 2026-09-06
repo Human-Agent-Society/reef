@@ -19,7 +19,7 @@ from reef.artifact.artifact import (
     ArtifactSourceError,
 )
 from reef.artifact.git_client import GitClient
-from reef.artifact.repository import CachedRepositoryBackendFactory, RepositoryBackend
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
 from reef.artifact.sources import GitVersionSource, download_huggingface_snapshot, parse_artifact_source
 
 _MANIFEST = "reef-artifact.json"
@@ -219,7 +219,7 @@ class _ArtifactManifest:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}") from exc
 
 
-class GitLFSRepositoryBackend(RepositoryBackend):
+class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     def __init__(
         self,
         scenario: str,

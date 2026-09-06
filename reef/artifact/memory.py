@@ -15,7 +15,7 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactRef,
 )
-from reef.artifact.repository import CachedRepositoryBackendFactory, RepositoryBackend
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
 
 
 class _InMemoryStorage:
@@ -58,7 +58,7 @@ class _InMemoryStorage:
         return ref
 
 
-class InMemoryRepositoryBackend(RepositoryBackend):
+class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
     def __init__(
         self,
         scenario: str,

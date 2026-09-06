@@ -56,6 +56,16 @@ class RepositoryBackend(ABC):
         advance_head: bool = True,
     ) -> ArtifactRef: ...
 
+
+class StagedReleaseRepositoryBackend(RepositoryBackend):
+    """Optional storage contract for publication followed by head promotion.
+
+    ``publish(advance_head=False)`` must store resolvable release bytes and
+    metadata without moving the head. ``commit_release`` then promotes that
+    release without publishing its bytes again.
+    """
+
+    @abstractmethod
     def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
         """Advance a staged durable release after the scenario commits it.
 
@@ -63,7 +73,7 @@ class RepositoryBackend(ABC):
         repeat an interrupted post-commit mirror update without publishing new
         bytes. They must reject an unrelated current head.
         """
-        raise ArtifactPublicationError("repository backend cannot commit a staged release")
+        ...
 
 
 class CachedRepositoryBackendFactory(ABC):
@@ -224,21 +234,22 @@ class Repository:
             self._current_artifact = ref
 
     def commit_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        """Install journal-committed serving state and refresh its durable mirror."""
+        """Install committed serving state and refresh its durable mirror."""
+        backend = self.require_staged_commit_support()
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
                 raise ArtifactConflict("repository heads changed before the committed release was installed")
             self._current_artifact = ref
             self._checkpoint_artifact = ref
         try:
-            self.backend.commit_release(ref, expected_parent=expected_checkpoint)
+            backend.commit_release(ref, expected_parent=expected_checkpoint)
         except (ArtifactPublicationError, ArtifactConflict):
-            # The journal is already durable. Its state must remain installed;
+            # The commit log is already durable. Its state must remain installed;
             # recovery or the next publication repairs this derived pointer.
             # An unrelated head still fails synchronization; leave it untouched
             # without reporting an already-committed scenario step as failed.
             _LOG.warning(
-                "could not refresh the committed artifact head; the journal remains authoritative", exc_info=True
+                "could not refresh the committed artifact head; the commit log remains authoritative", exc_info=True
             )
 
     def synchronize_checkpoint(self) -> None:
@@ -249,11 +260,12 @@ class Repository:
         if checkpoint.parent_release_id is None:
             raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
         parent = self.backend.resolve_release(checkpoint.parent_release_id)
-        self.backend.commit_release(checkpoint, expected_parent=parent)
+        self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
 
-    def require_staged_commit_support(self) -> None:
-        if type(self.backend).commit_release is RepositoryBackend.commit_release:
-            raise ArtifactPublicationError("repository backend cannot commit a staged release")
+    def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
+        if not isinstance(self.backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
+        return self.backend
 
     def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
         ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)

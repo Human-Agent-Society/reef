@@ -59,6 +59,8 @@ class ScenarioCommitProtocol:
     ) -> None:
         if not isinstance(scenario_step, int) or scenario_step < 0:
             raise ValueError("scenario_step must be non-negative")
+        if commit_log is not None:
+            artifacts.repository.require_staged_commit_support()
         self._name = name
         self._binding = binding
         self._artifacts = artifacts
@@ -197,9 +199,7 @@ class ScenarioCommitProtocol:
                 self._settle_trainer_commit(prepared, recorded, next_step)
                 return recorded.artifact_ref
             source = artifacts.resolve(target_ref)
-            journaled = self._commit_log is not None
-            if journaled:
-                artifacts.repository.require_staged_commit_support()
+            has_commit_log = self._commit_log is not None
             surface = self._binding.surface
             self._binding.artifact_validator.validate(source)
             if surface.loader is not None:
@@ -225,7 +225,7 @@ class ScenarioCommitProtocol:
                         **dict(source.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
-                    advance_heads=not journaled,
+                    advance_heads=not has_commit_log,
                 )
                 if isinstance(surface.loader, ArtifactActivator):
                     surface.loader.activate(artifacts.resolve(published_ref), self._binding.runtime, source=source)
@@ -237,7 +237,7 @@ class ScenarioCommitProtocol:
                     operation=operation,
                     rollback_target_release_id=release_id,
                 )
-                if journaled:
+                if has_commit_log:
                     artifacts.commit_checkpoint(published_ref, expected=current_ref, expected_checkpoint=checkpoint)
             except Exception:
                 artifacts.discard(staged)
@@ -330,10 +330,8 @@ class ScenarioCommitProtocol:
         head = artifacts.current
         self._binding.artifact_validator.validate(publication.artifact)
         pending = result.pending
-        journaled = self._commit_log is not None
+        has_commit_log = self._commit_log is not None
         checkpointed = pending or self._should_checkpoint(result)
-        if checkpointed and not pending and journaled:
-            artifacts.repository.require_staged_commit_support()
         local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         try:
             # A pending release is minted into the catalog but never activated and moves no head.
@@ -357,7 +355,7 @@ class ScenarioCommitProtocol:
                         **dict(publication.artifact.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
-                    advance_heads=not pending and not journaled,
+                    advance_heads=not pending and not has_commit_log,
                 )
                 if not pending:
                     self._activate(artifacts.resolve(published_ref), source=local_artifact)
@@ -376,7 +374,7 @@ class ScenarioCommitProtocol:
                     prepared=prepared,
                 )
             if not pending:
-                if checkpointed and journaled:
+                if checkpointed and has_commit_log:
                     artifacts.commit_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
                 elif not checkpointed:
                     artifacts.advance(local_artifact.ref, expected=head)

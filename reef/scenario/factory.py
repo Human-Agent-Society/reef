@@ -8,12 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactRef, LiveWeightArtifactRef
+from reef.artifact.artifact import (
+    Artifact,
+    ArtifactConflict,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    ArtifactRef,
+    LiveWeightArtifactRef,
+)
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendFactory,
+    StagedReleaseRepositoryBackend,
 )
 from reef.core.errors import ReefError
 from reef.observability import ExperimentLogger, ExperimentTracker
@@ -131,6 +139,10 @@ class ScenarioFactory:
     ) -> Scenario:
         """Create or recover a scenario in this deployment's repository."""
         backend = self._backend_factory(scenario)
+        if self._agent_record_dir is not None and not isinstance(backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError(
+                "scenarios with a commit log require a backend implementing StagedReleaseRepositoryBackend"
+            )
         metadata = backend.metadata()
         snapshot_data = None if metadata is None else metadata.get(SCENARIO_SNAPSHOT_METADATA_KEY)
         if snapshot_data is not None:
@@ -226,9 +238,9 @@ class ScenarioFactory:
             else _RecoveredHead.from_snapshot(snapshot)
         )
 
-        # Publication stages durable bytes before the journal commit, while
+        # Publication stages durable bytes before the commit record is durable, while
         # the backend's head is only a post-commit mirror. A crash between the
-        # two leaves the journal's checkpoint ahead of that pointer.
+        # two leaves the commit log's checkpoint ahead of that pointer.
         if commit_log is not None:
             checkpoints = [
                 record
