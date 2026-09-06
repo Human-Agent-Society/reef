@@ -374,14 +374,14 @@ def test_a_failed_mount_rolls_back_and_the_previous_composition_keeps_serving(tm
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest, poll_interval_s=0.1) as server:
         broken = _tool("broken", "    return 1")
-        broken["config"]["code"] = "raise RuntimeError('boom')\n\ndef run(args, workdir):\n    return 1\n"
-        # r2 changes good, drops spare and adds an entry that cannot import: the whole of it must come undone.
+        broken["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
+        # r2 changes good, drops spare and adds an entry that cannot load: the whole of it must come undone.
         reef.release("r2", [_tool("good", "    return 'changed'"), broken], parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
         failed = _typed(_events(log), "harness/mount-failed")[0]
         assert failed["release_id"] == "r2" and failed["source"] == "release" and failed["entry"] == "broken"
-        assert "boom" in failed["error"]
+        assert "no top level statement of broken.py binds run" in failed["error"]
         assert server.status()["release_id"] == "r1" and sorted(server.host.tools) == ["good", "spare"]
         assert server.host.tools["good"].run({}, ".") == "ok"
         assert sorted(p.name for p in (server.mount_dir / "tools").glob("*.py")) == ["good.py", "spare.py"]
@@ -681,11 +681,11 @@ def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(
     assert reef.reports[0]["metadata"] == {"client_release": "r1"}
 
 
-def test_a_trial_that_fails_admission_or_import_is_refused_and_rolled_back(tmp_path: Path, reef: _FakeReef) -> None:
+def test_a_trial_that_fails_admission_or_load_is_refused_and_rolled_back(tmp_path: Path, reef: _FakeReef) -> None:
     reef.release("r1", [_tool("shout", "    return 'LOUD'")])
     bad_kind = {"op": "update", "id": "shout", "options": {"name": "skill", "config": {"name": "shout", "text": "x"}}}
     broken = _whisper_mutation()
-    broken["options"]["config"]["code"] = "raise RuntimeError('boom')\n\ndef run(args, workdir):\n    return 1\n"
+    broken["options"]["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
     reef.replies = [
         _reply(tool_calls=[_call("harness_try", {"mutations": [bad_kind]}, "c1")]),
         _reply(tool_calls=[_call("harness_try", {"mutations": [broken]}, "c2")]),
@@ -699,7 +699,7 @@ def test_a_trial_that_fails_admission_or_import_is_refused_and_rolled_back(tmp_p
     results = _typed(streamed, "tool/result")
     assert "cannot change the entry's kind" in json.loads(results[0]["content"])["error"]
     second = json.loads(results[1]["content"])
-    assert second["entry"] == "whisper" and "boom" in second["error"]
+    assert second["entry"] == "whisper" and "no top level statement of whisper.py binds run" in second["error"]
     assert (
         results[2]["error"]["code"] == "TOOL_FAILED" and "mutations[0]: mutation op must be" in results[2]["content"]
     )
@@ -938,28 +938,34 @@ def test_a_rollback_that_cannot_reimport_is_logged_and_named_by_status(
 ) -> None:
     marker = tmp_path / "once.marker"
     monkeypatch.setenv("ONCE_MARKER", str(marker))
-    once = _tool("once", "    return 'once'")
-    # An import that is not idempotent: the second import of the same module fails on the marker it left.
-    once["config"][
-        "code"
-    ] = "import os\nopen(os.environ['ONCE_MARKER'], 'x').close()\n\n\ndef run(args, workdir):\n    return 'once'\n"
+    # A hook imports at mount (a tool module imports only where a call runs), and this import is not idempotent:
+    # the second import of the same module fails on the marker it left.
+    once = _entry(
+        "once",
+        "native_hook",
+        name="once",
+        event="pre_step",
+        code="import os\nopen(os.environ['ONCE_MARKER'], 'x').close()\n\n\ndef listen(payload, next):\n    return next()\n",
+    )
     reef.release("r1", [once, _tool("other")])
     dest = _tree(tmp_path, reef, "r1")
     with _running(dest, poll_interval_s=0.1) as server:
-        assert sorted(server.host.tools) == ["once", "other"] and marker.exists()
+        assert [hook.name for hook in server.host.hooks["pre_step"]] == ["once"] and marker.exists()
         broken = _tool("broken")
-        broken["config"]["code"] = "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n"
+        broken["config"]["code"] = "def helper(args, workdir):\n    return 1\n"
         reef.release("r2", [broken], parent="r1")
         log = server.sessions_dir / serve.SERVE_LOG
         _wait(lambda: bool(_typed(_events(log), "harness/rollback-failed")))
         failed = _typed(_events(log), "harness/rollback-failed")[0]
         assert failed["entry"] == "once" and "FileExistsError" in failed["error"] and failed["release_id"] == "r1"
         assert server.status()["degraded"] == ["once"] and sorted(server.host.tools) == ["other"]
+        assert server.host.hooks["pre_step"] == []
         # A mount that lands clears the mark: the composition is again what the release says.
         marker.unlink()
         reef.release("r3", [once, _tool("other")], parent="r1")
         _wait(lambda: server.status()["release_id"] == "r3")
-        assert server.status()["degraded"] == [] and sorted(server.host.tools) == ["once", "other"]
+        assert server.status()["degraded"] == [] and sorted(server.host.tools) == ["other"]
+        assert [hook.name for hook in server.host.hooks["pre_step"]] == ["once"]
 
 
 def test_a_session_from_a_previous_process_is_not_silently_resumed(tmp_path: Path, reef: _FakeReef) -> None:
