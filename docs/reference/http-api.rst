@@ -169,7 +169,8 @@ To change the data processor's mode:
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
 Use ``"auto"`` to resume recipe batching. The change selects subsequent
 batches; a batch already reserved or running completes in its original mode.
-Buffered inputs remain with their mode and are not reclassified. Accepted
+Both modes share buffered data, so auto can batch traffic collected while
+manual was selected. Accepted
 manual instructions wait for manual mode, including instructions not yet read
 when the selector changes to auto.
 

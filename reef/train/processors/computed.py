@@ -9,7 +9,7 @@ worker. This engine owns everything between those facts and the trainer:
 the record lifecycle, the judging worker, the batch cycle, retention, and
 crash-replay semantics. A recipe subclasses it and writes four methods:
 
-* ``ingest_auto(record)`` — the method's own correlation, written with the
+* ``ingest(record)`` — the method's own correlation, written with the
   engine's verbs: start with ``catch_up``, ``dispatch`` each completed
   record's job, then ``track`` the record or ``retire`` it;
 * ``judge(job)`` — an async coroutine producing the recipe's judgment,
@@ -186,7 +186,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     advances the version every step, and stale pending candidates would
     deadlock the FIFO.
 
-    The line, in reading order: the recipe's ``ingest_auto`` (catch_up →
+    The line, in reading order: the recipe's ``ingest`` (catch_up →
     dispatch → track), its ``judge`` on the worker, then here —
     ``_collect_judgments`` absorbs what landed, ``build_batch`` calls the
     recipe's ``make_batch``, ``acknowledge`` releases.
@@ -214,7 +214,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     # ------------------------------------------------------- the recipe hooks
 
     @abstractmethod
-    def ingest_auto(self, item: AgentRecord) -> None:
+    def ingest(self, item: AgentRecord) -> None:
         """The method's own correlation, one record at a time, written with
         the engine's verbs (``catch_up`` first, then ``dispatch`` /
         ``track`` / ``retire``)."""
@@ -223,7 +223,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     async def judge(self, job: Any) -> SupportsReceipt:
         """The recipe's judgment for one job.
 
-        Awaited on the worker thread after your ``ingest_auto`` dispatched the
+        Awaited on the worker thread after your ``ingest`` dispatched the
         job — never on the trainer's — so it may call models and take
         minutes. It carries the ``receipt`` of the record it judges; that
         is all the engine reads of it.
@@ -320,9 +320,9 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     # whatever the worker finished, since judgments land without a record
     # ever arriving to trigger it.
 
-    def ready_auto(self) -> bool:
+    def ready(self) -> bool:
         self.catch_up(time.monotonic())
-        return super().ready_auto()
+        return super().ready()
 
     def _ready_count(self) -> int:
         return len(self._candidates)
@@ -343,7 +343,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
 
     # -------------------------------------------------------- background work
 
-    def derivation_pending_auto(self) -> bool:
+    def derivation_pending(self) -> bool:
         """In-flight judgments resolve and tracked records expire without a
         new record ever waking the training worker; poll while either exists."""
         return bool(self._in_flight or self._tracked)
@@ -354,14 +354,14 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
 
     # -------------------------------------------------------------- retention
 
-    def retention_decision_auto(self) -> RetentionDecision:
+    def retention_decision(self) -> RetentionDecision:
         protected = frozenset(self._tracked) | frozenset(self._in_flight) | frozenset(self._candidates)
         return RetentionDecision(
             protected_agent_record_ids=protected,
             releasable_agent_record_ids=frozenset(self._terminal) - protected,
         )
 
-    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
+    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         self._terminal -= agent_record_ids
         for agent_record_id in agent_record_ids:
             self._tracked.pop(agent_record_id, None)

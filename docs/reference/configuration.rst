@@ -115,11 +115,11 @@ automatic batching policy. Harness evolution needs only the instruction.
 For a dotted weight-training deployment this field is also accepted as
 ``reef.training_mode``. Named presets set it in their own ``data`` section.
 
-The processor receives ``ProcessorContext.training_mode`` and implements
-the selected mode's lifecycle through ``*_auto`` / ``*_manual`` methods on
-the same class. It declares ``supported_training_modes``; unsupported modes
-raise ``NotImplementedError`` at processor construction. Missing manual
-hooks also raise ``NotImplementedError`` instead of running automatic logic.
+The processor receives ``ProcessorContext.training_mode`` as its initial
+batching mode. Both modes share ingestion and retention; the
+``make_training_batch(batch_number, request)`` hook selects batch inputs.
+Processors declare ``supported_training_modes``; unsupported modes or missing
+manual assembly raise ``NotImplementedError``.
 Harness evolution supports both modes and requires a proposer that explicitly
 accepts ``requests`` for manual operation. Setting ``manual`` on an
 inference-only recipe does not create a training backend.

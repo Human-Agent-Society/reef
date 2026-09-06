@@ -11,22 +11,15 @@ path to a batch — is at https://reefinfra.ai/docs/developer-guide/processors/.
 Everything numeric about a method — advantages, loss family — lives in its
 backend step preparer, not here: processors own the records and their
 retention, preparers own the training signal.
-
-Training mode is a processor capability: unsupported modes fail at
-construction. Mode-specific methods live on the same processor instance.
-``ManualTrainingProcessor`` supplies reusable manual hooks for methods whose
-manual input is one user instruction per batch.
 """
 
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.computed import ComputedFeedbackProcessor
-from reef.train.processors.manual import ManualTrainingProcessor
 from reef.train.processors.reported import ReportedFeedbackProcessor
 
 __all__ = [
     "ComputedFeedbackProcessor",
     "DataProcessor",
-    "ManualTrainingProcessor",
     "ReportedFeedbackProcessor",
     "RetentionDecision",
 ]

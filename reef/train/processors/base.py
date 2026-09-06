@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
 
@@ -37,14 +38,6 @@ class RetentionDecision:
 class DataProcessor:
     """The processor contract: turn records into typed training batches.
 
-    Each processor owns the behavior of its supported training modes.
-    ``context.training_mode`` selects the mode at construction;
-    ``supported_training_modes`` defaults to auto only. A subclass can
-    implement additional modes with ``ingest_auto`` / ``ingest_manual``,
-    ``ready_auto`` / ``ready_manual`` and ``build_batch_auto`` /
-    ``build_batch_manual`` on the same instance. Unsupported modes raise
-    ``NotImplementedError`` before any records are ingested.
-
     Which base a recipe builds on is one question — how does its feedback
     arrive?
 
@@ -57,10 +50,10 @@ class DataProcessor:
     * **Computed from the traffic itself** — correlated across records,
       judged by a model, landing asynchronously → subclass
       :class:`~reef.train.processors.computed.ComputedFeedbackProcessor` and write
-      ``ingest_auto`` (the method's own correlation, built from the engine's
+      ``ingest`` (the method's own correlation, built from the engine's
       ``catch_up``/``dispatch``/``track``/``retire`` verbs), ``judge``,
       ``make_sample``, and ``make_batch``; bulky machinery stays in the
-      method package. Here ``judge`` is an ``async def``: your ``ingest_auto`` hands a
+      method package. Here ``judge`` is an ``async def``: your ``ingest`` hands a
       job to ``dispatch`` and a private worker thread awaits it, so it may
       call models and take minutes without blocking serving.
 
@@ -98,13 +91,12 @@ class DataProcessor:
     supported_training_modes: frozenset[str] = frozenset({"auto"})
 
     def __init__(self, context: ProcessorContext) -> None:
-        if context.training_mode not in self.supported_training_modes:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not implement training_mode={context.training_mode!r}"
-            )
         self._context = context
-        self._used_training_modes = {context.training_mode}
-        self._pending_mode = context.training_mode
+        if not context.config.get("manual_enabled", True):
+            self.supported_training_modes = self.supported_training_modes - {"manual"}
+        self.set_training_mode(context.training_mode)
+        self._training_requests: dict[str, TrainingRequest] = {}
+        self._consumed_requests: set[str] = set()
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -127,21 +119,16 @@ class DataProcessor:
 
     @property
     def training_mode(self) -> str:
-        """The mode whose ingest, readiness, assembly and retention this processor implements."""
+        """The batching policy selected for this processor."""
         return self._context.training_mode
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches; an existing reservation keeps its original mode.
-
-        Call under the trainer lock. Mode-owned buffers stay on this instance;
-        switching does not replay or reclassify records already ingested.
-        """
+        """Select future batches while preserving shared buffers and reservations."""
         if training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
-        self._used_training_modes.add(training_mode)
 
     @property
     def experiment_logger(self) -> ExperimentLogger:
@@ -152,24 +139,14 @@ class DataProcessor:
     output_schema: type[TrainingBatch] = PolicyBatch
 
     def ingest(self, item: AgentRecord) -> None:
-        """Dispatch record ingestion to the selected mode on this instance."""
-        if item.request_type is RequestType.TRAIN and "manual" in self.supported_training_modes:
-            # An accepted instruction may still be unread when auto is selected.
-            # Keep it queued for manual mode rather than releasing it as traffic.
-            self._used_training_modes.add("manual")
-            self.ingest_manual(item)
-        elif self.training_mode == "auto":
-            self.ingest_auto(item)
+        if item.request_type is RequestType.TRAIN:
+            if item.scenario != self.scenario:
+                raise ValueError("training records must belong to the processor's scenario")
+            request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
+            if request.id not in self._consumed_requests:
+                self._training_requests.setdefault(request.id, request)
         else:
-            self.ingest_manual(item)
-
-    def ingest_auto(self, item: AgentRecord) -> None:
-        """Retain audit ids by default; automatic engines override this hook."""
-        self._agent_record_ids.add(item.agent_record_id)
-
-    def ingest_manual(self, item: AgentRecord) -> None:
-        """Ingest records according to the processor's manual input requirements."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement ingest_manual")
+            self._agent_record_ids.add(item.agent_record_id)
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -180,54 +157,46 @@ class DataProcessor:
     # consuming them releases.
 
     def ready(self) -> bool:
-        """An outstanding reservation stays ready regardless of new arrivals."""
         if self._pending is not None:
             return True
-        return self.ready_auto() if self.training_mode == "auto" else self.ready_manual()
-
-    def ready_auto(self) -> bool:
-        """Apply the recipe's automatic batch-size gate."""
+        if self.training_mode == "manual":
+            return bool(self._training_requests)
         return self._ready_count() >= self._batch_size
-
-    def ready_manual(self) -> bool:
-        """Decide whether an instruction and its required inputs are available."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement ready_manual")
 
     def build_batch(self) -> TrainingBatch:
         if self._pending is None:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            self._pending_mode = self.training_mode
-            self._pending = (
-                self.build_batch_auto(self._batch_number)
-                if self.training_mode == "auto"
-                else self.build_batch_manual(self._batch_number)
-            )
+            request = next(iter(self._training_requests.values())) if self.training_mode == "manual" else None
+            self._pending = self.make_training_batch(self._batch_number, request)
+            if request is not None:
+                self._pending = replace(
+                    self._pending, batch_id=f"{self.scenario}:manual:{request.id}", request=request
+                )
         return self._pending
 
-    def build_batch_auto(self, batch_number: int) -> TrainingBatch:
-        """Assemble an automatic batch; the caller caches it until acknowledgement."""
-        return self._make_pending(batch_number)
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        """Select inputs for one batch; a request supplies manual authorization.
 
-    def build_batch_manual(self, batch_number: int) -> TrainingBatch:
-        """Assemble an instruction-authorized batch, including ``batch.request``."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement build_batch_manual")
+        Override this single assembly hook to support manual batching. Ingestion,
+        acknowledgement and retention operate on the same state in either mode.
+        """
+        if request is not None:
+            raise NotImplementedError(f"{type(self).__name__} does not implement manual batch assembly")
+        return self._make_pending(batch_number)
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed = self.acknowledge_auto() if self._pending_mode == "auto" else self.acknowledge_manual()
+        consumed = self._consume_pending()
+        if self._pending.request is not None:
+            request_id = self._pending.request.id
+            self._training_requests.pop(request_id)
+            self._consumed_requests.add(request_id)
+            consumed = consumed | {request_id}
         self._pending = None
         return consumed
-
-    def acknowledge_auto(self) -> frozenset[str]:
-        """Consume the reserved automatic batch and return its record ids."""
-        return self._consume_pending()
-
-    def acknowledge_manual(self) -> frozenset[str]:
-        """Consume the reserved instruction and any inputs selected with it."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement acknowledge_manual")
 
     def _ready_count(self) -> int:
         """How many batch-ready units are held.
@@ -252,50 +221,23 @@ class DataProcessor:
         return frozenset()
 
     def retention_decision(self) -> RetentionDecision:
-        """Protect buffers owned by every mode used on this instance."""
-        protected: set[str] = set()
-        releasable: set[str] = set()
-        for mode in self._used_training_modes:
-            decision = self.retention_decision_auto() if mode == "auto" else self.retention_decision_manual()
-            protected.update(decision.protected_agent_record_ids)
-            releasable.update(decision.releasable_agent_record_ids)
-        return RetentionDecision(frozenset(protected), frozenset(releasable - protected))
-
-    def retention_decision_manual(self) -> RetentionDecision:
-        """Protect pending manual inputs and release only committed or terminal records."""
-        raise NotImplementedError(f"{type(self).__name__} does not implement retention_decision_manual")
-
-    def retention_decision_auto(self) -> RetentionDecision:
         """Return the records the processor currently protects or releases.
 
         The no-update default protects every ingested id (audit-only retention).
         Subclasses with real pairing semantics override this to derive
         protected/releasable sets from their own state.
         """
-        return RetentionDecision(protected_agent_record_ids=frozenset(self._agent_record_ids))
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
+            releasable_agent_record_ids=frozenset(self._consumed_requests),
+        )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
-        if "auto" in self._used_training_modes:
-            self.compaction_applied_auto(agent_record_ids)
-        if "manual" in self._used_training_modes:
-            self.compaction_applied_manual(agent_record_ids)
-
-    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
         self._agent_record_ids -= agent_record_ids
-
-    def compaction_applied_manual(self, agent_record_ids: frozenset[str]) -> None:
-        raise NotImplementedError(f"{type(self).__name__} does not implement compaction_applied_manual")
+        self._consumed_requests -= agent_record_ids
 
     def derivation_pending(self) -> bool:
-        """Poll only the selected mode's background derivation."""
-        return self.derivation_pending_auto() if self.training_mode == "auto" else self.derivation_pending_manual()
-
-    def derivation_pending_manual(self) -> bool:
-        """Override if manual input preparation finishes asynchronously."""
-        return False
-
-    def derivation_pending_auto(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
 
         The training worker sleeps until the next accepted record; a
@@ -313,7 +255,7 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
-        return {}
+        return {"buffered_requests": len(self._training_requests)} if "manual" in self.supported_training_modes else {}
 
     def close(self) -> None:
         """Release resources the processor owns; safe to call more than once.

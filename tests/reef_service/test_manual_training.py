@@ -17,7 +17,6 @@ from reef.service.app import create_app
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.processors.base import DataProcessor
-from reef.train.processors.manual import ManualTrainingProcessor
 from reef.train.trainer import Trainer
 from reef.train.types import ProcessorContext, TraceBatch
 
@@ -230,11 +229,13 @@ def test_auto_rejects_manual_requests(tmp_path):
 
 
 def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
-    class InstructionProcessor(ManualTrainingProcessor):
+    class InstructionProcessor(DataProcessor):
+        supported_training_modes = frozenset({"manual"})
+        required_request_types = frozenset(RequestType)
         output_schema = ExampleBatch
 
-        def make_request_batch(self, request):
-            return ExampleBatch(request.agent_record_id, (request.payload["text"],))
+        def make_training_batch(self, batch_number, request):
+            return ExampleBatch(request.id, (request.text,))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         InstructionProcessor(ProcessorContext("s"))
@@ -269,32 +270,18 @@ def test_missing_mode_implementation_fails_at_processor_initialization():
         ProcessorContext("s", training_mode="invalid")
 
 
-@pytest.mark.parametrize(
-    "operation",
-    ["ingest", "ready", "build_batch", "acknowledge", "retention_decision", "compaction_applied"],
-)
-def test_unimplemented_manual_hooks_never_fall_back_to_auto(operation):
+def test_unimplemented_manual_assembly_never_falls_back_to_auto():
     class IncompleteProcessor(DataProcessor):
         supported_training_modes = frozenset({"auto", "manual"})
 
     processor = IncompleteProcessor(ProcessorContext("s", training_mode="manual"))
-    with pytest.raises(NotImplementedError, match=f"{operation}_manual"):
-        if operation == "ingest":
-            processor.ingest(instruction("one"))
-        elif operation == "ready":
-            processor.ready()
-        elif operation == "build_batch":
-            processor.build_batch_manual(1)
-        elif operation == "acknowledge":
-            processor.acknowledge_manual()
-        elif operation == "retention_decision":
-            processor.retention_decision()
-        else:
-            processor.compaction_applied(frozenset())
+    processor.ingest(instruction("one"))
+    with pytest.raises(NotImplementedError, match="manual batch assembly"):
+        processor.build_batch()
 
 
 @pytest.mark.parametrize("mode", ["auto", "manual"])
-def test_processor_owns_mode_specific_ingestion_and_readiness(mode):
+def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
     class TrajectoryProcessor(DataProcessor):
         supported_training_modes = frozenset({"auto", "manual"})
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
@@ -303,135 +290,46 @@ def test_processor_owns_mode_specific_ingestion_and_readiness(mode):
         def __init__(self, context):
             super().__init__(context)
             self.exchanges = []
-            self.request = None
 
-        def ingest_auto(self, item):
-            super().ingest_auto(item)
+        def ingest(self, item):
+            super().ingest(item)
             if item.request_type is RequestType.INFERENCE:
                 self.exchanges.append(item)
-            elif item.request_type is RequestType.TRAIN:
-                self.request = item
 
-        def ingest_manual(self, item):
-            self.ingest_auto(item)
+        def _ready_count(self):
+            return len(self.exchanges)
 
-        def ready_auto(self):
-            return len(self.exchanges) >= 2
+        def ready(self):
+            return self._pending is not None or (len(self.exchanges) >= 2 and super().ready())
 
-        def ready_manual(self):
-            return self.request is not None and len(self.exchanges) >= 2
+        def make_training_batch(self, batch_number, request):
+            return ExampleBatch("custom-batch", tuple(record.agent_record_id for record in self.exchanges))
 
-        def build_batch_auto(self, batch_number):
-            request = (
-                None
-                if self.request is None
-                else replace(TrainingRequest.from_dict(self.request.payload), id=self.request.agent_record_id)
-            )
-            return ExampleBatch(
-                "custom-batch", tuple(record.agent_record_id for record in self.exchanges), request=request
-            )
-
-        def build_batch_manual(self, batch_number):
-            return self.build_batch_auto(batch_number)
-
-        def acknowledge_manual(self):
-            return self.acknowledge_auto()
-
-        def retention_decision_manual(self):
-            return self.retention_decision_auto()
-
-        def compaction_applied_manual(self, agent_record_ids):
-            self.compaction_applied_auto(agent_record_ids)
-
-        def acknowledge_auto(self):
-            consumed = {record.agent_record_id for record in self.exchanges}
-            if self.request is not None:
-                consumed.add(self.request.agent_record_id)
+        def _consume_pending(self):
+            consumed = frozenset(record.agent_record_id for record in self.exchanges)
             self.exchanges.clear()
-            self.request = None
-            return frozenset(consumed)
+            return consumed
 
     records, backend = RecordStore(), CaptureBackend()
-    trainer = build(records, backend, TrajectoryProcessor, mode=mode)
-    assert type(trainer.processor) is TrajectoryProcessor
-    records.append(inference("first"))
-    assert trainer.run_once() is None
-    if mode == "manual":
-        records.append(instruction("use-the-trajectory"))
-        # This processor requires trajectory data as well as the instruction;
-        # the trainer must honor its readiness rather than applying a manual queue.
+    trainer = build(records, backend, TrajectoryProcessor, mode=mode, batch_size=2)
+    try:
+        records.append(inference("first"))
         assert trainer.run_once() is None
-    records.append(inference("second"))
-    result = trainer.run_once()
-    assert result is not None
-    assert backend.batches[0].values == ("first", "second")
-    assert (backend.batches[0].request is None) == (mode == "auto")
-    prepared = trainer.prepare_commit(result)
-    expected = {"first", "second"} | ({"use-the-trajectory"} if mode == "manual" else set())
-    assert prepared.consumed_ids == frozenset(expected)
-    trainer.commit(prepared)
-    assert trainer.run_once() is None
-    trainer.close()
-    records.close()
-
-
-@pytest.mark.parametrize("mode", ["auto", "manual"])
-def test_mode_methods_share_one_reservation_until_acknowledgement(mode):
-    class MethodProcessor(DataProcessor):
-        supported_training_modes = frozenset({"auto", "manual"})
-        output_schema = ExampleBatch
-
-        def __init__(self, context):
-            super().__init__(context)
-            self.calls = []
-            self.available = True
-
-        def ready_auto(self):
-            self.calls.append("ready_auto")
-            return self.available
-
-        def ready_manual(self):
-            self.calls.append("ready_manual")
-            return self.available
-
-        def build_batch_auto(self, batch_number):
-            self.calls.append("build_auto")
-            return ExampleBatch(f"auto:{batch_number}", ("auto",))
-
-        def build_batch_manual(self, batch_number):
-            self.calls.append("build_manual")
-            return ExampleBatch(
-                f"manual:{batch_number}",
-                ("manual",),
-                request=TrainingRequest(text="change", session="session", release_id="release"),
-            )
-
-        def acknowledge_auto(self):
-            self.calls.append("acknowledge_auto")
-            return frozenset({"auto-record"})
-
-        def acknowledge_manual(self):
-            self.calls.append("acknowledge_manual")
-            return frozenset({"manual-record"})
-
-    processor = MethodProcessor(ProcessorContext("s", training_mode=mode))
-    first = processor.build_batch()
-    assert first.values == (mode,)
-    # New arrivals/readiness changes cannot replace the reserved batch.
-    processor.available = False
-    assert processor.ready()
-    assert processor.build_batch() is first
-    with pytest.raises(ValueError, match="unknown batch_id"):
-        processor.acknowledge("wrong")
-    assert processor.build_batch() is first
-    assert processor.calls == [f"ready_{mode}", f"build_{mode}"]
-    assert processor.acknowledge(first.batch_id) == frozenset({f"{mode}-record"})
-    assert not processor.ready()
-    processor.available = True
-    second = processor.build_batch()
-    assert second is not first
-    assert second.batch_id == f"{mode}:2"
-    assert processor.calls.count(f"build_{mode}") == 2
+        if mode == "manual":
+            records.append(instruction("use-the-trajectory"))
+            assert trainer.run_once() is None
+        records.append(inference("second"))
+        result = trainer.run_once()
+        assert backend.batches[0].values == ("first", "second")
+        assert (backend.batches[0].request is None) == (mode == "auto")
+        prepared = trainer.prepare_commit(result)
+        expected = {"first", "second"} | ({"use-the-trajectory"} if mode == "manual" else set())
+        assert prepared.consumed_ids == frozenset(expected)
+        trainer.commit(prepared)
+        assert trainer.run_once() is None
+    finally:
+        trainer.close()
+        records.close()
 
 
 def test_factory_cannot_silently_change_the_processor_mode():
@@ -652,3 +550,31 @@ def test_mode_selection_resets_to_recipe_default_on_reload(tmp_path):
         assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "auto"
     finally:
         dispatcher.close()
+
+
+@pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
+def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, processor, mode="manual", batch_size=2)
+    try:
+        for receipt in ("a", "b"):
+            records.append(inference(receipt))
+            if processor is CordisProcessor:
+                records.append(
+                    AgentRecord.create(
+                        scenario="s",
+                        request_type=RequestType.REPORT,
+                        payload={"score": 0, "references": [receipt]},
+                    )
+                )
+        assert trainer.run_once() is None
+        original = trainer.processor
+        offset = trainer.data_offset
+        trainer.set_training_mode("auto")
+        assert trainer.run_once() is not None
+        assert trainer.processor is original
+        assert trainer.data_offset == offset
+        assert [sample.source_agent_record_id for sample in backend.batches[-1].samples] == ["a", "b"]
+    finally:
+        trainer.close()
+        records.close()

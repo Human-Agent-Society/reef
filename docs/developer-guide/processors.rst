@@ -40,93 +40,56 @@ can implement their own lifecycle or reuse one of the feedback engines below.
 Explicit manual training
 ------------------------
 
-Pass the recipe's ``training_mode`` to ``Trainer.build``. The factory receives
-it in ``ProcessorContext.training_mode``; ``with_config`` preserves it.
-The processor owns ingestion, readiness, batch assembly and retention for
-the chosen mode. Trainer calls the same lifecycle methods in every mode
-and never substitutes a manual wrapper.
+``training_mode`` is an attribute of each ``DataProcessor``. The recipe passes
+its initial value through ``Trainer.build`` and ``ProcessorContext``; it
+defaults to ``auto``. Ingestion, acknowledgement, retention and compaction use
+the same methods and buffers in both modes.
 
-``DataProcessor`` supports ``auto`` by default. A processor implementing
-both modes declares ``supported_training_modes = frozenset({"auto", "manual"})``
-and implements mode-specific methods on the same class. An unsupported mode
-raises ``NotImplementedError`` during initialization, before records are
-ingested or a backend step runs. An unknown mode name is a ``ValueError``.
+The shared batching cycle waits for ``batch_size`` units in auto mode or a
+queued TRAIN instruction in manual mode. A processor supporting both declares
+``supported_training_modes = frozenset({"auto", "manual"})`` and implements
+one assembly hook:
 
 .. code:: python
 
-   class MyProcessor(DataProcessor):
-       supported_training_modes = frozenset({"auto", "manual"})
+   def make_training_batch(self, batch_number, request):
+       if request is not None:
+           # Select inputs for this instruction; harness needs no samples.
+           self._pending_units = ()
+           return TraceBatch(request.id, ())
+       return self._make_pending(batch_number)
 
-       def ingest_auto(self, record):
-           ...  # Collect inputs according to the automatic policy.
+This example extends the reported-feedback engine. ``request`` is a
+``TrainingRequest`` in manual mode and ``None`` in auto mode. The base class
+attaches the instruction to ``batch.request`` and assigns its stable batch id.
+``_consume_pending`` releases the selected data; shared acknowledgement also
+consumes the instruction. A processor needing additional manual inputs can
+extend the shared ``ready`` predicate. Batch construction must not call models
+or perform training.
 
-       def ingest_manual(self, record):
-           ...  # Collect instructions and any required inference inputs.
+Processors receive TRAIN records by including ``RequestType.TRAIN`` in
+``required_request_types`` and forwarding those records to ``super().ingest``.
+The base class queues them FIFO regardless of the selected mode. Data ingestion
+continues normally in manual mode, so changing to auto can batch data already
+collected. Custom retention implementations must preserve queued instructions
+and release consumed ones, as the reported-feedback engine does.
 
-       def ready_auto(self):
-           ...  # Apply the recipe's batching policy.
-
-       def ready_manual(self):
-           ...  # Require an instruction and its inputs, independently of auto batching.
-
-       def build_batch_auto(self, batch_number):
-           ...  # Return the automatic training batch.
-
-       def build_batch_manual(self, batch_number):
-           ...  # Return the manual training batch with batch.request attached.
-
-The shared ``ingest``, ``ready`` and ``build_batch`` entry points dispatch to
-these methods using the instance's selected training mode. ``build_batch``
-caches the selected batch until acknowledgement, so repeated reservations do
-not rebuild it. There is no mapping to another processor class or instance.
-
-The processor also implements ``acknowledge_auto`` / ``acknowledge_manual``
-(return consumed receipt ids), ``retention_decision_auto`` /
-``retention_decision_manual``, and ``compaction_applied_auto`` /
-``compaction_applied_manual``. Missing manual hooks raise
-``NotImplementedError``; declaring support never falls back to automatic
-behavior. Existing automatic engines retain their ``_ready_count``,
-``_make_pending`` and ``_consume_pending`` hooks through the default auto
-methods. Computed-feedback subclasses implement ``ingest_auto`` for their
-correlation logic and inherit automatic readiness and retention from their
-engine. Processors overriding the shared entry points own their dispatch.
-Background work is polled through ``derivation_pending_auto`` /
-``derivation_pending_manual`` (both default to false); ``close`` remains a
-shared teardown hook for all resources owned by the instance.
-
-Manual ingestion must include ``RequestType.TRAIN``. The processor decides
-how an explicit instruction authorizes a batch: it may use the instruction
-alone, or combine it with accumulated inference data. It should attach the
-instruction to ``batch.request`` (``id``, ``text``, ``session``, ``release_id``)
-and acknowledge the instruction receipt with the input records it consumes.
-Trainer preserves batch reservation, commit and replay semantics.
-
-Harness evolution inherits the reusable ``*_manual`` methods from the optional
-``ManualTrainingProcessor`` engine on the same processor instance. This engine
-queues instructions FIFO,
-retains ordinary traffic for audit, and creates one batch per instruction.
-Subclasses implement ``make_request_batch(request: AgentRecord)``; the engine
-attaches ``batch.request``, assigns a stable batch id and manages request
-acknowledgement. Harness requests need no inference samples, so its hook
-returns an empty ``TraceBatch``. Other processors can reuse this engine or
-implement their own manual lifecycle. No batch assembly method may call
-models or perform training; that remains the backend's responsibility.
+Unsupported modes, or manual assembly without an implementation, raise
+``NotImplementedError``. An invalid mode name raises ``ValueError``.
+The default automatic assembly keeps the existing ``_make_pending`` hook;
+automatic processors and computed-feedback ``ingest`` implementations need no
+mode-specific lifecycle methods or additional processor class.
 
 Changing training mode
 ----------------------
 
-``POST /reef/scenarios/{scenario}/update`` selects ``auto`` or
-``manual`` on the existing processor through ``set_training_mode``.
-The trainer serializes this operation with ingestion and reservation.
-A reserved batch retains its original acknowledgement mode, so changing
-mode does not interrupt a running step.
+``POST /reef/scenarios/{scenario}/update`` selects ``auto`` or ``manual`` on
+the existing processor. The trainer serializes selection with ingestion and
+reservation. A reserved batch stays unchanged and acknowledgement consumes its
+actual contents, independently of subsequent mode changes.
 
-Mode-owned buffers stay on the same instance. Already ingested records are
-not replayed into another mode; switching back resumes that mode's buffers.
-Retention protects inputs held by either mode, and accepted TRAIN records
-remain queued for manual mode even if auto is selected before ingestion.
-The selector is runtime state: rebuilding a scenario uses the recipe's
-configured default again.
+Buffered data and queued instructions stay on the same instance. The selector
+is runtime state: rebuilding a scenario uses the recipe's configured default.
 
 The two feedback paths
 ----------------------
@@ -143,7 +106,7 @@ method compute it?**
 | ``judge`` is    | a plain method                              | an ``async def``                                   |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | called          | by the engine, inside its own ``ingest``    | on a private worker, after the recipe's            |
-|                 |                                             | ``ingest_auto`` dispatches                         |
+|                 |                                             | ``ingest`` dispatches                         |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | so it may       | only decide on data already in hand         | call models and take minutes                       |
 +-----------------+---------------------------------------------+----------------------------------------------------+
@@ -185,7 +148,7 @@ What a recipe writes
 groups, plus the class attributes ``output_schema``, ``exclusive_sources``,
 ``ordered_groups``.
 
-**Computed feedback:** In ``ingest_auto``, the correlation *is* the method. It uses
+**Computed feedback:** In ``ingest``, the correlation *is* the method. It uses
 the engine's ``catch_up`` / ``dispatch`` / ``track`` / ``retire`` verbs, as
 well as ``judge``, ``make_sample``, ``make_batch``, and ``expire`` for tracked
 records that time out.

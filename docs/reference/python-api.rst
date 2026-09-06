@@ -244,13 +244,12 @@ thread, so they must not block on network or model latency.
 |                   | replay                        |                               |
 +-------------------+-------------------------------+-------------------------------+
 
-Training mode belongs to the processor. Declare ``supported_training_modes``
-and implement ``ingest_auto`` / ``ingest_manual``, ``ready_auto`` /
-``ready_manual``, and ``build_batch_auto`` / ``build_batch_manual`` on the
-same class. The public lifecycle dispatches using the selected training mode;
-reservation and acknowledgement remain shared. Manual hooks are unsupported
-by default. See :doc:`/developer-guide/processors` for consumption, retention,
-background derivation, and the reusable manual instruction queue.
+``DataProcessor.training_mode`` selects automatic or instruction-triggered
+batching on the same processor. Declare ``supported_training_modes`` and
+implement ``make_training_batch(batch_number, request)`` to select inputs;
+``request`` is ``None`` in auto mode. Ingestion, acknowledgement, retention,
+compaction and background derivation are shared. See
+:doc:`/developer-guide/processors` for the instruction queue and batch contract.
 
 Every processor gets the scenario's experiment logger as
 ``self.experiment_logger``. Log finite numeric metrics under the ``processor``
@@ -322,7 +321,7 @@ calls a model or another slow service.
 +---------------------------------------+-----------------------------------+
 | Hook                                  | Contract                          |
 +=======================================+===================================+
-| ``ingest_auto(record)``               | correlate records; must not block |
+| ``ingest(record)``               | correlate records; must not block |
 +---------------------------------------+-----------------------------------+
 | ``async judge(job)``                  | slow judgment, on the processor's |
 |                                       | own worker                        |

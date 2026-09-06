@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
-from reef.train.processors.base import RetentionDecision
-from reef.train.processors.manual import ManualTrainingProcessor
+from reef.core.training_request import TrainingRequest
+from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.reported import (
     NEVER,
     BatchUnit,
@@ -13,10 +13,10 @@ from reef.train.processors.reported import (
     ReportDecision,
     ReportedFeedbackProcessor,
 )
-from reef.train.types import ProcessorContext, TraceBatch, TraceSample
+from reef.train.types import ProcessorContext, TraceBatch, TraceSample, TrainingBatch
 
 
-class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
+class CordisProcessor(ReportedFeedbackProcessor):
     """Pair recorded requests with reported scores and batch them unmodified.
 
     Requests are recorded post-transform, so a trace shows exactly what the
@@ -32,9 +32,11 @@ class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
     supported_training_modes = frozenset({"auto", "manual"})
     required_request_types = frozenset(RequestType)
 
-    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
-        """Manual instructions authorize a proposal without inference samples."""
-        return TraceBatch(request.agent_record_id, ())
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        if request is not None:
+            self._pending_units = ()
+            return TraceBatch(request.id, ())
+        return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:
         self._min_score = float(context.config.get("min_score", float("-inf")))
@@ -86,7 +88,7 @@ class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
         )
 
 
-class RecordDrivenTraceProcessor(ManualTrainingProcessor):
+class RecordDrivenTraceProcessor(DataProcessor):
     """Batch recorded inference traffic every ``batch_size`` requests, unscored.
 
     The report-free half of harness evolution: a deployment that only serves
@@ -102,17 +104,20 @@ class RecordDrivenTraceProcessor(ManualTrainingProcessor):
     supported_training_modes = frozenset({"auto", "manual"})
     required_request_types = frozenset(RequestType)
 
-    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
-        """Manual instructions authorize a proposal without inference samples."""
-        return TraceBatch(request.agent_record_id, ())
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        if request is not None:
+            return TraceBatch(request.id, ())
+        return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
         self._records: list[AgentRecord] = []
         self._released: set[str] = set()
 
-    def ingest_auto(self, item: AgentRecord) -> None:
-        if item.request_type is RequestType.INFERENCE:
+    def ingest(self, item: AgentRecord) -> None:
+        if item.request_type is RequestType.TRAIN:
+            super().ingest(item)
+        elif item.request_type is RequestType.INFERENCE:
             self._records.append(item)
         else:
             self._released.add(item.agent_record_id)
@@ -142,11 +147,14 @@ class RecordDrivenTraceProcessor(ManualTrainingProcessor):
         self._released |= consumed
         return consumed
 
-    def retention_decision_auto(self) -> RetentionDecision:
+    def retention_decision(self) -> RetentionDecision:
         return RetentionDecision(
-            protected_agent_record_ids=frozenset(record.agent_record_id for record in self._records),
-            releasable_agent_record_ids=frozenset(self._released),
+            protected_agent_record_ids=frozenset(
+                {record.agent_record_id for record in self._records} | self._training_requests.keys()
+            ),
+            releasable_agent_record_ids=frozenset(self._released | self._consumed_requests),
         )
 
-    def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:
+    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        super().compaction_applied(agent_record_ids)
         self._released -= agent_record_ids
