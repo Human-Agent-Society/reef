@@ -90,8 +90,25 @@ def test_remove_entry_disposes_fiber() -> None:
     log.clear()
     loader.remove("a")
     assert log == [("alpha-out", {"n": 1})]
+    assert loader.root.data == []  # the row leaves the group with the entry
     with pytest.raises(LookupError, match="cannot resolve entry a"):
         loader.resolve("a")
+
+
+def test_remove_entry_unlinks_only_its_row() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "a", "name": "alpha", "config": {"n": 1}},
+            {"id": "b", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    log.clear()
+    loader.remove("a")
+    assert log == [("alpha-out", {"n": 1})]
+    assert [options["id"] for options in loader.root.data] == ["b"]
+    assert loader.resolve("b").options is loader.root.data[0]
 
 
 def test_dependent_entry_waits_for_provider_entry() -> None:
@@ -192,6 +209,44 @@ def test_move_entry_between_groups() -> None:
     entry = loader.resolve("a")
     assert entry.parent is loader.resolve("g").subgroup
     assert entry.fiber.state is FiberState.ACTIVE
+
+
+def test_move_within_group_keeps_one_row_per_entry() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "r1", "name": "alpha", "config": {"n": 1}},
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    log.clear()
+    loader.update("r2", {}, None, 0, move=True)
+    assert [options["id"] for options in loader.root.data] == ["r2", "r1"]  # moved once, not duplicated (#274)
+    assert all(loader.resolve(options["id"]).options is options for options in loader.root.data)
+    assert log == []  # a move alone reconfigures nothing
+
+
+def test_root_update_after_move_still_reconciles_by_id() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "r1", "name": "alpha", "config": {"n": 1}},
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    loader.update("r2", {}, None, 0, move=True)
+    log.clear()
+    loader.root.update(
+        [
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+            {"id": "r1", "name": "alpha", "config": {"n": 3}},
+        ]
+    )
+    assert [options["id"] for options in loader.root.data] == ["r2", "r1"]
+    assert log == [("alpha-out", {"n": 1}), ("alpha", {"n": 3})]  # only the changed entry reloads
+    assert all(loader.resolve(options["id"]).options is options for options in loader.root.data)
 
 
 def test_unresolvable_name_leaves_entry_without_fiber() -> None:
