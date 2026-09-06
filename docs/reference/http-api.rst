@@ -173,7 +173,7 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "release_id"?, "config"?}``                 |
+| ``POST /reef/scenarios``                    | ``{"name", "release_id"?, "config"?}``      |
 |                                             | → ``{scenario, release_id,                  |
 |                                             | content_id, config}``; 201 created, 200     |
 |                                             | existed                                     |
