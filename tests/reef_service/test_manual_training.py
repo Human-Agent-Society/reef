@@ -570,7 +570,7 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            url = "/reef/scenarios/s/training-mode"
+            url = "/reef/scenarios/s/update"
             response = await client.post(url, json={"training_mode": "manual"})
             assert response.status == (200 if reads_requests else 501)
             if reads_requests:
@@ -585,7 +585,7 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
             ):
                 response = await client.post(url, json=invalid)
                 assert response.status == 400
-            response = await client.post("/reef/scenarios/missing/training-mode", json={"training_mode": "manual"})
+            response = await client.post("/reef/scenarios/missing/update", json={"training_mode": "manual"})
             assert response.status == 404
             assert not dispatcher.has_scenario("missing")
             response = await client.get("/reef/scenarios/s/config")
@@ -621,7 +621,7 @@ def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
             assert response.status == 200
             assert await asyncio.to_thread(entered.wait, 3)
             response = await asyncio.wait_for(
-                client.post("/reef/scenarios/s/training-mode", json={"training_mode": "auto"}), timeout=2
+                client.post("/reef/scenarios/s/update", json={"training_mode": "auto"}), timeout=2
             )
             assert response.status == 200
             assert not release.is_set()

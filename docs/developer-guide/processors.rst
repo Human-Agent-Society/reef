@@ -115,7 +115,7 @@ models or perform training; that remains the backend's responsibility.
 Changing training mode
 ----------------------
 
-``POST /reef/scenarios/{scenario}/training-mode`` selects ``auto`` or
+``POST /reef/scenarios/{scenario}/update`` selects ``auto`` or
 ``manual`` on the existing processor through ``set_training_mode``.
 The trainer serializes this operation with ingestion and reservation.
 A reserved batch retains its original acknowledgement mode, so changing

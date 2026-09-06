@@ -131,7 +131,7 @@ inference-only recipe does not create a training backend.
 
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
-Use ``POST /reef/scenarios/{scenario}/training-mode`` to select another mode
+Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent batches; a reserved batch completes under
 its original mode. Mode changes are not persisted, and rebuilding the scenario
 uses the recipe's configured mode again.

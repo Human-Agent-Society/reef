@@ -155,11 +155,12 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
 
-Training mode
-~~~~~~~~~~~~~
+Scenario updates
+~~~~~~~~~~~~~~~~
 
-``POST /reef/scenarios/{scenario}/training-mode`` updates the existing
-data processor's mode:
+``POST /reef/scenarios/{scenario}/update`` updates an existing scenario.
+Currently, only ``training_mode`` is supported; unknown fields are rejected.
+To change the data processor's mode:
 
 .. code:: json
 
