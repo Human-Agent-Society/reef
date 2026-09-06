@@ -321,7 +321,7 @@ calls a model or another slow service.
 +---------------------------------------+-----------------------------------+
 | Hook                                  | Contract                          |
 +=======================================+===================================+
-| ``ingest(record)``               | correlate records; must not block |
+| ``ingest(record)``                    | correlate records; must not block |
 +---------------------------------------+-----------------------------------+
 | ``async judge(job)``                  | slow judgment, on the processor's |
 |                                       | own worker                        |

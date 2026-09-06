@@ -106,7 +106,7 @@ method compute it?**
 | ``judge`` is    | a plain method                              | an ``async def``                                   |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | called          | by the engine, inside its own ``ingest``    | on a private worker, after the recipe's            |
-|                 |                                             | ``ingest`` dispatches                         |
+|                 |                                             | ``ingest`` dispatches                              |
 +-----------------+---------------------------------------------+----------------------------------------------------+
 | so it may       | only decide on data already in hand         | call models and take minutes                       |
 +-----------------+---------------------------------------------+----------------------------------------------------+
