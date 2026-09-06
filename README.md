@@ -192,15 +192,22 @@ current version without restarting Reef.
 
 ### Harness-evolving deployment
 
-Improve harness skills using a model API instead of GPUs. Set `model.path`
-in [deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) to your model name,
-then run from your Reef checkout and activated Python environment:
+Improve harness skills using a model API instead of GPUs.
+
+Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
+[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) uses this
+variable for both serving and evaluation. From your Reef checkout and activated
+Python environment, replace the model ID and API key below with your provider's values:
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
+export REEF_UPSTREAM_MODEL="REPLACE_WITH_YOUR_PROVIDER_MODEL_ID"
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
 reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
+
+Use the exact model ID accepted by your provider, not the placeholder above.
+An unset or empty `REEF_UPSTREAM_MODEL` is reported at startup.
 
 For another provider, use its base URL, model name, and API key. This config deploys Reef on `8901` with `reef-local` as its access token.
 
@@ -216,6 +223,11 @@ reef-pi -p "fix the failing test in auth.py"
 # After running your tests, report the actual result:
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
+
+If you already installed the harness with `your-model-name`, set `REEF_UPSTREAM_MODEL`,
+stop and restart `reef serve` with the command above, then rerun the harness install
+command before retrying `reef-pi`. Installation writes the model ID into the local
+harness configuration.
 
 Failed reports trigger a candidate skill update. Reef evaluates it against the
 current harness on the tutorial's three coding tasks and publishes it only if

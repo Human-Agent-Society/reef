@@ -123,6 +123,10 @@ A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
 in a preset. A preset carries its own ``implementation``, ``model``, and
 ``data`` sections, plus an optional ``runtime`` section when the recipe
 builds its own runtime instead of using the deployment's upstream proxy.
+When using the deployment's runtime, a preset may omit ``model.path`` to
+inherit that runtime's model (``reef.upstream_model`` for an upstream proxy).
+An explicit ``model.path`` takes precedence. A preset with its own ``runtime``
+section must still supply its own non-empty ``model.path``.
 Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml

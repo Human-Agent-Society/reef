@@ -66,14 +66,23 @@ serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 s
 
 ## Keep a deployment running
 
-Set `model.path` in [deployment.yaml](configs/deployment.yaml) to your provider's model
-name. From the repository root, after the source installation and with `pi` on PATH:
+Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
+[deployment.yaml](configs/deployment.yaml) uses the same variable for serving and
+evaluation. From the repository root, after the source installation and with `pi`
+on PATH, replace the model ID and API key below with your provider's values:
 
 ```bash
 export REEF_UPSTREAM_URL="https://api.openai.com"  # no /v1 suffix
+export REEF_UPSTREAM_MODEL="REPLACE_WITH_YOUR_PROVIDER_MODEL_ID"
 export REEF_UPSTREAM_API_KEY="your-openai-api-key"
 reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 ```
+
+Use the exact model ID accepted by your provider, not the placeholder above.
+An unset or empty `REEF_UPSTREAM_MODEL` is reported at startup.
+The deployment resolves this variable in `reef.upstream_model`. The recipe
+omits `model.path` and uses the resolved runtime's model; recipe YAML loading
+does not read environment variables or expand `${...}` references.
 
 Use your provider's API key, or omit it for a local endpoint without authentication.
 `deployment.yaml` keeps Reef running until interrupted. It contains both the
@@ -88,6 +97,11 @@ Install a harness from this service and submit feedback as shown in the
 [root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s
 tasks and `harness/evolution.py`'s proposer and grader for your workload before
 starting the deployment.
+
+If you already installed the harness with the placeholder model, set `REEF_UPSTREAM_MODEL`,
+stop and restart `reef serve`, then rerun the harness install command from the root
+README before retrying `reef-pi`. Installation writes the model ID into the local
+harness configuration.
 
 ## Notebook
 
