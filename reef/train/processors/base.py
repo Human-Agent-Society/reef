@@ -8,7 +8,7 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
@@ -103,6 +103,8 @@ class DataProcessor:
                 f"{type(self).__name__} does not implement training_mode={context.training_mode!r}"
             )
         self._context = context
+        self._used_training_modes = {context.training_mode}
+        self._pending_mode = context.training_mode
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -128,6 +130,19 @@ class DataProcessor:
         """The mode whose ingest, readiness, assembly and retention this processor implements."""
         return self._context.training_mode
 
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches; an existing reservation keeps its original mode.
+
+        Call under the trainer lock. Mode-owned buffers stay on this instance;
+        switching does not replay or reclassify records already ingested.
+        """
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
+        if training_mode not in self.supported_training_modes:
+            raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
+        self._context = replace(self._context, training_mode=training_mode)
+        self._used_training_modes.add(training_mode)
+
     @property
     def experiment_logger(self) -> ExperimentLogger:
         """The scenario logger shared by its recipe, processor, and backend."""
@@ -138,7 +153,12 @@ class DataProcessor:
 
     def ingest(self, item: AgentRecord) -> None:
         """Dispatch record ingestion to the selected mode on this instance."""
-        if self.training_mode == "auto":
+        if item.request_type is RequestType.TRAIN and "manual" in self.supported_training_modes:
+            # An accepted instruction may still be unread when auto is selected.
+            # Keep it queued for manual mode rather than releasing it as traffic.
+            self._used_training_modes.add("manual")
+            self.ingest_manual(item)
+        elif self.training_mode == "auto":
             self.ingest_auto(item)
         else:
             self.ingest_manual(item)
@@ -178,6 +198,7 @@ class DataProcessor:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
+            self._pending_mode = self.training_mode
             self._pending = (
                 self.build_batch_auto(self._batch_number)
                 if self.training_mode == "auto"
@@ -196,7 +217,7 @@ class DataProcessor:
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed = self.acknowledge_auto() if self.training_mode == "auto" else self.acknowledge_manual()
+        consumed = self.acknowledge_auto() if self._pending_mode == "auto" else self.acknowledge_manual()
         self._pending = None
         return consumed
 
@@ -231,8 +252,14 @@ class DataProcessor:
         return frozenset()
 
     def retention_decision(self) -> RetentionDecision:
-        """Read retention from the mode that owns the records."""
-        return self.retention_decision_auto() if self.training_mode == "auto" else self.retention_decision_manual()
+        """Protect buffers owned by every mode used on this instance."""
+        protected: set[str] = set()
+        releasable: set[str] = set()
+        for mode in self._used_training_modes:
+            decision = self.retention_decision_auto() if mode == "auto" else self.retention_decision_manual()
+            protected.update(decision.protected_agent_record_ids)
+            releasable.update(decision.releasable_agent_record_ids)
+        return RetentionDecision(frozenset(protected), frozenset(releasable - protected))
 
     def retention_decision_manual(self) -> RetentionDecision:
         """Protect pending manual inputs and release only committed or terminal records."""
@@ -249,9 +276,9 @@ class DataProcessor:
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
-        if self.training_mode == "auto":
+        if "auto" in self._used_training_modes:
             self.compaction_applied_auto(agent_record_ids)
-        else:
+        if "manual" in self._used_training_modes:
             self.compaction_applied_manual(agent_record_ids)
 
     def compaction_applied_auto(self, agent_record_ids: frozenset[str]) -> None:

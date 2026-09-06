@@ -222,7 +222,6 @@ class ScenarioCommitProtocol:
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 snapshot_metadata = snapshot_metadata_for(
-                    configuration=self._binding.configuration,
                     name=self._name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
@@ -362,7 +361,6 @@ class ScenarioCommitProtocol:
                 self._activate(local_artifact)
             if checkpointed:
                 snapshot_metadata = snapshot_metadata_for(
-                    configuration=self._binding.configuration,
                     name=self._name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,

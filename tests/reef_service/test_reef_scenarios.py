@@ -79,7 +79,6 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
 
 
 def test_scenario_snapshot_round_trips() -> None:
-    from reef.scenario.configuration import ScenarioConfig
     from reef.scenario.snapshot import ScenarioSnapshot, parse_snapshot_metadata
 
     scenario = build_default_dispatcher().get_or_create_scenario("math")
@@ -92,7 +91,6 @@ def test_scenario_snapshot_round_trips() -> None:
     assert "recipe" not in metadata
     assert parse_snapshot_metadata(metadata) == ScenarioSnapshot(
         scenario="math",
-        configuration=ScenarioConfig(scenario.configuration),
         base_artifact=scenario.repository.base_artifact,
         scenario_step=0,
         algorithm_state=None,

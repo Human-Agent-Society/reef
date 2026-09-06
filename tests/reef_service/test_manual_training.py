@@ -486,3 +486,169 @@ def test_manual_harness_requires_explicit_requests_keyword(tmp_path):
     with pytest.raises(RecipeConfigError, match="requests"):
         recipe.build("s", records)
     records.close()
+
+
+@pytest.mark.parametrize("dispatched", [False, True])
+@pytest.mark.parametrize("mode", ["auto", "manual"])
+def test_switch_during_reserved_batch_keeps_original_acknowledgement(mode, dispatched):
+    records, backend = RecordStore(), CaptureBackend(dispatched=dispatched)
+    trainer = build(records, backend, mode=mode)
+    try:
+        records.append(inference("first") if mode == "auto" else instruction("first"))
+        if dispatched:
+            original = trainer.reserve_training_batch()
+        else:
+            result = trainer.run_once()
+            original = trainer.pending_batch
+        target = "manual" if mode == "auto" else "auto"
+        processor = trainer.processor
+        trainer.set_training_mode(target)
+        assert trainer.processor is processor
+        assert trainer.training_mode == target
+        assert trainer.pending_batch is original
+        if dispatched:
+            assert trainer.reserve_training_batch() is original
+            result = trainer.execute_reserved_step(0).result
+        prepared = trainer.prepare_commit(result)
+        assert prepared.consumed_ids == frozenset({"first"})
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        records.append(instruction("next") if target == "manual" else inference("next"))
+        if dispatched:
+            following = trainer.reserve_training_batch()
+        else:
+            assert trainer.run_once(1) is not None
+            following = trainer.pending_batch
+        assert (following.request is not None) == (target == "manual")
+    finally:
+        trainer.close()
+        records.close()
+
+
+def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions():
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, mode="auto", batch_size=2)
+    try:
+        records.append(inference("a"))
+        assert trainer.run_once() is None
+        trainer.set_training_mode("manual")
+        records.append(instruction("change"))
+        # Change back before the accepted instruction has been read.
+        trainer.set_training_mode("auto")
+        assert trainer.run_once() is None
+        records.append(inference("b"))
+        result = trainer.run_once()
+        assert [item.source_agent_record_id for item in backend.batches[-1].samples] == ["a", "b"]
+        prepared = trainer.prepare_commit(result)
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        assert records.get("s", "change") is not None
+        trainer.set_training_mode("manual")
+        result = trainer.run_once(1)
+        assert backend.batches[-1].request.id == "change"
+        prepared = trainer.prepare_commit(result)
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        trainer.set_training_mode("auto")
+        assert trainer.run_once(2) is None
+    finally:
+        trainer.close()
+        records.close()
+
+
+@pytest.mark.parametrize("reads_requests", [False, True])
+def test_http_training_mode_updates_only_existing_supported_processors(tmp_path, reads_requests):
+    def propose(nodes, samples, models, *, requests=()):
+        return None
+
+    recipe = _recipe(tmp_path, propose if reads_requests else lambda n, s, m: None)
+    dispatcher = _dispatcher(tmp_path, recipe)
+    scenario = dispatcher.get_or_create_scenario("s")
+    processor = scenario.trainer.processor
+
+    async def run():
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            url = "/reef/scenarios/s/training-mode"
+            response = await client.post(url, json={"training_mode": "manual"})
+            assert response.status == (200 if reads_requests else 501)
+            if reads_requests:
+                assert await response.json() == {"scenario": "s", "training_mode": "manual"}
+            assert scenario.trainer.training_mode == ("manual" if reads_requests else "auto")
+            assert scenario.trainer.processor is processor
+            for invalid in (
+                {},
+                {"training_mode": "bad"},
+                {"training_mode": []},
+                {"training_mode": "auto", "batch_size": 2},
+            ):
+                response = await client.post(url, json=invalid)
+                assert response.status == 400
+            response = await client.post("/reef/scenarios/missing/training-mode", json={"training_mode": "manual"})
+            assert response.status == 404
+            assert not dispatcher.has_scenario("missing")
+            response = await client.get("/reef/scenarios/s/config")
+            assert response.status == 404
+            response = await client.post(url, json={"training_mode": "auto"})
+            assert response.status == 200
+            assert scenario.trainer.training_mode == "auto"
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_http_mode_change_does_not_wait_for_running_proposer(tmp_path):
+    entered, release = Event(), Event()
+
+    def propose(nodes, samples, models, *, requests=()):
+        entered.set()
+        assert release.wait(5)
+
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="manual"))
+
+    async def run():
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            response = await client.post(
+                "/reef/train", headers={"x-reef-scenario": "s"}, json=instruction("one").payload
+            )
+            assert response.status == 200
+            assert await asyncio.to_thread(entered.wait, 3)
+            response = await asyncio.wait_for(
+                client.post("/reef/scenarios/s/training-mode", json={"training_mode": "auto"}), timeout=2
+            )
+            assert response.status == 200
+            assert not release.is_set()
+            scenario = dispatcher.get_or_create_scenario("s")
+            assert scenario.trainer.training_mode == "auto"
+            assert scenario.trainer.pending_batch.request.text == "one"
+        finally:
+            release.set()
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+        dispatcher.close()
+
+
+def test_mode_selection_resets_to_recipe_default_on_reload(tmp_path):
+    def propose(nodes, samples, models, *, requests=()):
+        return None
+
+    dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, propose))
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        scenario.set_training_mode("manual")
+        assert scenario.trainer.training_mode == "manual"
+        dispatcher._registry.reload("s")
+        assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "auto"
+    finally:
+        dispatcher.close()

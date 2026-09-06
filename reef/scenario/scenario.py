@@ -62,11 +62,6 @@ class Scenario:
         return self._name
 
     @property
-    def configuration(self) -> dict[str, Any]:
-        """The configuration fixed by durable scenario creation."""
-        return self._binding.configuration.to_dict()
-
-    @property
     def runtime(self) -> InferenceRuntime | None:
         """Inference or training runtime bound to this scenario."""
         return self._binding.runtime
@@ -114,6 +109,10 @@ class Scenario:
     def surface(self) -> Surface:
         """The serving surface built for this scenario."""
         return self._surface
+
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches without waiting for a running backend step."""
+        self._trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self) -> TrainStepResult | None:
         """Prepare one local-backend step while excluding rollback and commit."""
@@ -223,7 +222,6 @@ class Scenario:
             name=self.name,
             base_artifact=self.repository.base_artifact,
             scenario_step=self.scenario_step,
-            configuration=self._binding.configuration,
         )
 
 

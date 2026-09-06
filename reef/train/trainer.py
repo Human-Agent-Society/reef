@@ -111,7 +111,6 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
-        self._consumed_ids: set[str] = set()
         self._lock = Lock()
 
     @property
@@ -120,8 +119,13 @@ class Trainer:
 
     @property
     def training_mode(self) -> str:
-        """The mode fixed when this scenario was created."""
+        """The mode selected for subsequent batches."""
         return self._processor.training_mode
+
+    def set_training_mode(self, training_mode: str) -> None:
+        """Serialize mode selection with record ingestion and batch reservation."""
+        with self._lock:
+            self._processor.set_training_mode(training_mode)
 
     @property
     def processor(self) -> DataProcessor:
@@ -359,7 +363,6 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._state = dict(prepared.algorithm_state)
-            self._consumed_ids.update(prepared.consumed_ids)
             self._pending = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
@@ -385,7 +388,7 @@ class Trainer:
             if self._pending is None:
                 return
             batch_id = self._pending.batch_id
-            self._consumed_ids.update(self._processor.acknowledge(batch_id))
+            self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
             self._records.compact(
@@ -395,7 +398,6 @@ class Trainer:
                 receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
             )
             self._processor.compaction_applied(compacted)
-            self._consumed_ids.difference_update(compacted)
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
@@ -405,7 +407,6 @@ class Trainer:
         with self._lock:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
-            self._consumed_ids.difference_update(compacted_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
@@ -455,7 +456,6 @@ class Trainer:
                     if sequence > up_to_sequence:
                         return
                     if item.agent_record_id in consumed_ids:
-                        self._consumed_ids.add(item.agent_record_id)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)

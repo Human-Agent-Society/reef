@@ -18,7 +18,6 @@ from types import MappingProxyType
 from typing import Any
 
 from reef.artifact.artifact import ArtifactRef, decode_artifact_ref, encode_artifact_ref
-from reef.scenario.configuration import ScenarioConfig
 from reef.train.types import PreparedCommit
 
 SCENARIO_SNAPSHOT_METADATA_KEY = "scenario_snapshot"
@@ -78,7 +77,6 @@ class ScenarioSnapshot:
     operation: str | None = None
     rollback_target_release_id: str | None = None
     metrics: Mapping[str, Any] | None = None
-    configuration: ScenarioConfig | None = None
 
 
 def snapshot_metadata_for(
@@ -90,7 +88,6 @@ def snapshot_metadata_for(
     prepared: PreparedCommit | None = None,
     operation: str = "training",
     rollback_target_release_id: str | None = None,
-    configuration: ScenarioConfig | None = None,
 ) -> dict[str, object]:
     if not isinstance(scenario_step, int) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
@@ -101,8 +98,6 @@ def snapshot_metadata_for(
         "base_artifact": encode_artifact_ref(base_artifact),
         "operation": operation,
     }
-    if configuration is not None:
-        metadata["config"] = configuration.to_dict()
     if operation not in ("training", "rollback", "promote"):
         raise ValueError("scenario snapshot operation must be 'training' or 'rollback'")
     if operation in ("rollback", "promote"):
@@ -173,11 +168,7 @@ def parse_snapshot_metadata(value: Mapping[str, Any]) -> ScenarioSnapshot:
             raise ValueError("rollback scenario snapshot cannot carry training_job_id")
     elif rollback_target_release_id is not None:
         raise ValueError("non-rollback scenario snapshot cannot carry rollback_target_release_id")
-    config = value.get("config")
-    if config is not None and not isinstance(config, Mapping):
-        raise ValueError("scenario snapshot config must be an object")
     return ScenarioSnapshot(
-        configuration=None if config is None else ScenarioConfig(config),
         scenario=scenario,
         base_artifact=base_artifact,
         scenario_step=scenario_step,

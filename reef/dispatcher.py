@@ -162,18 +162,22 @@ class Dispatcher:
         *,
         release_id: str | None = None,
         allow_implicit_creation: bool | None = None,
-        config: Mapping[str, Any] | None = None,
     ) -> Scenario | None:
         return self._registry.get_or_create(
             scenario,
             release_id,
             allow_implicit_creation=allow_implicit_creation,
-            config=config,
         )
 
-    def scenario_configuration(self, name: str) -> dict[str, Any]:
-        with self._registry.lock_for(name):
-            return self._registry.require(name).configuration
+    def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
+        with self._registry.lock_for(scenario):
+            current = self._registry.require(scenario)
+            current.set_training_mode(training_mode)
+            if isinstance(current.runtime, TrainingRuntime):
+                self._training.ready.set()
+            elif current.trainer.training_backend is not None:
+                self._start_local_backend_worker(scenario)
+            return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
 from reef.artifact import Artifact
 from reef.core.reports import ReportBase
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import InferenceBackend
-from reef.scenario.configuration import ScenarioConfig
 from reef.surface.base import Surface
 
 
@@ -39,4 +38,3 @@ class ScenarioBinding:
     #: when set, every report on this scenario is parsed through it at
     #: ingress. ``None`` keeps open ingress.
     report_type: type[ReportBase] | None = None
-    configuration: ScenarioConfig = field(default_factory=ScenarioConfig)

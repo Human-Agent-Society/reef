@@ -143,9 +143,9 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "release_id"?, "config"?}``      |
+| ``POST /reef/scenarios``                    | ``{"name", "release_id"?}``                 |
 |                                             | → ``{scenario, release_id,                  |
-|                                             | content_id, config}``; 201 created, 200     |
+|                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario and its current        |
@@ -155,23 +155,31 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
 
-Pass recipe overrides when creating a scenario:
+Training mode
+~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/training-mode`` updates the existing
+data processor's mode:
 
 .. code:: json
 
-   {"name": "agents", "config": {"data": {"training_mode": "manual", "batch_size": 8}}}
+   {"training_mode": "manual"}
 
-``config.data`` accepts settings declared by the deployment's recipe. Omitted
-fields inherit its defaults; unknown fields are rejected. The response
-includes the full resolved ``config``. ``GET /reef/scenarios/{scenario}/config``
-reads the stored creation configuration, returning ``404`` for an unknown
-scenario. Neither endpoint selects a different recipe, model, or runtime.
+HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
+Use ``"auto"`` to resume recipe batching. The change selects subsequent
+batches; a batch already reserved or running completes in its original mode.
+Buffered inputs remain with their mode and are not reclassified. Accepted
+manual instructions wait for manual mode, including instructions not yet read
+when the selector changes to auto.
 
-The configuration is fixed at atomic registration and survives checkpointing
-and restart. Repeating creation with matching or omitted config returns
-``200``; conflicting overrides return ``409`` without modifying the existing
-scenario. Use a new scenario name to choose different settings.
+Unknown scenarios return ``404`` without implicit creation; invalid payloads
+return ``400``. A processor that does not support the requested mode returns
+``501`` without changing its state. Harness manual mode also requires a
+proposer that explicitly accepts ``requests``.
 
+``GET /reef/status`` reports the selected ``training_mode``. This selector
+is runtime state, not persisted scenario configuration: service restart or
+scenario reload uses the recipe's configured mode again.
 
 Inference
 ---------

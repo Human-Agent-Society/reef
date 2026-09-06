@@ -7,10 +7,9 @@ backend updates model weights.
 
 from __future__ import annotations
 
-import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.reports import ReportBase
@@ -50,35 +49,6 @@ class Recipe:
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
-
-    def scenario_config(self) -> dict[str, Any]:
-        data = {name: getattr(self, name) for name in recipe_config_fields(type(self))}
-        # Unbounded score windows are legal recipe defaults. Encode their
-        # scalar spelling rather than non-standard JSON Infinity tokens;
-        # the field's existing parser restores the numeric value on build.
-        return {
-            "data": {
-                name: str(value) if isinstance(value, float) and not math.isfinite(value) else value
-                for name, value in data.items()
-            }
-        }
-
-    def with_scenario_config(self, values: Mapping[str, Any]) -> Recipe:
-        """Apply recipe data overrides while constructing a new scenario."""
-        if (
-            not isinstance(values, Mapping)
-            or set(values) - {"data"}
-            or not isinstance(values.get("data", {}), Mapping)
-        ):
-            raise ValueError("scenario configuration must contain only a data object")
-        data = values.get("data", {})
-        fields = recipe_config_fields(type(self))
-        if unknown := set(data) - set(fields):
-            raise ValueError(f"unknown scenario data fields: {sorted(unknown)}")
-        parsed = {name: fields[name].parse(value, name) for name, value in data.items()}
-        if all(value == getattr(self, name) for name, value in parsed.items()):
-            return self
-        return replace(self, **parsed)
 
     @classmethod
     def from_environment(

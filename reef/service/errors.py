@@ -34,6 +34,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactError, web.HTTPServiceUnavailable),
     (ReefError, web.HTTPBadRequest),
     (ValueError, web.HTTPBadRequest),
+    (NotImplementedError, web.HTTPNotImplemented),
 )
 
 

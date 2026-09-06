@@ -492,9 +492,15 @@ class CordisRecipe(Recipe):
             scenario,
             records,
             processor_factory=lambda context: (
-                RecordDrivenTraceProcessor(context.with_config({"batch_size": self.batch_size}))
-                if self.batch_policy == "records"
-                else CordisProcessor(context.with_config({"batch_size": self.batch_size, "max_score": self.max_score}))
+                RecordDrivenTraceProcessor if self.batch_policy == "records" else CordisProcessor
+            )(
+                context.with_config(
+                    {
+                        "batch_size": self.batch_size,
+                        "max_score": self.max_score,
+                        "manual_enabled": self.propose.reads_requests,
+                    }
+                )
             ),
             training_backend=training_backend,
             candidate_evaluator=DefaultCandidateEvaluationPlugin(training_backend, self.candidate_selector),
@@ -503,9 +509,3 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
         )
-
-    def with_scenario_config(self, values: Mapping[str, Any]) -> Recipe:
-        recipe = super().with_scenario_config(values)
-        if recipe.training_mode == "manual" and not self.propose.reads_requests:
-            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
-        return recipe

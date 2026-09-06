@@ -27,6 +27,8 @@ class ManualTrainingProcessor(DataProcessor, ABC):
     supported_training_modes = frozenset({"manual"})
 
     def __init__(self, context: ProcessorContext) -> None:
+        if not context.config.get("manual_enabled", True):
+            self.supported_training_modes = self.supported_training_modes - {"manual"}
         super().__init__(context)
         self._manual_audit_ids: set[str] = set()
         self._manual_requests: dict[str, AgentRecord] = {}

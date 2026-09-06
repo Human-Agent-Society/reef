@@ -76,7 +76,7 @@ ingested or a backend step runs. An unknown mode name is a ``ValueError``.
            ...  # Return the manual training batch with batch.request attached.
 
 The shared ``ingest``, ``ready`` and ``build_batch`` entry points dispatch to
-these methods using the instance's configuration snapshot. ``build_batch``
+these methods using the instance's selected training mode. ``build_batch``
 caches the selected batch until acknowledgement, so repeated reservations do
 not rebuild it. There is no mapping to another processor class or instance.
 
@@ -112,24 +112,21 @@ returns an empty ``TraceBatch``. Other processors can reuse this engine or
 implement their own manual lifecycle. No batch assembly method may call
 models or perform training; that remains the backend's responsibility.
 
-Scenario creation configuration
--------------------------------
+Changing training mode
+----------------------
 
-``POST /reef/scenarios`` accepts ``config.data`` overrides for the served
-recipe's declared ``config_field`` settings. ``Recipe.with_scenario_config``
-parses and validates these values before registration. A recipe can extend
-that hook for additional construction-time constraints.
+``POST /reef/scenarios/{scenario}/training-mode`` selects ``auto`` or
+``manual`` on the existing processor through ``set_training_mode``.
+The trainer serializes this operation with ingestion and reservation.
+A reserved batch retains its original acknowledgement mode, so changing
+mode does not interrupt a running step.
 
-The resulting configuration is fixed at creation. The processor receives its
-mode and input settings through the recipe's normal ``build`` path; it has no
-runtime reconfiguration hook. One immutable ``ScenarioConfig`` belongs to the
-scenario binding and supplies HTTP inspection and checkpoint metadata.
-Recovery reconstructs the recipe from that stored configuration even when the
-deployment's defaults have changed. A conflicting repeat creation returns
-``409``; use a new scenario name for a different configuration.
-
-See ``test_scenario_configuration.py`` for creation, recovery, and conflict
-contracts.
+Mode-owned buffers stay on the same instance. Already ingested records are
+not replayed into another mode; switching back resumes that mode's buffers.
+Retention protects inputs held by either mode, and accepted TRAIN records
+remain queued for manual mode even if auto is selected before ingestion.
+The selector is runtime state: rebuilding a scenario uses the recipe's
+configured default again.
 
 The two feedback paths
 ----------------------

@@ -9,7 +9,7 @@ resolution and uses the registry for lookups.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
@@ -132,7 +132,6 @@ class ScenarioRegistry:
         release_id: str | None = None,
         *,
         allow_implicit_creation: bool | None = None,
-        config: Mapping[str, Any] | None = None,
     ) -> Scenario | None:
         """Resolve a scenario, creating it when allowed.
 
@@ -145,7 +144,7 @@ class ScenarioRegistry:
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, release_id, config=config)
+            return self._resolve(scenario, release_id)
 
     def require(self, scenario: str) -> Scenario:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
@@ -201,15 +200,13 @@ class ScenarioRegistry:
         self,
         scenario: str,
         release_id: str | None,
-        *,
-        config: Mapping[str, Any] | None = None,
     ) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id, config)
+            self._scenario_factory.validate_existing(current, release_id)
             return current
-        current = self._scenario_factory.load_or_create(scenario, release_id, config=config)
+        current = self._scenario_factory.load_or_create(scenario, release_id)
         runtime = current.runtime
         training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
         with self._lock:

@@ -130,27 +130,11 @@ inference-only recipe does not create a training backend.
      training_mode: manual
 
 The mode controls training initiation, independently of
-``evolution.publish: auto | review``. It is fixed when a scenario is created.
-
-Scenario creation configuration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``POST /reef/scenarios`` accepts a ``config`` object with recipe ``data``
-overrides, such as ``training_mode``, ``batch_size`` and other fields declared
-by the selected recipe. Unspecified fields inherit deployment defaults;
-unknown fields or invalid values are rejected. For example:
-
-.. code:: json
-
-   {"name": "agents", "config": {"data": {"training_mode": "manual", "batch_size": 8}}}
-
-The full resolved data configuration is stored with scenario registration and
-preserved in checkpoints. Existing scenarios keep their creation settings on
-restart. ``GET /reef/scenarios/{scenario}/config`` returns those settings.
-A repeat creation with compatible settings is idempotent; conflicting settings
-return ``409``. There is no scenario configuration update API. Create a new
-scenario to select different settings. Unbounded numeric defaults are encoded
-as JSON strings such as ``"inf"``.
+``evolution.publish: auto | review``. It supplies the initial processor mode.
+Use ``POST /reef/scenarios/{scenario}/training-mode`` to select another mode
+at runtime. This changes subsequent batches; a reserved batch completes under
+its original mode. Mode changes are not persisted, and rebuilding the scenario
+uses the recipe's configured mode again.
 
 A recipe is selected three ways:
 
