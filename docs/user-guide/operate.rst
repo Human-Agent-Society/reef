@@ -61,6 +61,24 @@ A harness scenario keeps the proposals its agents sent through ``POST /reef/harn
 
 The commit that settled a proposal carries ``proposal: {id, session, release_id}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. A step takes the oldest pending proposal before it asks the method's own ``propose``; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
 
+Read what a release requires
+----------------------------
+
+A request sent to ``POST /reef/train`` may name what its change needs from the person's machine, and the commit that answered it carries ``training_request.requires`` (``{name, kind, check}`` items; ``kind`` is ``permission``, ``env`` or ``service``; the method may have added items of its own), so ``GET /reef/harness/releases`` and ``GET /reef/harness`` say what a release needs before anyone installs it. A releases row carries its own step's list; the manifest's ``requires`` is the union over the release's chain (a promote continues at the release it promoted), the newest definition of a name winning, so a release whose request named nothing still needs what an earlier one added. On the person's machine the ``.reef-harness-release`` sidecar the install script writes beside the tree carries two keys for it:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - Key
+     - Meaning
+   * - ``requires``
+     - what the installed release needs over its whole chain, as its manifest carried it
+   * - ``setup``
+     - the check offs ``reef-<adapter> setup`` recorded, ``{name, checked_at, check}`` each, carried over from the previous sidecar by name, so a check off survives every later install through the script (the stdlib client's pull writes its own sidecar, without them); an item whose check is not the recorded one counts as unmet, and ``setup`` runs it again
+
+The install script refuses a release with an item ``setup`` does not meet: it prints the setup list and the newest release in the chain that requires nothing, the one that installs on a machine with nothing set up (``?release_id=<id>``; install it, run ``reef-<adapter> setup`` for the head's list, then install the head), and exits 1 before it installs the binary or makes a directory. ``reef-<adapter> setup`` is the only thing that runs a check, after the person read it and confirmed; ``reef-<adapter> setup --mark <name>`` records a check off by hand, and ``reef-<adapter> setup --release <id>`` checks off a pending release's items before its promote and install. A sidecar the stdlib client pull or an older install wrote carries neither key, which reads as nothing required and nothing checked off.
+
 Pin a version
 -------------
 

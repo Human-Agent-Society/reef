@@ -97,6 +97,31 @@ originating ``session`` and ``release_id``. The latter two are provenance,
 not a request to restore an old release. The backend operates on the
 current committed state. The API requires no inference receipts or score.
 
+A request may also carry ``requires``: what the change needs from the
+person's machine, at most 8 ``{name, kind, check}`` items, default none.
+``kind`` is ``permission`` (an OS permission the person grants), ``env``
+(a variable the person sets; the extension reads it from the environment,
+and its value never enters a request or the tree) or ``service`` (an
+account or endpoint the person connects). ``name`` matches the entry name
+pattern and is what a check off is recorded under. ``check`` is optional:
+the variable name for ``env``; for ``permission`` and ``service`` a shell
+command whose exit status zero means satisfied. For ``env`` the variable
+named (the check, else the name) is a shell identifier,
+``^[A-Za-z_][A-Za-z0-9_]*$``. The credential and directive screens run
+over every ``name`` and ``check`` as they run over ``text``, with the same
+HTTP 400 and a reason that names the rule; a malformed list is HTTP 400
+naming the first bad item. The method's ``propose`` may add items of its
+own to the mapping it received (an extension that reads a variable, say);
+the backend merges them by name into the commit's
+``training_request.requires`` after the same screens (a bad item of the
+method's is dropped alone, named in the service log), the person's items
+first and the list capped at 8 with the dropped items named in the service
+log, so the releases row and the manifest carry what the person named and
+what the change added. Nothing on the service runs a check:
+``reef-<adapter> setup`` runs one after the person read it and confirmed,
+the install script only reads the check offs, and the update notice prints
+the setup list instead of the update while an item is unmet.
+
 The three modes differ in what starts a step. ``auto``, the default,
 batches on traffic and refuses an instruction with HTTP 400. ``manual``
 runs instructions only and never batches on traffic; harness evolution
@@ -135,8 +160,15 @@ instruction queue also report ``buffered_requests`` (requests already
 read into the processor; later records may still wait in storage) and
 ``pending_instructions`` (accepted instructions not yet consumed: the
 buffered ones plus those still unread in storage).
-Committed step metrics include ``training_request``
-with the instruction id, text, session and release id.
+Committed step metrics include ``training_request`` with the instruction
+id, text, session, release id and ``requires``; the releases row of a step
+that answered a request carries, for example:
+
+.. code:: json
+
+   {"training_request": {"id": "change-001", "text": "Text me when the run is blocked",
+                         "session": "session-1", "release_id": "release-1",
+                         "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}]}}
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -363,8 +395,8 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 | Route                          | Response                                                      |
 +================================+===============================================================+
-| ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files, gate}``, |
-|                                | plus an ``x-reef-release-id`` response header                 |
+| ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files, gate,    |
+|                                | requires}``, plus an ``x-reef-release-id`` response header    |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
 |                                | carrying the gate metrics of the step that published it       |
@@ -397,6 +429,27 @@ process mounts that list entry by entry; an older ``reef-native`` ignores the
 file and reads the rendered files as before. ``pi`` declares none: a pi
 release is its rendered files, and the entries stay in the commit log, where
 the proposals route and the evolve step read them.
+
+``requires`` is what the release needs from the person who installs it:
+every ``training_request.requires`` item (`Manual training
+<#manual-training>`__ gives the shape) over the release's chain, merged by
+name with the newest definition winning, since a request's items are per
+release and a later release whose request named nothing still carries the
+extension an earlier one added. The chain follows ``parent_release_id``
+through the catalog, a promote or rollback row continuing at the release it
+copied; a releases row carries its own step's list alone. The install
+script embeds the list (the union of a chain is not bounded by one
+request's cap of 8) and refuses, before it installs the binary or makes a
+directory, while an item is not checked off in the ``.reef-harness-release``
+sidecar on disk: it prints the setup list and the newest release in the
+chain that requires nothing, the one that installs on a machine with
+nothing set up (``?release_id=<id>``), and exits 1. ``reef-<adapter> setup``
+records the check offs; ``--release <id>`` names a pending release so its
+items are checked off before its promote. The sidecar the script writes
+carries ``requires`` (the list) and ``setup`` (the check offs, ``{name,
+checked_at, check}``, carried over from the previous sidecar by name; an
+item whose check is not the recorded one counts as unmet); a sidecar the
+stdlib client pull wrote carries neither, which reads as nothing required.
 
 Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
@@ -479,7 +532,8 @@ that error and leave mode switching to the caller.
 The existing trainer delivers the request to a proposer that explicitly
 accepts ``requests``, then evaluates and publishes under the same policy as
 automatic evolution. Its commit metrics carry ``training_request:
-{id, text, session, release_id}``, visible through the release catalog.
+{id, text, session, release_id, requires}``, visible through the release
+catalog.
 
 Rollback
 ~~~~~~~~

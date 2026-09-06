@@ -47,6 +47,9 @@ API_SKILL_NAME = "reef-pi-extension-api"
 #: How much of each entry's body the request prompt shows: enough to recognize it, never the whole tree.
 _PREVIEW_CHARS = 240
 
+#: What a change may ask of the user's machine: an OS permission, a variable the extension reads, a service.
+REQUIRE_KINDS = ("permission", "env", "service")
+
 #: The prompt that answers a person's request. Braces doubled where the JSON shapes need them literally.
 REQUEST_PROMPT = (
     "You are changing your own coding agent harness because its user asked for a change. "
@@ -69,7 +72,14 @@ REQUEST_PROMPT = (
     "Respond with a JSON array of one or more objects and nothing else, each of the form:\n"
     '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}}\n'
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
-    "The id of a named kind must equal its config name."
+    "The id of a named kind must equal its config name.\n"
+    "When the change needs something only the user can set up on their machine, add one more "
+    'object to the array: {{"requires": [{{"name": "<name>", "kind": "<kind>", "check": "<check>"}}]}}. '
+    "kind is permission (an OS permission the user grants; check is a shell command that exits 0 "
+    "once granted), env (a variable the extension reads from process.env; name and check are the "
+    "variable name; never write its value anywhere) or service (an account or endpoint the user "
+    "connects; check is a shell command that exits 0 once connected). Omit the object when the "
+    "change needs nothing."
 )
 
 #: The prompt section carrying the failures a step in training_mode hybrid hands over beside the request.
@@ -137,7 +147,11 @@ def propose(nodes, samples, models, *, requests=()):
 
 
 def _answer_request(nodes, request, samples, models):
-    """The mutations the served model writes for one request: any of ``REQUEST_KINDS``, reserved ids dropped."""
+    """The mutations the served model writes for one request: any of ``REQUEST_KINDS``, reserved ids dropped.
+
+    A ``{"requires": [...]}`` object beside the entries is what the change
+    needs from the user's machine; its items are appended to the request
+    mapping's ``requires``, where the backend reads them back."""
     from reef.harness.tree.nodes import RESERVED_ENTRY_IDS  # lazy: keeps run.py reef-free
     from reef.train.cordis_backend import Mutation, untrusted_text
 
@@ -169,7 +183,13 @@ def _answer_request(nodes, request, samples, models):
         # invisible here (nodes carry no ids), so a rules change is always a new entry.
         op = "update" if (kind, entry_id) in named else "create"
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
-    return mutations or None
+    if not mutations:
+        return None
+    added = _parse_requires(reply)
+    # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
+    if added and isinstance(request, dict):
+        request["requires"] = [*list(request.get("requires") or ()), *added]
+    return mutations
 
 
 def _without_reefs_own(proposals):
@@ -227,10 +247,34 @@ def grade_text(task: str, text: str | None) -> float:
 def _parse_proposal(reply: str, kinds=("skill",)):
     """The strict proposal objects dug out of the model's text, as (entry id, kind, config) triples in reply
     order; ``None`` when the reply carries no usable proposal of one of ``kinds``."""
-    parsed = _json_in(reply)
-    items = parsed if isinstance(parsed, list) else [parsed]
-    proposals = [triple for triple in (_parse_entry(item, kinds) for item in items) if triple is not None]
+    proposals = [triple for triple in (_parse_entry(item, kinds) for item in _items_in(reply)) if triple is not None]
     return proposals or None
+
+
+def _parse_requires(reply: str):
+    """The ``{name, kind, check?}`` items of every ``{"requires": [...]}`` object in the reply, malformed ones dropped."""
+    items = []
+    for value in _items_in(reply):
+        if not isinstance(value, dict) or not isinstance(value.get("requires"), list):
+            continue
+        for item in value["requires"]:
+            if not isinstance(item, dict) or item.get("kind") not in REQUIRE_KINDS:
+                continue
+            name, check = item.get("name"), item.get("check")
+            if not isinstance(name, str) or not _ENTRY_NAME.fullmatch(name):
+                continue
+            if check is not None and (not isinstance(check, str) or not check.strip()):
+                continue
+            items.append({"name": name, "kind": item["kind"], **({} if check is None else {"check": check})})
+    return items
+
+
+def _items_in(reply: str):
+    """The objects of the reply's JSON array, or the one object it holds; empty when nothing parses."""
+    parsed = _json_in(reply)
+    if parsed is None:
+        return []
+    return parsed if isinstance(parsed, list) else [parsed]
 
 
 def _json_in(reply: str):

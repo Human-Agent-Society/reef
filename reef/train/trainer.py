@@ -391,7 +391,8 @@ class Trainer:
             metrics = dict(result.metrics)
             request = self._pending.batch.request
             if request is not None:
-                metrics["training_request"] = {"id": request.id, **request.to_dict()}
+                # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.
+                metrics.setdefault("training_request", {"id": request.id, **request.to_dict()})
             prepared = PreparedCommit(
                 algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
