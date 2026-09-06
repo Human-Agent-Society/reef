@@ -305,6 +305,40 @@ def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatc
 
 
 @pytest.mark.unit
+def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypatch, tmp_path) -> None:
+    module = tmp_path / "demo_evolution.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+
+    dispatcher = deploy.build_dispatcher(
+        _settings(
+            recipe="reef.train.cordis_backend.recipe:CordisRecipe",
+            recipe_settings={
+                "evolution": {
+                    "propose": "demo_evolution:propose",
+                    "evaluate": "demo_evolution:evaluate",
+                    "tasks": ["task one"],
+                    "adapter": "pi",
+                }
+            },
+            agent_record_dir=str(tmp_path / "agent-record"),
+        ),
+        environ={},
+    )
+
+    recipe = dispatcher._recipe
+    assert recipe.adapter == "pi"
+    assert recipe.tasks == ("task one",)
+
+
+@pytest.mark.unit
 def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) -> None:
     captured = {}
 
