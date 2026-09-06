@@ -39,6 +39,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/update``      | update the scenario training mode                 |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``     | what this scenario accepts                        |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/releases``     | ``{scenario, releases}``, newest first            |
