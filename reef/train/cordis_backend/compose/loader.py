@@ -10,7 +10,9 @@ effect of the loader's fiber, so tree teardown is plain LIFO replay), and a
 changed one patches its context and reconfigures through ``fiber.update``,
 restarting only the affected subtree. The live state also writes back: a
 config update or self-disposal of a tracked fiber lands in its entry's
-options, keeping the desired tree the single source of truth.
+options, keeping the desired tree the single source of truth. The loader
+owns the option dicts it is given and writes those live changes into them;
+to change an entry pass a new dict, never edit one the loader already holds.
 
 Plugins are named: the loader maps an entry's ``name`` to a plugin through
 the resolver callable given at construction, and the tree lives in memory.
@@ -128,12 +130,13 @@ class Entry:
         """Reconcile new options: dispose when disabled, patch and
         reconfigure when live and changed, load when not yet live.
 
-        In non-create mode a None value deletes its key; ``create`` replaces
-        the options wholesale.
+        In non-create mode a None value deletes its key; ``create`` adopts
+        the given options object wholesale.
         """
         legacy = dict(self.options)
         if create:
-            self.options = dict(options)
+            # The group's row and the entry's options must be one object: unlink finds the row by identity.
+            self.options = options
         else:
             for key, value in options.items():
                 if value is None:

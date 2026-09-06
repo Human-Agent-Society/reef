@@ -79,7 +79,8 @@ def test_every_kind_installs_into_the_host_and_leaves_nothing_when_the_entry_lea
     host, loader = _live(tmp_path)
     loader.root.update(
         [
-            *SEED_NODES,
+            # The loader owns its rows and marks a removed one disabled; the seed constants must stay clean.
+            *(dict(entry) for entry in SEED_NODES),
             _entry("r1", "rules", text="Be brief."),
             _entry("s1", "skill", name="tidy", text="Keep files tidy.\n"),
             _entry("helper", "native_agent", name="helper", prompt="You check answers."),

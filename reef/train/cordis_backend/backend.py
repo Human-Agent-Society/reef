@@ -8,6 +8,7 @@ can import the backend without an import cycle.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import tempfile
@@ -389,7 +390,6 @@ def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
     else:
         _resolve(loader, mutation.id)
         loader.remove(mutation.id)
-        loader.root.data[:] = [options for options in loader.root.data if str(options.get("id")) != mutation.id]
 
 
 def admit_mutations(
@@ -1023,7 +1023,8 @@ class CordisBackend(TrainingBackend):
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
-            self._loader.root.update(entries)
+            # The loader writes live changes into the rows it holds, config included; the returned state shares none.
+            self._loader.root.update([copy.deepcopy(entry) for entry in entries])
             # The published tree carries its entries list too, so a resident process can mount it entry by entry.
             published = {**candidate.candidate_files, **tree_files(self._descriptor, entries)}
             artifact = Artifact.local(_write_rendered_files(published))
@@ -1040,7 +1041,7 @@ class CordisBackend(TrainingBackend):
             return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
-        self._loader.root.update(entries)
+        self._loader.root.update([copy.deepcopy(entry) for entry in entries])
         return TrainStepResult({**state, "entries": entries}, metrics)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
