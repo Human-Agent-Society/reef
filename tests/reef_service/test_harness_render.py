@@ -343,6 +343,7 @@ def test_native_render_matches_the_golden_tree() -> None:
     assert rendered == golden_tree("native")
     descriptor = get_adapter("native")
     assert descriptor.tree_path == "native/tree.json" and get_adapter("pi").tree_path is None
+    assert get_adapter("opencode").tree_path is None
     for kind, node in (("agent_command", "summarize"), ("code_extension", "tracer")):
         with pytest.raises(RenderError, match=f"does not render {kind} nodes"):
             render_composition([node_ for node_ in NODES if node_[1].get("name") == node], descriptor)

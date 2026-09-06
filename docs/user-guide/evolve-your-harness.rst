@@ -447,6 +447,45 @@ the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
+You can also ask for a harness change in plain words. The tutorial's
+``deployment.yaml`` runs in ``data.training_mode: hybrid``, so an ask needs
+no mode switch there; a scenario in ``auto`` takes asks after a switch to
+``hybrid`` or ``manual``:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"training_mode": "hybrid"}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
+   reef-pi harness "run the tests before you report a fix as done"
+
+The wrapper submits to ``POST /reef/train`` with the installed release id
+from the sidecar and the oldest pending session's id, or a fresh session id
+when nothing is spooled. A request can execute without inference receipts;
+captured receipts remain available for a later feedback report. Acceptance
+returns a training record id and does not mean the change has passed the
+gate. To return to failure driven evolution alone, use the same update
+endpoint with ``{"training_mode": "auto"}``. The commands surface an error
+when the scenario is in ``auto``.
+
+With ``evolution.requests: true``, a tree that boots from the seed also
+carries the pi ``/reef-harness <request>`` command, which uses the same manual
+training API with pi's current session id. Recovered trees keep their
+existing entries, as with ``version_check``. The proposer must explicitly
+accept ``requests``. The tutorial's proposer asks the served model for a
+skill, rules entry, command, or extension, using the bundled
+``reef-pi-extension-api`` skill as its extension reference. The native trainer
+owns request persistence, scheduling, retry and acknowledgement, and records
+``training_request: {id, session, release_id, text}`` in commit metrics.
+
+Admission screens the proposed mutations and the gate evaluates them.
+Reef's entries (``reef-version-check``, ``reef-requests``,
+``reef-pi-extension-api``) are reserved ids no proposal may change.
+An evolved extension runs in pi's process with your privileges; use
+``evolution.review_kinds: [code_extension]`` to hold such releases for
+``POST /reef/scenarios/{scenario}/promote`` before installation.
+
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
 name your Reef URL in its ``native/models.json``, and run the wrapper module

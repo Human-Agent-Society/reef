@@ -182,6 +182,7 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | native + graph | Mac mini | ollama | `qwen2.5:7b` | reef-native from the checkout, after #250 |
 | native, serve | Mac mini | ollama | `qwen2.5:7b` | `reef-native serve` from the checkout, #278 with #282 and #284 |
 | native, self | Mac mini | ollama | `qwen2.5:7b` | `reef-native serve --self-tools` from the checkout, after #285 |
+| pi, ask | Mac mini | ollama | `qwen2.5:7b` | pi 0.84.2 through `reef-pi` from the checkout, the deployment config with `requests: true`, #311 |
 
 ### Runs
 
@@ -198,6 +199,8 @@ The loop under measurement is one fresh scenario through `./run.sh` (pi adapter)
 | native, serve | qwen2.5:7b | 1 | 2026-09-06 | #282 + #284 | 0.0 / 0.0 / 0.0 | `update main` (native_graph): a `check` stage | 0.0 / 0.0 / 0.0 | 0.0 / 1.0 / 0.0 | 1 / 0 / 2 | published, mounted [11] | 320 [12] |
 | native, self | qwen2.5:7b | 1 | 2026-09-06 | #285 | 0.0 [13] | `create answer-format`, `create answer-format-rationale` (rules), by the model through `harness_propose` | 0.0 / 0.0 / 0.0 | 0.0 / 1.0 / 1.0 | 2 / 0 / 1 | published, mounted [14] | 124 |
 | native, self | qwen2.5:7b | 2 | 2026-09-06 | #287 | 0.0 [15] | `remove answer-style`, `create answer-style` (skill to rules), by the model after the route refused a kind change | 0.0 / 0.0 / 0.0 | 0.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 113 |
+| pi, ask | qwen2.5:7b | 1 | 2026-09-06 | #311 | one plain turn [16] | none: the request's reply was dropped [17] | - | - | - | skipped | 207 |
+| pi, ask | qwen2.5:7b | 2 | 2026-09-06 | #311 | one plain turn [16] | `create test-first` (skill), by the service proposer from the request | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 1 / 0 / 2 | published `7b91b2ca` | 207 [18] |
 
 One run is one sample and no run was repeated, so the rows carry no spread. Gate episodes are stochastic: the seed tree scored `[sieve]` 1.0 on every recorded pass and 0.0 in four of the five gate episodes on the Mac, because with tools in hand the model runs the sieve and then answers in prose, so the integer is not alone on the last line.
 
@@ -272,6 +275,11 @@ The model name is set in three places, `model.path` and `upstream_model` in the 
 [13] The self form sends one turn, not the three tasks: the model inspected its tree, proposed the two rules through `harness_propose` (admitted at the route) and answered the sieve task `\boxed{95920}`, score 0.0, reported.
 [14] The step claimed the model's proposal (the commit's `proposal` names its id and session), the process mounted the release within one second of the commit, and the sieve task ran again on the 9 entry tree with the model's rules in its prompt: stages entered think, act, think, done, answer `\boxed{9657}`, score 0.0. The gate's win and the served turn's miss are both on the record. Launch to verdict is the first turn's start to the commit.
 [15] `./run.sh self` as shipped. The model's first proposal updated the `answer-style` skill into a `rules` entry; the route refused it under the kind rule and said why (remove the entry and create it under the new kind); the model read the reason and proposed the remove plus create pair, admitted. Its own answer put the right number in a sentence, score 0.0. The gate tied all three tasks (both sides 0.0) and rejected; the settled proposal file carries the verdict, and the replay page shows the rejected step beside the seed.
+[16] Historical run on #311 before its rebase onto native auto/manual training: `reef-pi -p "Reply with the single word ready."` for one session, so its receipt spools, then `reef-pi harness "add a skill named test-first that tells you to run the project's tests before you answer any coding question"`, which files the request and reports that receipt with score 0; the step reads the request beside the trace and the service proposer writes the change. The recorded pass is the one turn, not the three tasks.
+[17] The model answered the request prompt with a well formed `test-first` skill whose config omitted the name the entry id carries, and the parser refused a named kind without it; the step recorded `skipped: no proposal` and the request settled `skipped`. The parser now takes the entry id as the name.
+[18] The same request on the fixed parser: the proposer took 15 s, the candidate won the sieve task and tied the other two, the release published and the request settled `selected`; the commit's `request` names its id, session and text. Launch to verdict is from the ask to the commit, in 5 s polls.
+
+The current ask command uses `POST /reef/train`, which `deployment.yaml` takes in `data.training_mode: hybrid` (`manual` takes it too; `auto` refuses it, and `POST /reef/scenarios/{scenario}/update` switches a running scenario). It needs no inference receipts and leaves the feedback spool intact; commits use `training_request` metrics. Runs [16] to [18] describe the earlier request-store implementation and have not been repeated against this path.
 
 ### Known limitations
 

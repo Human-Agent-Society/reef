@@ -332,7 +332,9 @@ declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
 file: the release's entries list, the same ``{id, name, config}`` objects the
 commit log persists, as one JSON array. A resident ``reef-native serve``
 process mounts that list entry by entry; an older ``reef-native`` ignores the
-file and reads the rendered files as before.
+file and reads the rendered files as before. ``pi`` declares none: a pi
+release is its rendered files, and the entries stay in the commit log, where
+the proposals route and the evolve step read them.
 
 Use ``?release_id=`` on the manifest or install route to request a specific
 catalog release. An unknown or unrestorable release returns HTTP 404.
@@ -378,13 +380,17 @@ The service admits the mutations against the head release's entries with the
 rules every mutation meets (a create on an existing id, an update on a missing
 id or one that changes the entry's kind, a remove on a missing id, a config the
 kind's admission refuses, a kind the adapter does not render, a tree that does
-not render) and answers ``{proposal_id, admitted, reason, release_id}``:
+not render, any op on one of reef's own entries: ``reef-version-check``,
+``reef-requests`` and ``reef-pi-extension-api`` are reserved ids) and answers
+``{proposal_id, admitted, reason, release_id}``:
 ``reason`` is the rule that refused, else ``null``; ``release_id`` is the head
 the proposal was admitted against. An admitted proposal waits in the
 scenario's inbox (``evolution.proposals_dir``) until the next evolve step takes
 it, oldest first, before the method's own ``propose`` is asked; the step admits
 it again against its own entries, since the head may have moved, and the gate
-settles it like any mutation. When ``evolution.max_pending_proposals`` already
+settles it like any mutation. The commit that settles it carries ``proposal:
+{id, session, release_id, reason}`` in its metrics, and the releases row
+carries that commit. When ``evolution.max_pending_proposals`` already
 wait, the answer is ``admitted: false`` with reason ``inbox full``; on a
 scenario in ``data.training_mode: manual`` it is ``admitted: false`` with
 reason ``manual mode takes instructions only``, since no automatic step runs
@@ -393,6 +399,25 @@ body is HTTP 400; a scenario whose recipe is not a harness evolution recipe is
 HTTP 404 naming that. `Operate a deployment
 <../user-guide/operate.rst#read-the-proposal-inbox>`__ describes the inbox
 directories.
+
+Harness requests
+~~~~~~~~~~~~~~~~
+
+``reef-<adapter> harness "<request>"`` and pi's ``/reef-harness <request>``
+submit the user's instruction through ``POST /reef/train``, described under
+`Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
+(the deployment keeps learning from failures) or ``manual``, or switch an
+existing scenario with ``POST /reef/scenarios/{scenario}/update``.
+The commands send ``text``, ``session`` and the installed ``release_id``;
+HTTP 200 acknowledges durable acceptance and returns ``agent_record_id``.
+They require no inference receipts and leave captured receipts available for
+feedback. A scenario in ``auto`` refuses the request; the commands surface
+that error and leave mode switching to the caller.
+
+The existing trainer delivers the request to a proposer that explicitly
+accepts ``requests``, then evaluates and publishes under the same policy as
+automatic evolution. Its commit metrics carry ``training_request:
+{id, text, session, release_id}``, visible through the release catalog.
 
 Rollback
 ~~~~~~~~

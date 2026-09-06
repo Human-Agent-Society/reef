@@ -18,6 +18,13 @@ When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."
      (one trajectory sample), or one report per receipt with ``--per-receipt``.
   3. Clears the persisted receipts.
 
+When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are blocked"``):
+
+  Sends an explicit manual training instruction to ``POST /reef/train`` with
+  the installed release and the oldest pending session's id (or a fresh id
+  when nothing is spooled). The scenario must use ``training_mode: manual``.
+  Acceptance queues a step without inference receipts or a feedback report.
+
 Env vars (baked into the wrapper at install time):
 
   ``REEF_HARNESS_BINARY``    absolute path to the agent binary
@@ -378,6 +385,12 @@ class _TaggedStore(CaptureStore):
             turns, self._tagged = self._tagged, []
             return turns
 
+    def clear(self) -> int:
+        # An agent that reported its receipts clears the proxy; the list a publish drains must go with them.
+        with self._guard:
+            self._tagged = []
+            return super().clear()
+
 
 def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObserver) -> type[BaseHTTPRequestHandler]:
     class Handler(base):  # type: ignore[valid-type,misc]
@@ -475,9 +488,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     upstream = _strip_v1(reef_url)
 
     release = _installed_release(compose_dir)
-    proxy = CaptureProxy(
-        upstream, scenario, os.environ.get("REEF_TOKEN"), tags={"release": release} if release else {}
-    )
+    # Every call carries the session as a tag, so the spool and the agent records name the session an ask refers to.
+    tags = {"session": str(uuid.uuid4()), **({"release": release} if release else {})}
+    proxy = CaptureProxy(upstream, scenario, os.environ.get("REEF_TOKEN"), tags=tags)
     try:
         proxy.start()
     except WrapperError as exc:
@@ -508,6 +521,15 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
 def _reportable(turn: Mapping[str, Any]) -> bool:
     """A captured exchange with a receipt that was not a trial's: a trial never reaches the gate."""
     return bool(turn.get("receipt")) and "trial" not in (turn.get("tags") or {})
+
+
+def _reef_headers(scenario: str) -> dict[str, str]:
+    """Scenario and authentication headers for Reef's record routes."""
+    headers = {"Content-Type": "application/json", "x-reef-scenario": scenario}
+    token = os.environ.get("REEF_TOKEN")
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    return headers
 
 
 def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt: bool = False) -> None:
@@ -577,6 +599,72 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
     print(f"reef-{adapter}: reported {len(receipts)} receipt(s) to {scenario} ({mode})")
 
 
+def _spooled_session(scenario: str) -> str | None:
+    """Read session provenance without claiming or consuming feedback receipts."""
+    directory = _captures_dir()
+    paths = [directory / f"{scenario}.json", *sorted(directory.glob(f"{_scenario_key(scenario)}-*.pending.json"))]
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("turns"), list):
+            continue
+        for turn in data["turns"]:
+            if not isinstance(turn, dict):
+                continue
+            tags = turn.get("tags")
+            session = (tags.get("session") if isinstance(tags, dict) else None) or turn.get("session_id")
+            if isinstance(session, str) and session:
+                return session
+    return None
+
+
+def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
+    """Submit a native manual training request, leaving feedback receipts available."""
+    text = text.strip()
+    if not text:
+        sys.exit(f"reef-{adapter} harness: the request is empty")
+    release = _installed_release(compose_dir)
+    if release is None:
+        sys.exit(
+            f"reef-{adapter}: no {HARNESS_RELEASE_SIDECAR} sidecar at {Path(compose_dir).resolve().parent}: this "
+            "tree did not come through reef's install channel, so a request cannot name the release it runs; "
+            "nothing was sent"
+        )
+    try:
+        reef_url = _extract_reef_url(adapter, Path(compose_dir))
+    except WrapperError as exc:
+        sys.exit(f"reef-{adapter}: {exc}")
+    if reef_url is None:
+        sys.exit(f"reef-{adapter}: no Reef URL in the tree's model binding files")
+    upstream = _strip_v1(reef_url)
+
+    # Session and release are provenance; they do not select an inference batch.
+    session = _spooled_session(scenario) or str(uuid.uuid4())
+
+    body = {"text": text, "session": session, "release_id": release}
+    req = urllib.request.Request(
+        f"{upstream}/reef/train",
+        data=json.dumps(body).encode(),
+        headers=_reef_headers(scenario),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            answer = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        sys.exit(f"reef-{adapter}: request failed ({exc.code}): {detail}")
+    except OSError as exc:
+        sys.exit(f"reef-{adapter}: reef unreachable at {upstream}: {exc}")
+    record_id = answer.get("agent_record_id") if isinstance(answer, dict) else None
+    if not isinstance(record_id, str):
+        # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
+        sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
+    print(f"reef-{adapter}: training request {record_id} accepted")
+
+
 def main() -> None:
     binary = os.environ.get("REEF_HARNESS_BINARY")
     compose = os.environ.get("REEF_HARNESS_COMPOSE")
@@ -601,6 +689,11 @@ def main() -> None:
         )
         ns = parser.parse_args(args[1:])
         report(scenario, adapter, ns.score, ns.feedback, per_receipt=ns.per_receipt)
+    elif args and args[0] == "harness":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} harness")
+        parser.add_argument("request", nargs=argparse.REMAINDER, help="what the harness should do, in plain words")
+        ns = parser.parse_args(args[1:])
+        harness(scenario, adapter, compose, " ".join(ns.request))
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 

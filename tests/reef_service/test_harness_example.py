@@ -135,18 +135,117 @@ def test_propose_without_failures_skips_without_calling_the_model(evolution) -> 
 
 def test_propose_answers_a_queued_request_with_the_failures_as_context(evolution) -> None:
     model = canned(proposal("run-tests"))
-    mutation = evolution.propose(NODES, SAMPLES, model, requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, SAMPLES, model, requests=(REQUEST,))
     assert (mutation.op, mutation.id) == ("create", "run-tests")
     assert model.prompt.index(REQUEST["text"]) < model.prompt.index("[fib] compute fib(90)")
-    assert "makes the change the user asked for" in model.prompt
+    assert "gives the user what the request names" in model.prompt
 
 
 def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     model = canned(proposal("answer-style"))
-    mutation = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert (mutation.op, mutation.id) == ("update", "answer-style")
     assert model.calls == 1
-    assert REQUEST["text"] in model.prompt and "Failing requests" not in model.prompt
+    assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
+
+
+API_SKILL = (
+    "skill",
+    {"name": "reef-pi-extension-api", "text": "---\nname: reef-pi-extension-api\n---\n# pi API\npi.registerTool"},
+)
+
+
+def request_reply(*entries: dict) -> str:
+    return json.dumps(list(entries))
+
+
+def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skill_in_its_prompt(evolution) -> None:
+    skill = {"name": "test-first", "text": "---\nname: test-first\ndescription: run tests first\n---\n# test-first\n"}
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    mutations = evolution.propose(
+        (*NODES, ("rules", {"text": "Be brief."}), API_SKILL), (), model, requests=(REQUEST,)
+    )
+    assert model.calls == 1
+    prompt = model.prompt
+    assert REQUEST["text"] in prompt and "[BEGIN user request" in prompt
+    assert '"id": "answer-style"' in prompt and '"body": "# answer-style' in prompt
+    assert '"kind": "rules"' in prompt and '"id": null' in prompt
+    assert "pi.registerTool" in prompt and "reef-pi-extension-api" in prompt
+    for reserved in ("reef-version-check", "reef-requests"):
+        assert reserved in prompt
+    for kind in ("skill", "rules", "agent_command", "code_extension"):
+        assert f"- {kind}:" in prompt
+    assert [(m.op, m.id, m.options) for m in mutations] == [
+        ("create", "test-first", {"name": "skill", "config": skill})
+    ]
+    # Without the API skill in the tree the prompt carries no reference section.
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "pi.registerTool" not in model.prompt and "code_extension" in model.prompt
+
+
+def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
+    code = "export default function (pi) {}\n"
+    reply = request_reply(
+        {"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# updated"}},
+        {"id": "test-first", "name": "rules", "config": {"text": "Run the tests first."}},
+        {"id": "notify", "name": "code_extension", "config": {"name": "notify", "code": code, "extra": 1}},
+        {"id": "review", "name": "agent_command", "config": {"name": "review", "text": "Review the diff."}},
+        {
+            "id": "test-first-skill",
+            "name": "skill",
+            "config": {"text": "--- name: test-first-skill ---\nRun the tests."},
+        },
+    )
+    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,))
+    assert [(m.op, m.id, m.options) for m in mutations] == [
+        ("update", "answer-style", {"name": "skill", "config": {"name": "answer-style", "text": "# updated"}}),
+        ("create", "test-first", {"name": "rules", "config": {"text": "Run the tests first."}}),
+        ("create", "notify", {"name": "code_extension", "config": {"name": "notify", "code": code}}),
+        ("create", "review", {"name": "agent_command", "config": {"name": "review", "text": "Review the diff."}}),
+        # A config that omits the name takes the entry id; that is how the served model writes a skill.
+        (
+            "create",
+            "test-first-skill",
+            {
+                "name": "skill",
+                "config": {"name": "test-first-skill", "text": "--- name: test-first-skill ---\nRun the tests."},
+            },
+        ),
+    ]
+    # One fenced object is a proposal too, and a named kind already in the tree updates by its name.
+    fenced = f"```json\n{json.dumps({'id': 'notify', 'name': 'code_extension', 'config': {'name': 'notify', 'code': code}})}\n```"
+    tree = (*NODES, ("code_extension", {"name": "notify", "code": "old"}))
+    (mutation,) = evolution.propose(tree, (), canned(fenced), requests=(REQUEST,))
+    assert (mutation.op, mutation.id) == ("update", "notify")
+
+
+def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
+    reply = request_reply(
+        {"id": "reef-requests", "name": "code_extension", "config": {"name": "reef-requests", "code": "x"}},
+        {"id": "reef-version-check", "name": "rules", "config": {"text": "x"}},
+        {"id": "notify", "name": "code_extension", "config": {"name": "other", "code": "x"}},
+        {"id": "shout", "name": "native_tool", "config": {"name": "shout", "code": "x"}},
+        {"id": "bad id", "name": "rules", "config": {"text": "x"}},
+        {"id": "empty", "name": "rules", "config": {"text": "  "}},
+        {"id": "ok", "name": "rules", "config": {"text": "ok"}},
+    )
+    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,))
+    assert [(m.op, m.id) for m in mutations] == [("create", "ok")]
+    only_reserved = json.dumps(
+        {"id": "reef-pi-extension-api", "name": "skill", "config": {"name": "reef-pi-extension-api", "text": "x"}}
+    )
+    assert evolution.propose(NODES, (), canned(only_reserved), requests=(REQUEST,)) is None
+    assert evolution.propose(NODES, (), canned("no json here"), requests=(REQUEST,)) is None
+
+
+def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
+    never = Model(failure=AssertionError("no samples, no request, no model call"))
+    assert evolution.propose(NODES, (), never, requests=()) is None and never.calls == 0
+    # The failure path still writes skills only, whatever kinds a request may name.
+    assert evolution.propose(NODES, SAMPLES, canned(proposal("answer-style", name="rules"))) is None
+    down = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
+    assert evolution.propose(NODES, (), down, requests=(REQUEST,)) is None
 
 
 # -- evaluate: exact last-line grading ------------------------------------

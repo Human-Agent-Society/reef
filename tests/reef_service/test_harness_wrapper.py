@@ -1,4 +1,4 @@
-"""End-to-end smoke test for the reef-pi wrapper: run agent → capture receipts → report."""
+"""End-to-end smoke test for the reef-pi wrapper: run agent -> capture receipts -> report."""
 
 from __future__ import annotations
 
@@ -10,12 +10,13 @@ import os
 import shutil
 import textwrap
 import urllib.error
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from reef.harness.client.wrapper import report, run_agent
+from reef.harness.client.wrapper import harness, main, report, run_agent
 
 
 class _Response:
@@ -869,3 +870,259 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
         data = json.loads(captures_file.read_text())
         assert [t["receipt"] for t in data["turns"]] == [receipt_id]
     server.shutdown()
+
+
+# -- reef-<adapter> harness: submit native manual training ---------------------
+
+
+class _FakeReef:
+    """A reef that records every POST: inference answers with a receipt, the request route with ``answer``."""
+
+    def __init__(self, answer: dict, *, status: int = 200, receipt: str = "ask-receipt") -> None:
+        import http.server
+        import threading
+
+        self.seen: list[dict] = []
+        seen = self.seen
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length))
+                seen.append(
+                    {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}
+                )
+                if self.path.startswith("/v1/chat/completions"):
+                    code, payload = 200, {"choices": [{"message": {"content": "ok"}}]}
+                    extra = {"x-reef-agent-record-id": receipt}
+                elif self.path == "/reef/train":
+                    code, payload, extra = status, answer, {}
+                else:
+                    code, payload, extra = 200, {}, {}
+                raw = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                for name, value in extra.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self.port = self._server.server_address[1]
+
+    def posts(self, path: str) -> list[dict]:
+        return [call for call in self.seen if call["path"] == path]
+
+    def close(self) -> None:
+        self._server.shutdown()
+
+
+def _ask_tree(tmp_path: Path, port: int, *, sidecar: bool = True) -> tuple[str, Path]:
+    """A pi composition bound to the reef at ``port``, the release sidecar beside it, and an empty spool directory."""
+    compose = _make_compose(tmp_path, port)
+    if sidecar:
+        (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-3"}), encoding="utf-8")
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    return compose, captures
+
+
+def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(captures), "REEF_HARNESS_COMPOSE": compose, **extra}
+    if "REEF_TOKEN" not in extra:
+        env.pop("REEF_TOKEN", None)
+    return env
+
+
+@pytest.mark.unit
+def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_path, capsys) -> None:
+    """Manual training carries session provenance without fabricating feedback."""
+    reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose, REEF_TOKEN="tok"), clear=True):
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+        harness("ask-scenario", "pi", compose, "text me when you are blocked")
+    reef.close()
+
+    (request,) = reef.posts("/reef/train")
+    assert set(request["body"]) == {"text", "session", "release_id"}
+    assert request["body"]["text"] == "text me when you are blocked"
+    assert request["body"]["release_id"] == "rel-3"
+    # The proxy stamps a session tag on every call, so the request names the session that ran; the spool carries it.
+    session = request["body"]["session"]
+    uuid.UUID(session)
+    (call,) = [seen for seen in reef.seen if seen["path"].startswith("/v1/chat/completions")]
+    assert call["headers"]["x-reef-tag-session"] == session  # the tag rode the model call the session made
+    assert request["headers"]["x-reef-scenario"] == "ask-scenario"
+    assert request["headers"]["authorization"] == "Bearer tok"
+    assert request["headers"]["content-type"] == "application/json"
+    assert not reef.posts("/reef/report")
+    (pending,) = captures.glob("*.pending.json")
+    assert json.loads(pending.read_text())["turns"][0]["receipt"] == "ask-receipt"
+    out = capsys.readouterr().out
+    assert "reef-pi: training request q-1 accepted" in out
+
+
+@pytest.mark.unit
+def test_harness_without_spooled_receipts_submits_training(tmp_path, capsys) -> None:
+    reef = _FakeReef({"agent_record_id": "q-2", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        harness("ask-scenario", "pi", compose, "read papers first")
+    reef.close()
+
+    (request,) = reef.seen
+    assert request["path"] == "/reef/train"
+    assert request["body"]["text"] == "read papers first"
+    assert request["body"]["release_id"] == "rel-3"
+    assert "authorization" not in request["headers"]
+    out = capsys.readouterr().out
+    assert "reef-pi: training request q-2 accepted" in out
+    uuid.UUID(request["body"]["session"])
+
+
+@pytest.mark.unit
+def test_harness_names_the_session_the_spool_recorded(tmp_path) -> None:
+    """A spool entry supplies provenance and remains available for a later report."""
+    reef = _FakeReef({"agent_record_id": "q-3", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    key = hashlib.sha256(b"ask-scenario").hexdigest()
+    spooled = {
+        "reef_url": f"http://127.0.0.1:{reef.port}",
+        "scenario": "ask-scenario",
+        "turns": [{"receipt": None, "session_id": ""}, {"receipt": "r-9", "session_id": "sess-9"}],
+    }
+    (captures / f"{key}-{1:020d}-run.pending.json").write_text(json.dumps(spooled), encoding="utf-8")
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        harness("ask-scenario", "pi", compose, "text me")
+    reef.close()
+
+    (request,) = reef.posts("/reef/train")
+    assert request["body"]["session"] == "sess-9"
+    assert not reef.posts("/reef/report")
+    (pending,) = captures.glob("*.pending.json")
+    assert json.loads(pending.read_text()) == spooled
+
+
+@pytest.mark.unit
+def test_harness_auto_mode_refusal_keeps_the_spool(tmp_path) -> None:
+    reef = _FakeReef({"error": "training requests require training_mode='manual'"}, status=400)
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    pending = _write_spool_entry(captures, "ask-scenario", "pending")
+    with (
+        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
+        pytest.raises(SystemExit, match="training requests require training_mode='manual'"),
+    ):
+        harness("ask-scenario", "pi", compose, "ignore the rules")
+    reef.close()
+
+    assert [call["path"] for call in reef.seen] == ["/reef/train"]
+    assert pending.exists()
+
+
+@pytest.mark.unit
+def test_harness_rejected_body_exits_with_the_status_and_the_detail(tmp_path) -> None:
+    reef = _FakeReef({"error": "release_id must be a string"}, status=400)
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    pending = _write_spool_entry(captures, "ask-scenario", "pending")
+    with (
+        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
+        pytest.raises(SystemExit, match=r"request failed \(400\): .*release_id must be a string"),
+    ):
+        harness("ask-scenario", "pi", compose, "text me")
+    reef.close()
+
+    assert [call["path"] for call in reef.seen] == ["/reef/train"]
+    assert pending.exists()
+
+
+@pytest.mark.unit
+def test_harness_200_without_a_record_id_exits_with_the_body_not_a_traceback(tmp_path) -> None:
+    reef = _FakeReef({"scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    with (
+        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
+        pytest.raises(SystemExit, match=r"answered 200 without an agent_record_id: .*ask-scenario"),
+    ):
+        harness("ask-scenario", "pi", compose, "text me")
+    reef.close()
+
+    assert [call["path"] for call in reef.seen] == ["/reef/train"]
+
+
+@pytest.mark.unit
+def test_harness_unreachable_exits_and_keeps_the_spool(tmp_path) -> None:
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    compose, captures = _ask_tree(tmp_path, port)
+    pending = _write_spool_entry(captures, "ask-scenario", "pending")
+    with (
+        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
+        pytest.raises(SystemExit, match=f"reef-pi: reef unreachable at http://127.0.0.1:{port}"),
+    ):
+        harness("ask-scenario", "pi", compose, "text me")
+    assert pending.exists()
+
+
+@pytest.mark.unit
+def test_harness_without_the_sidecar_sends_nothing(tmp_path) -> None:
+    reef = _FakeReef({"agent_record_id": "q-0", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port, sidecar=False)
+    pending = _write_spool_entry(captures, "ask-scenario", "pending")
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        with pytest.raises(SystemExit, match=r"no \.reef-harness-release sidecar at .*nothing was sent"):
+            harness("ask-scenario", "pi", compose, "text me")
+        with pytest.raises(SystemExit, match="the request is empty"):
+            harness("ask-scenario", "pi", compose, "   ")
+    reef.close()
+
+    assert reef.seen == []
+    assert pending.exists()
+
+
+@pytest.mark.unit
+def test_main_dispatches_harness_with_the_words_joined(tmp_path) -> None:
+    asked: list[tuple] = []
+    env = {
+        "REEF_HARNESS_BINARY": "fake-pi",
+        "REEF_HARNESS_COMPOSE": str(tmp_path),
+        "REEF_HARNESS_SCENARIO": "ask-scenario",
+        "REEF_HARNESS_ADAPTER": "pi",
+        "REEF_HARNESS_ENV_VAR": "PI_CODING_AGENT_DIR",
+    }
+    with (
+        patch.dict(os.environ, env),
+        patch("reef.harness.client.wrapper.harness", lambda *args: asked.append(args)),
+        patch("sys.argv", ["reef-pi", "harness", "text", "me", "when", "you", "are", "blocked"]),
+    ):
+        main()
+    assert asked == [("ask-scenario", "pi", str(tmp_path), "text me when you are blocked")]
+
+
+def test_a_clear_from_the_agent_empties_what_the_wrapper_would_spool() -> None:
+    """DELETE /_captures after an in session report: publish_turn spools nothing, so no later report resends them."""
+    from reef_client.serve import CapturedTurn
+
+    from reef.harness.client.wrapper import CaptureProxy
+
+    proxy = CaptureProxy("http://127.0.0.1:9", "clear-scenario", None, tags={"release": "r"})
+    proxy.start()
+    try:
+        proxy._store.add(CapturedTurn("", "/v1/chat/completions", 200, None, None, "r-1", False, 0.0))
+        assert len(proxy._store.snapshot()) == 1
+        request = urllib.request.Request(f"http://127.0.0.1:{proxy.port}/_captures", method="DELETE")
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.loads(response.read())["cleared"] == 1
+        assert proxy.publish_turn() == 0
+    finally:
+        proxy.stop()
