@@ -38,7 +38,7 @@ evolve-your-harness/
                  counts what admission lets through, by kind
     replay.py    writes work/replay.html from a run's files: the release
                  chain, the loop graph replayed from a session, the tool
-                 call ledger and the process timeline
+                 calls and the process timeline
   pyproject.toml makes harness/ an installable package
 ```
 
@@ -60,7 +60,7 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ./run.sh self     # the same, and the model proposes the change itself through its self tools
 ```
 
-Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session's tool call ledger and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
+Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session's tool calls and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
