@@ -1666,6 +1666,73 @@ def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> 
 
 
 @pytest.mark.unit
+def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeypatch) -> None:
+    """An external family must reach the actor as its dotted reference.
+
+    The bridge actor re-resolves ``loss_family`` in a fresh Ray process whose
+    registry is empty, so the plain name of a family registered via
+    ``register_loss_family_ref`` only resolves there as its dotted reference
+    (``resolve`` imports it and registers the spec). Names without a
+    registered reference ship unchanged.
+    """
+    import sys
+    from types import ModuleType
+
+    from reef.train.algos.registry import register_loss_family_ref
+    from reef.train.slime_backend.algorithm import SlimeAlgorithm
+    from reef.train.slime_backend.loss_families import unregister_loss_family
+
+    class _ExternalAlgorithm(SlimeAlgorithm):
+        loss_family = "external_family"
+        loss_type = "sft_loss"
+
+        def validate_specific_args(self, args, source):
+            pass
+
+    module = ModuleType("external_family_pkg")
+    module.ALGORITHM = _ExternalAlgorithm()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "external_family_pkg", module)
+    register_loss_family_ref("external_family", "external_family_pkg:ALGORITHM")
+
+    events = []
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    class ActorClass:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            events.append(kwargs)
+            return "bridge-handle"
+
+    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
+    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: object())
+    monkeypatch.setattr(bridge, "create_train_groups", lambda args, pgs, manager: (object(), None))
+    monkeypatch.setattr(bridge, "TrainBridgeActor", ActorClass())
+    monkeypatch.setattr(
+        bridge.CheckpointStorage,
+        "validate_capacity",
+        lambda self, **kwargs: {"blocked": False, "reasons": []},
+    )
+    args = _bridge_args(
+        save_hf="~/checkpoints/hf/{rollout_id}",
+        save="~/checkpoints/megatron",
+    )
+
+    try:
+        assert bridge.start_bridge(args, loss_family="external_family") == "bridge-handle"
+        assert events[0]["loss_family"] == "external_family_pkg:ALGORITHM"
+    finally:
+        unregister_loss_family("external_family")
+
+    # A registered family without a dotted reference ships under its own
+    # name, and an explicit dotted reference passes through untouched.
+    bridge.start_bridge(args, loss_family="sft")
+    assert events[1]["loss_family"] == "sft"
+
+
+@pytest.mark.unit
 def test_driver_sao_options_strip_sao_flags_and_project_them_onto_args() -> None:
     # The --sao-* family is owned by the sao plugin: the driver strips the
     # flags before Slime's parser sees them and projects the values back onto
