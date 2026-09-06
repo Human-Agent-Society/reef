@@ -181,7 +181,12 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
     if settings.evaluation_settings is not None:
         raise ValueError("the top-level evaluation section requires a weight-training recipe")
     if ":" in selected:
-        return build_recipe(selected, env, runtime=_upstream_runtime(settings))
+        return build_recipe(
+            selected,
+            env,
+            config=_recipe_owned_settings(settings),
+            runtime=_upstream_runtime(settings),
+        )
     return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
 
 
