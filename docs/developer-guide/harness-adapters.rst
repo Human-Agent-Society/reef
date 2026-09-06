@@ -56,8 +56,7 @@ rendering checks syntax without executing it, and the runner uses Harbor's
 native ``AgentConfig.import_path`` contract. No extension means stock Terminus 2.
 
 Extensions require ``evolution.executor: sandbox`` to isolate the Python
-runner, with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY`` explicitly
-forwarded through ``evolution.sandbox.env_from``. Harbor then runs the terminal
+runner. Harbor then runs the terminal
 task remotely. Network access must be enabled with ``sandbox.egress_hosts``;
 that setting currently enables networking without enforcing a hostname firewall.
 The runtime needs Linux, bubblewrap, Python 3.12+, ``reef-infra[terminus]``, and
