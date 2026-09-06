@@ -247,46 +247,12 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 ## 架构
 
-```mermaid
-sequenceDiagram
-    accTitle: How Reef serves, records, trains, evaluates, and publishes
-    autonumber
-    participant H as Harness
-    participant S as Scenario
-    participant I as Inference
-    participant T as Trainer
-    participant G as Training*
-    participant E as Artifact evaluation
-
-    opt Harness recipe: pull the served tree
-      H->>S: GET /reef/harness for scenario
-      S-->>H: Harness tree and release
-      Note over H: Agent runs on that tree
-    end
-    Note over H,I: Serve and record each request
-    H->>S: Inference request for scenario
-    S->>S: Freeze current release
-    S->>I: Provider-native request
-    I-->>S: Provider response
-    S->>S: Validate frozen release and store record
-    S-->>H: Response and receipt
-    H->>S: Feedback quotes the receipt
-    S->>T: Eligible record
-    opt Processor has a batch
-      Note over S,E: Produce, evaluate, and select a candidate
-      T->>G: Prepared step
-      G-->>T: Candidate artifact ready
-      T->>E: evaluate(candidate)
-      E-->>T: Evaluation result
-      T->>E: decide(candidate, result)
-      E-->>T: Select or reject
-      alt Candidate selected
-        T->>S: Commit new release
-      else Candidate rejected
-        Note over S,I: Previous release keeps serving
-      end
-    end
-```
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.gif">
+  <img src="docs/assets/architecture-light.gif" alt="Reef 架构：Harness 请求经 Scenario 转发到推理服务；通过 receipt 关联的反馈进入记录与 recipe 训练，候选产物经评估和选择后发布新版本。候选被拒绝时，继续使用当前版本。" width="1200">
+</picture>
+</div>
 
 请求路径、scenario 和 release 生命周期详见[架构指南](https://reefinfra.ai/docs/getting-started/architecture/)。
 
