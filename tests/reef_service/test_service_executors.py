@@ -196,12 +196,15 @@ def test_probe_runs_with_service_environment_and_cwd_and_has_a_deadline(tmp_path
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX owner leases")
-def test_remote_service_dies_when_its_owner_lease_closes(tmp_path):
+@pytest.mark.parametrize("ignores_term", [False, True], ids=["graceful", "sigkill"])
+def test_remote_service_dies_when_its_owner_lease_closes(tmp_path, ignores_term):
     pid_file = tmp_path / "service-child.pid"
     command = [
         sys.executable,
         "-c",
-        f"import os,time; from pathlib import Path; Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)",
+        "import os,signal,time; from pathlib import Path; "
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignores_term else "")
+        + f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)",
     ]
     worker = RayProcessWorker({}, [{"name": "prm", "command": command}], tmp_path, 10, tmp_path / "config.yaml")
     try:

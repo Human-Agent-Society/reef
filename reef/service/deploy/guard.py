@@ -39,9 +39,17 @@ def main() -> None:
     if os.getpgrp() != os.getpid():
         raise RuntimeError("service lease guard must own its process group")
     os.killpg(os.getpid(), signal.SIGTERM)
+    deadline = time.monotonic() + 1
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+    # Reap the direct child before this guard exits; otherwise its zombie is
+    # orphaned and remains observable until the node's init process reaps it.
     # Keep the guard alive through escalation, even if the direct child exits
     # early and leaves grandchildren. SIGKILL also retires this guard.
-    time.sleep(1)
+    time.sleep(max(0, deadline - time.monotonic()))
     os.killpg(os.getpid(), signal.SIGKILL)
 
 
