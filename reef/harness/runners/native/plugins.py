@@ -99,6 +99,15 @@ class NativeAgentPlugin(NodePlugin):
         ctx.effect(lambda: host.add_agent(options), f"native_agent {options['name']}")
 
 
+class NativeLoopPlugin(NodePlugin):
+    name = "native_loop"
+
+    def apply(self, ctx: Any, config: Any) -> None:
+        options = copy.deepcopy(nodes.validate_native_loop(config))
+        host: NativeHost = ctx.native
+        ctx.effect(lambda: host.mount_module("native_loop", options), f"native_loop {options['name']}")
+
+
 class RulesPlugin(NodePlugin):
     name = "rules"
 
@@ -170,6 +179,7 @@ NATIVE_PLUGINS: dict[str, NodePlugin] = {
         NativeHookPlugin(),
         NativeGraphPlugin(),
         NativeAgentPlugin(),
+        NativeLoopPlugin(),
     )
 }
 """Entry ``name`` to effect registering plugin; the resolver of a live native composition."""

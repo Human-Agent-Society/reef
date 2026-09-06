@@ -2,7 +2,7 @@
 
 One episode is one process and one turn. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
-``graphs/``, ``agents/`` and ``models.json``; the loop reads them once into a
+``graphs/``, ``agents/``, ``loops/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.runners.native.host``), talks to the served model
 through the rendered binding, dispatches tool calls to the tool modules
 through the capability enforcer ``REEF_NATIVE_ENFORCE`` selects, asks the
@@ -16,6 +16,7 @@ decision that changed the loop's course.
 from __future__ import annotations
 
 import argparse
+import ast
 import copy
 import importlib.util
 import json
@@ -24,13 +25,14 @@ import shutil
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, SandboxFailed, ToolFailed, select_enforcer
-from reef.harness.tree.nodes import NATIVE_EVENTS
+from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
 MAX_STEPS = 12
@@ -143,6 +145,20 @@ class HookModule:
         self.listen = listen
 
 
+@dataclass(frozen=True)
+class LoopModule:
+    """One rendered ``native_loop`` node: the module whose ``run_turn(ctx)`` replaces the graph for the root turn."""
+
+    name: str
+    #: The module file; None for a loop built in code.
+    path: Path | None
+    max_steps: int
+    module: ModuleType
+
+    def run_turn(self, ctx: Any) -> Any:
+        return self.module.run_turn(ctx)
+
+
 def import_module_file(path: Path, prefix: str) -> ModuleType:
     """Import one rendered module outside ``sys.modules``; a failure is a LoadError naming the file.
 
@@ -155,7 +171,9 @@ def import_module_file(path: Path, prefix: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     try:
         exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # bytes: the coding cookie and BOM apply
-    except Exception as exc:
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:  # SystemExit too: a module that exits at import is one the loop cannot use
         raise LoadError(f"{path.name} failed to import: {type(exc).__name__}: {exc}") from exc
     return module
 
@@ -187,6 +205,72 @@ def hook_from_module(path: Path, module: ModuleType) -> HookModule:
     if not callable(listen) or event not in NATIVE_EVENTS:
         raise LoadError(f"hook {path.name} defines no listen(payload, next) at a known event")
     return HookModule(str(getattr(module, "NAME", path.stem)), event, listen)
+
+
+def loop_from_module(path: Path | None, module: ModuleType, options: Mapping[str, Any]) -> LoopModule:
+    """The loop a rendered module declares: ``run_turn`` plus the name and budget of its admitted options."""
+    name = str(options["name"])
+    if not callable(getattr(module, "run_turn", None)):
+        raise LoadError(f"loop {path.name if path is not None else name} defines no run_turn(ctx)")
+    return LoopModule(name, path, int(options.get("max_steps", NATIVE_LOOP_DEFAULT_MAX_STEPS)), module)
+
+
+def _admit_loop(path: Path, options: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``options`` admitted as a native_loop node, or the LoadError naming the file that carries them."""
+    try:
+        return validate_native_loop(options)
+    except ValueError as exc:
+        raise LoadError(f"loop {path.name} cannot run: {exc}") from exc
+
+
+def _loop_header(path: Path, code: str) -> dict[str, Any]:
+    """The ``NAME`` and ``MAX_STEPS`` literals the render wrote after the code, read without running it.
+
+    Any other binding of the two names at module scope is refused: the import would set what this read
+    could not, and the module's top level would have run before admission saw it."""
+    header: dict[str, Any] = {"name": path.stem, "code": code}
+    try:
+        # The bytes the import compiles: a coding cookie or a BOM reads the same here.
+        tree = ast.parse(code.encode("utf-8"), path.name)
+    except (SyntaxError, ValueError) as exc:
+        raise LoadError(f"loop {path.name} cannot run: code does not compile: {exc}") from exc
+    written: list[ast.Name] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    written.append(target)
+                    if target.id == "NAME":
+                        header["name"] = node.value.value
+                    elif target.id == "MAX_STEPS":
+                        header["max_steps"] = node.value.value
+    for name, binding in scope_bindings(tree):
+        if name in ("NAME", "MAX_STEPS") and not any(binding is target for target in written):
+            raise LoadError(f"loop {path.name} cannot run: the header is not the literals the render wrote")
+    return header
+
+
+def load_loop(loops_dir: Path) -> LoopModule | None:
+    """The one ``*.py`` under ``loops/``, admitted again like an agent file; two files are a LoadError, none is None."""
+    paths = sorted(loops_dir.glob("*.py")) if loops_dir.is_dir() else []
+    if len(paths) > 1:
+        raise LoadError(f"one loop per tree: loops/ holds {', '.join(path.name for path in paths)}")
+    if not paths:
+        return None
+    path = paths[0]
+    code = path.read_text(encoding="utf-8")
+    # The text and its written header meet admission before the import runs the module; what the module binds meets it after.
+    _admit_loop(path, _loop_header(path, code))
+    module = import_module_file(path, "reef_native_loop")
+    options = _admit_loop(
+        path,
+        {
+            "name": str(getattr(module, "NAME", path.stem)),
+            "code": code,
+            "max_steps": getattr(module, "MAX_STEPS", NATIVE_LOOP_DEFAULT_MAX_STEPS),
+        },
+    )
+    return loop_from_module(path, module, options)
 
 
 def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
@@ -409,7 +493,7 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
 
 
 def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
-    """One turn: the tree's graph (or the seed graph) walked stage by stage; each model stage is one step."""
+    """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage."""
     from reef.harness.runners.native import graph as graphs  # late: graph.py imports this module
     from reef.harness.runners.native.host import NativeHost
 
@@ -437,10 +521,10 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             host = NativeHost.from_root(root, mount_dir)
             graph = host.graph("main")
         except (LoadError, graphs.GraphError, ValueError) as exc:
-            session.write("session", {**header, "tools": [], "hooks": {}, "graph": None})
+            session.write("session", {**header, "tools": [], "hooks": {}, "graph": None, "loop": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
-        tools, hooks = host.tools, host.hooks
+        tools, hooks, module = host.tools, host.hooks, host.loop
         session.write(
             "session",
             {
@@ -450,7 +534,9 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
                 "tools": sorted(tools),
                 "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                 "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
+                # The graph stays named beside the loop: it is what the agents the loop calls fall back to.
                 "graph": graph.source,
+                "loop": None if module is None else module.name,
                 "agents": sorted(host.agents),
             },
         )
@@ -458,6 +544,8 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
         loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
         run = graphs.Run(loop, prompt, binding, host, workdir)
         try:
+            if module is not None:
+                return graphs.run_loop_module(run, module)
             return graphs.run_graph(run, graph)
         finally:
             host.dispose()

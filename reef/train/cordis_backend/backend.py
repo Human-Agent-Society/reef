@@ -25,7 +25,14 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
-from reef.harness.tree.nodes import NODE_KINDS, directive_shaped, redact_secret_shaped, secret_shaped
+from reef.harness.tree.nodes import (
+    ALWAYS_REVIEWED_KINDS,
+    NODE_KINDS,
+    directive_shaped,
+    flat_entry_refusal,
+    redact_secret_shaped,
+    secret_shaped,
+)
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
@@ -312,8 +319,12 @@ def _unrenderable(descriptor: AdapterDescriptor, kind: str) -> str | None:
 
 
 def _load_error(loader: Loader, id_: str, descriptor: AdapterDescriptor) -> str | None:
-    """Why the entry cannot serve: its kind's admission, its fiber's state, then whether the adapter renders it."""
+    """Why the entry cannot serve: the flat tree rule, its kind's admission, its fiber's state, then whether the adapter renders it."""
     entry = loader.resolve(id_)
+    # The seed and a recovered state never pass _apply_mutation, so the flat tree rule is read here as well.
+    refusal = flat_entry_refusal(entry.options)
+    if refusal is not None:
+        return refusal
     kind = str(entry.options.get("name"))
     if entry.disabled:
         # Disabled is a serving state, not a validation bypass (#476): a
@@ -345,7 +356,13 @@ def _resolve(loader: Loader, id_: str) -> Any:
 
 
 def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
-    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id."""
+    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id; every op refuses a group entry."""
+    if mutation.options is not None:
+        # The loader would route a group entry to its Group plugin and mount the children through the kinds'
+        # plugins, unseen by every check that walks the root; the tree is flat, so the shape never loads.
+        refusal = flat_entry_refusal(mutation.options, partial=mutation.op == "update")
+        if refusal is not None:
+            raise MutationError(f"mutation {mutation.op} {mutation.id!r} rejected: {refusal}")
     if mutation.op == "create":
         try:
             loader.resolve(mutation.id)
@@ -1015,8 +1032,11 @@ class CordisBackend(TrainingBackend):
             if replaced is not None:
                 replaced.discard()
             self._rendered_publications[step] = artifact
-            # Under review, or when a reviewed kind is touched, the release waits for a promote.
-            pending = self._publish == "review" or bool(self._review_kinds & self._mutation_kinds(candidate))
+            # Under review, or when a reviewed kind is touched, the release waits for a promote; loop code is
+            # reviewed whether or not the deployment listed it.
+            pending = self._publish == "review" or bool(
+                (self._review_kinds | ALWAYS_REVIEWED_KINDS) & self._mutation_kinds(candidate)
+            )
             return TrainStepResult({**state, "entries": entries}, metrics, artifact=artifact, pending=pending)
 
         entries = [dict(entry) for entry in candidate.current_entries]
@@ -1101,9 +1121,9 @@ class CordisBackend(TrainingBackend):
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
             if path.get("errored_agent"):
                 cause = f"agent {path['errored_agent']}: {cause}"
-            return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="graph", cause=cause), residue, agents, path
-            )
+            # A loop turn walks no graph: the failure names the loop when the root's header does.
+            stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
+            return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
         score = float(self._score_episode(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
@@ -1234,6 +1254,15 @@ def _write_episode_record(
     keep_dir.mkdir(parents=True, exist_ok=True)
     with open(keep_dir / RECORD_EPISODE_FILE, "x", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2, default=str) + "\n")
+
+
+def _root_header(trajectory: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The root's ``session`` line of a native-jsonl trajectory (the agents' files sort first); empty for other formats."""
+    for event in trajectory:
+        data = event.get("data") or {}
+        if event.get("type") == "session" and str(data.get("agent") or "root") == "root":
+            return data
+    return {}
 
 
 def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:

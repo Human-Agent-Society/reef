@@ -19,8 +19,8 @@ At a glance
 +-------------------+--------------------------------------------------------------+
 | What evolves      | Config, rules, prompt templates, skills, and extension code; |
 |                   | on the native harness also its tools, its hook listeners,    |
-|                   | the graph that is its control loop, and the agents the loop  |
-|                   | delegates to.                                                |
+|                   | the graph or the loop code that is its control loop, and the |
+|                   | agents the loop delegates to.                                |
 +-------------------+--------------------------------------------------------------+
 | Which agents      | pi, opencode, Claude Code, Codex, DeepSeek Harness, Hermes   |
 |                   | Agent, Terminus 2, and ``native``, Reef's own loop. One      |
@@ -54,8 +54,8 @@ called the tree. A tree is a flat list of entries, and each entry has three
 fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
-``native_hook``), ``config.name`` is the file name the entry renders to.
-Nine kinds are registered in
+``native_hook``, ``native_loop``), ``config.name`` is the file name the entry
+renders to. Ten kinds are registered in
 `reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__:
 
 +--------------------+----------------------------------------------------------+
@@ -81,6 +81,9 @@ Nine kinds are registered in
 | ``native_agent``   | one agent of the native loop: its prompt, graph, tools,  |
 |                    | skills, budget, and the agents it hands its text to      |
 +--------------------+----------------------------------------------------------+
+| ``native_loop``    | the native loop itself as code: ``run_turn(ctx)`` over   |
+|                    | the context API; always reviewed                         |
++--------------------+----------------------------------------------------------+
 
 The table describes what each kind contains. Where each kind is written is
 decided by an adapter, which maps every kind to a concrete file for one agent.
@@ -88,12 +91,29 @@ Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
 ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
 Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
 are ``native_tool`` nodes, whose loop events listen to ``native_hook``
-nodes, whose control flow is a ``native_graph`` node, and whose helpers are
-``native_agent`` nodes a graph can call, so the agent can evolve the tools
-it runs, how its loop reacts, the loop itself, and who it delegates to, not
+nodes, whose control flow is a ``native_graph`` node, whose helpers are
+``native_agent`` nodes a graph can call, and whose loop can be a
+``native_loop`` node written as code, so the agent can evolve the tools it
+runs, how its loop reacts, the loop itself, and who it delegates to, not
 only the text around a vendor binary; and ``terminus``, Terminal-Bench's
 Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those four kinds.
+those five kinds.
+
+A ``native_loop`` node goes one step past a graph: its ``code`` defines
+``run_turn(ctx)``, and that function runs the root turn in place of the graph
+interpreter. ``ctx`` is the context API Reef owns: ``ctx.model()`` takes one
+model step, ``ctx.run_tools()`` runs the last message's tool calls,
+``ctx.agent(name)`` hands text to a ``native_agent`` and returns its answer,
+``ctx.say(text)`` adds a user message, ``ctx.end(reason)`` ends the turn, and
+``ctx.log(event, data)`` writes a ``loop/<event>`` line to the session. Hooks,
+tools, budgets, the session log and the sandbox stay Reef's; a loop that
+raises, or calls the context past its budget of transitions, ends the turn
+with ``LOOP_ERROR`` and loses the gate, and the first end of a turn is final
+whatever the loop code catches. Loop code runs inside the loop's own
+process, so a win that creates, changes or removes a ``native_loop`` is always
+a pending release a person promotes, whether or not ``evolution.review_kinds``
+names the kind, and ``harness_try`` refuses to mount one on a serving process:
+the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 ``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
@@ -180,7 +200,8 @@ By default a gate win is served at once. ``evolution.publish: review`` holds
 every win as a pending release instead, and ``evolution.review_kinds`` (a
 list of node kinds, empty by default) holds only the wins that touch those
 kinds, so ``[code_extension]`` lets rules and config auto publish while code
-waits for a person. A pending release sits in the catalog with its gate
+waits for a person; a win that touches a ``native_loop`` waits whether or not
+the list names it. A pending release sits in the catalog with its gate
 metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
 names it; the loop keeps evolving from it in the meantime, so promoting the
 latest pending release serves everything accumulated since the head.
@@ -542,7 +563,7 @@ the model calls. The bundled descriptors cover these agents:
 +---------------+----------------------------------+----------------------------------------+
 | ``native``    | Reef's own loop                  | the five above plus native_tool,       |
 |               |                                  | native_hook, native_graph,             |
-|               |                                  | native_agent                           |
+|               |                                  | native_agent, native_loop              |
 +---------------+----------------------------------+----------------------------------------+
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and

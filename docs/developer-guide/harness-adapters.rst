@@ -226,8 +226,9 @@ pinned model fields stay in ``native/models.json``.
 At boot the loop reads the file when it exists: a fresh compose context, a
 ``Loader`` over ``NATIVE_PLUGINS``, ``root.update(entries)``, every entry
 admitted again by its kind's plugin and installed into the host through the
-same effects a resident process uses, with the tool and hook modules written
-under ``sessions/mounts/boot/`` (the one writable path under the sandbox).
+same effects a resident process uses, with the tool, hook and loop modules
+written under ``sessions/mounts/boot-<pid>/`` (the one writable path under the
+sandbox).
 An entry that does not end ACTIVE ends the episode with ``LOAD_ERROR``
 naming the entry id, its kind and the fiber's error, or ``no plugin for kind
 X`` for a kind the loop never reads, so a hand edited list cannot run
@@ -308,11 +309,66 @@ agent's stages under ``agents/`` stay out of it; an episode that could not
 run is ``None`` and a format without stage events gives an empty list and a
 ``None`` reason.
 
+A ``native_loop`` node is the loop itself as code, rendered to
+``native/loops/<name>.py``: the node's ``code``, which defines
+``run_turn(ctx)``, then ``NAME`` and ``MAX_STEPS`` from the node config. When
+a tree carries one, the root turn calls ``run_turn`` instead of walking
+``main``; agents still run their graphs, and the loop reaches them through
+``ctx.agent``. One loop per tree: render refuses a second ``native_loop``
+node, the host refuses a second ``add_loop``, and the file form refuses two
+files under ``loops/``, and admits the file's text before it imports it: a
+file that does not parse, or whose ``NAME`` or ``MAX_STEPS`` is bound by
+anything but the literal assignment the render wrote, is refused before the
+import. Admission reads the code and never runs it: the module compiles,
+carries no credential, and leaves ``run_turn`` bound to a plain top level
+``def`` with a parameter (the last statement that binds the name at module
+scope decides, including one inside an ``if``, ``for``, ``with``, ``try`` or
+``match``, which is refused); ``max_steps`` (1 to 32, 12 by default) is the
+loop's model step budget. The tree is flat: an entry with ``group`` is
+refused at admission, at boot and at every mount, so no loop enters as
+another entry's child. The context is the API Reef owns, each call a thin
+call into the run:
+
+.. config::
+
+   ctx.prompt, ctx.step, ctx.max_steps, ctx.tools, ctx.messages, ctx.last | the task, the steps spent, the budget, the tool names the run may call, a copy of the messages and a copy of the last assistant message
+   ctx.model() | one model step, the ``model`` stage: fires ``pre_step`` and ``request_error``, writes ``step/start``, ``request/header`` when what the model sees changed (always at step 1), ``assistant/message`` and ``step/end``; returns ``tool_calls`` or ``text``; a spent budget ends the turn with ``max-steps``. Returning after ``tool_calls`` without ``run_tools`` leaves those calls unanswered in the conversation for the next turn
+   ctx.run_tools(allow=None) | the ``tools`` stage over the last message's calls, each behind ``pre_execute`` then ``post_execute``; ``allow`` narrows them to these names, and an empty or absent ``allow`` is no restriction, as in the stage
+   ctx.text() | the last assistant text
+   ctx.say(text) | a ``user/message`` with ``source.kind`` ``loop`` and the loop's name; counts as a transition
+   ctx.agent(name, text=None) | one agent's turn: runs the named ``native_agent`` alone on ``text`` (the last assistant text, else the task); its ``then`` chain is not followed; appends its answer as a ``user/message`` with ``source.kind`` ``agent``; returns ``(outcome, text)``
+   ctx.end(reason="completed") | ends the turn with ``completed`` or ``gave_up``; any other reason is a ``ValueError``
+   ctx.log(event, data) | a ``loop/<event>`` line: the name must be a node name other than ``enter`` or ``exit`` and is always prefixed, so this call cannot write a core event; ``data`` is made JSON (keys as their text), and past 4096 serialized characters it is replaced by ``{"text": the first 4096, "truncated": true}``; counts as a transition
+
+Returning from ``run_turn`` ends the turn ``completed``. A loop turn writes
+``loop/enter`` (``name``) first and ``loop/exit`` (``reason``) before
+``turn/end``, and no ``stage/*`` events, so its stage path is an empty list
+with the turn's reason. The transition guard is the graph's: past ``(max_steps
++ 1) * 16`` calls to ``model``, ``run_tools``, ``agent``, ``say`` and ``log``,
+or any exception out of ``run_turn`` (``SystemExit`` included;
+``KeyboardInterrupt`` propagates), the turn ends with ``LOOP_ERROR`` and exit
+status 1, and the gate ranks the episode as one that could not run; that leaves
+about 16 context calls per model step, ``log`` and ``say`` included. The first
+end is final: after ``max-steps``, ``ctx.end`` or an abort, every call into
+the context that acts raises the end again and writes nothing, so a turn has
+one ``turn/end`` and the exit status it recorded, whatever the loop code
+catches. A loop that never calls the context, or catches the end and goes on
+without it, is bounded by the episode wall clock in the episode form; in the
+serve form it holds the turn until it returns. The session header's ``loop``
+names the loop that ran and is null when the graph did; the serve form writes
+the header at the first turn of a session, so ``loop`` names the loop of that
+first turn; ``graph`` keeps naming the graph the agents fall back to. The loop
+code runs in the loop process with that process's privileges, and no enforcer
+stands between it and the host: that is why the kind is always reviewed. A
+win that touches a ``native_loop`` is a pending release whatever
+``review_kinds`` says, and ``harness_try`` refuses to mount one.
+
 The native loop writes its trajectory as ``native-jsonl``: one
 ``{type, seq, time, data}`` object per line, ``seq`` contiguous from 0. A
 ``session`` header line names the task, model, tools, hooks (name to
-event), the ``enforcement`` mode, and ``tree``, where the composition came
-from (``tree.json`` or ``files``); then ``turn/start``, per step
+event), the ``enforcement`` mode, ``tree``, where the composition came
+from (``tree.json`` or ``files``), ``graph``, ``loop`` (the loop that ran,
+null under a graph), and ``agents``; then ``turn/start``, per step
 ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
@@ -321,8 +377,12 @@ the log holds everything the model saw), ``assistant/message`` (``content``,
 closed ``code``: ``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``,
 ``SANDBOX_FAILED``, ``HOOK_DENIED``, ``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),
 ``step/end``, and finally ``turn/end`` with a ``reason`` of ``completed``,
-``max-steps``, ``rejected``, or ``error`` (its ``error`` code ``MODEL_ERROR``
-or ``LOAD_ERROR``). Arguments are validated against the tool's declared
+``gave_up``, ``max-steps``, ``max-tool-calls``, ``rejected``, ``ask`` (an
+agent's turn a hook escalated), ``turn-timeout`` (the serve form's wall
+clock), or ``error`` (its ``error`` code ``MODEL_ERROR``, ``LOAD_ERROR``,
+``GRAPH_ERROR``, ``LOOP_ERROR`` under a ``native_loop``, or ``TURN_ERROR`` in
+the serve form). Arguments are
+validated against the tool's declared
 schema before ``run`` sees them. A result over 20,000 characters is spilled:
 the whole text is written to ``.reef/spill/<step>-<call_id>.txt`` under the
 workspace, the model reads the head, one marker line naming that file and the

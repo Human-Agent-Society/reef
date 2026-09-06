@@ -797,6 +797,52 @@ def test_a_tree_entry_with_a_reserved_name_does_not_mount(tmp_path: Path, reef: 
     assert not (dest / "native" / "serve.sock").exists()
 
 
+def test_a_group_wrapped_entry_is_neither_tried_nor_mounted_nor_booted(tmp_path: Path, reef: _FakeReef) -> None:
+    graph_only = [_tool("shout", "    return 'LOUD'"), _graph(SEED_STAGES, SEED_EDGES)]
+    loop = {
+        "name": "main",
+        "code": "def run_turn(ctx):\n    while ctx.model() == 'tool_calls':\n        ctx.run_tools()\n",
+    }
+    # A group entry: children in place of a config, which the compose loader would mount through the same plugins.
+    group = {
+        "id": "g",
+        "name": "rules",
+        "group": True,
+        "config": [{"id": "hidden", "name": "native_loop", "config": loop}],
+    }
+    reef.release("r1", graph_only)
+    mutation = {"op": "create", "id": "g", "options": {key: value for key, value in group.items() if key != "id"}}
+    reef.replies = [
+        _reply(tool_calls=[_call("harness_try", {"mutations": [mutation]}, "c1")]),
+        _reply("done"),
+        _reply("again"),
+    ]
+    with _running(_tree(tmp_path, reef, "r1"), self_tools=True, poll_interval_s=0.1) as server:
+        result, streamed = _turn(server, "try a hidden loop")
+        assert result["exit"] == 0 and result["text"] == "done"
+        (refused,) = _typed(streamed, "tool/result")
+        assert refused["error"]["code"] == "TOOL_FAILED"
+        assert refused["content"] == "Error: create 'g': the tree is flat: a group entry is not admitted"
+        assert [m["source"] for m in _typed(streamed, "harness/mount")] == [] and server.host.loop is None
+        log = server.sessions_dir / serve.SERVE_LOG
+        reef.release("r2", [*graph_only, group], parent="r1")
+        _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
+        failed = _typed(_events(log), "harness/mount-failed")[0]
+        assert (failed["release_id"], failed["source"], failed["entry"], failed["kind"]) == (
+            "r2",
+            "release",
+            "g",
+            "rules",
+        )
+        assert failed["error"] == "the tree is flat: a group entry is not admitted"
+        assert server.status()["release_id"] == "r1" and server.host.loop is None
+        second, streamed = _turn(server, "again")
+        assert second["text"] == "again" and _typed(streamed, "session")[0]["loop"] is None
+        assert "loop/enter" not in {event["type"] for event in streamed}
+    with pytest.raises(ServeError, match="does not mount: g: the tree is flat: a group entry is not admitted"):
+        Server(_tree(tmp_path / "boot", reef, "r2"), scenario=SCENARIO).start()
+
+
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 
