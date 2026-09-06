@@ -87,6 +87,11 @@ official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
 run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
 
+[Meta-Harness](meta_harness/README.md) searches complete harness compositions
+using all retained candidates and scores. It selects strict mean-score
+improvements and commits the population with Reef's serving state. See the
+[Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
+
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
 sealed night (one decision per skill group plus the no-skill bucket) mapped

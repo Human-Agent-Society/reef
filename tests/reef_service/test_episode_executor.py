@@ -225,3 +225,30 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
     assert isinstance(executor, SandboxExecutor)
     assert executor.egress_hosts == ("127.0.0.1:8000",)
     assert executor.limits == SandboxLimits(cpu_seconds=30, memory_bytes=1 << 30)
+
+
+def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
+    from reef.harness.episodes.executor import ISOLATION_ENV
+
+    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
+    executor = build_executor(
+        {"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}},
+        environ={"REMOTE_KEY": "deliberately-forwarded", "UNRELATED_SECRET": "must-not-leak"},
+    )
+    assert isinstance(executor, SandboxExecutor)
+    argv = executor._bwrap_argv(
+        ["true"], root=tmp_path, workspace=tmp_path / "workspace", env={ISOLATION_ENV: "forged"}
+    )
+    env = {argv[i + 1]: argv[i + 2] for i, token in enumerate(argv) if token == "--setenv"}
+    assert env["REMOTE_KEY"] == "deliberately-forwarded"
+    assert env[ISOLATION_ENV] == "bwrap"
+    assert "UNRELATED_SECRET" not in env
+    assert "deliberately-forwarded" not in repr(executor)
+    with pytest.raises(ReefError, match="requires environment variable 'REMOTE_KEY'"):
+        build_executor({"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}}, environ={})
+
+
+@pytest.mark.parametrize("names", ["REMOTE_KEY", [None], [""]])
+def test_sandbox_refuses_invalid_env_from(names) -> None:
+    with pytest.raises(ReefError, match="env_from must be a list"):
+        build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})

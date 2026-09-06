@@ -79,3 +79,17 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
     parameters = set(inspect.signature(Terminus2.__init__).parameters)
     unknown = sorted((_ALLOWED_KNOBS | _BINDING_KNOBS) - parameters)
     assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
+
+
+@pytest.mark.unit
+def test_extension_must_remain_a_terminus_agent(monkeypatch) -> None:
+    from reef.harness.episodes.executor import ISOLATION_ENV
+    from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError
+
+    monkeypatch.setenv(ISOLATION_ENV, "bwrap")
+    monkeypatch.setenv(ENVIRONMENT_ENV, "e2b")
+    files = render_composition(
+        [*NODES, ("code_extension", {"name": "agent", "code": "class Agent: pass\n"})], get_adapter("terminus")
+    )
+    with pytest.raises(TerminusTreeError, match="must inherit Harbor's Terminus2"):
+        agent_spec("/root", files)

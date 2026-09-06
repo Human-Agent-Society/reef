@@ -7,9 +7,9 @@ without the ``terminus`` extra can still load the descriptor.
 Reef stays the outer loop. An episode launches ``reef-terminus --task <task>``;
 this module runs that one task through reef-eval, the same primitive every
 recipe under ``recipes/`` uses to reach Harbor, driving Harbor's own
-``terminus-2`` agent. Nothing of Reef's runs inside the agent: the tree
-reaches it as Harbor's native inputs, so no evolved code is executed in this
-process and the adapter is not coupled to Terminus 2 internals.
+``terminus-2`` agent. A tree may instead supply one Agent(Terminus2) module;
+it is imported only when Reef's executor has isolated this runner. Config,
+rules, and skills retain Harbor's native interfaces in either case.
 
 It writes one trial file under ``REEF_TERMINUS_SESSION_DIR`` holding the
 verifier's rewards and the ATIF steps, which the adapter's
@@ -21,20 +21,26 @@ directory the reader walks to files Reef wrote.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
+import sys
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 from typing import Any
 
+from reef.harness.episodes.executor import ISOLATION_ENV
 from reef.harness.runners.terminus.tree import (
+    ENVIRONMENT_ENV,
     TerminusTreeError,
+    extension_source,
     instruction_paths,
     load_tree,
     skill_roots,
     terminus_kwargs,
 )
 
-#: Harbor's own Terminus 2. Reef contributes configuration, not code.
+#: Harbor's default when the tree has no code extension.
 AGENT_NAME = "terminus-2"
 SESSION_DIR_ENV = "REEF_TERMINUS_SESSION_DIR"
 TREE_DIR_ENV = "REEF_TERMINUS_DIR"
@@ -75,6 +81,28 @@ def agent_spec(root: str, tree: dict[str, str]) -> dict[str, Any]:
     if not model:
         raise TerminusTreeError("the terminus tree carries no model_name; Reef's model binding sets it")
     spec: dict[str, Any] = {"name": AGENT_NAME, "model_name": str(model)}
+    extension = extension_source(tree)
+    if extension is not None:
+        if os.environ.get(ISOLATION_ENV) != "bwrap" or os.environ.get(ENVIRONMENT_ENV) != "e2b":
+            raise TerminusTreeError("terminus code_extension must run inside Reef's sandbox with remote E2B tasks")
+        path, code = extension
+        # Harbor imports this class in the same runner process. A content name
+        # prevents two candidates with the same node name from sharing a module.
+        from harbor.agents.terminus_2 import Terminus2
+
+        name = "_reef_terminus_" + hashlib.sha256(code.encode()).hexdigest()
+        module = ModuleType(name)
+        module.__file__ = str(Path(root) / path)
+        sys.modules[name] = module
+        try:
+            exec(compile(code, module.__file__, "exec"), module.__dict__)
+            agent = getattr(module, "Agent", None)
+            if not isinstance(agent, type) or not issubclass(agent, Terminus2):
+                raise TerminusTreeError("terminus code_extension Agent must inherit Harbor's Terminus2")
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+        spec = {"import_path": f"{name}:Agent", "model_name": str(model)}
     if knobs:
         spec["kwargs"] = knobs
     roots = skill_roots(root, tree)
@@ -156,12 +184,16 @@ def run(task: str) -> int:
     sessions = Path(_required_env(SESSION_DIR_ENV))
     trials = Path(os.environ.get(TRIALS_DIR_ENV) or sessions.parent / "trials")
     trials.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.get(ENVIRONMENT_ENV, "docker")
+    if environment not in ("docker", "e2b"):
+        raise TerminusTreeError(f"unsupported terminus environment {environment!r}; use docker or e2b")
 
     row = asyncio.run(
         Lab(trials).run(
             task,
             agent_spec(root, tree),
             extra_instruction_paths=instruction_paths(root, tree),
+            environment={"type": environment},
         )
     )
     error = str((getattr(row, "tags", None) or {}).get("error") or "")

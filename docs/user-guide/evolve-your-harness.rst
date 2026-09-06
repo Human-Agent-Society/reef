@@ -116,10 +116,10 @@ names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
-``skill``. Both reject ``code_extension``: Codex lifecycle hooks run outside
-its command sandbox, and a Terminus module would run in Reef's own runner
-rather than the task container. Reef will not activate arbitrary evolved code
-without a separate isolation boundary.
+``skill``. Codex rejects ``code_extension`` because lifecycle hooks run outside
+its command sandbox. Terminus accepts one Python module defining
+``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
+remote E2B tasks. See the adapter guide for the required deployment settings.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -218,14 +218,19 @@ Each episode runs through an executor. The default ``local`` executor runs the
 binary as a plain subprocess, which is right for development and the tests. A
 hosted service that evaluates model-proposed trees sets ``evolution.executor:
 sandbox`` so each episode runs in a bubblewrap jail (a fresh non-root
-namespace, a read-only base filesystem, no host credentials, resource limits,
-and no network unless a model endpoint is allowlisted); a deployment that
+namespace, a read-only base filesystem, explicit credentials only, resource limits,
+and no network unless ``sandbox.egress_hosts`` is configured); a deployment that
 requires it refuses to start without the sandbox runtime. On the native
 adapter the sandbox also runs each tool call in a nested jail that withholds
 the network, workspace writes, or the shell and system binaries a tool did
 not declare in its capabilities; it cannot withhold the tool's own
 interpreter, or reads. The adapter guide states the full boundary. The
 local executor enforces none of this.
+
+``evolution.sandbox.env_from`` explicitly lists deployment environment variables
+to forward, and missing variables fail configuration. This keeps remote sandbox
+credentials out of candidate compositions. ``egress_hosts`` currently enables
+network access; it does not enforce a hostname firewall.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -562,7 +567,8 @@ the model calls. The bundled descriptors cover these agents:
 | ``hermes``    | Hermes Agent                     | config, rules, agent_command, skill,   |
 |               |                                  | code_extension                         |
 +---------------+----------------------------------+----------------------------------------+
-| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill    |
+| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill,   |
+|               |                                  | code_extension (sandbox + E2B)         |
 +---------------+----------------------------------+----------------------------------------+
 | ``native``    | Reef's own loop                  | the five above plus native_tool,       |
 |               |                                  | native_hook, native_graph,             |

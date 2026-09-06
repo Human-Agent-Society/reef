@@ -11,7 +11,7 @@ development run and a hosted one, so that step is the seam:
 * :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
   fresh non-root namespace, a read-only base filesystem with only the episode
   root exposed (its workspace and declared runtime state writable, rendered
-  inputs read-only), no host environment or credentials, resource limits,
+  inputs read-only), only explicitly forwarded deployment environment, resource limits,
   network disabled unless an egress allowlist is configured, and death with
   the parent.
 
@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Protocol
 
 from reef.core.errors import ReefError
-from reef.harness.runners.native.enforce import ISOLATION as TOOL_ISOLATION
+
+ISOLATION_ENV = "REEF_EPISODE_ISOLATION"
 
 
 class SandboxUnavailable(ReefError):
@@ -190,6 +191,8 @@ class SandboxExecutor:
     limits: SandboxLimits = field(default_factory=SandboxLimits)
     #: Base directories bound read-only so the binary and its runtime resolve.
     base_paths: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
+    #: Explicit deployment credentials/settings; never inherited from the candidate tree.
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def preflight(self) -> None:
         if shutil.which("bwrap") is None:
@@ -220,6 +223,8 @@ class SandboxExecutor:
 
     def _nested_probe_argv(self) -> list[str]:
         """An episode jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
+        from reef.harness.runners.native.enforce import ISOLATION as TOOL_ISOLATION
+
         bwrap = shutil.which("bwrap") or "bwrap"
         binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
         episode = [bwrap, *_ISOLATION, "--unshare-net", *binds]
@@ -242,6 +247,10 @@ class SandboxExecutor:
         for base in self.base_paths:
             if Path(base).exists():
                 cmd += ["--ro-bind", base, base]
+        if self.egress_hosts:
+            for dns_path in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
+                if Path(dns_path).exists():
+                    cmd += ["--ro-bind", dns_path, dns_path]
         # Mount the root read-only, then open only declared runtime-state
         # directories. Rendered inputs inside those directories are rebound
         # read-only so a run cannot mutate the admitted composition.
@@ -253,7 +262,13 @@ class SandboxExecutor:
                 cmd += ["--ro-bind", str(path), str(path)]
         cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
-        for key, value in {**_inherited_env(), **env, "REEF_NATIVE_ENFORCE": "bwrap"}.items():
+        for key, value in {
+            **_inherited_env(),
+            **env,
+            **self.env,
+            "REEF_NATIVE_ENFORCE": "bwrap",
+            ISOLATION_ENV: "bwrap",
+        }.items():
             cmd += ["--setenv", key, value]
         cmd += ["--", *argv]
         return cmd
@@ -314,11 +329,14 @@ class SandboxExecutor:
             resource.setrlimit(resource.RLIMIT_FSIZE, (self.limits.file_bytes, self.limits.file_bytes))
 
 
-def build_executor(config: Mapping[str, object] | None) -> EpisodeExecutor:
+def build_executor(
+    config: Mapping[str, object] | None, *, environ: Mapping[str, str] | None = None
+) -> EpisodeExecutor:
     """Build the executor a deployment selected.
 
     ``executor`` is ``local`` (default) or ``sandbox``; a sandbox reads its
-    ``egress_hosts`` and ``limits`` from the same section. The executor is
+    ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
+    variable names from the same section. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
     fails to start, not at the first episode.
     """
@@ -341,6 +359,17 @@ def build_executor(config: Mapping[str, object] | None) -> EpisodeExecutor:
         processes=int(limits_config.get("processes", 0)),
         file_bytes=int(limits_config.get("file_bytes", 0)),
     )
-    executor = SandboxExecutor(egress_hosts=egress, limits=limits)
+    names = sandbox_config.get("env_from", [])
+    if not isinstance(names, (list, tuple)) or not all(
+        isinstance(name, str) and name.isidentifier() for name in names
+    ):
+        raise ReefError("evolution.sandbox.env_from must be a list of environment variable names")
+    values = os.environ if environ is None else environ
+    env = {}
+    for name in names:
+        if name not in values or not values[name]:
+            raise ReefError(f"evolution.sandbox.env_from requires environment variable {name!r}")
+        env[name] = values[name]
+    executor = SandboxExecutor(egress_hosts=egress, limits=limits, env=env)
     executor.preflight()
     return executor

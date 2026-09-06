@@ -116,4 +116,13 @@ What survives a restart, provided the storage paths are persistent:
    * - a training step in flight
      - not recoverable; the batch is replayed after the step is settled
 
+After a step commits, ``/reef/status`` reports its scenario's
+``artifact_head_sync`` with the checkpoint ``release_id`` and any ``error``.
+The ``state`` is ``synchronized`` when the backend head is current, ``pending``
+when updating it failed, or ``conflict`` when another writer moved it to an
+unrelated release. The committed step remains successful. Before another commit,
+Reef retries synchronization; if it still fails, the new commit stops before
+publishing or writing its commit record. A conflict never overwrites the other
+writer's head. Restart also synchronizes the head before loading the scenario.
+
 The record store, commit logs, and repository live under ``.reef/`` by default (``agent_record_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `Architecture <../getting-started/architecture.rst#durability>`__ describes the commit ordering behind the table.

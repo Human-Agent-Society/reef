@@ -165,14 +165,20 @@ def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> N
         render_composition([("config", {"data": {"max_turns": turns}})], get_adapter("terminus"))
 
 
-def test_terminus_rejects_code_extensions_that_would_run_outside_the_container() -> None:
-    # Harbor isolates the commands the model writes, not Reef's own process,
-    # so an evolved module would outrank the agent it configures.
-    with pytest.raises(RenderError, match="outside the container"):
+def test_terminus_extension_requires_an_agent_class() -> None:
+    with pytest.raises(RenderError, match="must define class Agent"):
         render_composition(
             [("code_extension", {"name": "assemble", "code": "def assemble(s, r, f): return None\n"})],
             get_adapter("terminus"),
         )
+
+
+def test_terminus_renders_one_extension_without_executing_it() -> None:
+    node = ("code_extension", {"name": "agent", "code": "raise RuntimeError('must not run')\nclass Agent: pass\n"})
+    files = render_composition([node], get_adapter("terminus"))
+    assert files["terminus/context/agent.py"] == node[1]["code"]
+    with pytest.raises(RenderError, match="exactly one code_extension"):
+        render_composition([node, ("code_extension", {**node[1], "name": "second"})], get_adapter("terminus"))
 
 
 def test_terminus_binding_renders_the_litellm_provider() -> None:

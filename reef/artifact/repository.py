@@ -54,6 +54,25 @@ class RepositoryBackend(ABC):
     ) -> ArtifactRef: ...
 
 
+class StagedReleaseRepositoryBackend(RepositoryBackend):
+    """Optional storage contract for publication followed by head promotion.
+
+    ``publish(advance_head=False)`` must store resolvable release bytes and
+    metadata without moving the head. ``commit_release`` then promotes that
+    release without publishing its bytes again.
+    """
+
+    @abstractmethod
+    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+        """Advance a staged durable release after the scenario commits it.
+
+        Implementations must accept an already-current release so recovery can
+        repeat an interrupted post-commit mirror update without publishing new
+        bytes. They must reject an unrelated current head.
+        """
+        ...
+
+
 class CachedRepositoryBackendFactory(ABC):
     """Own per-scenario backend caching instead of hiding it in a closure."""
 
@@ -210,6 +229,29 @@ class Repository:
                     f"refusing to advance to {ref.release_id}"
                 )
             self._current_artifact = ref
+
+    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        """Install already-committed serving and checkpoint refs without storage I/O."""
+        with self._head_lock:
+            if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
+                raise ArtifactConflict("repository heads changed before the committed release was installed")
+            self._current_artifact = ref
+            self._checkpoint_artifact = ref
+
+    def synchronize_checkpoint(self) -> None:
+        """Repair a stale backend head from the committed checkpoint, never vice versa."""
+        checkpoint = self.require_checkpoint_artifact()
+        if self.backend.current() == checkpoint:
+            return
+        if checkpoint.parent_release_id is None:
+            raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
+        parent = self.backend.resolve_release(checkpoint.parent_release_id)
+        self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
+
+    def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
+        if not isinstance(self.backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
+        return self.backend
 
     def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
         ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)

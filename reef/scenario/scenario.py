@@ -141,12 +141,12 @@ class Scenario:
 
     @property
     def commit_log(self) -> CommitLog | None:
-        """The commit protocol's durable journal, for read-only inspection."""
+        """The durable commit log, for read-only inspection."""
         return self._commit_protocol.commit_log
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
-        """The non-blocking step and durable training-outcome snapshot."""
+        """The non-blocking committed step, training outcome, and artifact-head sync status."""
         return self._commit_protocol.commit_status
 
     @property
