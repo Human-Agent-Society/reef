@@ -399,6 +399,30 @@ class GitLFSRepositoryBackend(RepositoryBackend):
                 raise
             return self._manifest.artifact_ref(commit)
 
+    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+        with self._workspace.lock:
+            staged = self.resolve_release(ref.release_id)
+            if staged != ref or ref.parent_release_id != expected_parent.release_id:
+                raise ArtifactPublicationError("committed release differs from its staged identity or parent")
+            current = self._workspace.ls_remote(self.ref_name)
+            if current == ref.release_id:
+                return
+            if current != expected_parent.release_id:
+                raise ArtifactConflict("repository head changed before the staged release was committed")
+            try:
+                self._workspace.force_push_with_lease(
+                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
+                    f"{ref.release_id}:{self.ref_name}",
+                    f"+{ref.release_id}:refs/reef/head",
+                )
+            except ArtifactPublicationError as exc:
+                current = self._workspace.ls_remote(self.ref_name)
+                if current == ref.release_id:
+                    return
+                if current != expected_parent.release_id:
+                    raise ArtifactConflict("repository head changed while committing a staged release") from exc
+                raise
+
     def _bootstrap(
         self,
         artifact_source: str,

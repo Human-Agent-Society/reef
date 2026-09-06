@@ -20,6 +20,7 @@ finding.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import tempfile
@@ -30,7 +31,7 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor
+from reef.harness.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, LocalExecutor, SandboxExecutor
 from reef.harness.trajectory import reader_for
 
 
@@ -111,6 +112,15 @@ def run_episode(
     or failure.
     """
     executor = executor or LocalExecutor()
+    # An adapter that isolates episodes itself cannot also run inside the jail:
+    # a task container does not nest in bubblewrap. Refuse at the shared
+    # boundary so every caller is told, rather than quietly getting the
+    # adapter's own boundary instead of the one the deployment configured.
+    if descriptor.self_isolating and isinstance(executor, SandboxExecutor):
+        raise EpisodeError(
+            f"adapter {descriptor.name!r} isolates episodes in its own container and cannot run under "
+            "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
+        )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
     root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-"))
     try:
@@ -138,6 +148,12 @@ def run_episode(
         # Point HOME at the root unless the descriptor relocates it itself:
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
+        # Named host variables, for an adapter whose episodes reach a hosted
+        # sandbox and need that provider's credential. Absent ones stay absent.
+        for name in descriptor.inherit_env:
+            value = os.environ.get(name)
+            if value is not None:
+                env.setdefault(name, value)
         env.setdefault("HOME", str(root))
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:

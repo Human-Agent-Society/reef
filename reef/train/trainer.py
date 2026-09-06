@@ -105,6 +105,7 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
+        self._prepared_commit: PreparedCommit | None = None
         self._lock = Lock()
 
     @property
@@ -294,7 +295,16 @@ class Trainer:
                 self._pending.result = execution.result
         return execution
 
-    def commit(self) -> PreparedCommit:
+    def prepare_commit(self) -> PreparedCommit:
+        """Freeze a retryable commit without advancing algorithm state.
+
+        Processor acknowledgement is cached with the pending result until the
+        journal accepts it. A failed publication or journal append can retry
+        this same commit without acknowledging twice or repeating evaluation.
+        """
+        return self.commit(defer_state=True)
+
+    def commit(self, *, defer_state: bool = False) -> PreparedCommit:
         """Commit the pending result on the trainer side, without compacting.
 
         With a pending result this acknowledges its batch, advances the
@@ -305,6 +315,8 @@ class Trainer:
         and the returned commit describes the current state.
         """
         with self._lock:
+            if self._prepared_commit is not None:
+                return self._prepared_commit
             if self._pending is None:
                 return PreparedCommit(
                     algorithm_state=self.algorithm_state_dict(),
@@ -320,10 +332,8 @@ class Trainer:
             consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
-            self._state = dict(result.state)
-            self._pending = None
-            return PreparedCommit(
-                algorithm_state=self.algorithm_state_dict(),
+            prepared = PreparedCommit(
+                algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
                 compacted_ids=frozenset(compacted),
@@ -331,6 +341,12 @@ class Trainer:
                 metrics=dict(result.metrics) or None,
                 training_job_id=result.training_job_id,
             )
+            if defer_state:
+                self._prepared_commit = prepared
+            else:
+                self._state = dict(result.state)
+                self._pending = None
+            return prepared
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
         """Attach provider correlation fields to the exact pending result.
@@ -377,6 +393,13 @@ class Trainer:
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
+        with self._lock:
+            if self._prepared_commit is not None:
+                if state != self._prepared_commit.algorithm_state:
+                    raise ValueError("durable state differs from the prepared trainer commit")
+                self._state = dict(state)
+                self._pending = None
+                self._prepared_commit = None
         backend = self._training_backend
         if backend is not None:
             backend.commit_applied(state)

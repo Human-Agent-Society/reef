@@ -114,11 +114,11 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
     release = Event()
     failed = False
 
-    def publish(self, artifact, *, expected_parent):
+    def publish(self, artifact, *, expected_parent, advance_head=True):
         type(self).started.set()
         if not type(self).release.wait(5):
             raise TimeoutError("test did not release blocked publication")
-        ref = super().publish(artifact, expected_parent=expected_parent)
+        ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
         if not type(self).failed:
             type(self).failed = True
             raise ArtifactPublicationError("lost publication acknowledgement")

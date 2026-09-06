@@ -194,13 +194,13 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
         local_artifact_dir=tmp_path / "staged",
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    original_commit = scenario.trainer.commit
+    original_commit = scenario.trainer.prepare_commit
 
     def slow_commit():
         time.sleep(0.05)
         return original_commit()
 
-    monkeypatch.setattr(scenario.trainer, "commit", slow_commit)
+    monkeypatch.setattr(scenario.trainer, "prepare_commit", slow_commit)
 
     def worker(seed: int) -> None:
         dispatcher.accept_record(sft_inference(f"i{seed}"))

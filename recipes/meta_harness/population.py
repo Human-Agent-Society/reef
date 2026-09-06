@@ -252,7 +252,6 @@ class Population:
                 raise ValueError("committed Meta-Harness population does not match Reef's served composition")
             candidate = self.by_id(candidate_id)
             candidate.outcome = "selected"
-            self.pending_id = None
             return candidate
         candidate = CandidateRecord.create(
             normalized,
@@ -317,7 +316,11 @@ class Population:
         candidate_scores: Sequence[float],
         current_scores: Sequence[float],
         selected: bool,
+        episode_calls: int | None = None,
     ) -> CandidateRecord:
+        calls = len(candidate_scores) + len(current_scores) if episode_calls is None else episode_calls
+        if isinstance(calls, bool) or not isinstance(calls, int) or calls < 0:
+            raise ValueError("episode_calls must be a non-negative integer")
         candidate = self.pending
         served = self.served
         candidate.scores = _scores(candidate_scores)
@@ -331,7 +334,7 @@ class Population:
         if selected:
             self.served_id = candidate.candidate_id
         self.pending_id = None
-        self.episode_calls += len(candidate_scores) + len(current_scores)
+        self.episode_calls += calls
         return candidate
 
     def record_attempt(self, **values: Any) -> None:

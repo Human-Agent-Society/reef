@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,55 @@ def test_codex_accepts_admitted_model_tuning() -> None:
 def test_codex_requires_the_responses_dialect() -> None:
     with pytest.raises(ModelBindingError, match="declares no model_binding for the 'openai' api"):
         ModelBinding("http://up", "m").compose_nodes(get_adapter("codex"))
+
+
+def _terminus_nodes():
+    # terminus rejects code_extension, and its config target holds Terminus 2
+    # constructor arguments rather than a pi-shaped settings object.
+    nodes = [node for node in NODES if node[0] not in ("config", "code_extension")]
+    return [*nodes, ("config", {"data": {"max_turns": 40}})]
+
+
+def test_terminus_render_matches_the_golden_tree() -> None:
+    assert render_composition(_terminus_nodes(), get_adapter("terminus")) == golden_tree("terminus")
+
+
+def test_terminus_folds_agent_commands_into_a_second_skill_root() -> None:
+    files = render_composition(_terminus_nodes(), get_adapter("terminus"))
+    # Both roots carry a SKILL.md, and the quirk synthesized frontmatter on each.
+    assert files["terminus/skills/notes/SKILL.md"].startswith("---\nname: notes\n")
+    assert files["terminus-commands/summarize/SKILL.md"].startswith("---\nname: summarize\n")
+
+
+def test_terminus_rejects_config_keys_that_are_not_constructor_arguments() -> None:
+    with pytest.raises(RenderError, match="not Terminus 2 arguments"):
+        render_composition([("config", {"data": {"tmux_pane_width": 200}})], get_adapter("terminus"))
+
+
+@pytest.mark.parametrize("turns", [0, -1, True, "many"])
+def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> None:
+    with pytest.raises(RenderError, match="max_turns must be a positive integer"):
+        render_composition([("config", {"data": {"max_turns": turns}})], get_adapter("terminus"))
+
+
+def test_terminus_rejects_code_extensions_that_would_run_outside_the_container() -> None:
+    # Harbor isolates the commands the model writes, not Reef's own process,
+    # so an evolved module would outrank the agent it configures.
+    with pytest.raises(RenderError, match="outside the container"):
+        render_composition(
+            [("code_extension", {"name": "assemble", "code": "def assemble(s, r, f): return None\n"})],
+            get_adapter("terminus"),
+        )
+
+
+def test_terminus_binding_renders_the_litellm_provider() -> None:
+    descriptor = get_adapter("terminus")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
+    config = json.loads(files["terminus/config.json"])
+    assert config["model_name"] == "m1"
+    assert config["api_base"] == "http://127.0.0.1:9/v1"
+    assert config["llm_kwargs"] == {"api_key": "k-1"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"

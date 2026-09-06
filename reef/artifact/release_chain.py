@@ -59,6 +59,9 @@ class ArtifactReleaseChain:
     def advance(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
         self._repository.advance_current(ref, expected=expected)
 
+    def commit_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        self._repository.commit_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+
     def stage(self, step: int, artifact: Artifact, *, parent: ArtifactRef | None = None) -> Artifact:
         return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)
 

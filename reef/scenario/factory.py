@@ -226,6 +226,18 @@ class ScenarioFactory:
             else _RecoveredHead.from_snapshot(snapshot)
         )
 
+        # Publication stages durable bytes before the journal commit, while
+        # the backend's head is only a post-commit mirror. A crash between the
+        # two leaves the journal's checkpoint ahead of that pointer.
+        if commit_log is not None:
+            checkpoints = [
+                record
+                for record in commit_log.records()
+                if record.checkpoint and not record.pending and record.step >= snapshot.scenario_step
+            ]
+            if checkpoints:
+                checkpoint_head = checkpoints[-1].artifact_ref
+
         current_artifact = (
             checkpoint_head
             if surface.loader is None
@@ -239,6 +251,7 @@ class ScenarioFactory:
             checkpoint_artifact=checkpoint_head,
             local_dir=self._local_artifact_dir,
         )
+        repository.synchronize_checkpoint()
         if isinstance(surface.loader, ArtifactActivator) and not isinstance(current_artifact, LiveWeightArtifactRef):
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.

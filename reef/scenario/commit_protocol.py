@@ -184,13 +184,14 @@ class ScenarioCommitProtocol:
 
             artifacts = self._artifacts
             checkpoint = artifacts.checkpoint
+            artifacts.repository.require_staged_commit_support()
             next_step = self._step + 1
             source = artifacts.resolve(target_ref)
             surface = self._binding.surface
             self._binding.artifact_validator.validate(source)
             if surface.loader is not None:
                 surface.loader.load(source, self._binding.runtime)
-            prepared = self._trainer.commit()
+            prepared = self._trainer.prepare_commit()
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 snapshot_metadata = snapshot_metadata_for(
@@ -212,6 +213,7 @@ class ScenarioCommitProtocol:
                         **dict(source.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
+                    advance_heads=False,
                 )
                 if isinstance(surface.loader, ArtifactActivator):
                     surface.loader.activate(artifacts.resolve(published_ref), self._binding.runtime, source=source)
@@ -224,6 +226,7 @@ class ScenarioCommitProtocol:
                     rollback_target_release_id=release_id,
                 )
                 self._finish_trainer_commit(prepared)
+                artifacts.commit_checkpoint(published_ref, expected=current_ref, expected_checkpoint=checkpoint)
             except Exception:
                 artifacts.discard(staged)
                 raise
@@ -268,7 +271,7 @@ class ScenarioCommitProtocol:
             # Live weights have no durable bytes to promote later, so holding them back is not expressible.
             raise ReefError("a pending release requires a durable checkpoint; this step publishes live weights only")
         head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
-        prepared = self._trainer.commit()
+        prepared = self._trainer.prepare_commit()
         self._append_commit_record(
             step=next_step,
             artifact_ref=live_ref,
@@ -283,7 +286,7 @@ class ScenarioCommitProtocol:
     def _commit_without_artifact(self, result: TrainStepResult) -> Any:
         # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
-        prepared = self._trainer.commit()
+        prepared = self._trainer.prepare_commit()
         self._append_commit_record(
             step=next_step,
             artifact_ref=self._artifacts.current,
@@ -300,17 +303,20 @@ class ScenarioCommitProtocol:
         checkpoint = artifacts.checkpoint
         head = artifacts.current
         self._binding.artifact_validator.validate(publication.artifact)
-        prepared = self._trainer.commit()
-        local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
+        prepared = self._trainer.prepare_commit()
         # A pending release is minted into the catalog but never activated and moves no head.
         pending = result.pending
+        checkpointed = pending or self._should_checkpoint(result)
+        local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         try:
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
-            if pending or self._should_checkpoint(result):
+            if checkpointed:
+                if not pending:
+                    artifacts.repository.require_staged_commit_support()
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
@@ -325,7 +331,7 @@ class ScenarioCommitProtocol:
                         **dict(publication.artifact.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
-                    advance_heads=not pending,
+                    advance_heads=False,
                 )
                 if not pending:
                     self._activate(artifacts.resolve(published_ref), source=local_artifact)
@@ -337,7 +343,6 @@ class ScenarioCommitProtocol:
                     pending=pending,
                 )
             else:
-                artifacts.advance(local_artifact.ref, expected=head)
                 self._append_commit_record(
                     step=next_step,
                     artifact_ref=local_artifact.ref,
@@ -345,6 +350,11 @@ class ScenarioCommitProtocol:
                     prepared=prepared,
                 )
             self._finish_trainer_commit(prepared)
+            if not pending:
+                if checkpointed:
+                    artifacts.commit_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
+                else:
+                    artifacts.advance(local_artifact.ref, expected=head)
         except Exception:
             artifacts.discard(local_artifact)
             raise

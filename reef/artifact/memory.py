@@ -28,6 +28,7 @@ class _InMemoryStorage:
         self.lock = Lock()
         self.refs: dict[str, ArtifactRef] = {}
         self.paths: dict[str, Path] = {}
+        self.metadata: dict[str, dict[str, object]] = {}
         self.head = self.copy_artifact(
             source,
             parent_release_id=None,
@@ -110,6 +111,7 @@ class InMemoryRepositoryBackend(RepositoryBackend):
             )
             self._current = ref
             self._metadata = dict(metadata or {})
+            self._storage.metadata[ref.release_id] = dict(self._metadata)
             return ref
 
     def metadata(self) -> Mapping[str, object] | None:
@@ -148,12 +150,26 @@ class InMemoryRepositoryBackend(RepositoryBackend):
                 parent_release_id=current.release_id,
                 content_id=artifact.ref.content_id,
             )
+            self._storage.metadata[ref.release_id] = dict(artifact.metadata)
             # advance_head=False mints a pending release the head does not move to.
             if advance_head:
                 self._current = ref
                 self._metadata = dict(artifact.metadata)
                 self._storage.head = ref
             return ref
+
+    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+        with self._storage.lock:
+            current = self.current()
+            if self._storage.refs.get(ref.release_id) != ref or ref.parent_release_id != expected_parent.release_id:
+                raise ArtifactPublicationError("committed release differs from its staged identity or parent")
+            if current == ref:
+                return
+            if current != expected_parent:
+                raise ArtifactConflict("repository head changed before the staged release was committed")
+            self._current = ref
+            self._metadata = dict(self._storage.metadata[ref.release_id])
+            self._storage.head = ref
 
 
 class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):

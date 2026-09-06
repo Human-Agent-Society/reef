@@ -549,3 +549,49 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
         assert json.loads(mirror.read_text()) == committed
     finally:
         restarted.close()
+
+
+@pytest.mark.parametrize("failure", ["activation", "publication", "commit"])
+def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monkeypatch, failure):
+    make_binary(tmp_path)
+    config = sections(tmp_path)
+    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
+    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), IMPROVED))})
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        agent_record_dir=tmp_path / "records",
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("publish-failure")
+        previous = json.loads(json.dumps(scenario.trainer.state))
+        _report_once(scenario, "publish-failure", "1")
+        result = scenario.prepare_training_step()
+        assert result.artifact is not None
+        backend = scenario.trainer.training_backend
+        assert tuple(backend._entries()) == SEED
+        head = scenario.current_artifact_ref()
+        checkpoint = scenario.repository.require_checkpoint_artifact()
+        durable_head = scenario.repository.backend.current()
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("unavailable")
+
+        if failure == "publication":
+            monkeypatch.setattr(scenario.repository, "publish", fail)
+        elif failure == "commit":
+            monkeypatch.setattr(scenario.commit_log, "append", fail)
+        else:
+            monkeypatch.setattr(scenario._commit_protocol, "_activate", fail)
+        with pytest.raises(RuntimeError, match="unavailable"):
+            scenario.commit(result)
+        assert scenario.trainer.state == previous
+        assert tuple(backend._entries()) == SEED
+        assert scenario.current_artifact_ref() == head
+        assert scenario.repository.require_checkpoint_artifact() == checkpoint
+        assert scenario.repository.backend.current() == durable_head
+        assert not scenario_population_path(tmp_path / "meta-harness", "publish-failure").exists()
+    finally:
+        dispatcher.close()
