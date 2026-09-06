@@ -4,8 +4,7 @@
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
-model:
-  path: &model your-model-name  # Set once; shared by serving and evaluation.
+# The recipe uses the upstream runtime's model for evaluation as well as serving.
 
 evolution:
   adapter: pi
@@ -65,7 +64,7 @@ reef:
   recipe: deployment
   token: reef-local
   upstream_url: ${REEF_UPSTREAM_URL}
-  upstream_model: *model
+  upstream_model: ${REEF_UPSTREAM_MODEL}
   upstream_api_key: ${REEF_UPSTREAM_API_KEY}
   agent_record_dir: tutorials/evolve-your-harness/work/deployment/agent-record
   artifact_repository: tutorials/evolve-your-harness/work/deployment/artifacts.git
