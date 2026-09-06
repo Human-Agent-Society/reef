@@ -184,6 +184,32 @@ class RecordStore:
     def append(self, item: AgentRecord) -> AgentRecord:
         return self.append_result(item).item
 
+    def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
+        """Validate a retry before applying admission rules for new records.
+
+        Compacted records retain content hashes, so an already accepted
+        instruction can still be retried after the training mode changes.
+        This lookup never appends data or changes its receipt.
+        """
+        encoded = self._encode(item)
+        with self._lock:
+            consumed = self._connection.execute(
+                "SELECT content_sha256 FROM consumed_agent_record WHERE agent_record_id = ?",
+                (item.agent_record_id,),
+            ).fetchone()
+            if consumed is not None:
+                if consumed["content_sha256"] != self._content_sha256(encoded):
+                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
+                return item
+            row = self._connection.execute(
+                "SELECT * FROM agent_record WHERE agent_record_id = ?", (item.agent_record_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            if self._content(self._row_content(row)) != self._content(encoded):
+                raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
+            return self._decode(row)
+
     def append_result(self, item: AgentRecord) -> AppendResult:
         encoded = self._encode(item)
         with self._lock, self._connection:

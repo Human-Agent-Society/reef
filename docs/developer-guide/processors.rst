@@ -35,7 +35,87 @@ invariant failure).
 
 ``DataProcessor`` in ``base.py`` is concrete on purpose: bare, it is the
 no-update default that ingests for audit and never becomes ready. Recipes
-never implement it directly; they subclass one of the two engines.
+can implement their own lifecycle or reuse one of the feedback engines below.
+
+Explicit manual training
+------------------------
+
+Pass the recipe's ``training_mode`` to ``Trainer.build``. The factory receives
+it in ``ProcessorContext.training_mode``; ``with_config`` preserves it.
+The processor owns ingestion, readiness, batch assembly and retention for
+the chosen mode. Trainer calls the same lifecycle methods in every mode
+and never substitutes a manual wrapper.
+
+``DataProcessor`` supports ``auto`` by default. A processor implementing
+both modes declares ``supported_training_modes = frozenset({"auto", "manual"})``
+and uses ``self.training_mode`` in its implementation. An unsupported mode
+raises ``NotImplementedError`` during initialization, before records are
+ingested or a backend step runs. An unknown mode name is a ``ValueError``.
+
+For separate implementations per mode, subclass the optional
+``ModeDataProcessor`` helper and declare ``mode_processors``:
+
+.. code:: python
+
+   class MyProcessor(ModeDataProcessor):
+       mode_processors = {
+           "auto": MyAutomaticProcessor,
+           "manual": MyManualProcessor,
+       }
+
+It selects the implementation at construction and delegates its complete
+lifecycle, including retention, asynchronous derivation status and teardown.
+An omitted mode raises ``NotImplementedError``. Each selected implementation
+receives the same context and must support that mode.
+
+Manual ingestion must include ``RequestType.TRAIN``. The processor decides
+how an explicit instruction authorizes a batch: it may use the instruction
+alone, or combine it with accumulated inference data. It should attach the
+instruction to ``batch.request`` (``id``, ``text``, ``session``, ``release_id``)
+and acknowledge the instruction receipt with the input records it consumes.
+Trainer preserves batch reservation, commit and replay semantics.
+
+Harness evolution selects an implementation based on the optional
+``ManualTrainingProcessor`` engine. This engine queues instructions FIFO,
+retains ordinary traffic for audit, and creates one batch per instruction.
+Subclasses implement ``make_request_batch(request: AgentRecord)``; the engine
+attaches ``batch.request``, assigns a stable batch id and manages request
+acknowledgement. Harness requests need no inference samples, so its hook
+returns an empty ``TraceBatch``. Other processors can reuse this engine or
+implement their own manual lifecycle. No batch assembly method may call
+models or perform training; that remains the backend's responsibility.
+
+Dynamic configuration
+---------------------
+
+The manager binds one immutable configuration snapshot to each trainer.
+``ProcessorContext.config_revision`` identifies it, and each reserved step
+retains that revision until its commit. Components must not fetch newer
+configuration midway through an operation.
+
+Dynamic updates are opt-in. Declare the fields in both
+``Recipe.dynamic_config_fields`` and ``DataProcessor.dynamic_config_fields``.
+The recipe's ``with_runtime_config`` validates the complete proposed data
+configuration and any backend-specific constraints. Implement
+``prepare_reconfiguration(context)`` to return a separate, empty processor
+for the requested configuration, without changing the current processor or
+external state. The default raises ``NotImplementedError``.
+``ModeDataProcessor`` provides construction of a replacement as an optional
+helper; its subclasses still declare which fields can change dynamically.
+
+At a step boundary, the trainer replays retained records up to its consumption
+cursor into the replacement, excluding records already consumed by committed
+steps. It preserves algorithm/backend state and the record cursor. Pending
+records beyond that cursor are consumed normally after activation. Preparation
+must preserve the requested mode and output schema; failures close the new
+processor and leave the current one intact. Successful activation swaps the
+processor and snapshot together under the trainer lock, then closes the old
+processor. Batch IDs must remain distinct across configuration revisions;
+the harness processors include ``config_revision`` in their automatic batch IDs.
+
+The manager serializes and persists updates, while the worker owns the safe
+boundary. Do not mutate a recipe, processor context, or a manager snapshot to
+change live behavior. For examples, see ``test_runtime_configuration.py``.
 
 The two feedback paths
 ----------------------

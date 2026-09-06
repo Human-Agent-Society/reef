@@ -1,0 +1,80 @@
+"""Native request-driven batching, independent of a recipe's automatic gates."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from collections.abc import Mapping
+from dataclasses import replace
+from typing import Any
+
+from reef.core import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
+from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.types import ProcessorContext, TrainingBatch
+
+
+class ManualTrainingProcessor(DataProcessor, ABC):
+    """One durable TRAIN record authorizes one batch containing its instruction.
+
+    Ordinary traffic remains audit data. It never enters automatic batching
+    or model-based feedback derivation. Only the instruction receipt is
+    consumed by a committed manual step.
+    """
+
+    required_request_types = frozenset(RequestType)
+    supported_training_modes = frozenset({"manual"})
+
+    def __init__(self, context: ProcessorContext) -> None:
+        super().__init__(context)
+        self._batch_size = 1
+        self._audit_ids: set[str] = set()
+        self._requests: dict[str, AgentRecord] = {}
+        self._released: set[str] = set()
+
+    @abstractmethod
+    def make_request_batch(self, request: AgentRecord) -> TrainingBatch:
+        """Shape one explicit instruction into the method's batch schema, without model calls."""
+
+    def ingest(self, item: AgentRecord) -> None:
+        if item.scenario != self.scenario:
+            raise ValueError("manual training records must belong to the processor's scenario")
+        if item.request_type is RequestType.TRAIN:
+            TrainingRequest.from_dict(item.payload)
+            if item.agent_record_id not in self._released:
+                self._requests.setdefault(item.agent_record_id, item)
+        else:
+            self._audit_ids.add(item.agent_record_id)
+
+    def _ready_count(self) -> int:
+        return len(self._requests)
+
+    def _make_pending(self, batch_number: int) -> TrainingBatch:
+        record = next(iter(self._requests.values()))
+        batch = self.make_request_batch(record)
+        return replace(
+            batch,
+            batch_id=f"{self.scenario}:manual:{record.agent_record_id}",
+            request=replace(TrainingRequest.from_dict(record.payload), id=record.agent_record_id),
+        )
+
+    def _consume_pending(self) -> frozenset[str]:
+        receipt = next(iter(self._requests))
+        self._requests.pop(receipt)
+        self._released.add(receipt)
+        return frozenset({receipt})
+
+    def retention_decision(self) -> RetentionDecision:
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(self._audit_ids) | frozenset(self._requests),
+            releasable_agent_record_ids=frozenset(self._released),
+        )
+
+    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        self._released -= agent_record_ids
+
+    def status(self) -> Mapping[str, Any]:
+        return {
+            "training_mode": "manual",
+            "buffered_requests": len(self._requests),
+            "retained_records": len(self._audit_ids),
+        }

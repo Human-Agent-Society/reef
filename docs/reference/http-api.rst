@@ -33,6 +33,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/train``                            | enqueue one explicit manual training instruction  |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios``                         | every known scenario and current release          |
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
@@ -58,6 +60,63 @@ Routes
 | ``GET /reef/status``                            | training, serving, and storage state              |
 +-------------------------------------------------+---------------------------------------------------+
 
+Runtime configuration
+---------------------
+
+``GET /reef/config`` reads supported service settings;
+``GET /reef/scenarios/{scenario}/config`` reads an existing scenario's recipe
+data settings. Both return the active snapshot and update history:
+
+.. code:: json
+
+   {
+     "scope": "scenario:agents",
+     "revision": 1,
+     "active_revision": 0,
+     "active": {"data": {"training_mode": "auto", "batch_size": 4}},
+     "updates": [
+       {"id": "1", "revision": 1, "patch": {"data": {"training_mode": "manual"}}, "status": "pending"}
+     ]
+   }
+
+The ``active`` example is abbreviated; scenario responses include all declared
+recipe data fields. ``revision`` advances when an update is accepted;
+``active_revision`` advances only after successful application. GET includes
+an ``ETag`` containing ``revision``. Update IDs are local to their scope.
+
+Create an update with ``POST /reef/config/updates`` or
+``POST /reef/scenarios/{scenario}/config/updates``, supplying a partial
+configuration object:
+
+.. code:: bash
+
+   curl -X POST http://127.0.0.1:8900/reef/scenarios/agents/config/updates \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -H 'If-Match: "1"' \
+     -d '{"data":{"training_mode":"manual","batch_size":8}}'
+
+``If-Match`` is optional; when provided, it must match the latest accepted
+revision, including queued or failed updates. A stale revision returns ``409``.
+Invalid or unsupported changes return ``400`` without enqueuing anything;
+an unknown scenario returns ``404``. These routes use the normal service
+authentication.
+
+Successful acceptance returns ``202`` with ``scope``, ``id``, ``revision``,
+``patch`` and ``status: "pending"``. This is an acceptance receipt: application
+may already have completed by the time the response arrives. Poll GET to
+observe ``pending``, ``applied``, or ``failed``; a failed update includes
+``error``, and a deferred manual-to-auto transition includes ``waiting_for``.
+Submission during training is queued, not rejected because the trainer is busy.
+
+Service updates currently accept the three ``reef.inference_retry_*`` fields;
+they apply for subsequent non-streaming requests. Harness scenario updates
+accept ``data.training_mode`` and ``data.batch_size``. Scenario updates apply
+between training steps, before the next automatic batch is selected. Already
+accepted manual instructions finish before a switch to auto; new instructions
+receive ``409`` while a transition away from manual is queued. Configuration
+updates never implicitly clear inference records or pending instructions.
+
 Headers
 -------
 
@@ -82,6 +141,43 @@ Headers
 |                                   | on the record under ``metadata.tags``, for a processor  |
 |                                   | to correlate on. Reef never reads a value.              |
 +-----------------------------------+---------------------------------------------------------+
+
+Manual training
+---------------
+
+``POST /reef/train`` is available to a scenario configured with
+``data.training_mode: manual``. It takes the user's ``text``, originating
+``session`` and ``release_id``. The latter two are provenance, not a request
+to restore an old release. The backend operates on the current committed
+state. The API requires no inference receipts or score. The processor
+determines what inputs it needs for manual training; harness evolution
+can execute the request without any inference data or ready automatic batch.
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/train \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: coding" \
+     -H "Content-Type: application/json" \
+     -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "release_id":"release-1"}'
+
+The response is ``{agent_record_id, scenario, request_type: "train"}``.
+HTTP 200 acknowledges durable acceptance, not successful training. Requests
+are executed one at a time by the normal training worker; later requests
+do not change a step already in flight. The existing evaluation and
+publication rules still determine whether the result becomes served.
+``GET /reef/status`` reports ``training_mode``. Processors using the shared
+manual request queue also report ``buffered_requests`` (requests already
+read into the processor; later records may still wait in storage).
+Committed step metrics include ``training_request``
+with the instruction id, text, session and release id.
+
+Supply ``agent_record_id`` to retry safely: an identical request is accepted
+without another step, including after record compaction; reusing the id with
+different content returns HTTP 409. Without it, each submission gets a fresh
+id. Empty text, text longer than 4000 characters, missing or non-string
+session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
+The normal bearer authentication and implicit-scenario-creation setting apply.
 
 Scenarios
 ---------

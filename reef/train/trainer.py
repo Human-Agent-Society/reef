@@ -17,6 +17,8 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any
 
+from reef.core.configuration import ConfigDeferred, ConfigManager, ConfigSnapshot, PreparedConfigChange
+from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.records import RecordStore
@@ -38,6 +40,7 @@ class _PendingStep:
     batch: TrainingBatch
     result: TrainStepResult | None
     prepared_commit: PreparedCommit | None = None
+    config_snapshot: ConfigSnapshot | None = None
 
     @property
     def batch_id(self) -> str:
@@ -61,6 +64,7 @@ class Trainer:
         algorithm_state: Mapping[str, Any] | None = None,
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        training_mode: str = "auto",
     ) -> Trainer:
         if training_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a training backend")
@@ -69,8 +73,12 @@ class Trainer:
                 scenario=scenario,
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
+                training_mode=training_mode,
             )
         )
+        if processor.training_mode != training_mode:
+            processor.close()
+            raise ValueError("processor_factory must preserve the requested training_mode")
         default_state = training_backend.initial_state() if training_backend is not None else {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         return cls(
@@ -106,11 +114,103 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
+        self._config_snapshot: ConfigSnapshot | None = None
+        self._consumed_ids: set[str] = set()
         self._lock = Lock()
 
     @property
     def scenario(self) -> str:
         return self._scenario
+
+    @property
+    def training_mode(self) -> str:
+        """The active mode; queued updates do not change the current step."""
+        return self._processor.training_mode
+
+    def bind_configuration(self, snapshot: ConfigSnapshot) -> None:
+        """Bind the manager's snapshot before the new trainer is exposed."""
+        self._config_snapshot = snapshot
+        self._processor.bind_config_revision(snapshot.revision)
+
+    def apply_configuration(self, manager: ConfigManager) -> None:
+        """Apply queued updates before reserving the next batch, never mid-step."""
+        retired: list[DataProcessor] = []
+        with self._lock:
+            if self._pending is not None or self._config_snapshot is None:
+                return
+
+            def prepare(snapshot: ConfigSnapshot) -> PreparedConfigChange:
+                data = snapshot.values["data"]
+                previous = self._config_snapshot
+                if previous is None:
+                    raise RuntimeError("trainer configuration has not been bound")
+                changed = {name for name in data if data[name] != previous.values["data"][name]}
+                if not changed:
+                    return PreparedConfigChange(lambda: self.bind_configuration(snapshot))
+                unsupported = changed - self._processor.dynamic_config_fields
+                if unsupported:
+                    raise NotImplementedError(f"processor cannot dynamically update {sorted(unsupported)}")
+                mode = data["training_mode"]
+                if mode not in self._processor.supported_training_modes:
+                    raise NotImplementedError(f"processor does not implement training_mode={mode!r}")
+                # Instructions already accepted retain their manual semantics.
+                # Finish them before leaving manual; new instructions are
+                # excluded by the dispatcher once this transition is queued.
+                if self.training_mode == "manual" and mode != "manual":
+                    sequence = 0
+                    while items := self._records.replay_page(self.scenario, after_sequence=sequence, limit=256):
+                        for _, item in items:
+                            if (
+                                item.request_type is RequestType.TRAIN
+                                and item.agent_record_id not in self._consumed_ids
+                            ):
+                                raise ConfigDeferred("accepted manual requests must finish before switching mode")
+                        sequence = items[-1][0]
+                context = replace(
+                    self._processor.context,
+                    training_mode=mode,
+                    config_revision=snapshot.revision,
+                    config={
+                        **self._processor.context.config,
+                        **{name: data[name] for name in changed if name != "training_mode"},
+                    },
+                )
+                replacement = self._processor.prepare_reconfiguration(context)
+                try:
+                    if replacement is self._processor:
+                        raise ValueError("reconfiguration must prepare a separate processor")
+                    if replacement.training_mode != mode or replacement.output_schema != self._processor.output_schema:
+                        raise ValueError("replacement must preserve the requested mode and batch schema")
+                    sequence = 0
+                    while items := self._records.replay_page(self.scenario, after_sequence=sequence, limit=256):
+                        for sequence, item in items:
+                            if sequence > self._data_sequence:
+                                break
+                            if (
+                                item.agent_record_id not in self._consumed_ids
+                                and item.request_type in replacement.required_request_types
+                            ):
+                                replacement.ingest(item)
+                        if sequence >= self._data_sequence:
+                            break
+                except BaseException:
+                    if replacement is not self._processor:
+                        replacement.close()
+                    raise
+
+                def activate() -> None:
+                    retired.append(self._processor)
+                    self._processor = replacement
+                    self._config_snapshot = snapshot
+
+                return PreparedConfigChange(activate, replacement.close)
+
+            try:
+                while manager.apply_next(self._config_snapshot.scope, prepare):
+                    pass
+            finally:
+                for processor in retired:
+                    processor.close()
 
     @property
     def processor(self) -> DataProcessor:
@@ -215,7 +315,7 @@ class Trainer:
                 if not self._processor.ready():
                     return None
                 batch = self._build_validated_batch()
-                self._pending = _PendingStep(batch=batch, result=None)
+                self._pending = _PendingStep(batch=batch, result=None, config_snapshot=self._config_snapshot)
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         execution = self._execute_backend_step(batch, scenario_step)
@@ -274,7 +374,7 @@ class Trainer:
             if not self._processor.ready():
                 return None
             batch = self._build_validated_batch()
-            self._pending = _PendingStep(batch=batch, result=None)
+            self._pending = _PendingStep(batch=batch, result=None, config_snapshot=self._config_snapshot)
             return batch
 
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
@@ -324,13 +424,19 @@ class Trainer:
             consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            metrics = dict(result.metrics)
+            if self._pending.config_snapshot is not None:
+                metrics["config_revision"] = self._pending.config_snapshot.revision
+            request = self._pending.batch.request
+            if request is not None:
+                metrics["training_request"] = {"id": request.id, **request.to_dict()}
             prepared = PreparedCommit(
                 algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
                 compacted_ids=frozenset(compacted),
                 consumed_ids=consumed,
-                metrics=dict(result.metrics) or None,
+                metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
             self._pending.prepared_commit = prepared
@@ -344,6 +450,7 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._state = dict(prepared.algorithm_state)
+            self._consumed_ids.update(prepared.consumed_ids)
             self._pending = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
@@ -369,7 +476,7 @@ class Trainer:
             if self._pending is None:
                 return
             batch_id = self._pending.batch_id
-            self._processor.acknowledge(batch_id)
+            self._consumed_ids.update(self._processor.acknowledge(batch_id))
             retention = self._processor.retention_decision()
             compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
             self._records.compact(
@@ -379,6 +486,7 @@ class Trainer:
                 receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
             )
             self._processor.compaction_applied(compacted)
+            self._consumed_ids.difference_update(compacted)
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
@@ -388,6 +496,7 @@ class Trainer:
         with self._lock:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
+            self._consumed_ids.difference_update(compacted_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
@@ -437,6 +546,7 @@ class Trainer:
                     if sequence > up_to_sequence:
                         return
                     if item.agent_record_id in consumed_ids:
+                        self._consumed_ids.add(item.agent_record_id)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)

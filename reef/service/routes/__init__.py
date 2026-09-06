@@ -4,6 +4,7 @@ from aiohttp import web
 
 from reef.runtime.inference import InferenceBackend
 from reef.service.request_service import RequestService
+from reef.service.routes.configuration import register_configuration_routes
 from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.scenarios import register_scenario_routes
@@ -23,6 +24,7 @@ def register_routes(
         inference_backend=inference_backend,
     )
     register_scenario_routes(app, request_service=request_service)
+    register_configuration_routes(app, request_service=request_service)
     register_system_routes(app, request_service=request_service)
     register_record_routes(app, request_service=request_service)
 

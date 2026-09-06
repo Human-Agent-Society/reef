@@ -5,19 +5,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.artifact_ref import RuntimeLoadSpan
+from reef.core.training_request import TrainingRequest
 
 
 @dataclass(frozen=True)
 class TrainingBatch:
     """Base type for every batch flowing from a processor to a preparer.
 
-    Carries only the batch identity; each subclass adds its concrete payload
+    Carries batch identity and an optional explicit training request; each subclass adds its concrete payload
     (tokenized policy samples, grouped comparison sets, raw recorded traces).
     Concrete subclasses provide wiring safety between processors and backend
     algorithms or local artifact backends.
     """
 
     batch_id: str
+    request: TrainingRequest | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import ClassVar
+
 from reef.core import AgentRecord, RequestType
 from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.manual import ManualTrainingProcessor
+from reef.train.processors.modes import ModeDataProcessor
 from reef.train.processors.reported import (
     NEVER,
     BatchUnit,
@@ -15,7 +20,7 @@ from reef.train.processors.reported import (
 from reef.train.types import ProcessorContext, TraceBatch, TraceSample
 
 
-class CordisProcessor(ReportedFeedbackProcessor):
+class _ReportedTraceProcessor(ReportedFeedbackProcessor):
     """Pair recorded requests with reported scores and batch them unmodified.
 
     Requests are recorded post-transform, so a trace shows exactly what the
@@ -74,12 +79,12 @@ class CordisProcessor(ReportedFeedbackProcessor):
 
     def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> TraceBatch:
         return TraceBatch(
-            f"{self.scenario}:harness_evolve:{batch_number}",
+            f"{self.scenario}:harness_evolve:{self.context.config_revision}:{batch_number}",
             tuple(unit.candidates[0].value for unit in units),
         )
 
 
-class RecordDrivenTraceProcessor(DataProcessor):
+class _RecordDrivenTraceProcessor(DataProcessor):
     """Batch recorded inference traffic every ``batch_size`` requests, unscored.
 
     The report-free half of harness evolution: a deployment that only serves
@@ -110,7 +115,7 @@ class RecordDrivenTraceProcessor(DataProcessor):
     def _make_pending(self, batch_number: int) -> TraceBatch:
         selected = self._records[: self._batch_size]
         return TraceBatch(
-            f"{self.scenario}:harness_evolve:{batch_number}",
+            f"{self.scenario}:harness_evolve:{self.context.config_revision}:{batch_number}",
             tuple(
                 TraceSample(
                     source_agent_record_id=record.agent_record_id,
@@ -137,3 +142,34 @@ class RecordDrivenTraceProcessor(DataProcessor):
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         self._released -= agent_record_ids
+
+
+class _RequestedTraceProcessor(ManualTrainingProcessor):
+    """Answer a user's harness instruction without requiring inference samples."""
+
+    output_schema = TraceBatch
+
+    def make_request_batch(self, request: AgentRecord) -> TraceBatch:
+        return TraceBatch(request.agent_record_id, ())
+
+
+class CordisProcessor(ModeDataProcessor):
+    """Batch scored reports in auto mode; answer explicit harness requests in manual mode."""
+
+    output_schema = TraceBatch
+    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
+    mode_processors: ClassVar[Mapping[str, type[DataProcessor]]] = {
+        "auto": _ReportedTraceProcessor,
+        "manual": _RequestedTraceProcessor,
+    }
+
+
+class RecordDrivenTraceProcessor(ModeDataProcessor):
+    """Batch inference traffic in auto mode; answer explicit harness requests in manual mode."""
+
+    output_schema = TraceBatch
+    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
+    mode_processors: ClassVar[Mapping[str, type[DataProcessor]]] = {
+        "auto": _RecordDrivenTraceProcessor,
+        "manual": _RequestedTraceProcessor,
+    }

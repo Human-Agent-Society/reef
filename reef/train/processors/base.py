@@ -8,7 +8,7 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
@@ -36,6 +36,13 @@ class RetentionDecision:
 
 class DataProcessor:
     """The processor contract: turn records into typed training batches.
+
+    Each processor owns the behavior of its supported training modes.
+    ``context.training_mode`` selects the mode at construction;
+    ``supported_training_modes`` defaults to auto only. A subclass can
+    implement additional modes in its lifecycle methods or compose separate
+    implementations using ``ModeDataProcessor``. Unsupported modes raise
+    ``NotImplementedError`` before any records are ingested.
 
     Which base a recipe builds on is one question — how does its feedback
     arrive?
@@ -86,9 +93,15 @@ class DataProcessor:
     history.
     """
 
-    required_request_types: frozenset[RequestType] = frozenset(RequestType)
+    required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
+    supported_training_modes: frozenset[str] = frozenset({"auto"})
+    dynamic_config_fields: frozenset[str] = frozenset()
 
     def __init__(self, context: ProcessorContext) -> None:
+        if context.training_mode not in self.supported_training_modes:
+            raise NotImplementedError(
+                f"{type(self).__name__} does not implement training_mode={context.training_mode!r}"
+            )
         self._context = context
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
@@ -109,6 +122,11 @@ class DataProcessor:
     @property
     def scenario(self) -> str:
         return self._scenario
+
+    @property
+    def training_mode(self) -> str:
+        """The mode whose ingest, readiness, assembly and retention this processor implements."""
+        return self._context.training_mode
 
     @property
     def experiment_logger(self) -> ExperimentLogger:
@@ -210,3 +228,17 @@ class DataProcessor:
         after ``close`` returns, no thread of the processor may touch shared
         state or deliver further results.
         """
+
+    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
+        """Prepare an empty replacement for retained-record replay.
+
+        Called only between steps. The returned processor must not mutate the
+        current instance or external state. Recipes and processors both opt
+        in to dynamic fields; a mode supported at startup need not support a
+        live transition. The trainer replays unconsumed retained records.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not implement dynamic configuration")
+
+    def bind_config_revision(self, revision: int) -> None:
+        """Stamp an initial processor before any record replay or operation."""
+        self._context = replace(self._context, config_revision=revision)

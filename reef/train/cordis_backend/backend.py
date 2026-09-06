@@ -749,7 +749,7 @@ class CordisBackend(TrainingBackend):
             )
         manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
         # Failing traces become permanent gate tasks; off by default. The method picks which, Reef screens them.
-        if self._promote_failures:
+        if self._promote_failures and batch.request is None:
             if self._promote_task is None:
                 candidates: Sequence[str] = _default_promote(batch.samples)
             elif self._promote_accepts_manifest:
@@ -783,7 +783,7 @@ class CordisBackend(TrainingBackend):
         # Re-gate the last-good tree against the published one on cadence or when the served model changed.
         drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
-        if self._recheck_every and rollback_entries is not None and (due or drifted):
+        if batch.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
             target = [dict(entry) for entry in rollback_entries]
             published = [dict(entry) for entry in self._entries()]
             metrics["recheck"] = True
@@ -811,7 +811,9 @@ class CordisBackend(TrainingBackend):
         record: list[dict[str, Any]] = []
         # An agent's pending proposal goes first; the method proposes only when none waits.
         inbox = self.proposals
-        claimed = None if inbox is None else inbox.claim()
+        # A manual request owns this step; an unrelated inbox proposal must
+        # not consume its batch without the proposer reading the instruction.
+        claimed = None if inbox is None or batch.request is not None else inbox.claim()
         if inbox is not None and claimed is not None:
             metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "release_id": claimed.release_id}
             # An agent's proposal asks the method nothing, so the step's proposer record is empty.
@@ -833,6 +835,10 @@ class CordisBackend(TrainingBackend):
                 extra["rejected"] = tuple(rejected)
             if self._propose_accepts_sources:
                 extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+            if batch.request is not None:
+                if not self._propose.reads_requests:
+                    raise ValueError("manual harness evolution requires a proposer that accepts 'requests'")
+                extra["requests"] = ({"id": batch.request.id, **batch.request.to_dict(), "untrusted": True},)
             try:
                 proposal = self._propose(self._nodes(), batch.samples, models, **extra)
             finally:

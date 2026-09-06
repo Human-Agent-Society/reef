@@ -106,6 +106,85 @@ ignored.
 Recipe configuration
 --------------------
 
+``data.training_mode`` is shared by all recipes and defaults to ``auto``.
+In ``auto``, the recipe's processor decides when its data can form a batch.
+In ``manual``, inference and reports cannot authorize training by themselves;
+``POST /reef/train`` supplies the user instruction. The processor defines
+the manual mode's input requirements and batching, independently of its
+automatic batching policy. Harness evolution needs only the instruction.
+For a dotted weight-training deployment this field is also accepted as
+``reef.training_mode``. Named presets set it in their own ``data`` section.
+
+The processor receives ``ProcessorContext.training_mode`` and implements
+the selected mode's lifecycle. It declares ``supported_training_modes`` or
+selects separate implementations through ``ModeDataProcessor.mode_processors``;
+unsupported modes raise ``NotImplementedError`` at processor construction.
+Harness evolution supports both modes and requires a proposer that explicitly
+accepts ``requests`` for manual operation. Setting ``manual`` on an
+inference-only recipe does not create a training backend.
+
+.. code:: yaml
+
+   data:
+     training_mode: manual
+
+The mode selects the initial processor. Harness scenarios can change it at
+runtime through the configuration API below. It controls training initiation,
+independently of ``evolution.publish: auto | review``.
+
+Runtime configuration
+~~~~~~~~~~~~~~~~~~~~~
+
+``ConfigManager`` owns the active configuration and a FIFO queue of updates
+for each scope. A request or training step uses an immutable snapshot; it
+never observes a mixture of revisions during execution. Startup configuration
+initializes a scope once. Managed fields keep their persisted active values
+and pending updates on subsequent starts. Static recipe fields can change at
+restart and enter a new configuration revision. Finish pending updates before
+restarting with different static recipe settings; Reef refuses to silently
+rebase a queue onto a changed deployment. Unbounded numeric defaults in the
+configuration response use JSON strings such as ``"inf"``.
+
+The initial dynamic fields are:
+
+- Deployment scope, ``GET /reef/config`` and ``POST /reef/config/updates``:
+  ``reef.inference_retry_initial_s``,
+  ``reef.inference_retry_max_s``, and ``reef.inference_retry_timeout_s``. They
+  take effect for subsequent non-streaming inference requests; an existing
+  request keeps its policy across all retries. Streaming behavior is unchanged.
+- Scenario scope, ``GET /reef/scenarios/{scenario}/config`` and
+  ``POST /reef/scenarios/{scenario}/config/updates``: harness
+  ``data.training_mode`` and ``data.batch_size``. Both the recipe and processor
+  must explicitly support a field. Other fields are rejected for dynamic
+  updates; deployment defaults do not implicitly update existing scenarios.
+
+Submitting a valid update returns ``202`` even while training is running.
+After the current step commits, the worker applies queued updates before
+checking whether another batch is ready. Lowering the batch size can therefore
+start training from existing retained records. Switching to manual prevents
+an already-ready automatic batch from starting. Accepted manual instructions
+finish before a switch to auto; while that switch is pending, new manual
+instructions are refused so the transition cannot be starved by new requests.
+A custom manual processor may need more inference data to finish those requests.
+
+Updates are validated before acceptance and again before application. The
+processor prepares a replacement, Reef replays unconsumed retained records,
+and the manager persists the new active revision before exposing it. Preparation
+failure marks the update ``failed`` and preserves the old processor and snapshot.
+Later patches are evaluated against the configuration that actually became active.
+Each committed training step records its ``config_revision`` in metrics.
+
+The queue and active values live in ``configuration.sqlite3`` under
+``reef.agent_record_dir``; an in-memory dispatcher has in-memory configuration.
+This manager coordinates one Reef HTTP service process. It does not hot-update
+the surrounding deployment processes or synchronize independent Reef services.
+Settings such as ports, model loading, storage paths and worker topology still
+require a restart or redeployment. The API exposes only the supported runtime
+configuration, not credentials or the complete deployment YAML.
+
+See `runtime configuration API <http-api.rst#runtime-configuration>`__ for
+payloads, revisions, and update status.
+
 A recipe is selected three ways:
 
 - **The core record-only recipe:** ``recipe: recipe``

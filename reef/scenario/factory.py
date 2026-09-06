@@ -23,6 +23,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
+from reef.core.configuration import ConfigManager
 from reef.core.errors import ReefError
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.recipe.base import Recipe
@@ -117,12 +118,14 @@ class ScenarioFactory:
         local_artifact_dir: Path | None = None,
         agent_record_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
+        config_manager: ConfigManager | None = None,
     ) -> None:
         self._recipe = recipe
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
         self._experiment_tracker = experiment_tracker
+        self._config_manager = config_manager
         if self._agent_record_dir is not None:
             self._agent_record_dir.mkdir(parents=True, exist_ok=True)
 
@@ -316,6 +319,26 @@ class ScenarioFactory:
         recovered_head_record: CommitRecord | None = None,
     ) -> Scenario:
         database = None
+        config_snapshot = None
+        if self._config_manager is not None:
+
+            def validate(values: Mapping[str, Any]) -> None:
+                self._recipe.with_runtime_config(values)
+
+            initial_config = self._recipe.runtime_config()
+            config_snapshot = self._config_manager.register(
+                f"scenario:{scenario}",
+                initial_config,
+                validate,
+                restart_values={
+                    "data": {
+                        name: value
+                        for name, value in initial_config["data"].items()
+                        if name not in self._recipe.dynamic_config_fields
+                    }
+                },
+            )
+            recipe_definition = self._recipe.with_runtime_config(config_snapshot.values)
         if self._agent_record_dir is not None:
             database = self._agent_record_dir / f"{self._scenario_key(scenario)}.sqlite3"
         records = RecordStore(database)
@@ -339,6 +362,8 @@ class ScenarioFactory:
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
+        if config_snapshot is not None:
+            trainer.bind_configuration(config_snapshot)
         return Scenario(
             name=scenario,
             binding=ScenarioBinding(
@@ -367,12 +392,16 @@ class ScenarioFactory:
         experiment_logger: ExperimentLogger,
     ) -> Trainer:
         """Build a recipe trainer with the complete current recipe contract."""
-        return recipe.build(
+        trainer = recipe.build(
             scenario,
             records,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
+        if trainer.training_mode != recipe.training_mode:
+            trainer.close()
+            raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+        return trainer
 
     def _artifact_selector_matches(
         self,

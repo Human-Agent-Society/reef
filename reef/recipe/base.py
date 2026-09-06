@@ -7,9 +7,10 @@ backend updates model weights.
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from reef.core.reports import ReportBase
@@ -44,6 +45,44 @@ class Recipe:
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
+    training_mode: str = config_field("auto")
+
+    def __post_init__(self) -> None:
+        if self.training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
+
+    @property
+    def dynamic_config_fields(self) -> frozenset[str]:
+        """Data fields this recipe can update without rebuilding its backend."""
+        return frozenset()
+
+    def runtime_config(self) -> dict[str, Any]:
+        data = {name: getattr(self, name) for name in recipe_config_fields(type(self))}
+        # Unbounded score windows are legal recipe defaults. Encode their
+        # scalar spelling rather than non-standard JSON Infinity tokens;
+        # the field's existing parser restores the numeric value on build.
+        return {
+            "data": {
+                name: str(value) if isinstance(value, float) and not math.isfinite(value) else value
+                for name, value in data.items()
+            }
+        }
+
+    def with_runtime_config(self, values: Mapping[str, Any]) -> Recipe:
+        """Validate a complete snapshot; static data changes require a restart."""
+        if set(values) != {"data"} or not isinstance(values["data"], Mapping):
+            raise ValueError("scenario configuration must contain only a data object")
+        data = values["data"]
+        fields = recipe_config_fields(type(self))
+        if set(data) != set(fields):
+            raise ValueError("scenario configuration must retain the recipe's declared data fields")
+        parsed = {name: field.parse(data[name], name) for name, field in fields.items()}
+        for name, value in parsed.items():
+            if value != getattr(self, name) and name not in self.dynamic_config_fields:
+                raise ValueError(f"{name} requires a restart; this recipe does not support dynamic updates")
+        if all(value == getattr(self, name) for name, value in parsed.items()):
+            return self
+        return replace(self, **parsed)
 
     @classmethod
     def from_environment(
@@ -101,6 +140,7 @@ class Recipe:
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )
 
     @property
@@ -197,6 +237,7 @@ class WeightTrainingRecipe(Recipe):
         return WeightTrainingSpec(step_preparer="", loss_family="")
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         runtime_max_staleness = self.runtime.max_staleness
@@ -305,7 +346,11 @@ class WeightTrainingRecipe(Recipe):
         retention, so it is not included in processor config. Override this
         method to rename keys or add processor-only entries.
         """
-        return {name: getattr(self, name) for name in recipe_config_fields(type(self)) if name != "max_staleness"}
+        return {
+            name: getattr(self, name)
+            for name in recipe_config_fields(type(self))
+            if name not in ("max_staleness", "training_mode")
+        }
 
     def build(
         self,
@@ -382,4 +427,5 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )

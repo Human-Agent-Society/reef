@@ -203,6 +203,7 @@ class CordisRecipe(Recipe):
         return ScoredRolloutReport
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_episode, EpisodeScorer):
@@ -485,6 +486,8 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
     ) -> Trainer:
+        if self.training_mode == "manual" and not self.propose.reads_requests:
+            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
         return Trainer.build(
             scenario,
             records,
@@ -498,4 +501,15 @@ class CordisRecipe(Recipe):
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )
+
+    @property
+    def dynamic_config_fields(self) -> frozenset[str]:
+        return frozenset({"training_mode", "batch_size"})
+
+    def with_runtime_config(self, values: Mapping[str, Any]) -> Recipe:
+        recipe = super().with_runtime_config(values)
+        if recipe.training_mode == "manual" and not self.propose.reads_requests:
+            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
+        return recipe

@@ -19,6 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
+from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
@@ -80,6 +81,9 @@ def normalize_request_payload(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
     """Normalize a typed Reef payload; a native provider body passes through."""
+    if request_type is RequestType.TRAIN:
+        request = TrainingRequest.from_dict(payload)
+        return request.to_dict(), ()
     if request_type is not RequestType.REPORT:
         return dict(payload), ()
     report = ReportPayload.from_dict(payload)
@@ -139,7 +143,68 @@ class InferenceRetryTimeout(ReefError):
 class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
-        self._retry_policy = retry_policy or InferenceRetryPolicy()
+        policy = retry_policy or InferenceRetryPolicy()
+        self._dispatcher.config_manager.register(
+            "deployment",
+            {
+                "reef": {
+                    "inference_retry_initial_s": policy.initial_s,
+                    "inference_retry_max_s": policy.max_s,
+                    "inference_retry_timeout_s": policy.timeout_s,
+                }
+            },
+            self._validate_deployment_config,
+        )
+        self._apply_deployment_config()
+
+    @staticmethod
+    def _validate_deployment_config(values: Mapping[str, Any]) -> None:
+        if set(values) != {"reef"} or not isinstance(values["reef"], Mapping):
+            raise ValueError("runtime deployment configuration must contain only a reef object")
+        expected = {"inference_retry_initial_s", "inference_retry_max_s", "inference_retry_timeout_s"}
+        if set(values["reef"]) != expected:
+            raise ValueError(f"dynamic deployment configuration supports only {sorted(expected)}")
+        import math
+
+        if any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value)
+            for value in values["reef"].values()
+        ):
+            raise ValueError("inference retry settings must be finite numbers")
+        InferenceRetryPolicy(
+            initial_s=values["reef"]["inference_retry_initial_s"],
+            max_s=values["reef"]["inference_retry_max_s"],
+            timeout_s=values["reef"]["inference_retry_timeout_s"],
+        )
+
+    def _apply_deployment_config(self) -> None:
+        from reef.core.configuration import PreparedConfigChange
+
+        # Retry policies need no resource migration. Swapping the manager's
+        # active snapshot is their complete activation; in-flight requests
+        # keep their previously captured policy.
+        while self._dispatcher.config_manager.apply_next(
+            "deployment", lambda snapshot: PreparedConfigChange(lambda: None)
+        ):
+            pass
+
+    def deployment_configuration(self) -> dict[str, Any]:
+        return self._dispatcher.config_manager.status("deployment")
+
+    def update_deployment_configuration(
+        self, patch: Mapping[str, Any], *, expected_revision: int | None = None
+    ) -> dict[str, Any]:
+        update = self._dispatcher.config_manager.submit("deployment", patch, expected_revision=expected_revision)
+        self._apply_deployment_config()
+        return update
+
+    def _retry_snapshot(self) -> InferenceRetryPolicy:
+        values = self._dispatcher.config_manager.snapshot("deployment").values["reef"]
+        return InferenceRetryPolicy(
+            initial_s=values["inference_retry_initial_s"],
+            max_s=values["inference_retry_max_s"],
+            timeout_s=values["inference_retry_timeout_s"],
+        )
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -180,10 +245,11 @@ class RequestService:
         backend: InferenceBackend | None = None,
     ) -> tuple[dict[str, Any], AgentRecord]:
         original_payload = dict(payload)
-        retry_delay = self._retry_policy.initial_s
+        policy = self._retry_snapshot()
+        retry_delay = policy.initial_s
         loop = asyncio.get_running_loop()
-        remaining_budget = self._retry_policy.timeout_s
-        timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
+        remaining_budget = policy.timeout_s
+        timeout_error = f"inference retry deadline exceeded ({policy.timeout_s:g}s)"
         attempt = 0
         while True:
             attempt += 1
@@ -240,7 +306,7 @@ class RequestService:
             sleep_for = min(retry_delay, remaining_budget)
             await asyncio.sleep(sleep_for)
             remaining_budget -= sleep_for
-            retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+            retry_delay = min(retry_delay * 2, policy.max_s)
 
     async def start_stream(
         self,

@@ -15,6 +15,7 @@ from threading import Lock, RLock
 from typing import Any
 
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.core.configuration import ConfigManager
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
@@ -42,6 +43,7 @@ class ScenarioRegistry:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        config_manager: ConfigManager | None = None,
     ) -> None:
         self._scenario_factory = ScenarioFactory(
             recipe,
@@ -49,6 +51,7 @@ class ScenarioRegistry:
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
+            config_manager=config_manager,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
