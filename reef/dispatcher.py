@@ -20,7 +20,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
-from reef.core.configuration import ConfigConflict, ConfigManager
+from reef.core.configuration import ConfigManager
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -134,7 +134,6 @@ class Dispatcher:
             agent_record_dir=agent_record_dir,
             allow_implicit_creation=allow_implicit_creation,
             experiment_tracker=self._experiment_tracker,
-            config_manager=self.config_manager,
         )
         self._registry.set_training_scenario_callback(self._start_training)
         self._publication = _PublicationState()
@@ -167,59 +166,18 @@ class Dispatcher:
         *,
         release_id: str | None = None,
         allow_implicit_creation: bool | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> Scenario | None:
-        was_loaded = self._registry.has_loaded(scenario)
-        current = self._registry.get_or_create(
+        return self._registry.get_or_create(
             scenario,
             release_id,
             allow_implicit_creation=allow_implicit_creation,
+            config=config,
         )
-        if (
-            not was_loaded
-            and current is not None
-            and current.trainer.training_backend is not None
-            and not isinstance(current.runtime, TrainingRuntime)
-        ):
-            configuration = self.config_manager.status(f"scenario:{scenario}")
-            if configuration["active_revision"] or any(
-                update["status"] == "pending" for update in configuration["updates"]
-            ):
-                # Resume recovered configuration work without turning an
-                # ordinary scenario lookup into a training trigger.
-                self._start_local_backend_worker(current.name)
-        return current
 
     def scenario_configuration(self, name: str) -> dict[str, Any]:
         with self._registry.lock_for(name):
-            self._registry.require(name)
-            return self.config_manager.status(f"scenario:{name}")
-
-    def update_scenario_configuration(
-        self, name: str, patch: Mapping[str, Any], *, expected_revision: int | None = None
-    ) -> dict[str, Any]:
-        with self._registry.lock_for(name):
-            current = self._registry.require(name)
-            if current.trainer.training_backend is None:
-                raise ValueError("this scenario has no dynamically configurable training backend")
-            scope = f"scenario:{name}"
-            if set(patch) != {"data"} or not isinstance(patch["data"], Mapping) or not patch["data"]:
-                raise ValueError("configuration patch must contain a non-empty data object")
-            unsupported = set(patch["data"]) - (
-                self._recipe.dynamic_config_fields & current.trainer.processor.dynamic_config_fields
-            )
-            if unsupported:
-                raise ValueError(f"dynamic configuration is not implemented for {sorted(unsupported)}")
-            mode = patch["data"].get("training_mode")
-            if "training_mode" in patch["data"] and (
-                not isinstance(mode, str) or mode not in current.trainer.processor.supported_training_modes
-            ):
-                raise ValueError(f"processor does not implement training_mode={mode!r}")
-            update = self.config_manager.submit(scope, patch, expected_revision=expected_revision)
-            if isinstance(current.runtime, TrainingRuntime):
-                self._training.ready.set()
-            else:
-                self._start_local_backend_worker(name)
-            return update
+            return self._registry.require(name).configuration
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
@@ -301,14 +259,6 @@ class Dispatcher:
                 raise ValueError("explicit training requests require training_mode='manual'")
             if current.trainer.training_backend is None:
                 raise ValueError("explicit training requests require a training backend")
-            if any(
-                update["status"] == "pending"
-                and update["patch"].get("data", {}).get("training_mode", "manual") != "manual"
-                for update in self.config_manager.status(f"scenario:{current.name}")["updates"]
-            ):
-                raise ConfigConflict(
-                    "a mode change is queued; wait until manual mode is active before submitting requests"
-                )
             TrainingRequest.from_dict(item.payload)
             if item.references:
                 raise ValueError("manual training requests do not reference inference receipts")
@@ -477,8 +427,6 @@ class Dispatcher:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         try:
-            with self._registry.lock_for(scenario):
-                current.trainer.apply_configuration(self.config_manager)
             result = current.prepare_training_step()
         except Exception:
             # Durable records let recovery reconstruct the reserved batch. A
@@ -607,8 +555,6 @@ class Dispatcher:
             committed_training_job_id=current.committed_training_job_id,
             committed_training_without_job_id=current.committed_training_without_job_id,
         )
-        with self._registry.lock_for(name):
-            current.trainer.apply_configuration(self.config_manager)
         if (batch := current.reserve_training_batch()) is None:
             return False
         execution = current.execute_reserved_training_step()

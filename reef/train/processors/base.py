@@ -8,7 +8,7 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
@@ -96,7 +96,6 @@ class DataProcessor:
 
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
     supported_training_modes: frozenset[str] = frozenset({"auto"})
-    dynamic_config_fields: frozenset[str] = frozenset()
 
     def __init__(self, context: ProcessorContext) -> None:
         if context.training_mode not in self.supported_training_modes:
@@ -297,17 +296,3 @@ class DataProcessor:
         after ``close`` returns, no thread of the processor may touch shared
         state or deliver further results.
         """
-
-    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
-        """Prepare an empty replacement for retained-record replay.
-
-        Called only between steps. The returned processor must not mutate the
-        current instance or external state. Recipes and processors both opt
-        in to dynamic fields; a mode supported at startup need not support a
-        live transition. The trainer replays unconsumed retained records.
-        """
-        raise NotImplementedError(f"{type(self).__name__} does not implement dynamic configuration")
-
-    def bind_config_revision(self, revision: int) -> None:
-        """Stamp an initial processor before any record replay or operation."""
-        self._context = replace(self._context, config_revision=revision)

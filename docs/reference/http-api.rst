@@ -63,59 +63,32 @@ Routes
 Runtime configuration
 ---------------------
 
-``GET /reef/config`` reads supported service settings;
-``GET /reef/scenarios/{scenario}/config`` reads an existing scenario's recipe
-data settings. Both return the active snapshot and update history:
+``GET /reef/config`` reads supported deployment settings, their active
+revision, and update history. GET includes an ``ETag`` containing the latest
+accepted revision. ``revision`` advances on acceptance; ``active_revision``
+advances only after successful application.
 
-.. code:: json
-
-   {
-     "scope": "scenario:agents",
-     "revision": 1,
-     "active_revision": 0,
-     "active": {"data": {"training_mode": "auto", "batch_size": 4}},
-     "updates": [
-       {"id": "1", "revision": 1, "patch": {"data": {"training_mode": "manual"}}, "status": "pending"}
-     ]
-   }
-
-The ``active`` example is abbreviated; scenario responses include all declared
-recipe data fields. ``revision`` advances when an update is accepted;
-``active_revision`` advances only after successful application. GET includes
-an ``ETag`` containing ``revision``. Update IDs are local to their scope.
-
-Create an update with ``POST /reef/config/updates`` or
-``POST /reef/scenarios/{scenario}/config/updates``, supplying a partial
-configuration object:
+Create an update with ``POST /reef/config/updates``:
 
 .. code:: bash
 
-   curl -X POST http://127.0.0.1:8900/reef/scenarios/agents/config/updates \
+   curl -X POST http://127.0.0.1:8900/reef/config/updates \
      -H "Authorization: Bearer $REEF_TOKEN" \
      -H 'Content-Type: application/json' \
-     -H 'If-Match: "1"' \
-     -d '{"data":{"training_mode":"manual","batch_size":8}}'
+     -H 'If-Match: "0"' \
+     -d '{"reef":{"inference_retry_timeout_s":60}}'
 
-``If-Match`` is optional; when provided, it must match the latest accepted
-revision, including queued or failed updates. A stale revision returns ``409``.
-Invalid or unsupported changes return ``400`` without enqueuing anything;
-an unknown scenario returns ``404``. These routes use the normal service
-authentication.
+``If-Match`` is optional; a stale revision returns ``409``. Invalid or
+unsupported fields return ``400`` without enqueuing an update. Acceptance
+returns ``202`` with ``scope``, ``id``, ``revision``, ``patch`` and
+``status: "pending"``. Application may already be complete by the time this
+receipt arrives. Poll GET for ``pending``, ``applied`` or ``failed``; failed
+updates include ``error``.
 
-Successful acceptance returns ``202`` with ``scope``, ``id``, ``revision``,
-``patch`` and ``status: "pending"``. This is an acceptance receipt: application
-may already have completed by the time the response arrives. Poll GET to
-observe ``pending``, ``applied``, or ``failed``; a failed update includes
-``error``, and a deferred manual-to-auto transition includes ``waiting_for``.
-Submission during training is queued, not rejected because the trainer is busy.
-
-Service updates currently accept the three ``reef.inference_retry_*`` fields;
-they apply for subsequent non-streaming requests. Harness scenario updates
-accept ``data.training_mode`` and ``data.batch_size``. Scenario updates apply
-between training steps, before the next automatic batch is selected. Already
-accepted manual instructions finish before a switch to auto; new instructions
-receive ``409`` while a transition away from manual is queued. Configuration
-updates never implicitly clear inference records or pending instructions.
+Updates support the three ``reef.inference_retry_*`` fields and apply to
+subsequent non-streaming inference requests. An in-flight request keeps the
+same policy across retries. Scenario configuration is selected at creation;
+there is no ``POST /reef/scenarios/{scenario}/config/updates`` endpoint.
 
 Headers
 -------
@@ -200,9 +173,9 @@ unknown scenario returns HTTP 404 and you create it first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "release_id"?}``                 |
+| ``POST /reef/scenarios``                    | ``{"name", "release_id"?, "config"?}``                 |
 |                                             | → ``{scenario, release_id,                  |
-|                                             | content_id}``; 201 created, 200 already     |
+|                                             | content_id, config}``; 201 created, 200     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario and its current        |
@@ -211,6 +184,24 @@ unknown scenario returns HTTP 404 and you create it first:
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
+
+Pass recipe overrides when creating a scenario:
+
+.. code:: json
+
+   {"name": "agents", "config": {"data": {"training_mode": "manual", "batch_size": 8}}}
+
+``config.data`` accepts settings declared by the deployment's recipe. Omitted
+fields inherit its defaults; unknown fields are rejected. The response
+includes the full resolved ``config``. ``GET /reef/scenarios/{scenario}/config``
+reads the stored creation configuration, returning ``404`` for an unknown
+scenario. Neither endpoint selects a different recipe, model, or runtime.
+
+The configuration is fixed at atomic registration and survives checkpointing
+and restart. Repeating creation with matching or omitted config returns
+``200``; conflicting overrides return ``409`` without modifying the existing
+scenario. Use a new scenario name to choose different settings.
+
 
 Inference
 ---------

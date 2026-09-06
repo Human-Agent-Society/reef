@@ -504,12 +504,8 @@ class CordisRecipe(Recipe):
             training_mode=self.training_mode,
         )
 
-    @property
-    def dynamic_config_fields(self) -> frozenset[str]:
-        return frozenset({"training_mode", "batch_size"})
-
-    def with_runtime_config(self, values: Mapping[str, Any]) -> Recipe:
-        recipe = super().with_runtime_config(values)
+    def with_scenario_config(self, values: Mapping[str, Any]) -> Recipe:
+        recipe = super().with_scenario_config(values)
         if recipe.training_mode == "manual" and not self.propose.reads_requests:
             raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
         return recipe

@@ -15,7 +15,6 @@ class ProcessorContext:
     report_type: type[ReportBase] | None = None
     experiment_logger: ExperimentLogger = field(default_factory=NullExperimentLogger)
     training_mode: str = "auto"
-    config_revision: int = 0
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual"):

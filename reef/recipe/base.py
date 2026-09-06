@@ -51,12 +51,7 @@ class Recipe:
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
 
-    @property
-    def dynamic_config_fields(self) -> frozenset[str]:
-        """Data fields this recipe can update without rebuilding its backend."""
-        return frozenset()
-
-    def runtime_config(self) -> dict[str, Any]:
+    def scenario_config(self) -> dict[str, Any]:
         data = {name: getattr(self, name) for name in recipe_config_fields(type(self))}
         # Unbounded score windows are legal recipe defaults. Encode their
         # scalar spelling rather than non-standard JSON Infinity tokens;
@@ -68,18 +63,19 @@ class Recipe:
             }
         }
 
-    def with_runtime_config(self, values: Mapping[str, Any]) -> Recipe:
-        """Validate a complete snapshot; static data changes require a restart."""
-        if set(values) != {"data"} or not isinstance(values["data"], Mapping):
+    def with_scenario_config(self, values: Mapping[str, Any]) -> Recipe:
+        """Apply recipe data overrides while constructing a new scenario."""
+        if (
+            not isinstance(values, Mapping)
+            or set(values) - {"data"}
+            or not isinstance(values.get("data", {}), Mapping)
+        ):
             raise ValueError("scenario configuration must contain only a data object")
-        data = values["data"]
+        data = values.get("data", {})
         fields = recipe_config_fields(type(self))
-        if set(data) != set(fields):
-            raise ValueError("scenario configuration must retain the recipe's declared data fields")
-        parsed = {name: field.parse(data[name], name) for name, field in fields.items()}
-        for name, value in parsed.items():
-            if value != getattr(self, name) and name not in self.dynamic_config_fields:
-                raise ValueError(f"{name} requires a restart; this recipe does not support dynamic updates")
+        if unknown := set(data) - set(fields):
+            raise ValueError(f"unknown scenario data fields: {sorted(unknown)}")
+        parsed = {name: fields[name].parse(value, name) for name, value in data.items()}
         if all(value == getattr(self, name) for name, value in parsed.items()):
             return self
         return replace(self, **parsed)

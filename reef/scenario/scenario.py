@@ -62,6 +62,11 @@ class Scenario:
         return self._name
 
     @property
+    def configuration(self) -> dict[str, Any]:
+        """The configuration fixed by durable scenario creation."""
+        return self._binding.configuration.to_dict()
+
+    @property
     def runtime(self) -> InferenceRuntime | None:
         """Inference or training runtime bound to this scenario."""
         return self._binding.runtime
@@ -218,6 +223,7 @@ class Scenario:
             name=self.name,
             base_artifact=self.repository.base_artifact,
             scenario_step=self.scenario_step,
+            configuration=self._binding.configuration,
         )
 
 

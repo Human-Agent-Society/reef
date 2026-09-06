@@ -129,59 +129,48 @@ inference-only recipe does not create a training backend.
    data:
      training_mode: manual
 
-The mode selects the initial processor. Harness scenarios can change it at
-runtime through the configuration API below. It controls training initiation,
-independently of ``evolution.publish: auto | review``.
+The mode controls training initiation, independently of
+``evolution.publish: auto | review``. It is fixed when a scenario is created.
 
-Runtime configuration
-~~~~~~~~~~~~~~~~~~~~~
+Scenario creation configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``ConfigManager`` owns the active configuration and a FIFO queue of updates
-for each scope. A request or training step uses an immutable snapshot; it
-never observes a mixture of revisions during execution. Startup configuration
-initializes a scope once. Managed fields keep their persisted active values
-and pending updates on subsequent starts. Static recipe fields can change at
-restart and enter a new configuration revision. Finish pending updates before
-restarting with different static recipe settings; Reef refuses to silently
-rebase a queue onto a changed deployment. Unbounded numeric defaults in the
-configuration response use JSON strings such as ``"inf"``.
+``POST /reef/scenarios`` accepts a ``config`` object with recipe ``data``
+overrides, such as ``training_mode``, ``batch_size`` and other fields declared
+by the selected recipe. Unspecified fields inherit deployment defaults;
+unknown fields or invalid values are rejected. For example:
 
-The initial dynamic fields are:
+.. code:: json
 
-- Deployment scope, ``GET /reef/config`` and ``POST /reef/config/updates``:
-  ``reef.inference_retry_initial_s``,
-  ``reef.inference_retry_max_s``, and ``reef.inference_retry_timeout_s``. They
-  take effect for subsequent non-streaming inference requests; an existing
-  request keeps its policy across all retries. Streaming behavior is unchanged.
-- Scenario scope, ``GET /reef/scenarios/{scenario}/config`` and
-  ``POST /reef/scenarios/{scenario}/config/updates``: harness
-  ``data.training_mode`` and ``data.batch_size``. Both the recipe and processor
-  must explicitly support a field. Other fields are rejected for dynamic
-  updates; deployment defaults do not implicitly update existing scenarios.
+   {"name": "agents", "config": {"data": {"training_mode": "manual", "batch_size": 8}}}
 
-Submitting a valid update returns ``202`` even while training is running.
-After the current step commits, the worker applies queued updates before
-checking whether another batch is ready. Lowering the batch size can therefore
-start training from existing retained records. Switching to manual prevents
-an already-ready automatic batch from starting. Accepted manual instructions
-finish before a switch to auto; while that switch is pending, new manual
-instructions are refused so the transition cannot be starved by new requests.
-A custom manual processor may need more inference data to finish those requests.
+The full resolved data configuration is stored with scenario registration and
+preserved in checkpoints. Existing scenarios keep their creation settings on
+restart. ``GET /reef/scenarios/{scenario}/config`` returns those settings.
+A repeat creation with compatible settings is idempotent; conflicting settings
+return ``409``. There is no scenario configuration update API. Create a new
+scenario to select different settings. Unbounded numeric defaults are encoded
+as JSON strings such as ``"inf"``.
 
-Updates are validated before acceptance and again before application. The
-processor prepares a replacement, Reef replays unconsumed retained records,
-and the manager persists the new active revision before exposing it. Preparation
-failure marks the update ``failed`` and preserves the old processor and snapshot.
-Later patches are evaluated against the configuration that actually became active.
-Each committed training step records its ``config_revision`` in metrics.
+Runtime deployment configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``ConfigManager`` owns deployment settings and a persisted FIFO update queue.
+``GET /reef/config`` reads active values and update status;
+``POST /reef/config/updates`` accepts supported changes. Each non-streaming
+inference request holds one immutable retry policy for all of its attempts.
+
+Supported fields are ``reef.inference_retry_initial_s``,
+``reef.inference_retry_max_s`` and ``reef.inference_retry_timeout_s``. Updates
+apply to subsequent requests. The manager validates updates before acceptance
+and application, and persists activation before exposing the new snapshot.
 
 The queue and active values live in ``configuration.sqlite3`` under
 ``reef.agent_record_dir``; an in-memory dispatcher has in-memory configuration.
-This manager coordinates one Reef HTTP service process. It does not hot-update
-the surrounding deployment processes or synchronize independent Reef services.
-Settings such as ports, model loading, storage paths and worker topology still
-require a restart or redeployment. The API exposes only the supported runtime
-configuration, not credentials or the complete deployment YAML.
+This manager coordinates one Reef HTTP service process. Ports, model loading,
+storage paths, optimizer configuration and worker topology remain deployment
+startup settings. The API does not reconfigure external worker processes or
+expose credentials.
 
 See `runtime configuration API <http-api.rst#runtime-configuration>`__ for
 payloads, revisions, and update status.

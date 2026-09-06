@@ -12,6 +12,9 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
+        config = payload.get("config")
+        if config is not None and not isinstance(config, dict):
+            raise ValueError("config must be an object")
         name = payload.get("name")
         release_id = payload.get("release_id")
         if not isinstance(name, str) or not name.strip():
@@ -28,6 +31,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             name,
             release_id=release_id,
             allow_implicit_creation=True,
+            config=config,
         )
         if scenario is None:
             raise RuntimeError("scenario creation returned no scenario")
@@ -37,9 +41,13 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
                 "scenario": scenario.name,
                 "release_id": current.release_id,
                 "content_id": current.content_id,
+                "config": scenario.configuration,
             },
             status=201 if created else 200,
         )
+
+    async def get_config(request: web.Request) -> web.Response:
+        return web.json_response(request_service.dispatcher.scenario_configuration(request.match_info["scenario"]))
 
     async def list_releases(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -87,6 +95,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
+    app.router.add_get("/reef/scenarios/{scenario}/config", get_config)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)

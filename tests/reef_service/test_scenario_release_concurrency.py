@@ -173,7 +173,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
             artifact, metrics = latest.result(timeout=2)
             assert artifact.ref == current_ref
             assert _model_text(artifact) == "step 1"
-            assert metrics == {"score": 1.0, "config_revision": 0}
+            assert metrics == {"score": 1.0}
             artifact, metrics = historical.result(timeout=2)
             assert artifact.ref == initial_ref
             assert _model_text(artifact) == "initial"
@@ -191,7 +191,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
         if operation == "commit":
             assert writer.result(timeout=2) == {"steps": 2}
             assert scenario.scenario_step == 2
-            assert scenario.artifact_snapshot()[1] == {"score": 2.0, "config_revision": 0}
+            assert scenario.artifact_snapshot()[1] == {"score": 2.0}
         else:
             with pytest.raises(ReefError, match="pending commit"):
                 writer.result(timeout=2)
@@ -274,9 +274,9 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     artifact, metrics = latest
     assert artifact.ref == current_ref
     assert _model_text(artifact) == ("step 3" if operation == "commit" else "initial")
-    assert metrics == ({"score": 3.0, "config_revision": 0} if operation == "commit" else None)
+    assert metrics == ({"score": 3.0} if operation == "commit" else None)
     assert historical[0].ref == previous_ref
-    assert historical[1] == {"score": 2.0, "config_revision": 0}
+    assert historical[1] == {"score": 2.0}
     assert version.ref == previous_ref
 
 

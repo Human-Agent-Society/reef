@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import RetentionDecision
 from reef.train.processors.manual import ManualTrainingProcessor
 from reef.train.processors.reported import (
     NEVER,
@@ -31,14 +31,10 @@ class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
     output_schema = TraceBatch
     supported_training_modes = frozenset({"auto", "manual"})
     required_request_types = frozenset(RequestType)
-    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
 
     def make_request_batch(self, request: AgentRecord) -> TraceBatch:
         """Manual instructions authorize a proposal without inference samples."""
         return TraceBatch(request.agent_record_id, ())
-
-    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
-        return type(self)(context)
 
     def __init__(self, context: ProcessorContext) -> None:
         self._min_score = float(context.config.get("min_score", float("-inf")))
@@ -85,7 +81,7 @@ class CordisProcessor(ReportedFeedbackProcessor, ManualTrainingProcessor):
 
     def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> TraceBatch:
         return TraceBatch(
-            f"{self.scenario}:harness_evolve:{self.context.config_revision}:{batch_number}",
+            f"{self.scenario}:harness_evolve:{batch_number}",
             tuple(unit.candidates[0].value for unit in units),
         )
 
@@ -105,14 +101,10 @@ class RecordDrivenTraceProcessor(ManualTrainingProcessor):
     output_schema = TraceBatch
     supported_training_modes = frozenset({"auto", "manual"})
     required_request_types = frozenset(RequestType)
-    dynamic_config_fields = frozenset({"training_mode", "batch_size"})
 
     def make_request_batch(self, request: AgentRecord) -> TraceBatch:
         """Manual instructions authorize a proposal without inference samples."""
         return TraceBatch(request.agent_record_id, ())
-
-    def prepare_reconfiguration(self, context: ProcessorContext) -> DataProcessor:
-        return type(self)(context)
 
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
@@ -131,7 +123,7 @@ class RecordDrivenTraceProcessor(ManualTrainingProcessor):
     def _make_pending(self, batch_number: int) -> TraceBatch:
         selected = self._records[: self._batch_size]
         return TraceBatch(
-            f"{self.scenario}:harness_evolve:{self.context.config_revision}:{batch_number}",
+            f"{self.scenario}:harness_evolve:{batch_number}",
             tuple(
                 TraceSample(
                     source_agent_record_id=record.agent_record_id,

@@ -112,37 +112,25 @@ returns an empty ``TraceBatch``. Other processors can reuse this engine or
 implement their own manual lifecycle. No batch assembly method may call
 models or perform training; that remains the backend's responsibility.
 
-Dynamic configuration
----------------------
+Scenario creation configuration
+-------------------------------
 
-The manager binds one immutable configuration snapshot to each trainer.
-``ProcessorContext.config_revision`` identifies it, and each reserved step
-retains that revision until its commit. Components must not fetch newer
-configuration midway through an operation.
+``POST /reef/scenarios`` accepts ``config.data`` overrides for the served
+recipe's declared ``config_field`` settings. ``Recipe.with_scenario_config``
+parses and validates these values before registration. A recipe can extend
+that hook for additional construction-time constraints.
 
-Dynamic updates are opt-in. Declare the fields in both
-``Recipe.dynamic_config_fields`` and ``DataProcessor.dynamic_config_fields``.
-The recipe's ``with_runtime_config`` validates the complete proposed data
-configuration and any backend-specific constraints. Implement
-``prepare_reconfiguration(context)`` to return a separate, empty processor
-for the requested configuration, without changing the current processor or
-external state. The default raises ``NotImplementedError``.
-The harness processors implement this as ``return type(self)(context)``;
-the same processor class supplies the methods for the requested mode.
+The resulting configuration is fixed at creation. The processor receives its
+mode and input settings through the recipe's normal ``build`` path; it has no
+runtime reconfiguration hook. One immutable ``ScenarioConfig`` belongs to the
+scenario binding and supplies HTTP inspection and checkpoint metadata.
+Recovery reconstructs the recipe from that stored configuration even when the
+deployment's defaults have changed. A conflicting repeat creation returns
+``409``; use a new scenario name for a different configuration.
 
-At a step boundary, the trainer replays retained records up to its consumption
-cursor into the replacement, excluding records already consumed by committed
-steps. It preserves algorithm/backend state and the record cursor. Pending
-records beyond that cursor are consumed normally after activation. Preparation
-must preserve the requested mode and output schema; failures close the new
-processor and leave the current one intact. Successful activation swaps the
-processor and snapshot together under the trainer lock, then closes the old
-processor. Batch IDs must remain distinct across configuration revisions;
-the harness processors include ``config_revision`` in their automatic batch IDs.
-
-The manager serializes and persists updates, while the worker owns the safe
-boundary. Do not mutate a recipe, processor context, or a manager snapshot to
-change live behavior. For examples, see ``test_runtime_configuration.py``.
+Only deployment service settings use ``ConfigManager`` and its runtime update
+API. See ``test_scenario_configuration.py`` for creation, recovery, and conflict
+contracts.
 
 The two feedback paths
 ----------------------

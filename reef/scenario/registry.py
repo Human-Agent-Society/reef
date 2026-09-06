@@ -9,13 +9,12 @@ resolution and uses the registry for lookups.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
 
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
-from reef.core.configuration import ConfigManager
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
@@ -43,7 +42,6 @@ class ScenarioRegistry:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
-        config_manager: ConfigManager | None = None,
     ) -> None:
         self._scenario_factory = ScenarioFactory(
             recipe,
@@ -51,7 +49,6 @@ class ScenarioRegistry:
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
-            config_manager=config_manager,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -135,6 +132,7 @@ class ScenarioRegistry:
         release_id: str | None = None,
         *,
         allow_implicit_creation: bool | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> Scenario | None:
         """Resolve a scenario, creating it when allowed.
 
@@ -147,7 +145,7 @@ class ScenarioRegistry:
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, release_id)
+            return self._resolve(scenario, release_id, config=config)
 
     def require(self, scenario: str) -> Scenario:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
@@ -203,13 +201,15 @@ class ScenarioRegistry:
         self,
         scenario: str,
         release_id: str | None,
+        *,
+        config: Mapping[str, Any] | None = None,
     ) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id)
+            self._scenario_factory.validate_existing(current, release_id, config)
             return current
-        current = self._scenario_factory.load_or_create(scenario, release_id)
+        current = self._scenario_factory.load_or_create(scenario, release_id, config=config)
         runtime = current.runtime
         training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
         with self._lock:
