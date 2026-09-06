@@ -4,16 +4,18 @@ the jail denies."""
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
-from reef.harness.runners.native import ToolModule, _invoke, load_tools
+from reef.harness.runners.native import LoadError, ToolModule, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
     ENFORCE_ENV,
@@ -23,6 +25,7 @@ from reef.harness.runners.native.enforce import (
     denied,
     select_enforcer,
 )
+from reef.harness.tree.render import render_native_module
 
 PROBE = """\
 import errno
@@ -189,6 +192,250 @@ def test_a_sandboxed_call_runs_the_child_protocol_and_keeps_the_error_codes(tmp_
     broken = _invoke(tools, "probe", "{}", work, enforcer=BwrapEnforcer())
     assert broken["error"]["code"] == "SANDBOX_FAILED"
     assert broken["error"]["message"] == "tool process exited 1: bwrap: No permissions to create a new namespace"
+
+
+def test_a_tool_module_is_read_at_load_and_imported_only_where_the_call_runs(tmp_path: Path, monkeypatch) -> None:
+    marker = tmp_path / "imported"
+    options = {
+        "name": "probe",
+        "description": "writes its pid when imported",
+        "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+        "capabilities": ["write"],
+        "code": (
+            f"import os\nfrom pathlib import Path\n\nPath({str(marker)!r}).write_text(str(os.getpid()))\n\n\n"
+            "def run(args, workdir):\n    return 'ran'\n"
+        ),
+    }
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    module = tools_dir / "probe.py"
+    module.write_text(render_native_module("native_tool", options))
+    work = tmp_path / "work"
+    work.mkdir()
+    tools = load_tools(tools_dir)
+    # The load read the declaration the render wrote; the module's top level ran nowhere.
+    assert not marker.exists()
+    tool = tools["probe"]
+    assert (tool.name, tool.description, tool.capabilities) == ("probe", options["description"], ("write",))
+    assert tool.parameters == options["parameters"] and tool.path == module
+    _fake_bwrap(tmp_path, monkeypatch, "argv = sys.argv[sys.argv.index('--') + 1:]\nos.execv(argv[0], argv)")
+    assert _invoke(tools, "probe", "{}", work, enforcer=BwrapEnforcer())["content"] == "ran"
+    assert int(marker.read_text()) != os.getpid()
+    marker.unlink()
+    # In process the module imports at the first call and once.
+    assert _invoke(tools, "probe", "{}", work, enforcer=InProcessEnforcer())["content"] == "ran"
+    assert int(marker.read_text()) == os.getpid()
+    marker.unlink()
+    assert _invoke(tools, "probe", "{}", work, enforcer=InProcessEnforcer())["content"] == "ran"
+    assert not marker.exists()
+    # A top level that raises is found where the call runs, under either enforcer, and fails that call only.
+    boom = "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n"
+    module.write_text(render_native_module("native_tool", {**options, "code": boom}))
+    tools = load_tools(tools_dir)
+    assert _invoke(tools, "probe", "{}", work, enforcer=BwrapEnforcer())["error"] == {
+        "code": "TOOL_FAILED",
+        "message": "RuntimeError: boom",
+    }
+    assert _invoke(tools, "probe", "{}", work, enforcer=InProcessEnforcer())["error"] == {
+        "code": "TOOL_FAILED",
+        "message": "LoadError: probe.py failed to import: RuntimeError: boom",
+    }
+    # What the static read refuses: no run at the top level, a declaration that is not a literal, no parse.
+    for source, message in (
+        (
+            "def helper(args, workdir):\n    return 1\n\nNAME = 'probe'\n",
+            r"^no top level statement of probe\.py binds run\(args, workdir\)$",
+        ),
+        ("def run(args, workdir):\n    return 1\n\nNAME = str(1)\n", r"tool probe\.py must declare NAME as a literal"),
+        ("def run(args, workdir:\n    return 1\n", r"probe\.py failed to parse: SyntaxError: "),
+    ):
+        module.write_text(source)
+        with pytest.raises(LoadError, match=message):
+            load_tools(tools_dir)
+
+
+def test_the_static_read_follows_compound_statements_at_module_scope(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    module = tools_dir / "probe.py"
+    work = tmp_path / "work"
+    work.mkdir()
+    # A run bound inside a compound statement at module scope loads and runs: the binding the import makes.
+    for source, answer in (
+        (
+            "try:\n    import reef_no_such_module\n\n    def run(args, workdir):\n        return 'fast'\n"
+            "except ImportError:\n\n    def run(args, workdir):\n        return 'fallback'\n",
+            "fallback",
+        ),
+        ("if 1 > 2:\n    run = None\nelse:\n\n    def run(args, workdir):\n        return 'else'\n", "else"),
+        (
+            "import contextlib\n\nwith contextlib.nullcontext():\n\n    def run(args, workdir):\n        return 'with'\n",
+            "with",
+        ),
+        ("for _ in range(1):\n\n    def run(args, workdir):\n        return 'for'\n", "for"),
+        ("while True:\n\n    def run(args, workdir):\n        return 'while'\n\n    break\n", "while"),
+        ("match 1:\n    case 1:\n\n        def run(args, workdir):\n            return 'match'\n", "match"),
+        ("try:\n    pass\nfinally:\n\n    def run(args, workdir):\n        return 'finally'\n", "finally"),
+    ):
+        module.write_text(f"{source}\nNAME = 'probe'\n")
+        assert _invoke(load_tools(tools_dir), "probe", "{}", work, enforcer=InProcessEnforcer())["content"] == answer
+    # The last binding in source order is the declaration, whichever branch would run.
+    for source in (
+        "def run(args, workdir):\n    return 1\n\nNAME = 'lit'\nif True:\n    NAME = 'cond'\n",
+        "def run(args, workdir):\n    return 1\n\nNAME = 'lit'\nif False:\n    NAME = 'cond'\n",
+    ):
+        module.write_text(source)
+        assert list(load_tools(tools_dir)) == ["cond"]
+    # A function or class body is not module scope.
+    for source in (
+        "def outer():\n    def run(args, workdir):\n        return 1\n",
+        "class Tool:\n    def run(self, args, workdir):\n        return 1\n",
+        "async def outer():\n    def run(args, workdir):\n        return 1\n",
+    ):
+        module.write_text(source)
+        with pytest.raises(LoadError, match=r"^no top level statement of probe\.py binds run\(args, workdir\)$"):
+            load_tools(tools_dir)
+
+
+def test_a_run_bound_to_something_not_callable_fails_the_first_call(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    module = tools_dir / "probe.py"
+    work = tmp_path / "work"
+    work.mkdir()
+    for source, message in (
+        ("run = 5\n\nNAME = 'probe'\n", "LoadError: tool probe.py binds run but it is not callable"),
+        (
+            "if 1 > 2:\n\n    def run(args, workdir):\n        return 1\n\n\nNAME = 'probe'\n",
+            "LoadError: tool probe.py did not bind run(args, workdir) when imported",
+        ),
+    ):
+        module.write_text(source)
+        tools = load_tools(tools_dir)
+        assert list(tools) == ["probe"]
+        for _ in range(2):
+            assert _invoke(tools, "probe", "{}", work, enforcer=InProcessEnforcer())["error"] == {
+                "code": "TOOL_FAILED",
+                "message": message,
+            }
+    # A top level that exits the interpreter is kept as the tool's error like any other exception: two calls, one run.
+    count = tmp_path / "count"
+    module.write_text(
+        f"import sys\n\nwith open({str(count)!r}, 'a') as handle:\n    handle.write('x')\nsys.exit(3)\n\n\n"
+        "def run(args, workdir):\n    return 1\n\n\nNAME = 'probe'\n"
+    )
+    tools = load_tools(tools_dir)
+    for _ in range(2):
+        assert _invoke(tools, "probe", "{}", work, enforcer=InProcessEnforcer())["error"] == {
+            "code": "TOOL_FAILED",
+            "message": "LoadError: probe.py failed to import: SystemExit: 3",
+        }
+    assert count.read_text() == "x"
+
+
+def test_the_static_read_counts_every_binding_form_at_module_scope(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    module = tools_dir / "probe.py"
+    work = tmp_path / "work"
+    work.mkdir()
+    impl = "def impl(args, workdir):\n    return 'bound'\n\n\n"
+    # A run bound by an unpacking, for, with, match or walrus target loads and runs: the binding the import makes.
+    for source in (
+        "run, helper = impl, None\n",
+        "helper, *rest, run = None, None, impl\n",
+        "for run in (impl,):\n    pass\n",
+        "import contextlib\n\nwith contextlib.nullcontext(impl) as run:\n    pass\n",
+        "match (impl,):\n    case [run]:\n        pass\n",
+        "(run := impl)\n",
+        "if (run := impl):\n    pass\n",
+    ):
+        module.write_text(f"{impl}{source}\nNAME = 'probe'\n")
+        assert _invoke(load_tools(tools_dir), "probe", "{}", work, enforcer=InProcessEnforcer())["content"] == "bound"
+    # A form the read counts that the import does not keep, or keeps as something not callable, fails the first call.
+    for source, message in (
+        (
+            "try:\n    raise ValueError('x')\nexcept ValueError as run:\n    pass\n",
+            "LoadError: tool probe.py did not bind run(args, workdir) when imported",
+        ),
+        ("*run, helper = impl, None\n", "LoadError: tool probe.py binds run but it is not callable"),
+        (
+            "match {'k': 1}:\n    case {**run}:\n        pass\n",
+            "LoadError: tool probe.py binds run but it is not callable",
+        ),
+    ):
+        module.write_text(f"{impl}{source}\nNAME = 'probe'\n")
+        assert _invoke(load_tools(tools_dir), "probe", "{}", work, enforcer=InProcessEnforcer())["error"] == {
+            "code": "TOOL_FAILED",
+            "message": message,
+        }
+    # A comprehension target, a lambda parameter or body, and a subscript target bind nothing at module scope.
+    for source in (
+        "helper = [run for run in (impl,)]\n",
+        "helper = lambda run: run\n",
+        "helper = lambda: (run := impl)\n",
+        "helper = {}\nhelper['run'] = impl\n",
+    ):
+        module.write_text(f"{impl}{source}\nNAME = 'probe'\n")
+        with pytest.raises(LoadError, match=r"^no top level statement of probe\.py binds run\(args, workdir\)$"):
+            load_tools(tools_dir)
+
+
+def test_a_source_the_parser_cannot_build_is_a_load_error(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    module = tools_dir / "probe.py"
+    head = "def run(args, workdir):\n    return 1\n\n\nX = 1"
+    # A flat operator chain is a tree as deep as it has terms; one the parser builds is read whole.
+    module.write_text(head + " + 1" * 2000 + "\nNAME = 'probe'\n")
+    assert list(load_tools(tools_dir)) == ["probe"]
+    source = head + " + 1" * 100_000 + "\nNAME = 'probe'\n"
+    try:
+        ast.parse(source)
+    except RecursionError:
+        pass
+    else:
+        pytest.skip("this interpreter builds a 100000 term chain")
+    module.write_text(source)
+    with pytest.raises(LoadError, match=r"^probe\.py failed to parse: RecursionError: "):
+        load_tools(tools_dir)
+
+
+def test_concurrent_first_calls_import_once_and_a_raising_top_level_fails_every_call_alike(tmp_path: Path) -> None:
+    log = tmp_path / "imports.log"
+    module = tmp_path / "slow.py"
+    module.write_text(
+        f"import os\nimport time\n\nwith open({str(log)!r}, 'a') as handle:\n    handle.write(str(os.getpid()) + '\\n')\n"
+        "time.sleep(0.2)\n\n\ndef run(args, workdir):\n    return 'ok'\n"
+    )
+    run = _ModuleRun(module)
+    results: list[str] = []
+    barrier = threading.Barrier(8)
+
+    def call() -> None:
+        barrier.wait()
+        results.append(run({}, str(tmp_path)))
+
+    threads = [threading.Thread(target=call) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert results == ["ok"] * 8 and log.read_text().splitlines() == [str(os.getpid())]
+    # A top level that raises runs once; every call fails with the first call's message.
+    count = tmp_path / "count"
+    boom = tmp_path / "boom.py"
+    boom.write_text(
+        f"with open({str(count)!r}, 'a') as handle:\n    handle.write('x')\nraise RuntimeError('boom')\n\n\n"
+        "def run(args, workdir):\n    return 1\n"
+    )
+    failing = _ModuleRun(boom)
+    messages = []
+    for _ in range(3):
+        with pytest.raises(LoadError) as raised:
+            failing({}, str(tmp_path))
+        messages.append(str(raised.value))
+    assert messages == ["boom.py failed to import: RuntimeError: boom"] * 3 and count.read_text() == "x"
 
 
 def require_nested_jail() -> None:

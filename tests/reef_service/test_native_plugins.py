@@ -199,9 +199,9 @@ def test_a_failing_entry_is_absent_from_the_host_and_its_siblings_stand(
             "broken",
             "native_tool",
             name="broken",
-            description="compiles, then fails to import",
+            description="compiles, but defines no run",
             parameters={},
-            code="raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n",
+            code="def helper(args, workdir):\n    return 1\n",
         ),
         _tool("good", id_="twin"),
         _entry("pinned", "config", target="models", data={"model": "other", "context_window": 8}),
@@ -213,7 +213,7 @@ def test_a_failing_entry_is_absent_from_the_host_and_its_siblings_stand(
     states = _states(loader)
     assert states["good"] is FiberState.ACTIVE
     assert {states[id_] for id_ in ("broken", "twin", "pinned", "primary", "window")} == {FiberState.FAILED}
-    assert "broken.py failed to import: RuntimeError: boom" in _error(loader, "broken")
+    assert "no top level statement of broken.py binds run(args, workdir)" in _error(loader, "broken")
     assert "one name, one module" in _error(loader, "twin")
     assert "cannot set model" in _error(loader, "pinned")
     assert "never reads" in _error(loader, "primary")
