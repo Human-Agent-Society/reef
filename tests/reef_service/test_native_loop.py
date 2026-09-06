@@ -283,8 +283,8 @@ def test_mount_module_writes_imports_and_registers_the_loop_and_the_remover_leav
         host.mount_module("native_loop", {"name": "broken", "code": "run_turn = None\n"})
     # Nothing behind: the file went, and the directory made for it went with it, for a tool as for a loop.
     assert host.loop is None and not (tmp_path / "mount" / "loops").exists()
-    with pytest.raises(LoadError, match=r"t\.py failed to import: RuntimeError: x"):
-        host.mount_module("native_tool", {"name": "t", "description": "d", "code": "raise RuntimeError('x')\n"})
+    with pytest.raises(LoadError, match=r"no top level statement of t\.py binds run\(args, workdir\)"):
+        host.mount_module("native_tool", {"name": "t", "description": "d", "code": "x = 1\n"})
     assert not (tmp_path / "mount" / "tools").exists()
     with pytest.raises(LoadError, match="no mount directory"):
         NativeHost().mount_module("native_loop", LOOP[1])

@@ -1876,17 +1876,155 @@ def test_an_entries_list_that_cannot_load_ends_the_episode_naming_the_entry(tmp_
         "name": "native_tool",
         "config": {
             "name": "broken",
-            "description": "compiles, then fails to import",
+            "description": "compiles, but defines no run",
             "parameters": {},
-            "code": "raise RuntimeError('boom')\n\n\ndef run(args, workdir):\n    return 1\n",
+            "code": "def helper(args, workdir):\n    return 1\n",
         },
     }
     result = _tree_episode(tmp_path, fake_model, [*SEED_TOOLS, broken])
     assert result.exit_code == 1 and [e["type"] for e in result.trajectory] == ["session", "turn/start", "turn/end"]
     error = result.trajectory[-1]["data"]["reason"]["error"]
     assert error["code"] == "LOAD_ERROR"
-    assert error["message"].startswith("tree.json entry 'broken' cannot load: native_tool: broken.py failed to import")
-    assert "RuntimeError: boom" in error["message"]
+    assert error["message"] == (
+        "tree.json entry 'broken' cannot load: native_tool: no top level statement of broken.py binds run(args, workdir)"
+    )
+
+
+def test_a_tool_modules_top_level_runs_nowhere_when_the_tree_loads(tmp_path: Path, fake_model, monkeypatch) -> None:
+    marker = tmp_path / "imported"
+    probe = {
+        "name": "probe",
+        "description": "writes a marker when imported",
+        "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+        "capabilities": ["write"],
+        "code": (
+            f"from pathlib import Path\n\nPath({str(marker)!r}).write_text('imported')\n\n\n"
+            "def run(args, workdir):\n    return 'ran'\n"
+        ),
+    }
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    entries = [*SEED_NODES, {"id": "probe", "name": "native_tool", "config": probe}]
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    root = tmp_path / "root"
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    task = "put hello in notes.txt and read it back"
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "bwrap").write_text(
+        f"#!{sys.executable}\nimport os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]\nos.execv(argv[0], argv)\n"
+    )
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+    # The model never calls probe, so the only way its top level runs is a load that imports it: from the
+    # rendered files, then from the entries list through the host's mount.
+    assert run_loop(task, root / "native", tmp_path / "s1", work) == 0
+    assert not marker.exists()
+    for relative, text in tree_files(descriptor, entries).items():
+        (root / relative).write_text(text, encoding="utf-8")
+    assert run_loop(task, root / "native", tmp_path / "s2", work) == 0
+    assert not marker.exists()
+    for name in ("s1", "s2"):
+        events = [json.loads(line) for line in (tmp_path / name / "session.jsonl").read_text().splitlines()]
+        header = events[0]["data"]
+        assert header["enforcement"] == "bwrap" and header["capabilities"]["probe"] == ["write"]
+        # The declaration the model saw is what the render wrote, read without running the module.
+        declared = [tool for tool in _events(events, "request/header")[0]["data"]["tools"] if "probe" in str(tool)]
+        assert declared == [
+            {
+                "type": "function",
+                "function": {"name": "probe", "description": probe["description"], "parameters": probe["parameters"]},
+            }
+        ]
+    # The in process enforcer loads through the same static read.
+    monkeypatch.delenv("REEF_NATIVE_ENFORCE")
+    assert run_loop(task, root / "native", tmp_path / "s3", work) == 0
+    assert not marker.exists()
+
+
+def test_a_tools_file_the_loop_cannot_read_ends_the_files_form_boot_with_load_error(
+    tmp_path: Path, fake_model
+) -> None:
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    root = tmp_path / "root"
+    for relative, text in render_composition([*_seed_nodes(), *binding.compose_nodes(descriptor)], descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    tools_dir = root / "native" / "tools"
+    dangling = tools_dir / "zz_gone.py"
+    dangling.symlink_to(tmp_path / "nowhere.py")
+    cases = [
+        (
+            dangling,
+            f"zz_gone.py cannot be read: FileNotFoundError: [Errno 2] No such file or directory: {str(dangling)!r}",
+        )
+    ]
+    if os.geteuid() != 0:  # root reads a mode 000 file
+        locked = tools_dir / "zz_locked.py"
+        locked.write_text("def run(args, workdir):\n    return 1\n\nNAME = 'locked'\n")
+        locked.chmod(0)
+        cases.append(
+            (locked, f"zz_locked.py cannot be read: PermissionError: [Errno 13] Permission denied: {str(locked)!r}")
+        )
+    # The seed tools sort first and load; the file the loop cannot read ends the boot as a load error, not a traceback.
+    for index, (path, message) in enumerate(cases):
+        session_dir = tmp_path / f"s{index}"
+        assert run_loop("put hello in notes.txt", root / "native", session_dir, work) == 1
+        events = [json.loads(line) for line in (session_dir / "session.jsonl").read_text().splitlines()]
+        assert [event["type"] for event in events] == ["session", "turn/start", "turn/end"]
+        assert events[0]["data"]["tree"] == "files" and events[0]["data"]["tools"] == []
+        assert events[-1]["data"]["reason"] == {"kind": "error", "error": {"code": "LOAD_ERROR", "message": message}}
+        path.unlink()
+    assert fake_model.requests == []
+
+
+class _ProbeTwiceModel(_FakeModel):
+    """Calls probe twice whatever comes back, then answers with the last result."""
+
+    def script(self, body: dict) -> dict:
+        done = len([m for m in body["messages"] if m.get("role") == "tool"])
+        if done < 2:
+            return _reply(tool_calls=[_call("probe", {}, f"c{done}")])
+        return _reply(content=f"gave up: {body['messages'][-1]['content']}")
+
+
+def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path: Path) -> None:
+    count = tmp_path / "count"
+    probe = (
+        "native_tool",
+        {
+            "name": "probe",
+            "description": "exits the interpreter when imported",
+            "parameters": {},
+            "code": (
+                f"import sys\n\nwith open({str(count)!r}, 'a') as handle:\n    handle.write('x')\nsys.exit(3)\n\n\n"
+                "def run(args, workdir):\n    return 'ran'\n"
+            ),
+        },
+    )
+    model = _ProbeTwiceModel()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), probe], prompt="probe twice")
+    finally:
+        model.shutdown()
+        model.server_close()
+    # The exit is the tool's error in the loop's own process: the top level ran once, both calls fail alike,
+    # and the turn ends the way the model chose.
+    assert result.exit_code == 0, result.stderr
+    assert result.trajectory[0]["data"]["enforcement"] == "none" and count.read_text() == "x"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["error"]) for r in results] == [
+        ("probe", {"code": "TOOL_FAILED", "message": "LoadError: probe.py failed to import: SystemExit: 3"})
+    ] * 2
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"} and len(model.requests) == 3
 
 
 def test_a_host_plane_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:

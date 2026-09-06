@@ -23,8 +23,9 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -50,6 +51,8 @@ DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the t
 SESSION_VERSION = 1
 #: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
 TREE_FILE = "tree.json"
+#: A tool's declaration as the render writes it after the code: literal constants the loop reads without running it.
+TOOL_FIELDS: tuple[str, ...] = ("NAME", "DESCRIPTION", "PARAMETERS", "CAPABILITIES")
 _SCALAR_TYPES: dict[str, type | tuple[type, ...]] = {
     "string": str,
     "integer": int,
@@ -107,7 +110,8 @@ class ToolModule:
         self.parameters = dict(parameters) or {"type": "object", "properties": {}}
         self.run = run
         self.capabilities = tuple(str(item) for item in capabilities)
-        # The module file, which a sandboxing enforcer imports afresh in its child; a tool built in code has none.
+        # The module file, imported only where a call runs: afresh in a sandboxing enforcer's child, or at the
+        # first in process call; a tool built in code has none.
         self.path = path
         # Reef's own code rather than the tree's (the serve form's self tools): it runs in process whatever
         # enforcer the environment names, since the enforcer confines what a tree entry may do.
@@ -173,28 +177,132 @@ def import_module_file(path: Path, prefix: str) -> ModuleType:
         exec(compile(path.read_bytes(), str(path), "exec"), module.__dict__)  # bytes: the coding cookie and BOM apply
     except KeyboardInterrupt:
         raise
-    except BaseException as exc:  # SystemExit too: a module that exits at import is one the loop cannot use
+    except BaseException as exc:  # a top level that exits the interpreter is the module's failure, not the loop's
         raise LoadError(f"{path.name} failed to import: {type(exc).__name__}: {exc}") from exc
     return module
 
 
 def _modules(directory: Path, prefix: str) -> Iterator[tuple[Path, ModuleType]]:
-    """Import every ``*.py`` in name order; a module that fails to import fails the episode, so the tree that carries it loses."""
+    """Import every ``*.py`` in name order (hooks: they run in this process); a module that fails to import fails the episode, so the tree that carries it loses."""
     for path in sorted(directory.glob("*.py")):
         yield path, import_module_file(path, prefix)
 
 
-def tool_from_module(path: Path, module: ModuleType) -> ToolModule:
-    """The tool a rendered module declares: ``run`` plus the constants the render wrote after the code."""
-    run = getattr(module, "run", None)
-    if not callable(run):
-        raise LoadError(f"tool {path.name} defines no run(args, workdir)")
-    name = str(getattr(module, "NAME", path.stem))
-    parameters = getattr(module, "PARAMETERS", {})
-    capabilities = getattr(module, "CAPABILITIES", ())
-    description = str(getattr(module, "DESCRIPTION", ""))
+def _imported_run(path: Path) -> ToolRunner:
+    """The ``run`` a tool module binds once imported; a name the static read saw bound may still be missing (a branch not taken) or not callable."""
+    namespace = vars(import_module_file(path, "reef_native_tool"))
+    if "run" not in namespace:
+        raise LoadError(f"tool {path.name} did not bind run(args, workdir) when imported")
+    if not callable(namespace["run"]):
+        raise LoadError(f"tool {path.name} binds run but it is not callable")
+    run: ToolRunner = namespace["run"]
+    return run
+
+
+class _ModuleRun:
+    """A tool module's ``run`` for the in process enforcer: imported at the first call, never at load, and once, so a top level that raised fails every later call the same way without running again."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._lock = threading.Lock()
+        self._run: ToolRunner | None = None
+        self._error: LoadError | None = None
+
+    def __call__(self, args: dict[str, Any], workdir: str, /) -> Any:
+        run = self._run
+        if run is None:
+            with self._lock:
+                if self._run is None and self._error is None:
+                    try:
+                        self._run = _imported_run(self._path)
+                    except LoadError as exc:
+                        self._error = exc
+                run = self._run
+            if run is None:
+                # A fresh instance: raising the kept one again would grow its traceback at every call.
+                raise LoadError(str(self._error)) from self._error
+        return run(args, workdir)
+
+
+def _literal(path: Path, name: str, value: ast.expr) -> Any:
+    """The constant a declaration assignment carries, evaluated as a literal and never as code."""
+    try:
+        return ast.literal_eval(value)
+    except (ValueError, TypeError) as exc:
+        raise LoadError(f"tool {path.name} must declare {name} as a literal") from exc
+
+
+def _module_scope(nodes: Iterable[ast.AST]) -> Iterator[ast.AST]:
+    """Every node at module scope in source order: compound statement bodies and expressions are followed, function, class and lambda bodies are not."""
+    # An explicit stack: a long flat operator chain is a tree as deep as it has terms.
+    stack = list(nodes)[::-1]
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            stack.extend(list(ast.iter_child_nodes(node))[::-1])
+
+
+def _target_names(target: ast.expr) -> Iterator[str]:
+    """The names an assignment target binds: a name, or every name under a tuple, list or star target."""
+    if isinstance(target, ast.Name):
+        yield target.id
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _target_names(element)
+    elif isinstance(target, ast.Starred):
+        yield from _target_names(target.value)
+
+
+def _bindings(node: ast.AST) -> Iterator[str]:
+    """The names one node binds in the scope it sits in: a def, class or import name; an assignment, for, with, except or walrus target; a match capture."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield node.name
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        yield from (alias.asname or alias.name.partition(".")[0] for alias in node.names)
+    elif isinstance(node, ast.Assign):
+        for target in node.targets:
+            yield from _target_names(target)
+    elif isinstance(node, (ast.AnnAssign, ast.For, ast.AsyncFor)):
+        yield from _target_names(node.target)
+    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+        yield from _target_names(node.optional_vars)
+    elif isinstance(node, ast.NamedExpr):
+        yield node.target.id
+    elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name is not None:
+        yield node.name
+    elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        yield node.rest
+
+
+def tool_from_source(path: Path) -> ToolModule:
+    """The tool a rendered module declares, read from its source without running it: the last module scope assignment to a declaration constant binds (compound statement bodies are followed, function and class bodies are not, and the render writes its constants last), and ``run`` is what the enforcer imports where the call runs."""
+    try:
+        tree = ast.parse(path.read_bytes(), filename=str(path))  # bytes: the coding cookie and BOM apply
+    except OSError as exc:
+        raise LoadError(f"{path.name} cannot be read: {type(exc).__name__}: {exc}") from exc
+    except Exception as exc:  # SyntaxError, a null byte, or a RecursionError from a tree too deep to build
+        raise LoadError(f"{path.name} failed to parse: {type(exc).__name__}: {exc}") from exc
+    bound: set[str] = set()
+    assigned: dict[str, ast.expr] = {}
+    for node in _module_scope(tree.body):
+        bound.update(_bindings(node))
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                if isinstance(target, ast.Name) and target.id in TOOL_FIELDS:
+                    assigned[target.id] = node.value
+    if "run" not in bound:
+        raise LoadError(f"no top level statement of {path.name} binds run(args, workdir)")
+    fields = {name: _literal(path, name, value) for name, value in assigned.items()}
+    parameters = fields.get("PARAMETERS", {})
+    capabilities = fields.get("CAPABILITIES", ())
     return ToolModule(
-        name, description, parameters, run, capabilities if isinstance(capabilities, list) else (), path=path
+        str(fields.get("NAME", path.stem)),
+        str(fields.get("DESCRIPTION", "")),
+        parameters if isinstance(parameters, dict) else {},
+        _ModuleRun(path),
+        capabilities if isinstance(capabilities, list) else (),
+        path=path,
     )
 
 
@@ -274,9 +382,10 @@ def load_loop(loops_dir: Path) -> LoopModule | None:
 
 
 def load_tools(tools_dir: Path) -> dict[str, ToolModule]:
+    """Every tool read from its source in name order; no tool module runs in this process at load."""
     tools: dict[str, ToolModule] = {}
-    for path, module in _modules(tools_dir, "reef_native_tool"):
-        tool = tool_from_module(path, module)
+    for path in sorted(tools_dir.glob("*.py")):
+        tool = tool_from_source(path)
         tools[tool.name] = tool
     return tools
 

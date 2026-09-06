@@ -476,10 +476,11 @@ is idle. The mount is one line in the open turn's session, else in
 The next step runs on the new tools, hooks, rules, skills and window, and
 writes a new ``request/header`` when what the model sees changed; the next
 turn runs the new graph. A mount that leaves an entry FAILED (a tool whose
-code does not import, a kind this reef has no plugin for, a name a self tool
-owns) is rolled back whole before the next step: ``harness/mount-failed``
-names the release, the entry and the error, and the previous composition
-keeps serving. On success the sidecar and ``native/tree.json`` name the new
+module binds no ``run`` at its top level, a hook whose code does not
+import, a kind this reef has no plugin for, a name a self tool owns) is
+rolled back whole before the next step: ``harness/mount-failed`` names the
+release, the entry and the error, and the previous composition keeps
+serving. On success the sidecar and ``native/tree.json`` name the new
 release, so a restart boots from it with ``source: boot``.
 
 With ``--follow pinned`` the process logs ``release/available`` with the
@@ -519,9 +520,11 @@ The order is inspect, then try, then propose. Every call is a ``tool/call``
 and ``tool/result`` pair in the session log, so what the model learned about
 itself and what it changed is in the record.
 
-The serve process runs on your machine with your privileges and imports
-tree code in process, as the episode form does; the gate's sandbox does not
-apply to it. Under ``--follow head``, whoever can publish to the scenario
+The serve process runs on your machine with your privileges and runs tree
+code in process, as the episode form does: every hook imports and listens
+there, and a tool call runs there unless ``REEF_NATIVE_ENFORCE=bwrap`` is
+set; the gate's sandbox does not apply to it. Under ``--follow head``,
+whoever can publish to the scenario
 runs code on the machine the process serves on. ``--follow pinned`` keeps a
 person in that loop.
 
