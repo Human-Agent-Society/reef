@@ -98,7 +98,7 @@ def build_named_recipe(
             f"unknown deployment recipe {name!r}; available recipes: {', '.join(sorted(available))}"
         )
 
-    settings = load_recipe_config(path)
+    settings = load_recipe_config(path, environ=values)
     model_path = settings["model"].get("path")
     if not isinstance(model_path, str) or not model_path:
         raise RecipeConfigError(f"recipe {name!r} must configure a non-empty model.path")

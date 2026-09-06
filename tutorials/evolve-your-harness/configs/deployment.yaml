@@ -5,7 +5,7 @@
 # ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 model:
-  path: &model your-model-name  # Set once; shared by serving and evaluation.
+  path: &model ${REEF_UPSTREAM_MODEL}  # Set at startup; shared by serving and evaluation.
 
 evolution:
   adapter: pi
