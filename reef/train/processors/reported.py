@@ -283,6 +283,9 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     # ---------------------------------------------------------------- ingest
 
     def ingest(self, item: AgentRecord) -> None:
+        if item.request_type is RequestType.TRAIN:
+            super().ingest(item)
+            return
         # 1. An inference record: store it and re-judge the reports that
         #    were waiting on it, once their last reference has arrived.
         if item.request_type is RequestType.INFERENCE:
@@ -514,11 +517,12 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         protected = set(self._reports) | live_references
         protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
         return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected),
-            releasable_agent_record_ids=frozenset(releasable),
+            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
+            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        super().compaction_applied(agent_record_ids)
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids

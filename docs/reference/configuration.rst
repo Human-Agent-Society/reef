@@ -106,6 +106,36 @@ ignored.
 Recipe configuration
 --------------------
 
+``data.training_mode`` is shared by all recipes and defaults to ``auto``.
+In ``auto``, the recipe's processor decides when its data can form a batch.
+In ``manual``, inference and reports cannot authorize training by themselves;
+``POST /reef/train`` supplies the user instruction. The processor defines
+the manual mode's input requirements and batching, independently of its
+automatic batching policy. Harness evolution needs only the instruction.
+For a dotted weight-training deployment this field is also accepted as
+``reef.training_mode``. Named presets set it in their own ``data`` section.
+
+The processor receives ``ProcessorContext.training_mode`` as its initial
+batching mode. Both modes share ingestion and retention; the
+``make_training_batch(batch_number, request)`` hook selects batch inputs.
+Processors declare ``supported_training_modes``; unsupported modes or missing
+manual assembly raise ``NotImplementedError``.
+Harness evolution supports both modes and requires a proposer that explicitly
+accepts ``requests`` for manual operation. Setting ``manual`` on an
+inference-only recipe does not create a training backend.
+
+.. code:: yaml
+
+   data:
+     training_mode: manual
+
+The mode controls training initiation, independently of
+``evolution.publish: auto | review``. It supplies the initial processor mode.
+Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
+at runtime. This changes subsequent batches; a reserved batch completes under
+its original mode. Mode changes are not persisted, and rebuilding the scenario
+uses the recipe's configured mode again.
+
 A recipe is selected three ways:
 
 - **The core record-only recipe:** ``recipe: recipe``

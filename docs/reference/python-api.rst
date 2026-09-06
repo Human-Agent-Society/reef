@@ -244,6 +244,13 @@ thread, so they must not block on network or model latency.
 |                   | replay                        |                               |
 +-------------------+-------------------------------+-------------------------------+
 
+``DataProcessor.training_mode`` selects automatic or instruction-triggered
+batching on the same processor. Declare ``supported_training_modes`` and
+implement ``make_training_batch(batch_number, request)`` to select inputs;
+``request`` is ``None`` in auto mode. Ingestion, acknowledgement, retention,
+compaction and background derivation are shared. See
+`Processors <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.
+
 Every processor gets the scenario's experiment logger as
 ``self.experiment_logger``. Log finite numeric metrics under the ``processor``
 namespace; processor code never imports W&B, and the logger is a no-op when

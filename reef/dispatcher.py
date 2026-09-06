@@ -22,6 +22,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
 from reef.observability import (
     ExperimentTracker,
     NullExperimentTracker,
@@ -168,6 +169,16 @@ class Dispatcher:
             allow_implicit_creation=allow_implicit_creation,
         )
 
+    def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
+        with self._registry.lock_for(scenario):
+            current = self._registry.require(scenario)
+            current.set_training_mode(training_mode)
+            if isinstance(current.runtime, TrainingRuntime):
+                self._training.ready.set()
+            elif current.trainer.training_backend is not None:
+                self._start_local_backend_worker(scenario)
+            return {"scenario": scenario, "training_mode": current.trainer.training_mode}
+
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
 
@@ -241,6 +252,16 @@ class Dispatcher:
             return self._accept_record(current, item)
 
     def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
+        if item.request_type is RequestType.TRAIN:
+            if (existing := current.records.existing_receipt(item)) is not None:
+                return existing
+            if current.trainer.training_mode != "manual":
+                raise ValueError("explicit training requests require training_mode='manual'")
+            if current.trainer.training_backend is None:
+                raise ValueError("explicit training requests require a training backend")
+            TrainingRequest.from_dict(item.payload)
+            if item.references:
+                raise ValueError("manual training requests do not reference inference receipts")
         # Schema enforcement: reject a malformed report before it is durably
         # appended, so the producer's POST fails with the violation naming
         # the broken field instead of the record dying silently at training
@@ -666,6 +687,7 @@ class Dispatcher:
             ),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
+            "training_mode": current.trainer.training_mode,
             "processor": current.trainer.processor_status(),
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }

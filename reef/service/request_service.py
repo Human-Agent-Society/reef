@@ -19,6 +19,7 @@ from typing import Any, Protocol, runtime_checkable
 from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
+from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
@@ -80,6 +81,9 @@ def normalize_request_payload(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
     """Normalize a typed Reef payload; a native provider body passes through."""
+    if request_type is RequestType.TRAIN:
+        request = TrainingRequest.from_dict(payload)
+        return request.to_dict(), ()
     if request_type is not RequestType.REPORT:
         return dict(payload), ()
     report = ReportPayload.from_dict(payload)

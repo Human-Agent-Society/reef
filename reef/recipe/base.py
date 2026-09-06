@@ -44,6 +44,11 @@ class Recipe:
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
+    training_mode: str = config_field("auto")
+
+    def __post_init__(self) -> None:
+        if self.training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
 
     @classmethod
     def from_environment(
@@ -101,6 +106,7 @@ class Recipe:
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )
 
     @property
@@ -197,6 +203,7 @@ class WeightTrainingRecipe(Recipe):
         return WeightTrainingSpec(step_preparer="", loss_family="")
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         runtime_max_staleness = self.runtime.max_staleness
@@ -305,7 +312,11 @@ class WeightTrainingRecipe(Recipe):
         retention, so it is not included in processor config. Override this
         method to rename keys or add processor-only entries.
         """
-        return {name: getattr(self, name) for name in recipe_config_fields(type(self)) if name != "max_staleness"}
+        return {
+            name: getattr(self, name)
+            for name in recipe_config_fields(type(self))
+            if name not in ("max_staleness", "training_mode")
+        }
 
     def build(
         self,
@@ -382,4 +393,5 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )

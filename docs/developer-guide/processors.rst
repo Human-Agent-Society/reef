@@ -35,7 +35,61 @@ invariant failure).
 
 ``DataProcessor`` in ``base.py`` is concrete on purpose: bare, it is the
 no-update default that ingests for audit and never becomes ready. Recipes
-never implement it directly; they subclass one of the two engines.
+can implement their own lifecycle or reuse one of the feedback engines below.
+
+Explicit manual training
+------------------------
+
+``training_mode`` is an attribute of each ``DataProcessor``. The recipe passes
+its initial value through ``Trainer.build`` and ``ProcessorContext``; it
+defaults to ``auto``. Ingestion, acknowledgement, retention and compaction use
+the same methods and buffers in both modes.
+
+The shared batching cycle waits for ``batch_size`` units in auto mode or a
+queued TRAIN instruction in manual mode. A processor supporting both declares
+``supported_training_modes = frozenset({"auto", "manual"})`` and implements
+one assembly hook:
+
+.. code:: python
+
+   def make_training_batch(self, batch_number, request):
+       if request is not None:
+           # Select inputs for this instruction; harness needs no samples.
+           self._pending_units = ()
+           return TraceBatch(request.id, ())
+       return self._make_pending(batch_number)
+
+This example extends the reported-feedback engine. ``request`` is a
+``TrainingRequest`` in manual mode and ``None`` in auto mode. The base class
+attaches the instruction to ``batch.request`` and assigns its stable batch id.
+``_consume_pending`` releases the selected data; shared acknowledgement also
+consumes the instruction. A processor needing additional manual inputs can
+extend the shared ``ready`` predicate. Batch construction must not call models
+or perform training.
+
+Processors receive TRAIN records by including ``RequestType.TRAIN`` in
+``required_request_types`` and forwarding those records to ``super().ingest``.
+The base class queues them FIFO regardless of the selected mode. Data ingestion
+continues normally in manual mode, so changing to auto can batch data already
+collected. Custom retention implementations must preserve queued instructions
+and release consumed ones, as the reported-feedback engine does.
+
+Unsupported modes, or manual assembly without an implementation, raise
+``NotImplementedError``. An invalid mode name raises ``ValueError``.
+The default automatic assembly keeps the existing ``_make_pending`` hook;
+automatic processors and computed-feedback ``ingest`` implementations need no
+mode-specific lifecycle methods or additional processor class.
+
+Changing training mode
+----------------------
+
+``POST /reef/scenarios/{scenario}/update`` selects ``auto`` or ``manual`` on
+the existing processor. The trainer serializes selection with ingestion and
+reservation. A reserved batch stays unchanged and acknowledgement consumes its
+actual contents, independently of subsequent mode changes.
+
+Buffered data and queued instructions stay on the same instance. The selector
+is runtime state: rebuilding a scenario uses the recipe's configured default.
 
 The two feedback paths
 ----------------------

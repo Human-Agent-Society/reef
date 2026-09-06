@@ -136,6 +136,23 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
 The loop
 --------
 
+The default ``data.training_mode: auto`` follows the batching loop below.
+For user-directed evolution, set ``data.training_mode: manual`` and submit
+``POST /reef/train`` with ``text``, ``session`` and ``release_id`` (see the
+`manual training API <../reference/http-api.rst#manual-training>`__).
+No inference receipts or failure report are needed. Each request starts
+one step; ordinary traffic never starts evolution in this mode.
+
+The proposer must explicitly accept ``requests``. It receives one request
+mapping containing ``id``, ``text``, ``session``, ``release_id`` and
+``untrusted=True``, together with the current harness and model bindings.
+``samples`` is empty in this path: the method answers the user's request
+instead of learning from failed exchanges. Its mutations pass through the
+same gate and ``evolution.publish`` policy. Pending agent proposals and
+periodic rollback rechecks cannot take the step reserved for a user's
+instruction. The tutorial's failure-only proposer must be extended with
+a ``requests`` branch before selecting manual mode.
+
 .. flow::
    :loop: publish the winner, or restore the snapshot
 

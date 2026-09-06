@@ -110,6 +110,10 @@ class Scenario:
         """The serving surface built for this scenario."""
         return self._surface
 
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches without waiting for a running backend step."""
+        self._trainer.set_training_mode(training_mode)
+
     def prepare_training_step(self) -> TrainStepResult | None:
         """Prepare one local-backend step while excluding rollback and commit."""
         with self._commit_protocol.lock:

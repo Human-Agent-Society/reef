@@ -367,12 +367,16 @@ class ScenarioFactory:
         experiment_logger: ExperimentLogger,
     ) -> Trainer:
         """Build a recipe trainer with the complete current recipe contract."""
-        return recipe.build(
+        trainer = recipe.build(
             scenario,
             records,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
+        if trainer.training_mode != recipe.training_mode:
+            trainer.close()
+            raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+        return trainer
 
     def _artifact_selector_matches(
         self,

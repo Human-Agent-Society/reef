@@ -8,10 +8,11 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
 
@@ -86,10 +87,16 @@ class DataProcessor:
     history.
     """
 
-    required_request_types: frozenset[RequestType] = frozenset(RequestType)
+    required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
+    supported_training_modes: frozenset[str] = frozenset({"auto"})
 
     def __init__(self, context: ProcessorContext) -> None:
         self._context = context
+        if not context.config.get("manual_enabled", True):
+            self.supported_training_modes = self.supported_training_modes - {"manual"}
+        self.set_training_mode(context.training_mode)
+        self._training_requests: dict[str, TrainingRequest] = {}
+        self._consumed_requests: set[str] = set()
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -111,6 +118,19 @@ class DataProcessor:
         return self._scenario
 
     @property
+    def training_mode(self) -> str:
+        """The batching policy selected for this processor."""
+        return self._context.training_mode
+
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches while preserving shared buffers and reservations."""
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
+        if training_mode not in self.supported_training_modes:
+            raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
+        self._context = replace(self._context, training_mode=training_mode)
+
+    @property
     def experiment_logger(self) -> ExperimentLogger:
         """The scenario logger shared by its recipe, processor, and backend."""
         return self._context.experiment_logger
@@ -119,7 +139,14 @@ class DataProcessor:
     output_schema: type[TrainingBatch] = PolicyBatch
 
     def ingest(self, item: AgentRecord) -> None:
-        self._agent_record_ids.add(item.agent_record_id)
+        if item.request_type is RequestType.TRAIN:
+            if item.scenario != self.scenario:
+                raise ValueError("training records must belong to the processor's scenario")
+            request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
+            if request.id not in self._consumed_requests:
+                self._training_requests.setdefault(request.id, request)
+        else:
+            self._agent_record_ids.add(item.agent_record_id)
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -130,20 +157,44 @@ class DataProcessor:
     # consuming them releases.
 
     def ready(self) -> bool:
-        return self._pending is not None or self._ready_count() >= self._batch_size
+        if self._pending is not None:
+            return True
+        if self.training_mode == "manual":
+            return bool(self._training_requests)
+        return self._ready_count() >= self._batch_size
 
     def build_batch(self) -> TrainingBatch:
         if self._pending is None:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            self._pending = self._make_pending(self._batch_number)
+            request = next(iter(self._training_requests.values())) if self.training_mode == "manual" else None
+            self._pending = self.make_training_batch(self._batch_number, request)
+            if request is not None:
+                self._pending = replace(
+                    self._pending, batch_id=f"{self.scenario}:manual:{request.id}", request=request
+                )
         return self._pending
+
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        """Select inputs for one batch; a request supplies manual authorization.
+
+        Override this single assembly hook to support manual batching. Ingestion,
+        acknowledgement and retention operate on the same state in either mode.
+        """
+        if request is not None:
+            raise NotImplementedError(f"{type(self).__name__} does not implement manual batch assembly")
+        return self._make_pending(batch_number)
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         consumed = self._consume_pending()
+        if self._pending.request is not None:
+            request_id = self._pending.request.id
+            self._training_requests.pop(request_id)
+            self._consumed_requests.add(request_id)
+            consumed = consumed | {request_id}
         self._pending = None
         return consumed
 
@@ -176,11 +227,15 @@ class DataProcessor:
         Subclasses with real pairing semantics override this to derive
         protected/releasable sets from their own state.
         """
-        return RetentionDecision(protected_agent_record_ids=frozenset(self._agent_record_ids))
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
+            releasable_agent_record_ids=frozenset(self._consumed_requests),
+        )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
         self._agent_record_ids -= agent_record_ids
+        self._consumed_requests -= agent_record_ids
 
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
@@ -200,7 +255,7 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
-        return {}
+        return {"buffered_requests": len(self._training_requests)} if "manual" in self.supported_training_modes else {}
 
     def close(self) -> None:
         """Release resources the processor owns; safe to call more than once.

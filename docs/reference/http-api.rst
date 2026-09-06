@@ -33,9 +33,13 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/train``                            | enqueue one explicit manual training instruction  |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios``                         | every known scenario and current release          |
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                        | create a scenario explicitly                      |
++-------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/update``      | update the scenario training mode                 |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``     | what this scenario accepts                        |
 +-------------------------------------------------+---------------------------------------------------+
@@ -83,6 +87,43 @@ Headers
 |                                   | to correlate on. Reef never reads a value.              |
 +-----------------------------------+---------------------------------------------------------+
 
+Manual training
+---------------
+
+``POST /reef/train`` is available to a scenario configured with
+``data.training_mode: manual``. It takes the user's ``text``, originating
+``session`` and ``release_id``. The latter two are provenance, not a request
+to restore an old release. The backend operates on the current committed
+state. The API requires no inference receipts or score. The processor
+determines what inputs it needs for manual training; harness evolution
+can execute the request without any inference data or ready automatic batch.
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/train \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "x-reef-scenario: coding" \
+     -H "Content-Type: application/json" \
+     -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "release_id":"release-1"}'
+
+The response is ``{agent_record_id, scenario, request_type: "train"}``.
+HTTP 200 acknowledges durable acceptance, not successful training. Requests
+are executed one at a time by the normal training worker; later requests
+do not change a step already in flight. The existing evaluation and
+publication rules still determine whether the result becomes served.
+``GET /reef/status`` reports ``training_mode``. Processors using the shared
+manual request queue also report ``buffered_requests`` (requests already
+read into the processor; later records may still wait in storage).
+Committed step metrics include ``training_request``
+with the instruction id, text, session and release id.
+
+Supply ``agent_record_id`` to retry safely: an identical request is accepted
+without another step, including after record compaction; reusing the id with
+different content returns HTTP 409. Without it, each submission gets a fresh
+id. Empty text, text longer than 4000 characters, missing or non-string
+session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
+The normal bearer authentication and implicit-scenario-creation setting apply.
+
 Scenarios
 ---------
 
@@ -115,6 +156,34 @@ unknown scenario returns HTTP 404 and you create it first:
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
+
+Scenario updates
+~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios/{scenario}/update`` updates an existing scenario.
+Currently, only ``training_mode`` is supported; unknown fields are rejected.
+To change the data processor's mode:
+
+.. code:: json
+
+   {"training_mode": "manual"}
+
+HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
+Use ``"auto"`` to resume recipe batching. The change selects subsequent
+batches; a batch already reserved or running completes in its original mode.
+Both modes share buffered data, so auto can batch traffic collected while
+manual was selected. Accepted
+manual instructions wait for manual mode, including instructions not yet read
+when the selector changes to auto.
+
+Unknown scenarios return ``404`` without implicit creation; invalid payloads
+return ``400``. A processor that does not support the requested mode returns
+``501`` without changing its state. Harness manual mode also requires a
+proposer that explicitly accepts ``requests``.
+
+``GET /reef/status`` reports the selected ``training_mode``. This selector
+is runtime state, not persisted scenario configuration: service restart or
+scenario reload uses the recipe's configured mode again.
 
 Inference
 ---------

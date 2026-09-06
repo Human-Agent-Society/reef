@@ -61,6 +61,7 @@ class Trainer:
         algorithm_state: Mapping[str, Any] | None = None,
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
+        training_mode: str = "auto",
     ) -> Trainer:
         if training_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a training backend")
@@ -69,8 +70,12 @@ class Trainer:
                 scenario=scenario,
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
+                training_mode=training_mode,
             )
         )
+        if processor.training_mode != training_mode:
+            processor.close()
+            raise ValueError("processor_factory must preserve the requested training_mode")
         default_state = training_backend.initial_state() if training_backend is not None else {}
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         return cls(
@@ -111,6 +116,16 @@ class Trainer:
     @property
     def scenario(self) -> str:
         return self._scenario
+
+    @property
+    def training_mode(self) -> str:
+        """The mode selected for subsequent batches."""
+        return self._processor.training_mode
+
+    def set_training_mode(self, training_mode: str) -> None:
+        """Serialize mode selection with record ingestion and batch reservation."""
+        with self._lock:
+            self._processor.set_training_mode(training_mode)
 
     @property
     def processor(self) -> DataProcessor:
@@ -324,13 +339,17 @@ class Trainer:
             consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            metrics = dict(result.metrics)
+            request = self._pending.batch.request
+            if request is not None:
+                metrics["training_request"] = {"id": request.id, **request.to_dict()}
             prepared = PreparedCommit(
                 algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
                 compacted_ids=frozenset(compacted),
                 consumed_ids=consumed,
-                metrics=dict(result.metrics) or None,
+                metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
             self._pending.prepared_commit = prepared

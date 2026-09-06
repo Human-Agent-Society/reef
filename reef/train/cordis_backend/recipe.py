@@ -203,6 +203,7 @@ class CordisRecipe(Recipe):
         return ScoredRolloutReport
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_episode, EpisodeScorer):
@@ -485,17 +486,26 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
     ) -> Trainer:
+        if self.training_mode == "manual" and not self.propose.reads_requests:
+            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
         return Trainer.build(
             scenario,
             records,
             processor_factory=lambda context: (
-                RecordDrivenTraceProcessor(context.with_config({"batch_size": self.batch_size}))
-                if self.batch_policy == "records"
-                else CordisProcessor(context.with_config({"batch_size": self.batch_size, "max_score": self.max_score}))
+                RecordDrivenTraceProcessor if self.batch_policy == "records" else CordisProcessor
+            )(
+                context.with_config(
+                    {
+                        "batch_size": self.batch_size,
+                        "max_score": self.max_score,
+                        "manual_enabled": self.propose.reads_requests,
+                    }
+                )
             ),
             training_backend=training_backend,
             candidate_evaluator=DefaultCandidateEvaluationPlugin(training_backend, self.candidate_selector),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )

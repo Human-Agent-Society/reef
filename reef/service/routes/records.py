@@ -39,6 +39,7 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
         return accept
 
     app.router.add_post("/reef/report", accept_typed(RequestType.REPORT))
+    app.router.add_post("/reef/train", accept_typed(RequestType.TRAIN))
 
 
 __all__ = ["register_record_routes"]

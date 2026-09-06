@@ -84,7 +84,19 @@ class Proposer(ABC):
     :func:`untrusted_text` before it enters a model prompt. Each keyword is
     only forwarded to callables whose signature names it, so earlier
     proposers run unchanged.
+
+    In manual mode, ``requests`` contains exactly one mapping with ``id``,
+    ``text``, ``session``, ``release_id`` and ``untrusted=True``. It is the
+    instruction that authorized this step; ``samples`` is empty. The
+    proposer must explicitly name ``requests`` to support manual evolution.
+    It generates mutations against the current tree, then the same gate
+    and publication policy used by automatic evolution apply.
     """
+
+    @property
+    def reads_requests(self) -> bool:
+        """Whether this proposer can honor an explicit manual training request."""
+        return names_keyword(self.__call__, "requests")
 
     @abstractmethod
     def __call__(
@@ -96,6 +108,7 @@ class Proposer(ABC):
         manifest: FailureManifest | None = None,
         rejected: Sequence[Mapping[str, Any]] = (),
         sources: Sequence[Mapping[str, Any]] = (),
+        requests: Sequence[Mapping[str, Any]] = (),
     ) -> Mutation | Sequence[Mutation] | None:
         """Propose mutations for the current composition and trace batch."""
 
@@ -127,6 +140,18 @@ def accepts_manifest(fn: Callable[..., Any]) -> bool:
     return accepts_keyword(fn, "manifest")
 
 
+def names_keyword(fn: Callable[..., Any], name: str) -> bool:
+    """A manual instruction must be explicitly accepted, not swallowed by **kwargs."""
+    try:
+        parameter = inspect.signature(fn).parameters.get(name)
+    except (TypeError, ValueError):
+        return False
+    return parameter is not None and parameter.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
 def untrusted_text(text: str, label: str = "recorded traffic") -> str:
     """Fence client text for a model prompt as data, not instructions.
 
@@ -148,6 +173,11 @@ class _CallableProposer(Proposer):
         self._forward_manifest = accepts_manifest(fn)
         self._forward_rejected = accepts_keyword(fn, "rejected")
         self._forward_sources = accepts_keyword(fn, "sources")
+        self._forward_requests = names_keyword(fn, "requests")
+
+    @property
+    def reads_requests(self) -> bool:
+        return self._forward_requests
 
     def __call__(
         self,
@@ -158,6 +188,7 @@ class _CallableProposer(Proposer):
         manifest: FailureManifest | None = None,
         rejected: Sequence[Mapping[str, Any]] = (),
         sources: Sequence[Mapping[str, Any]] = (),
+        requests: Sequence[Mapping[str, Any]] = (),
     ) -> Mutation | Sequence[Mutation] | None:
         extra: dict[str, Any] = {}
         if self._forward_manifest:
@@ -166,6 +197,8 @@ class _CallableProposer(Proposer):
             extra["rejected"] = rejected
         if self._forward_sources:
             extra["sources"] = sources
+        if self._forward_requests:
+            extra["requests"] = requests
         return self._fn(nodes, samples, models, **extra)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiohttp import web
 
 from reef.service.request_service import RequestService
@@ -40,6 +42,17 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             },
             status=201 if created else 200,
         )
+
+    async def update_scenario(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        if set(payload) != {"training_mode"} or payload["training_mode"] not in ("auto", "manual"):
+            raise ValueError("expected training_mode 'auto' or 'manual'")
+        result = await asyncio.to_thread(
+            request_service.dispatcher.set_training_mode,
+            request.match_info["scenario"],
+            payload["training_mode"],
+        )
+        return web.json_response(result)
 
     async def list_releases(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -87,6 +100,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
+    app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)

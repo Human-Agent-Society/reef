@@ -13,6 +13,7 @@ def test_core_package_exports_protocol_and_record_types() -> None:
     assert tuple(RequestType) == (
         RequestType.INFERENCE,
         RequestType.REPORT,
+        RequestType.TRAIN,
     )
     assert AgentRecord.__module__ == "reef.core.records_types"
     assert RecordStore.__module__ == "reef.records"
