@@ -352,3 +352,97 @@ def test_a_failing_entry_lands_failed_beside_active_siblings_on_load_and_on_upda
     asyncio.run(main())
     gc.collect()
     assert unhandled == []
+
+
+def _subgroup(log):
+    """A group entry with two children; the group entry, its subgroup and the loader."""
+    _root, loader = build(log)
+    loader.create(
+        {
+            "id": "g",
+            "group": True,
+            "config": [
+                {"id": "g1", "name": "alpha", "config": {"g": 1}},
+                {"id": "g2", "name": "alpha", "config": {"g": 2}},
+            ],
+        }
+    )
+    group = loader.resolve("g")
+    assert group.subgroup is not None
+    return loader, group, group.subgroup
+
+
+def _ids(rows) -> list[str]:
+    return [str(options["id"]) for options in rows]
+
+
+def test_a_move_inside_a_subgroup_lands_in_the_group_entrys_config() -> None:
+    loader, group, subgroup = _subgroup([])
+    assert group.options["config"] is subgroup.data  # the group entry's config is the children's live list
+    loader.update("g2", {}, "g", 0, move=True)
+    assert _ids(subgroup.data) == ["g2", "g1"] and _ids(group.options["config"]) == ["g2", "g1"]
+    loader.update("g", {})  # a forced update of the group entry reconciles the order it already has
+    assert _ids(subgroup.data) == ["g2", "g1"] and _ids(group.options["config"]) == ["g2", "g1"]
+    assert all(
+        loader.resolve(id_).options is options for id_, options in zip(_ids(subgroup.data), subgroup.data, strict=True)
+    )
+
+
+def test_a_create_inside_a_subgroup_appears_in_the_group_entrys_config() -> None:
+    loader, group, subgroup = _subgroup([])
+    loader.create({"id": "g3", "name": "alpha", "config": {"g": 3}}, "g")
+    assert _ids(subgroup.data) == ["g1", "g2", "g3"] and _ids(group.options["config"]) == ["g1", "g2", "g3"]
+    assert loader.resolve("g3").options is subgroup.data[2]
+
+
+def test_a_remove_inside_a_subgroup_leaves_no_ghost() -> None:
+    loader, group, subgroup = _subgroup([])
+    loader.remove("g2")
+    assert _ids(subgroup.data) == ["g1"] and _ids(group.options["config"]) == ["g1"]
+    loader.update("g", {})
+    assert _ids(subgroup.data) == ["g1"] and "g2" not in loader.root.tree.store
+
+
+def test_a_group_config_that_is_not_a_list_gets_one_list_the_entry_shares() -> None:
+    _root, loader = build([])
+    loader.create({"id": "t", "group": True, "config": ({"id": "t1", "name": "alpha", "config": {"t": 1}},)})
+    group = loader.resolve("t")
+    assert group.subgroup is not None and isinstance(group.options["config"], list)
+    assert group.options["config"] is group.subgroup.data and _ids(group.subgroup.data) == ["t1"]
+
+
+def test_a_new_list_given_through_update_is_the_list_the_group_shares() -> None:
+    loader, group, _ = _subgroup([])
+    loader.update("g", {"config": []})  # an empty list is a list, not a missing one
+    assert group.options["config"] is group.subgroup.data and group.subgroup.data == []
+    loader.create({"id": "g3", "name": "alpha", "config": {"g": 3}}, "g")
+    loader.update("g", {})
+    assert _ids(group.subgroup.data) == ["g3"] and _ids(group.options["config"]) == ["g3"]
+    loader.update("g", {"config": ({"id": "g4", "name": "alpha", "config": {"g": 4}},)})
+    assert isinstance(group.options["config"], list) and group.options["config"] is group.subgroup.data
+    loader.update("g4", {}, "g", 0, move=True)
+    loader.update("g", {})
+    assert _ids(group.subgroup.data) == ["g4"] and "g3" not in loader.root.tree.store
+
+
+def test_a_restart_of_the_group_fiber_rebuilds_from_the_live_list() -> None:
+    _root, loader = build([])
+    loader.create({"id": "d", "name": "db", "config": "v1"})
+    loader.create(
+        {
+            "id": "g",
+            "group": True,
+            "inject": ["db"],
+            "config": (
+                {"id": "g1", "name": "alpha", "config": {"g": 1}},
+                {"id": "g2", "name": "alpha", "config": {"g": 2}},
+            ),
+        }
+    )
+    group = loader.resolve("g")
+    assert group.fiber is not None and group.fiber.config is group.options["config"]
+    loader.update("g2", {}, "g", 0, move=True)
+    loader.update("d", {"config": "v2"})  # the provider restarts and the group fiber follows it
+    assert group.subgroup is not None
+    assert _ids(group.subgroup.data) == ["g2", "g1"] and group.options["config"] is group.subgroup.data
+    assert group.fiber is not None and group.fiber.config is group.subgroup.data
