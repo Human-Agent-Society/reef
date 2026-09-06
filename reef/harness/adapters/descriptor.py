@@ -59,9 +59,18 @@ NAMED_NODE_KINDS = (
     "native_hook",
     "native_graph",
     "native_agent",
+    "native_loop",
 )
 #: Named kinds an adapter may leave out; a mutation of that kind then fails to render under it.
-OPTIONAL_NODE_KINDS = ("agent_command", "code_extension", "native_tool", "native_hook", "native_graph", "native_agent")
+OPTIONAL_NODE_KINDS = (
+    "agent_command",
+    "code_extension",
+    "native_tool",
+    "native_hook",
+    "native_graph",
+    "native_agent",
+    "native_loop",
+)
 
 
 class DescriptorError(ReefError):

@@ -38,11 +38,12 @@ from reef.harness.client.wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy, W
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native import SESSION_VERSION, SPILL_DIR, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
-from reef.harness.runners.native.graph import Run, run_graph
+from reef.harness.runners.native.graph import Run, run_graph, run_loop_module
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.plugins import NATIVE_PLUGINS
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.runners.native.selftools import RESERVED_NAMES, self_tools
+from reef.harness.tree.nodes import flat_entry_refusal
 from reef.train.cordis_backend.backend import admit_mutations
 from reef.train.cordis_backend.compose import Context, FiberState
 from reef.train.cordis_backend.compose.loader import Loader
@@ -159,6 +160,16 @@ def _entries_of(loader: Loader) -> list[dict[str, Any]]:
         if entry is not None:
             result.append(copy.deepcopy(dict(entry.options)))
     return result
+
+
+def _not_flat(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
+    """Every group entry or entry without an object config: (id, kind, error); the loader would mount a group's children unseen."""
+    failures = []
+    for entry in entries:
+        refusal = flat_entry_refusal(entry)
+        if refusal is not None:
+            failures.append((str(entry.get("id")), str(entry.get("name")), refusal))
+    return failures
 
 
 def _failures(loader: Loader) -> list[tuple[str, str, str]]:
@@ -612,7 +623,7 @@ class Server:
     ) -> dict[str, Any] | None:
         """``root.update(entries)`` checked entry by entry; None on success, else the first failure after the rollback."""
         previous = self.served_entries()
-        failures = self._reserved(entries)
+        failures = [*_not_flat(entries), *self._reserved(entries)]
         if not failures:
             if self._degraded:
                 # A FAILED entry whose options did not change never retries on its own (only update() does), so a
@@ -782,7 +793,12 @@ class Server:
             run: Run | None = None
             try:
                 run = self._begin_turn(conversation, prompt, workdir, session)
-                exit_code = run_graph(run, self._host.graph("main"))
+                # Read at each turn start: a mount between turns lands on the next one, and a mount inside the turn
+                # (landed by before_step) changes the host under a loop that keeps this module object until the end.
+                module = self._host.loop
+                exit_code = (
+                    run_graph(run, self._host.graph("main")) if module is None else run_loop_module(run, module)
+                )
                 result = {
                     "exit": exit_code,
                     "session": conversation.id,
@@ -823,7 +839,7 @@ class Server:
             }
             loop = _ServeLoop(self, session, self.native, conversation.dir, header, self._enforcer)
             run = Run(loop, prompt, self.binding, self._host, workdir, session=session)
-            tools, hooks = run.tools, run.hooks
+            tools, hooks, module = run.tools, run.hooks, self._host.loop
             session.write(
                 "session",
                 {
@@ -835,6 +851,7 @@ class Server:
                     "capabilities": {name: list(tools[name].capabilities) for name in sorted(tools)},
                     "hooks": {hook.name: event for event, listeners in hooks.items() for hook in listeners},
                     "graph": self._host.graph("main").source,
+                    "loop": None if module is None else module.name,
                     "agents": sorted(self._host.agents),
                     "tree": TREE_FILE,
                 },

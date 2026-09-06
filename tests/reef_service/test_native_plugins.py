@@ -69,6 +69,7 @@ def test_the_plugin_table_names_what_the_loop_consumes_and_injects_the_host() ->
         "native_hook",
         "native_graph",
         "native_agent",
+        "native_loop",
     }
     assert set(NATIVE_PLUGINS) < set(NODE_KINDS)
     assert all(plugin.inject == ("native",) and plugin.name == name for name, plugin in NATIVE_PLUGINS.items())
