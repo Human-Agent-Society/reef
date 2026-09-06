@@ -730,16 +730,14 @@ class CordisBackend(TrainingBackend):
             carried["rejected_proposals"] = rejected
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(batch.samples)}
-        # The budgets are circuit breakers, not schedulers: a skipped step
-        # commits its reason and consumes the batch, so a runaway loop stops
-        # burning episodes and model calls instead of queueing forever.
-        if self._max_steps and steps > self._max_steps:
+        # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
+        if batch.request is None and self._max_steps and steps > self._max_steps:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={**metrics, "skipped": f"step budget of {self._max_steps} exhausted"},
             )
         streak = int(state.get("failure_streak", 0))
-        if self._max_failure_streak and streak >= self._max_failure_streak:
+        if batch.request is None and self._max_failure_streak and streak >= self._max_failure_streak:
             return PreparedStep.skipped(
                 state={"steps": steps, "entries": self._entries(), **carried},
                 metrics={

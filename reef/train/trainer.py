@@ -17,13 +17,14 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any
 
+from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import DefaultCandidateEvaluationPlugin
-from reef.train.processors.base import DataProcessor
+from reef.train.processors.base import INSTRUCTION_FAILURE_LIMIT, DataProcessor, InstructionFailure
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
 
 
@@ -62,6 +63,7 @@ class Trainer:
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
+        max_pending_requests: int = 8,
     ) -> Trainer:
         if training_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a training backend")
@@ -71,6 +73,7 @@ class Trainer:
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
+                max_pending_requests=max_pending_requests,
             )
         )
         if processor.training_mode != training_mode:
@@ -126,6 +129,33 @@ class Trainer:
         """Serialize mode selection with record ingestion and batch reservation."""
         with self._lock:
             self._processor.set_training_mode(training_mode)
+
+    @property
+    def max_pending_requests(self) -> int:
+        """The bound on accepted, unconsumed instructions the processor was built with."""
+        return self._processor.max_pending_requests
+
+    def pending_instructions(self) -> int:
+        """Instructions accepted and not yet consumed: the ones the processor buffers plus those unread in storage."""
+        with self._lock:
+            unread = self._records.count(
+                self.scenario, request_type=RequestType.TRAIN, after_sequence=self._data_sequence
+            )
+            return self._processor.buffered_requests() + unread
+
+    def set_instruction_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
+        """Carry failed steps into this trainer's processor; a rebuilt scenario starts without them."""
+        with self._lock:
+            self._processor.set_request_failures(failures)
+
+    def drop_reserved_instruction(self) -> None:
+        """Give a reserved instruction batch back after its step failed, so the next build selects again."""
+        with self._lock:
+            pending = self._pending
+            if pending is None or pending.result is not None or pending.batch.request is None:
+                return
+            self._processor.release_batch(pending.batch_id)
+            self._pending = None
 
     @property
     def processor(self) -> DataProcessor:
@@ -203,7 +233,8 @@ class Trainer:
                     self._processor.ingest(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if self._processor.ready():
+                # An instruction that already failed does not stop the read: it goes on for one that has not.
+                if self._processor.ready() and not self._processor.retrying_only():
                     return
 
     def run_once(self, scenario_step: int = 0) -> TrainStepResult | None:
@@ -246,6 +277,12 @@ class Trainer:
         backend = self._training_backend
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
+        request = batch.request
+        failure = None if request is None else self._processor.request_failure(request.id)
+        if failure is not None and failure.count >= INSTRUCTION_FAILURE_LIMIT:
+            # Committed without the backend: the instruction is consumed and the catalog row names why.
+            metrics = {"skipped": f"instruction failed {failure.count} times", "error": failure.error}
+            return StepExecution("commit", TrainStepResult(dict(self._state), metrics))
         prepared = backend.prepare_step(batch, self._state, scenario_step)
         if not isinstance(prepared, PreparedStep):
             raise TypeError(f"{type(backend).__name__}.prepare_step must return PreparedStep")

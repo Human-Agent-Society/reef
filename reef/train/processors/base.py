@@ -16,6 +16,17 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
 
+#: Failed steps one instruction may cause before it is consumed with a skip row instead of run again.
+INSTRUCTION_FAILURE_LIMIT = 3
+
+
+@dataclass(frozen=True)
+class InstructionFailure:
+    """How many steps one queued instruction failed, and what the last failure said."""
+
+    count: int
+    error: str
+
 
 @dataclass(frozen=True)
 class RetentionDecision:
@@ -97,6 +108,7 @@ class DataProcessor:
         self.set_training_mode(context.training_mode)
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
+        self._request_failures: dict[str, InstructionFailure] = {}
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -129,6 +141,36 @@ class DataProcessor:
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
+
+    @property
+    def max_pending_requests(self) -> int:
+        """How many accepted instructions a scenario holds unconsumed before admission answers ``requests full``."""
+        return self._context.max_pending_requests
+
+    def buffered_requests(self) -> int:
+        """How many instructions are read into memory and not yet consumed."""
+        return len(self._training_requests)
+
+    def request_failures(self, request_id: str) -> int:
+        """How many steps the instruction has failed so far."""
+        failure = self._request_failures.get(request_id)
+        return 0 if failure is None else failure.count
+
+    def request_failure(self, request_id: str) -> InstructionFailure | None:
+        """The instruction's failed step count and last error, when it failed at all."""
+        return self._request_failures.get(request_id)
+
+    def set_request_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
+        """Carry the failed steps of queued instructions into this processor."""
+        self._request_failures = {request_id: failure for request_id, failure in failures.items() if failure.count > 0}
+
+    def retrying_only(self) -> bool:
+        """Whether every buffered instruction already failed a step, so the trainer keeps reading for one that has not."""
+        return (
+            self.training_mode == "manual"
+            and bool(self._training_requests)
+            and all(request_id in self._request_failures for request_id in self._training_requests)
+        )
 
     @property
     def experiment_logger(self) -> ExperimentLogger:
@@ -168,7 +210,7 @@ class DataProcessor:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            request = next(iter(self._training_requests.values())) if self.training_mode == "manual" else None
+            request = self._next_request() if self.training_mode == "manual" else None
             self._pending = self.make_training_batch(self._batch_number, request)
             if request is not None:
                 self._pending = replace(
@@ -193,10 +235,27 @@ class DataProcessor:
         if self._pending.request is not None:
             request_id = self._pending.request.id
             self._training_requests.pop(request_id)
+            self._request_failures.pop(request_id, None)
             self._consumed_requests.add(request_id)
             consumed = consumed | {request_id}
         self._pending = None
         return consumed
+
+    def release_batch(self, batch_id: str) -> None:
+        """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
+        if self._pending is None or self._pending.batch_id != batch_id:
+            raise ValueError(f"unknown batch_id {batch_id!r}")
+        self._pending = None
+
+    def _next_request(self) -> TrainingRequest:
+        # One at the limit first (its skip row consumes it), then the fewest failures, so a failing one waits.
+        return min(
+            self._training_requests.values(),
+            key=lambda request: (
+                self.request_failures(request.id) < INSTRUCTION_FAILURE_LIMIT,
+                self.request_failures(request.id),
+            ),
+        )
 
     def _ready_count(self) -> int:
         """How many batch-ready units are held.
@@ -255,7 +314,7 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
-        return {"buffered_requests": len(self._training_requests)} if "manual" in self.supported_training_modes else {}
+        return {"buffered_requests": self.buffered_requests()} if "manual" in self.supported_training_modes else {}
 
     def close(self) -> None:
         """Release resources the processor owns; safe to call more than once.

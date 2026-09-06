@@ -320,12 +320,17 @@ class RecordStore:
             ).fetchall()
         return tuple((int(row["sequence"]), self._decode(row)) for row in rows)
 
-    def count(self, scenario: str) -> int:
+    def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
+        """How many records the scenario holds, of one type when given, past ``after_sequence`` only."""
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        sql = "SELECT COUNT(*) AS count FROM agent_record WHERE scenario = ? AND sequence > ?"
+        parameters: list[object] = [scenario, after_sequence]
+        if request_type is not None:
+            sql += " AND request_type = ?"
+            parameters.append(request_type.value)
         with self._lock:
-            row = self._connection.execute(
-                "SELECT COUNT(*) AS count FROM agent_record WHERE scenario = ?",
-                (scenario,),
-            ).fetchone()
+            row = self._connection.execute(sql, parameters).fetchone()
         if row is None:
             raise RuntimeError("record count query returned no row")
         return int(row["count"])

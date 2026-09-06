@@ -508,4 +508,5 @@ class CordisRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            max_pending_requests=self.max_pending_requests,
         )

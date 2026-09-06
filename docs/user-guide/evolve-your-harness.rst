@@ -141,7 +141,14 @@ For user-directed evolution, set ``data.training_mode: manual`` and submit
 ``POST /reef/train`` with ``text``, ``session`` and ``release_id`` (see the
 `manual training API <../reference/http-api.rst#manual-training>`__).
 No inference receipts or failure report are needed. Each request starts
-one step; ordinary traffic never starts evolution in this mode.
+one step; ordinary traffic never starts evolution in this mode. A request
+whose text is credential shaped or directive shaped is refused with the
+rule named, ``data.max_pending_requests`` (8) bounds how many wait, and the
+scenario must already exist. A request whose step fails is retried behind
+the others and, after three failed steps, consumed with a ``skipped`` row
+in the catalog. The step cap and the failure streak count every step, a
+request's step included, and stop automatic steps only; a request still
+runs past them.
 
 The proposer must explicitly accept ``requests``. It receives one request
 mapping containing ``id``, ``text``, ``session``, ``release_id`` and
