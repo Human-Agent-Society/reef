@@ -26,6 +26,8 @@ native harness adds kinds only it renders:
 - ``native_agent``: one agent of the native loop as data, its own prompt,
   graph, tools, skills, budget, and the agents its text is handed to
   (``native/agents/``).
+- ``native_loop``: the native loop itself as code, ``run_turn(ctx)`` over the
+  context API reef owns; always behind review (``native/loops/``).
 
 The plugins hold no services and register no effects: the Entry tree itself
 is the state, and ``reef.harness.tree.render`` reads it back out per adapter.
@@ -33,12 +35,21 @@ is the state, and ``reef.harness.tree.render`` reads it back out per adapter.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: Kinds a win never serves without a person, whatever ``evolution.review_kinds`` lists: loop code runs in the loop
+#: process with its privileges, and no enforcer stands between it and the host.
+ALWAYS_REVIEWED_KINDS = frozenset({"native_loop"})
+#: Why a group entry is refused wherever entries are admitted: the compose loader would mount its children through
+#: the same plugins, out of sight of every check that walks the root.
+FLAT_TREE_REFUSAL = "the tree is flat: a group entry is not admitted"
+#: A loop's model step budget when its node names none; the seed graph's.
+NATIVE_LOOP_DEFAULT_MAX_STEPS = 12
 #: The native loop's events, the only places a native_hook node may listen.
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
@@ -116,6 +127,19 @@ def _require_mapping(config: Any) -> Mapping[str, Any]:
     return config
 
 
+def flat_entry_refusal(options: Mapping[str, Any], *, partial: bool = False) -> str | None:
+    """Why entry ``options`` cannot enter the flat tree: a group, or a config that is not an object; None when they can.
+
+    ``partial`` is an update's options, which merge into the entry, so a
+    missing config keeps the one the entry has."""
+    if options.get("group"):
+        return FLAT_TREE_REFUSAL
+    config = options.get("config")
+    if ("config" in options or not partial) and not isinstance(config, Mapping):
+        return f"entry config must be an object, got {type(config).__name__}"
+    return None
+
+
 def _require_text(config: Mapping[str, Any], key: str) -> str:
     value = config.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -132,7 +156,8 @@ def _require_python(options: Mapping[str, Any], where: str) -> str:
     """A ``code`` body the native loop will import: refused here when it cannot even compile."""
     code = _require_text(options, "code")
     try:
-        compile(code, f"{options.get('name')}.py", "exec")
+        # The bytes the render writes, as the loop compiles them: a coding cookie reads the same here as at boot.
+        compile(code.encode("utf-8"), f"{options.get('name')}.py", "exec")
     except (SyntaxError, ValueError) as exc:
         raise ValueError(f"{where} 'code' does not compile: {exc}") from exc
     _reject_secret_shaped_text(code, f"{where} 'code'")
@@ -535,6 +560,83 @@ def native_agent_node(ctx: Any, config: Any) -> None:
     validate_native_agent(config)
 
 
+def _unread(node: ast.AST, field: str) -> bool:
+    """Whether ``field`` of ``node`` binds nothing in the scope that holds ``node``.
+
+    A def, class or lambda body is a scope of its own (its decorators, defaults and bases run in the holding
+    scope and are read); a comprehension's target is the comprehension's; a bare annotation binds nothing."""
+    if field == "body":
+        return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda))
+    if field == "target":
+        return isinstance(node, ast.comprehension) or (isinstance(node, ast.AnnAssign) and node.value is None)
+    return False
+
+
+def scope_bindings(node: ast.AST) -> Iterator[tuple[str, ast.AST]]:
+    """Every name ``node`` binds in the scope that holds it, in source order, each with the node that binds it.
+
+    A binding is a def or class name, an assignment, augmented assignment, annotated assignment, ``del``,
+    ``for`` or ``with`` target (through tuple and star unpacking), an import alias, a walrus target (inside a
+    comprehension too), an ``except`` handler name, a match capture or a type alias. The bodies of ``if``,
+    ``for``, ``while``, ``with``, ``try`` and ``match`` are followed; a function, class or lambda body is not."""
+    for field, value in ast.iter_fields(node):
+        if _unread(node, field):
+            continue
+        for child in value if isinstance(value, list) else [value]:
+            if isinstance(child, ast.AST):
+                yield from scope_bindings(child)
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        yield node.id, node
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        yield node.name, node
+    elif isinstance(node, ast.alias):
+        yield node.asname or node.name.split(".")[0], node
+    elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name is not None:
+        yield node.name, node
+    elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        yield node.rest, node
+
+
+def _defines_run_turn(code: str) -> bool:
+    """Whether ``run_turn``, as the module body leaves it, is a plain ``def`` taking the context, read off the syntax tree."""
+    # The bytes _require_python compiled: a coding cookie or a BOM parses here as it compiled there.
+    tree = ast.parse(code.encode("utf-8"))
+    last: ast.AST | None = None
+    for name, node in scope_bindings(tree):
+        if name == "run_turn":
+            last = node
+    # A plain def in the module body only: an async run_turn would hand the loop a coroutine and never run, and a
+    # def inside an if, for, with, try or match is a binding a static read cannot follow.
+    if not isinstance(last, ast.FunctionDef) or not any(node is last for node in tree.body):
+        return False
+    return bool(last.args.posonlyargs or last.args.args or last.args.vararg)
+
+
+def validate_native_loop(config: Any) -> Mapping[str, Any]:
+    """The admission rules of a native_loop, shared by the tree boundary and the loop's loader.
+
+    The loop is code, so admission checks what a static read can: the module
+    compiles, carries no credential, and defines a top level ``run_turn``
+    taking the context. Whether it runs is the gate's to find out, and a
+    person promotes it: the kind is in :data:`ALWAYS_REVIEWED_KINDS`."""
+    options = _require_mapping(config)
+    _require_name(options)
+    extra = sorted(set(options) - {"name", "code", "max_steps"})
+    if extra:
+        raise ValueError(f"native_loop node does not take {', '.join(extra)}")
+    max_steps = options.get("max_steps", NATIVE_LOOP_DEFAULT_MAX_STEPS)
+    if isinstance(max_steps, bool) or not isinstance(max_steps, int) or not 1 <= max_steps <= NATIVE_GRAPH_MAX_STEPS:
+        raise ValueError(f"native_loop node 'max_steps' must be an integer from 1 to {NATIVE_GRAPH_MAX_STEPS}")
+    if not _defines_run_turn(_require_python(options, "native_loop node")):
+        raise ValueError("native_loop node 'code' must define a top level run_turn(ctx)")
+    return options
+
+
+def native_loop_node(ctx: Any, config: Any) -> None:
+    """The native loop itself as code: ``run_turn(ctx)`` over the context API; always behind review."""
+    validate_native_loop(config)
+
+
 NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "config": config_node,
     "rules": rules_node,
@@ -545,5 +647,6 @@ NODE_KINDS: dict[str, Callable[[Any, Any], None]] = {
     "native_hook": native_hook_node,
     "native_graph": native_graph_node,
     "native_agent": native_agent_node,
+    "native_loop": native_loop_node,
 }
 """Entry ``name`` to node plugin; the resolver of the composition loader."""

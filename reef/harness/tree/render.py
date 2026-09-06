@@ -19,6 +19,7 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.tree.nodes import NATIVE_LOOP_DEFAULT_MAX_STEPS
 
 
 class RenderError(ReefError):
@@ -98,10 +99,15 @@ def _check_native_references(
 
 
 def render_native_module(kind: str, options: Mapping[str, Any]) -> str:
-    """One importable module for a ``native_tool`` or ``native_hook`` node: the code that defines ``run`` or ``listen``, then the declaration as constants, so the node config binds."""
+    """One importable module for a ``native_tool``, ``native_hook`` or ``native_loop`` node: the code that defines ``run``, ``listen`` or ``run_turn``, then the declaration as constants, so the node config binds."""
     fields: tuple[tuple[str, Any], ...]
     if kind == "native_hook":
         fields = (("NAME", options.get("name")), ("EVENT", options.get("event")))
+    elif kind == "native_loop":
+        fields = (
+            ("NAME", options.get("name")),
+            ("MAX_STEPS", options.get("max_steps", NATIVE_LOOP_DEFAULT_MAX_STEPS)),
+        )
     else:
         fields = (
             ("NAME", options.get("name")),
@@ -119,6 +125,7 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
     rules: list[str] = []
     graphs: list[Mapping[str, Any]] = []
     agents: list[Mapping[str, Any]] = []
+    loops: list[str] = []
     files: dict[str, str] = {}
 
     def emit(path: str, text: str) -> None:
@@ -127,7 +134,10 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
         files[path] = text
 
     for kind, config in nodes:
-        options: Mapping[str, Any] = config if isinstance(config, Mapping) else {}
+        if not isinstance(config, Mapping):
+            # A group entry's children, or any other shape the kinds never take: the tree is flat.
+            raise RenderError(f"{kind} node config must be an object, got {type(config).__name__}")
+        options: Mapping[str, Any] = config
         if kind == "config":
             target_name = str(options.get("target", "primary"))
             if target_name not in configs:
@@ -141,10 +151,16 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
             body = options.get("code", "") if kind == "code_extension" else options.get("text", "")
             emit(template.format(name=options.get("name")), str(body))
-        elif kind in ("native_tool", "native_hook"):
+        elif kind in ("native_tool", "native_hook", "native_loop"):
             template = descriptor.node_paths.get(kind)
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
+            if kind == "native_loop":
+                # The loop replaces the interpreter for the root turn, so a tree has room for one; the check runs
+                # before the path check so two loops under one name are refused for the right reason.
+                loops.append(str(options.get("name")))
+                if len(loops) > 1:
+                    raise RenderError(f"one loop per tree: native_loop nodes {loops[0]!r} and {loops[1]!r}")
             emit(template.format(name=options.get("name")), render_native_module(kind, options))
         elif kind in ("native_graph", "native_agent"):
             template = descriptor.node_paths.get(kind)

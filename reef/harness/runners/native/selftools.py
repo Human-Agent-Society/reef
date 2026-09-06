@@ -20,7 +20,7 @@ from reef.harness.runners.native import ToolModule
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.release_client import ReleaseClient
 from reef.harness.runners.native.seed import SEED_GRAPH
-from reef.harness.tree.nodes import NATIVE_RESERVED_TOOL_NAMES
+from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS, NATIVE_RESERVED_TOOL_NAMES, flat_entry_refusal
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 #: The names the host plane owns; a tree entry that takes one fails to mount.
@@ -68,7 +68,7 @@ TRY_DESCRIPTION = (
     "Mount a change on this process for the rest of the current turn only, with the same mutations shape as "
     "harness_propose. New tools, hooks, rules, skills, graphs and agents apply from your next step; at the end "
     "of the turn the served harness is mounted back. Nothing is published. Use it to check a change works "
-    "before harness_propose."
+    "before harness_propose. A native_loop is reviewed code and is refused here: propose it instead."
 )
 
 
@@ -180,7 +180,21 @@ class SelfTools:
         return json.dumps(payload, ensure_ascii=False)
 
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
-        return self._state.try_mount(_mutations(args.get("mutations")), secrets.token_hex(4))
+        mutations = _mutations(args.get("mutations"))
+        # A remove names no kind, so the live entries say what the id is; the check covers create, update and remove.
+        kinds = {str(entry.get("id")): str(entry.get("name")) for entry in self._state.live_entries()}
+        for mutation in mutations:
+            options = mutation.options or {}
+            refusal = (
+                None if mutation.options is None else flat_entry_refusal(options, partial=mutation.op == "update")
+            )
+            if refusal is not None:
+                raise ToolFailed(f"{mutation.op} {mutation.id!r}: {refusal}")
+            # The kind the options name and the kind the entry has: an update that renames the kind touches both.
+            for kind in (options.get("name"), kinds.get(mutation.id)):
+                if kind in ALWAYS_REVIEWED_KINDS:
+                    raise ToolFailed(f"{kind} is reviewed code: propose it, a person promotes it")
+        return self._state.try_mount(mutations, secrets.token_hex(4))
 
 
 def self_tools(state: ServeState) -> list[HostTool]:
