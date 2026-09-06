@@ -248,6 +248,22 @@ def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
     assert evolution.propose(NODES, (), down, requests=(REQUEST,)) is None
 
 
+def test_propose_keeps_reefs_own_skill_out_of_the_failure_path(evolution) -> None:
+    """The API reference skill is reserved: the failure prompt lists the skills the model may update, so it
+    omits the reference, and a reply that names it anyway is dropped."""
+    tree = (*NODES, API_SKILL)
+    model = canned(proposal("answer-style"))
+    mutation = evolution.propose(tree, SAMPLES, model)
+    assert (mutation.op, mutation.id) == ("update", "answer-style")
+    assert '"name": "answer-style"' in model.prompt and "Current skills" in model.prompt
+    assert "reef-pi-extension-api" not in model.prompt and "pi.registerTool" not in model.prompt
+    assert evolution.propose(tree, SAMPLES, canned(proposal("reef-pi-extension-api"))) is None
+    # In an array reply the reserved object is dropped and the next usable one is the proposal.
+    both = f"[{proposal('reef-pi-extension-api')}, {proposal('csv-median')}]"
+    mutation = evolution.propose(tree, SAMPLES, canned(both))
+    assert (mutation.op, mutation.id) == ("create", "csv-median")
+
+
 # -- evaluate: exact last-line grading ------------------------------------
 
 
@@ -610,6 +626,52 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert trainer.training_mode == "hybrid"
     trainer.close()
     records.close()
+
+
+def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolution, monkeypatch) -> None:
+    """The deployment sets the harness requests defaults: the seed carries the ask
+    command and the API skill, the notice offers the update, and a win that
+    touches a code_extension waits for a promote. The recipe folds the two
+    booleans into its seed, so they are read back as the entries they append.
+    The two demo files run in auto, where an ask is refused, so they set none
+    of the three. The ``evolution`` fixture puts the tutorial's harness package
+    on the path the deployment's dotted references resolve through."""
+    import os
+
+    from reef.recipe.registry import build_named_recipe
+    from reef.service.assembly import _upstream_runtime
+
+    monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
+    monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
+    monkeypatch.setenv("REEF_PYTHON", sys.executable)
+    monkeypatch.setenv("PWD", str(EXAMPLE_DIR.parents[1]))
+    config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
+    assert config["data"]["training_mode"] == "hybrid"
+    assert config["evolution"]["requests"] is True and config["evolution"]["version_check"] is True
+    assert config["evolution"]["review_kinds"] == ["code_extension"]
+    for name in ("serve", "serve-native"):
+        demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
+        assert demo["data"]["training_mode"] == "auto"
+        assert not {"requests", "version_check", "review_kinds"} & set(demo["evolution"])
+    built = build_named_recipe(
+        "deployment",
+        {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
+        default_runtime=_upstream_runtime(service_settings_from_config(config)),
+    )
+    assert isinstance(built, CordisRecipe)
+    assert built.review_kinds == ("code_extension",)
+    assert [entry["id"] for entry in built.seed] == [
+        "answer-style",
+        "reef-version-check",
+        "reef-requests",
+        "reef-pi-extension-api",
+    ]
+    assert [(entry["name"], entry["config"]["name"]) for entry in built.seed[1:]] == [
+        ("code_extension", "reef-version-check"),
+        ("code_extension", "reef-requests"),
+        ("skill", "reef-pi-extension-api"),
+    ]
 
 
 def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:

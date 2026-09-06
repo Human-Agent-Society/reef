@@ -13,6 +13,12 @@ evolution:
   adapter: pi
   propose: harness.evolution:propose
   evaluate: harness.evolution:evaluate
+  # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+  requests: true
+  # The notice at session start offers the update once the head moved.
+  version_check: true
+  # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
+  review_kinds: [code_extension]
   # No binary: at startup reef installs the descriptor's pinned pi under
   # ~/.local/share/reef-harness/pi, shared with the client install script.
   # Set evolution.binary to a path to use an install of your own instead.

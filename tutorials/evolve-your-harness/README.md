@@ -138,6 +138,8 @@ stop and restart `reef serve`, then rerun the harness install command from the r
 README before retrying `reef-pi`. Installation writes the model ID into the local
 harness configuration.
 
+`deployment.yaml` also sets `evolution.requests: true`, `evolution.version_check: true` and `evolution.review_kinds: [code_extension]`: a session asks for a harness change with `reef-pi harness "..."`, or `/reef-harness ...` in the TUI, and needs no mode switch because the deployment runs in `hybrid`; the notice at session start offers the newest release that is not pending; and a win that touches a `code_extension` waits as a pending release, because an evolved extension runs in pi's process with your privileges. A pending release shows only under a promote or a trial install by id. Promote it with `POST /reef/scenarios/{scenario}/promote` and `{"release_id": ...}`, the id of the row marked `pending: true` in `GET /reef/harness/releases`; the curl is under [Promote a pending release](../../docs/user-guide/evolve-your-harness.rst#promote-a-pending-release) in the user guide. `serve.yaml` and `serve-native.yaml` set none of the three: an ask is refused in `auto`, so a seeded command would have nothing to do there.
+
 ## Notebook
 
 `evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
