@@ -29,10 +29,11 @@ binding returns the assistant text. ``propose`` returns one ``Mutation``
 proposal under one verdict, or ``None`` to skip. An optional keyword-only
 ``manifest`` argument receives the previous step's ``FailureManifest``, and an
 optional keyword-only ``rejected`` argument receives the recent rejected
-proposals, oldest first, each a mapping of ``step``, ``mutations`` (``op`` and
-``id`` pairs), and the verdict's ``reason``; a method uses it to stop
-re-proposing what the gate already refused. Reef passes each keyword only to
-a signature that names it.
+proposals, oldest first, each a mapping of ``step``, ``mutations`` (each with
+its ``op``, ``id`` and the ``options`` it carried, ``None`` for a remove), and
+the verdict's ``reason``; a method uses it to stop re-proposing what the gate
+already refused, and can read the refused content rather than only its id.
+Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every
 pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
@@ -150,7 +151,7 @@ That file is a preset, not a deployment config. It has no ``services`` and no
 ``reef`` section, so ``reef serve -c`` cannot read it. Save it as
 ``recipes/<name>.yaml`` and ``export REEF_RECIPE_CONFIG_DIR=$PWD/recipes``;
 there is no default directory. The deployment config is the file ``reef serve
--c`` reads, and ``tutorials/harness_evolve/serve.yaml`` is
+-c`` reads, and ``tutorials/evolve-your-harness/configs/serve.yaml`` is
 the one to copy:
 
 .. code:: yaml
@@ -169,7 +170,7 @@ the one to copy:
        ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
-``tutorials/harness_evolve/run.sh`` does exactly this.
+``tutorials/evolve-your-harness/run.sh`` does exactly this.
 
 Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
 package is importable, and give ``-c`` an absolute path: Reef resolves a
@@ -212,3 +213,43 @@ regressed and at least one improved.
 
 Name it ``selection: my_pkg.policies:pareto_selection``. Publishing outside
 candidate selection breaks revert.
+
+Untrusted input
+~~~~~~~~~~~~~~~
+
+Every sample is client text. It enters the proposer's model prompt, and with
+``promote_failures`` it is re-run as a gate task, so a method treats it as
+data: fence it before it reaches a prompt, and read ``sources`` when a
+decision depends on who sent it.
+
+.. code:: python
+
+   import json
+
+   from reef.train.cordis_backend import Mutation, untrusted_text
+
+
+   def propose(nodes, samples, models, sources):
+       tagged = [s for s, p in zip(samples, sources, strict=True) if p["client"] != "untagged"]
+       shown = untrusted_text(json.dumps([s.payload for s in tagged], default=str))
+       reply = models.served.chat([{"role": "user", "content": f"Failing requests:\n{shown}\n\nPropose one skill."}])
+       ...
+
+``untrusted_text`` wraps text in a block whose delimiters carry a fresh random
+token, so nothing inside the block can close it and speak as the prompt's
+author. ``sources`` is one mapping per sample, in sample order: ``record``
+(the agent record id), ``client`` (the ``x-reef-tag-client`` header's value,
+else the session tag, else ``untagged``) and ``untrusted`` (always true). A
+tag is set by the client, so it names a client only where a gateway sets it.
+
+Reef screens what the method promotes. A prompt that carries a credential or
+an instruction override (``ignore the previous instructions``, a forged ``new
+system prompt:``, a chat-template control token) is skipped and counted in
+the step's ``screened_tasks`` metric; one tagged client holds at most
+``evolution.max_promoted_per_client`` promoted tasks and the whole ledger at
+most ``evolution.max_promoted_tasks``. A code-bearing mutation
+(``code_extension``, ``native_tool``, ``native_hook``) proposed from client
+text belongs behind ``evolution.review_kinds``, so a person reads it before
+it publishes. A ``native_graph`` carries no code, so a loop change can
+publish on the gate alone; list the kind in ``review_kinds`` when a person
+should read every loop change.

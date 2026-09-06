@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from reef.core import AgentRecord, RequestType
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -373,7 +373,7 @@ def test_seed_skill_directory_names_land_verbatim(example, tmp_path) -> None:
     assert entry["id"] == "self-improving-agent-3.0.5"
     assert entry["config"]["name"] == "self-improving-agent-3.0.5"
     from reef.harness.adapters import get_adapter
-    from reef.harness.render import render_composition
+    from reef.harness.tree.render import render_composition
 
     files = render_composition((("skill", entry["config"]),), get_adapter("pi"))
     assert "pi-agent/skills/self-improving-agent-3.0.5/SKILL.md" in files
@@ -540,7 +540,9 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert service.training_versions() == 1
         manifest = driver.pull_pool(client, service, tmp_path / "pulled")
         assert manifest["gate"]["published"] is True
-        assert manifest["gate"]["mutation"] == {"op": "create", "id": "csv-median"}
+        mutation = manifest["gate"]["mutation"]
+        assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("create", "csv-median", "skill")
+        assert "Sort, take the middle." in mutation["options"]["config"]["text"]
         assert "Sort, take the middle." in manifest["files"]["pi-agent/skills/csv-median/SKILL.md"]
 
         # The served pool's catalog section appears in the recorded request
@@ -674,7 +676,7 @@ def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> Non
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:
     """The ported retry loop now drives reef's binding: temperature dropped
     on the provider's 400, stream-only fallback folded, model never named."""
-    from reef.harness.model_binding import ModelBindingError
+    from reef.harness.episodes.model_binding import ModelBindingError
 
     evolver = example["evolver"]
     seen: list[dict[str, Any]] = []

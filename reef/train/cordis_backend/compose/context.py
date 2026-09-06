@@ -216,11 +216,11 @@ class Context:
         return self.registry.inject(deps, callback, ctx=self)
 
     def on(
-        self, name: str, listener: Callable[..., Any], *, prepend: bool = False, glob: bool = False
+        self, name: Name, listener: Callable[..., Any], *, prepend: bool = False, glob: bool = False
     ) -> EffectHandle:
         return self.events.on(name, listener, prepend=prepend, glob=glob, ctx=self)
 
-    def once(self, name: str, listener: Callable[..., Any], *, prepend: bool = False) -> EffectHandle:
+    def once(self, name: Name, listener: Callable[..., Any], *, prepend: bool = False) -> EffectHandle:
         return self.events.once(name, listener, prepend=prepend, ctx=self)
 
     def emit(self, *args: Any) -> None:
@@ -245,7 +245,7 @@ class Context:
 # annotations (made lazy by ``from __future__ import annotations``); the
 # runtime references in method bodies use lazy imports inside ``__init__``
 # or access services through ``self.<name>`` which resolves at call time.
-from .events import EventsService
+from .events import EventsService, Name
 from .fiber import EffectHandle, EffectResult, Fiber
 from .reflect import ReflectService
 from .registry import Inject, Plugin, RegistryService

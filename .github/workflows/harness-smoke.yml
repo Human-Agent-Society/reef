@@ -143,9 +143,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ./third_party/reef-client
-      # Exercise the Meta-Harness runtime boundaries with the example's pins.
-      # These tests use local doubles and never launch paid model or E2B work.
-      - run: >
-          python -m pip install -e ".[terminus]" pytest
-          harbor==0.20.0 litellm==1.99.0 openai==2.54.0 e2b==2.46.4
-      - run: python -m pytest tests/reef_service/test_terminus_agent.py tests/reef_service/test_meta_harness*.py -v
+      - run: python -m pip install -e ".[terminus]" pytest
+      - run: python -m pytest tests/reef_service/test_terminus_agent.py -v

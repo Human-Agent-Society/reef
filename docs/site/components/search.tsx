@@ -37,7 +37,8 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
     function onKeyDown(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setOpen(true);
+        // One dialog at a time: the shortcut waits while the drawer is open.
+        if (!document.querySelector('[role="dialog"]:not(.search-dialog)')) setOpen(true);
       }
       if (event.key === "Escape") closeSearch();
     }
@@ -126,7 +127,7 @@ export function Search({ documents }: { documents: SearchDocument[] }) {
 
   return (
     <>
-      <button className="search-trigger" type="button" onClick={() => setOpen(true)}>
+      <button className="search-trigger" type="button" onClick={() => setOpen(true)} aria-label="Search documentation" title="Search">
         <SearchIcon size={16} />
         <span>Search</span>
         <kbd>⌘ K</kbd>

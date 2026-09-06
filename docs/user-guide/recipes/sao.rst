@@ -1,5 +1,5 @@
-sao
-===
+SAO: learn from individual rollouts
+===================================
 
 Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
 <https://arxiv.org/abs/2607.07508>`__) trains on one graded rollout at a
@@ -101,3 +101,13 @@ untrained base at 0.458 above GRPO(+DIS) at 0.417.
 
 .. image:: ../../assets/sao/learning-curve.png
    :alt: Cumulative mean reward over the 48 scored rollouts per arm
+
+Related guides
+--------------
+
+- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
+  learn the request, receipt, and report workflow.
+- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
+  set up the GPU stack and inspect published updates.
+- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
+  and query feedback, scenarios, and releases.

@@ -424,14 +424,35 @@ function tableOfContents(html: string) {
   return items;
 }
 
+// Page summaries are independent of the opening paragraph: a walkthrough
+// often starts with an introduction that does not describe the whole page.
+// Pages without an authored summary continue to use their first paragraph.
+const docDescriptions: Partial<Record<string, string>> = {
+  "getting-started/intro":
+    "Learn how Reef connects inference, feedback, and continual learning to evolve model weights or agent harnesses.",
+  "getting-started/installation":
+    "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
+  "getting-started/quickstart":
+    "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the release history.",
+  "user-guide/recipes":
+    "Compare Reef recipes for model training and harness evolution. Choose a method based on your workload, feedback, and compute requirements.",
+  "user-guide/evolve-your-harness":
+    "Evolve agent rules, prompts, skills, and configuration with Reef. Evaluate candidate changes and publish accepted harness versions without a GPU.",
+  "user-guide/evolve-your-model":
+    "Configure Reef to train model weights from feedback and serve accepted updates through the same inference endpoint.",
+  "reference/http-api":
+    "Use the Reef HTTP API to send inference requests, report feedback, inspect scenarios, and manage model and harness releases.",
+};
+
 function loadDoc(sourcePath: string): Doc {
   const source = readFileSync(join(docsRoot, sourcePath), "utf8");
   const content = compileRst(source, sourcePath);
   const title = heading(content, 1)?.title;
   if (!title) throw new Error(`${sourcePath} is missing a level-one heading`);
-  const description = plainHtml(content.match(/<p>([\s\S]*?)<\/p>/)?.[1] ?? "");
+  const slug = slugFromSourcePath(sourcePath);
+  const description = docDescriptions[slug] ?? plainHtml(content.match(/<p>([\s\S]*?)<\/p>/)?.[1] ?? "");
   return {
-    slug: slugFromSourcePath(sourcePath),
+    slug,
     title,
     description,
     content,

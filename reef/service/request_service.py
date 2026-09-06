@@ -12,26 +12,42 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
 from reef.records import AgentRecord
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
-from reef.service.install_script import render_install_script
-from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
+from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
+from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class ProposalGate(Protocol):
+    """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
+
+    @property
+    def proposals(self) -> ProposalInbox | None: ...
+
+    def admit(
+        self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
+    ) -> tuple[list[dict[str, Any]], str | None]: ...
 
 
 def _random_harness_scenario_name() -> str:
@@ -59,31 +75,15 @@ def _inference_aborted(response: Mapping[str, Any]) -> bool:
     )
 
 
-class RequestPayloadNormalizer:
-    """Normalize only typed Reef payloads while preserving native bodies."""
-
-    def __init__(self) -> None:
-        self._normalizers: dict[
-            RequestType,
-            Callable[[Mapping[str, Any]], tuple[Mapping[str, Any], tuple[str, ...]]],
-        ] = {
-            RequestType.REPORT: self._normalize_report,
-        }
-
-    def normalize(
-        self,
-        request_type: RequestType,
-        payload: Mapping[str, Any],
-    ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
-        normalizer = self._normalizers.get(request_type)
-        if normalizer is None:
-            return dict(payload), ()
-        return normalizer(payload)
-
-    @staticmethod
-    def _normalize_report(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], tuple[str, ...]]:
-        report = ReportPayload.from_dict(payload)
-        return report.to_dict(), report.references
+def normalize_request_payload(
+    request_type: RequestType,
+    payload: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], tuple[str, ...]]:
+    """Normalize a typed Reef payload; a native provider body passes through."""
+    if request_type is not RequestType.REPORT:
+        return dict(payload), ()
+    report = ReportPayload.from_dict(payload)
+    return report.to_dict(), report.references
 
 
 @dataclass(frozen=True)
@@ -139,7 +139,6 @@ class InferenceRetryTimeout(ReefError):
 class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
-        self._payload_normalizer = RequestPayloadNormalizer()
         self._retry_policy = retry_policy or InferenceRetryPolicy()
 
     @property
@@ -480,6 +479,49 @@ class RequestService:
             "gate": gate,
         }
 
+    def harness_head(self, headers: Mapping[str, str]) -> str | None:
+        """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
+        try:
+            scenario = self._file_scenario(headers)
+        except ArtifactNotFound:
+            return None
+        return scenario.repository.require_current_artifact().release_id
+
+    def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
+
+        The admission is the backend's own (``admit_mutations`` over a fresh
+        loader), never a touch of its live tree, and it runs again on the
+        training thread when the step takes the proposal, since the head may
+        have moved. The answer names the proposal, whether it was admitted,
+        the refusal when not, and the head it was admitted against.
+        """
+        proposal = ProposalPayload.from_dict(payload)
+        scenario = self._file_scenario(headers)
+        backend = scenario.trainer.training_backend
+        if not isinstance(backend, ProposalGate) or backend.proposals is None:
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
+                "evolution recipe with a proposal inbox"
+            )
+        head = scenario.repository.require_current_artifact().release_id
+        # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
+        # state, which a step in flight has already moved; the seed before the first commit.
+        logged = scenario.entries_for_version(head)
+        info = scenario.surface.harness
+        if logged is None and info is not None:
+            logged = info.seed_entries
+        entries = [dict(entry) for entry in logged or ()]
+        proposal_id = ProposalInbox.new_id()
+        try:
+            mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
+            _, refusal = backend.admit(entries, mutations)
+        except MutationError as error:
+            refusal = str(error)
+        if refusal is None:
+            refusal = backend.proposals.submit(proposal_id, {**proposal.to_dict(), "head_release_id": head})
+        return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
+
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The scenario's release catalog with per-release gate metrics, newest last.
 
@@ -525,13 +567,53 @@ class RequestService:
             release_id=release_id,
         )
         manifest = self._harness_manifest_for_scenario(scenario, release_id)
+        descriptor = get_adapter(adapter)
         return render_install_script(
-            descriptor=get_adapter(adapter),
+            descriptor=descriptor,
             files=manifest["files"],
             release_id=manifest["release_id"],
             content_id=manifest["content_id"],
             scenario=scenario.name,
+            binding_files=self._install_binding(scenario, manifest, descriptor, headers),
         )
+
+    def _install_binding(
+        self, scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
+    ) -> dict[str, str]:
+        """The adapter's config targets re-rendered with a binding at the Reef this request reached.
+
+        The served composition never carries an endpoint or a credential, so
+        an installed tree needs one written beside it: the release's own
+        entries (the recipe's seed for the base release no step published)
+        plus the descriptor's binding template, the base URL taken from the
+        request's Host, the model from the gate the release ran against (the
+        recipe's served model for the base release), and the token left as a
+        placeholder the script fills from the client's environment. Empty
+        when any of those is unknown, and the script then installs the
+        composition as before.
+        """
+        normalized = {key.lower(): value.strip() for key, value in headers.items()}
+        host = normalized.get("host")
+        gate = manifest.get("gate") or {}
+        model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
+        info = scenario.surface.harness
+        if not isinstance(model, str) or not model:
+            model = None if info is None else info.served_model
+        entries = scenario.entries_for_version(manifest["release_id"])
+        if entries is None and info is not None:
+            entries = info.seed_entries
+        if not host or not model or not entries:
+            return {}
+        scheme = normalized.get("x-forwarded-proto") or "http"
+        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)
+        nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
+        try:
+            bound = binding.compose_nodes(descriptor)
+            files = render_composition((*nodes, *bound), descriptor)
+        except (ModelBindingError, RenderError, KeyError, TypeError):
+            return {}
+        targets = {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound}
+        return {path: files[path] for path in sorted(targets) if path in files}
 
     def _file_scenario(
         self,
@@ -578,7 +660,7 @@ class RequestService:
         agent_record_id: str | None = None,
         artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
-        normalized_payload, references = self._payload_normalizer.normalize(parsed.request_type, payload)
+        normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
         normalized_payload = _with_tags(normalized_payload, parsed)
         item = AgentRecord.create(
             scenario=parsed.scenario,
@@ -638,7 +720,7 @@ __all__ = [
     "InferenceRetryTimeout",
     "PendingInference",
     "PreparedInference",
-    "RequestPayloadNormalizer",
     "RequestService",
     "client_inference_response",
+    "normalize_request_payload",
 ]

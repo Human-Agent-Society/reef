@@ -128,6 +128,60 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         restarted.close()
 
 
+def test_without_a_journal_the_backend_publication_remains_the_commit(publication_case, monkeypatch):
+    recipe, factory, _, _ = publication_case
+    dispatcher = Dispatcher(recipe, factory())
+    try:
+        scenario = dispatcher.get_or_create_scenario("no-journal")
+        head = scenario.current_artifact_ref()
+
+        def unexpected(*args, **kwargs):
+            pytest.fail("a non-journaled publication must commit its backend head directly")
+
+        monkeypatch.setattr(scenario.repository.backend, "commit_release", unexpected)
+        _report_once(scenario, "no-journal", "1")
+        result = scenario.prepare_training_step()
+        scenario.commit(result)
+
+        assert scenario.commit_log is None
+        assert scenario.trainer.state == result.state
+        assert scenario.current_artifact_ref() == scenario.repository.backend.current() != head
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(
+    publication_case, monkeypatch, checkpoint
+):
+    recipe, factory, chat, records = publication_case
+    dispatcher = Dispatcher(recipe, factory(), agent_record_dir=records)
+    try:
+        scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
+        monkeypatch.setattr(scenario._commit_protocol, "_should_checkpoint", lambda result: checkpoint)
+        _report_once(scenario, "lost-journal-ack", "1")
+        result = scenario.prepare_training_step()
+        append = scenario.commit_log.append
+
+        def lose_ack(record):
+            append(record)
+            raise OSError("journal acknowledgment lost")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(scenario.commit_log, "append", lose_ack)
+            with pytest.raises(OSError, match="acknowledgment lost"):
+                scenario.commit(result)
+        committed = scenario.commit_log.records()[-1]
+        scenario.commit(result)
+
+        assert scenario.scenario_step == 1 and len(chat.prompts) == 1
+        assert scenario.current_artifact_ref() == committed.artifact_ref
+        assert scenario.repository.resolve(committed.artifact_ref).local_path.is_dir()
+        assert len(scenario.commit_log.records()) == 1
+    finally:
+        dispatcher.close()
+
+
 def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
     dispatcher = Dispatcher(recipe, factory(), agent_record_dir=records)

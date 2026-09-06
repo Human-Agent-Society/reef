@@ -83,16 +83,20 @@ for example, an adapter may still reject an otherwise valid Reef node kind.
 Every unique valid candidate is retained, including non-winners, and can be a
 future parent. Selection is a strict improvement in mean validation score over
 the score the incumbent was admitted on, which reproduces upstream's frontier:
-it keeps a high-water best and never re-runs the incumbent. Reef's paired gate
+it keeps the highest recorded score. Reef's paired gate
 still measures both sides, so this method spends two evaluations per iteration
 where upstream spends one; budgets expressed in episodes are not directly
 comparable to upstream's iteration counts. Failed episodes count as zero; a
 non-finite score is rejected by Reef before settlement.
 
-The [Terminal-Bench example](examples/terminal_bench/README.md) supplies a
-committed campaign that measures the baseline once and only the new candidate
-each iteration. Its [results](examples/terminal_bench/RESULTS.md) compare that
-execution with upstream and include the selected harness and recorded scores.
+The [Terminal-Bench results](RESULTS.md) compare a matched search with
+upstream and include the selected harness. The experiment measured the
+baseline once and each new candidate once per measurement; its local campaign
+tooling is separate from this reusable recipe.
+
+The evaluation suite must stay fixed so historical scores remain comparable.
+Task promotion, periodic rechecks, and review-only publication are therefore
+rejected by this method. Selection and automatic publication commit together.
 
 The complete population, parents, scores, served id, proposal attempts, and
 budget counters live under `meta_harness_population` in Reef's algorithm

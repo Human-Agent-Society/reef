@@ -6,6 +6,7 @@ import logging
 from dataclasses import dataclass
 
 from recipes.openclawrl.processor import OpenClawRLProcessor
+from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
 
@@ -38,6 +39,10 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     name: str = "openclawrl"
     batch_size: int = config_field(16)
     session_ttl_s: float = config_field(900.0)
+    # Ceiling on live sessions. Trace matching opens one per request it
+    # cannot match, so a client it never matches would otherwise grow the
+    # table with the request rate for a whole TTL.
+    max_open_sessions: int = config_field(DEFAULT_MAX_SESSIONS)
     prm_url: str = config_field("")  # the PRM's sglang server; empty = correlate-only
     prm_tokenizer_path: str = config_field("")
     prm_m: int = config_field(3)  # judge votes per turn
@@ -69,6 +74,8 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
             raise ValueError("batch_size must be positive")
         if self.session_ttl_s <= 0:
             raise ValueError("session_ttl_s must be positive")
+        if self.max_open_sessions <= 0:
+            raise ValueError("max_open_sessions must be positive")
         if self.prm_url and not self.prm_tokenizer_path:
             raise ValueError("OpenClaw-RL judging requires prm_tokenizer_path next to prm_url")
         for name, default in _RETIRED_FIELDS.items():

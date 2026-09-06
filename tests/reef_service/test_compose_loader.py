@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import logging
 
 import pytest
 
@@ -258,3 +260,40 @@ def test_reconcile_after_self_reconfigure_is_a_noop() -> None:
     log.clear()
     loader.resolve("t").update({"config": {"n": 5}})
     assert log == []
+
+
+def test_a_failing_entry_lands_failed_beside_active_siblings_on_load_and_on_update(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An async plugin body that raises is reported by its fiber: the entry is FAILED, its siblings
+    ACTIVE, the loader's join of the failed fiber leaves no unretrieved task exception, and a config
+    update of the bad entry fails the same way (cordis 2ceea23)."""
+    log: list = []
+    unhandled: list[object] = []
+
+    async def bad(ctx, config):
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    async def alpha(ctx, config):
+        await asyncio.sleep(0)
+        log.append(("alpha", config))
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        loader = Loader(compose.Context(), {"bad": bad, "alpha": alpha}.get)
+        with caplog.at_level(logging.ERROR):
+            loader.root.update([{"id": "1", "name": "bad"}, {"id": "2", "name": "alpha"}])
+            await loader.wait()
+        states = {e.options["id"]: e.fiber.state for e in loader.entries()}
+        assert states == {"1": FiberState.FAILED, "2": FiberState.ACTIVE}
+        with caplog.at_level(logging.ERROR):
+            loader.root.update([{"id": "1", "name": "bad", "config": {"a": 1}}, {"id": "2", "name": "alpha"}])
+            await loader.wait()
+        states = {e.options["id"]: e.fiber.state for e in loader.entries()}
+        assert states == {"1": FiberState.FAILED, "2": FiberState.ACTIVE}
+        assert log == [("alpha", None)]
+
+    asyncio.run(main())
+    gc.collect()
+    assert unhandled == []

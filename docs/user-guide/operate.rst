@@ -34,6 +34,33 @@ Newest first. Each row names the release, its parent and content, whether it is 
 
 For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree.
 
+Read the proposal inbox
+-----------------------
+
+.. code:: bash
+
+   ls -R .reef/proposals/code-repair
+   cat .reef/proposals/code-repair/settled/*.json
+
+A harness scenario keeps the proposals its agents sent through ``POST /reef/harness/proposals`` as plain JSON files under ``evolution.proposals_dir`` (default ``.reef/proposals``), one directory per scenario. Each file holds the body the agent sent (``mutations``, ``reason``, ``session``, ``release_id``), the ``proposal_id`` the route answered, ``received_at``, and ``head_release_id``, the head it was admitted against. The file name starts with the receive time, so ``ls`` shows the queue in age order. Where a file sits says what happened to it:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Directory
+     - Meaning
+   * - the scenario directory itself
+     - pending: admitted at the route, not yet taken by a step
+   * - ``claimed/``
+     - taken by the step now running; a step that failed before it settled leaves the file here, and no later step takes it again
+   * - ``refused/``
+     - the step's own admission refused it, because the head had moved; ``refused`` holds the rule
+   * - ``settled/``
+     - the gate settled it; ``verdict`` holds the step, whether it was selected, and the selector's reason
+
+The commit that settled a proposal carries ``proposal: {id, session, release_id}`` in its metrics, so ``GET /reef/harness/releases`` says which session proposed a served tree. A step takes the oldest pending proposal before it asks the method's own ``propose``; ``evolution.max_pending_proposals`` (default 8) bounds the queue.
+
 Pin a version
 -------------
 

@@ -8,7 +8,7 @@
 name: pi
 binary: pi
 # The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# GET /reef/harness/install script and harness evolution startup.
 install:
   kind: npm
   package: "@earendil-works/pi-coding-agent"

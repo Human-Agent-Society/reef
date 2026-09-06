@@ -37,9 +37,13 @@ Examples:
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
 
-    if not argv or argv[0] in ("-h", "--help"):
+    if not argv:
+        print(_help_text(), file=sys.stderr)
+        sys.exit(2)
+
+    if argv[0] in ("-h", "--help"):
         print(_help_text())
-        sys.exit(0 if argv else 1)
+        sys.exit(0)
 
     if argv[0] in ("-V", "--version"):
         from reef import __version__

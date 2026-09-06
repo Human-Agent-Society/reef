@@ -49,7 +49,7 @@ class ArtifactReleaseChain:
         """Build a live child of the durable checkpoint without moving a head."""
         expected = self.current
         ref = LiveWeightArtifactRef(
-            content_id=f"weights:{uuid.uuid4().hex}",
+            content_id=f"weights:{self._process_id}:{runtime_load_id}:{step}",
             release_id=f"live:{self._process_id}:{runtime_load_id}:{step}",
             parent_release_id=self.checkpoint.release_id,
             runtime_load_id=runtime_load_id,

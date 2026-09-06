@@ -1,5 +1,5 @@
-tttd
-====
+TTT-Discover: train a model at test time
+========================================
 
 TTT-Discover (`arXiv:2601.16175 <https://arxiv.org/abs/2601.16175>`__) specializes
 a model to one problem while it searches for the highest-scoring solution. The
@@ -469,3 +469,13 @@ Add tests for the program contract, invalid outputs, reward calculation, and
 task registration. ``tests/test_tttd_harness.py`` and
 ``tests/test_tttd_packing_tasks.py`` show how the shared harness hands programs
 to a task-specific judge.
+
+Related guides
+--------------
+
+- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
+  learn the request, receipt, and report workflow.
+- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
+  set up the GPU stack and inspect published updates.
+- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
+  and query feedback, scenarios, and releases.

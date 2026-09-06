@@ -53,8 +53,8 @@ class MetaHarnessBackend(CordisBackend):
         if not isinstance(entries, (list, tuple)):
             self._population_store.abort()
             raise ValueError("Meta-Harness composition entries state must be a list")
-        population.sync_served(entries, step=scenario_step)
         try:
+            population.sync_served(entries, step=scenario_step)
             prepared = super().prepare_step(batch, state, scenario_step)
             if prepared.outcome == "candidate":
                 prepared = self._bind_candidate(prepared, population)

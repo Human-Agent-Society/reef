@@ -18,7 +18,11 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             raise web.HTTPBadRequest(text="name must be a non-empty string")
         if release_id is not None and not isinstance(release_id, str):
             raise web.HTTPBadRequest(text="release_id must be a string")
+        if isinstance(release_id, str) and not release_id.strip():
+            raise web.HTTPBadRequest(text="release_id must be a non-empty string")
         name = name.strip()
+        if release_id is not None:
+            release_id = release_id.strip()
         created = not request_service.dispatcher.has_scenario(name)
         scenario = request_service.dispatcher.get_or_create_scenario(
             name,
@@ -68,9 +72,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def promote_scenario(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="request body must be an object")
+        payload = await read_object(request)
         release_id = payload.get("release_id")
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")

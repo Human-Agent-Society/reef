@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.preflight import (
-    _require_lora_distributed_schema,
-    _require_lora_tensor_schema,
-    configure_sglang_runtime,
-)
+from reef.train.slime_backend.reef_adapters.preflight import configure_sglang_runtime
 from reef.train.slime_backend.reef_adapters.sglang import plugin as sglang_plugin
+from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
+    require_lora_distributed_request_schema,
+    require_lora_tensor_request_schema,
+)
 from reef.train.slime_backend.reef_adapters.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
     install_colocated_retract_offload,
@@ -127,16 +127,13 @@ def _install_lora_request_schema(
 
 @pytest.mark.unit
 def test_lora_schema_preflight_accepts_distributed_upsert(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
     _install_lora_request_schema(
         monkeypatch,
         ("lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"),
     )
 
-    module.require_lora_distributed_request_schema()
-    _require_lora_distributed_schema()
-    module.require_lora_tensor_request_schema()
-    _require_lora_tensor_schema()
+    require_lora_distributed_request_schema()
+    require_lora_tensor_request_schema()
 
 
 @pytest.mark.unit
@@ -145,14 +142,11 @@ def test_lora_schema_preflight_rejects_incomplete_distributed_receiver(
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
 ) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
     fields = {"lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"} - {missing}
     _install_lora_request_schema(monkeypatch, tuple(sorted(fields)))
 
     with pytest.raises(RuntimeError, match=missing):
-        _require_lora_distributed_schema()
-    with pytest.raises(RuntimeError, match=missing):
-        module.require_lora_distributed_request_schema()
+        require_lora_distributed_request_schema()
 
 
 @pytest.mark.unit
@@ -164,7 +158,6 @@ def test_lora_schema_preflight_rejects_incomplete_colocated_receiver(
     monkeypatch: pytest.MonkeyPatch,
     missing: str,
 ) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
     distributed_fields = ("lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert")
     tensor_fields = {
         "lora_name",
@@ -176,9 +169,7 @@ def test_lora_schema_preflight_rejects_incomplete_colocated_receiver(
     _install_lora_request_schema(monkeypatch, distributed_fields, tuple(sorted(tensor_fields)))
 
     with pytest.raises(RuntimeError, match=missing):
-        _require_lora_tensor_schema()
-    with pytest.raises(RuntimeError, match=missing):
-        module.require_lora_tensor_request_schema()
+        require_lora_tensor_request_schema()
 
 
 @pytest.mark.unit

@@ -21,10 +21,10 @@ from collections.abc import Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
-from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.nodes import NODE_KINDS
-from reef.harness.render import RenderError, render_composition
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.tree.nodes import NODE_KINDS
+from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend.strategies import Mutation, Proposer
 from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import TraceSample
@@ -79,7 +79,9 @@ def mutations_between(
     created = [str(entry["id"]) for entry in after if str(entry["id"]) not in before_by_id]
     target_ids = [str(entry["id"]) for entry in after]
 
-    if target_ids != retained + created:
+    if target_ids != retained + created or any(
+        before_by_id[entry_id]["name"] != after_by_id[entry_id]["name"] for entry_id in retained
+    ):
         return (
             *(Mutation("remove", str(entry["id"])) for entry in before),
             *(
@@ -307,9 +309,9 @@ class MetaHarnessProposer(Proposer):
             "recent_traces": traffic,
         }
         return (
-            "Propose exactly one complete Reef composition. Each entry's config must match "
-            "node_config_schema for its name exactly; a missing or empty required field is rejected "
-            "and the proposal is discarded. In full_history mode you may branch from any "
+            "Propose exactly one complete Reef composition. Use node_config_schema as field guidance "
+            "where provided; every entry must pass the adapter's validation. "
+            "In full_history mode you may branch from any "
             "candidate_id in population; in incumbent_only mode use served_candidate_id. Each entry must have "
             "a unique root-level id, a name from adapter_node_kinds, and that node kind's config. Entries whose "
             "name is not in evolvable_node_kinds must be copied unchanged from the selected parent. Return exactly "
@@ -348,7 +350,6 @@ class MetaHarnessSelector:
             candidate_scores=candidate_scores,
             current_scores=current_scores,
             selected=selected,
-            episode_calls=evaluation.metrics.get("episode_calls"),
         )
         return SelectionDecision(
             outcome="select" if selected else "reject",

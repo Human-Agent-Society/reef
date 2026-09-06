@@ -66,7 +66,7 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-[Harness-Evolve quickstart](../tutorials/harness_evolve/README.md) runs the smallest skill
+[Harness-Evolve quickstart](../tutorials/evolve-your-harness/README.md) runs the smallest skill
 evolution on the harness evolution mechanism: the served model proposes one
 skill mutation over its own failing traffic, gated real episodes on three
 exact-answer coding tasks decide it, and the winning composition publishes
@@ -87,14 +87,10 @@ official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
 run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
 
-[Meta-Harness](meta_harness/README.md) adds full-history population search on
-the same harness-evolution mechanism. Every candidate is a complete Reef
-composition with committed parents and validation scores; retained
-non-winners remain available as future parents, while only a strict mean-score
-improvement publishes. The method is adapter- and task-agnostic: Reef's normal
-descriptor, episode scorer, executor, timeout, residue, and artifact paths do
-all target-specific work. Its JSON archive is a post-commit mirror only, and a
-restart rebuilds it from Reef's committed algorithm state.
+[Meta-Harness](meta_harness/README.md) searches complete harness compositions
+using all retained candidates and scores. It selects strict mean-score
+improvements and commits the population with Reef's serving state. See the
+[Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the

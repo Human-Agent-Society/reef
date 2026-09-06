@@ -1,18 +1,28 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowRight, Boxes, PlugZap } from "lucide-react";
+import { siteConfig } from "@/lib/site";
 
 export const metadata: Metadata = {
-  title: { absolute: "Reef — Continual learning infrastructure" },
+  title: { absolute: siteConfig.title },
+  description: siteConfig.description,
   alternates: { canonical: "/" },
-  openGraph: { title: "Reef — Continual learning infrastructure", url: "/" },
+  openGraph: { title: siteConfig.title, description: siteConfig.description, url: "/" },
 };
+
+const documentationLinks = [
+  { title: "Quickstart", href: "/docs/getting-started/quickstart" },
+  { title: "Installation", href: "/docs/getting-started/installation" },
+  { title: "Recipes", href: "/docs/user-guide/recipes" },
+  { title: "Harness Evolution", href: "/docs/user-guide/evolve-your-harness" },
+  { title: "API Reference", href: "/docs/reference/http-api" },
+];
 
 const surfaces = [
   {
     eyebrow: "No GPU",
     title: "Evolve the harness",
-    text: "Reef proposes an edit to your agent's rules, prompts, skills, and config, runs the agent both ways on your tasks, and publishes the winner.",
+    text: "Reef proposes an edit to your agent's rules, skills, config, tools, or loop, runs the agent both ways on your tasks, and publishes the winner. Eight coding agents, including Reef's own.",
     href: "/docs/user-guide/evolve-your-harness",
     cta: "Harness evolution",
     icon: PlugZap,
@@ -31,7 +41,8 @@ const methods = [
   { name: "sao", href: "/docs/user-guide/recipes/sao", signal: "Feedback on each attempt, over a stream of tasks", evolves: "model weights", gpu: "yes" },
   { name: "tttd", href: "/docs/user-guide/recipes/tttd", signal: "A fixed grid of sibling attempts at one problem", evolves: "model weights", gpu: "yes" },
   { name: "openclawrl", href: "/docs/user-guide/recipes/openclawrl", signal: "Nothing on the wire — just agent conversations", evolves: "model weights", gpu: "yes" },
-  { name: "harness_evolve", href: "/docs/user-guide/recipes/harness-evolve", signal: "Scores on requests, and failures worth learning from", evolves: "harness tree", gpu: "no" },
+  { name: "skillclaw", href: "/docs/user-guide/recipes/skillclaw", signal: "Scores on requests, and failures worth learning from", evolves: "harness tree", gpu: "no" },
+  { name: "gepa", href: "/docs/user-guide/recipes/gepa", signal: "Scores and transcripts to reflect on", evolves: "harness tree", gpu: "no" },
 ];
 
 const steps = [
@@ -96,13 +107,16 @@ export default function Home() {
         <div>
           <p className="pill">Continual learning infrastructure</p>
           <h1>Agents that improve from every run</h1>
-          <p className="lead">
-            Reef serves an inference endpoint in front of the model your agent already calls. It records what it served, accepts feedback about it, and publishes a better version of the weights or the harness.
-          </p>
+          <p className="lead">{siteConfig.description}</p>
           <div className="home-actions">
-            <Link className="primary-action" href="/docs/getting-started/intro">Get started</Link>
-            <a className="secondary-action" href="https://github.com/Human-Agent-Society/reef">View on GitHub</a>
+            <Link className="primary-action" href="/docs/getting-started/quickstart">Quickstart</Link>
+            <a className="secondary-action" href={siteConfig.repository}>View on GitHub</a>
           </div>
+          <nav className="home-doc-links" aria-label="Documentation shortcuts">
+            {documentationLinks.map((link) => (
+              <Link key={link.href} href={link.href}>{link.title}</Link>
+            ))}
+          </nav>
         </div>
         <aside className="loop-card">
           <p>The Reef loop</p>
@@ -134,8 +148,8 @@ curl http://localhost:8900/healthz`}</code></pre>
 
       <section className="home-section">
         <div className="section-heading-row">
-          <h2>Two surfaces</h2>
-          <p>The deployment&apos;s recipe decides which surface its scenarios evolve.</p>
+          <h2>Train weights or improve the harness</h2>
+          <p>Use a supported GPU stack to train model weights, or optimize prompts, skills, and rules with a hosted model.</p>
         </div>
         <div className="path-grid path-grid-2">
           {surfaces.map((item) => {

@@ -83,6 +83,10 @@ class MetaHarnessRecipe(CordisRecipe):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.publish != "auto" or self.review_kinds:
+            raise ValueError("Meta-Harness requires automatic publication so selection and serving commit together")
+        if self.recheck_every or self.promote_failures or self.promote is not None:
+            raise ValueError("Meta-Harness requires a fixed evaluation suite without rechecks or task promotion")
         if self.mode not in SEARCH_MODES:
             raise ValueError(f"evolution.meta_harness.mode must be one of {SEARCH_MODES}")
         if not self.proposer_model:

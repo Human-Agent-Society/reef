@@ -92,6 +92,14 @@ class FileTree(Protocol):
 
 
 @dataclass(frozen=True)
+class HarnessInfo:
+    """What the harness routes need beyond the file tree: the seed behind the base release and the served model."""
+
+    seed_entries: tuple[Mapping[str, Any], ...] = ()
+    served_model: str | None = None
+
+
+@dataclass(frozen=True)
 class Surface:
     """The explicit serving capabilities bound to one scenario.
 
@@ -102,12 +110,14 @@ class Surface:
     loader: ArtifactLoader | None = None
     inference: InferenceHooks | None = None
     files: FileTree | None = None
+    harness: HarnessInfo | None = None
 
 
 __all__ = [
     "ArtifactActivator",
     "ArtifactLoader",
     "FileTree",
+    "HarnessInfo",
     "InferenceHooks",
     "InferenceLease",
     "LeasingInferenceHooks",

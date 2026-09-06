@@ -23,7 +23,14 @@ import json
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
-from reef.harness.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+from reef.harness.episodes.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
+
+#: The script's install-prefix root in shell spelling, the same root reef's
+#: own server-side vendor install uses, honouring the same environment
+#: override: a server and a client on one machine share the installed binary
+#: instead of each fetching the pin into its own tree.
+_SHELL_PREFIX_ROOT = DEFAULT_PREFIX_ROOT.replace("~", "$HOME", 1)
 
 #: Client-side bookkeeping file, byte-identical to what the stdlib client
 #: pull writes; must match ``reef_client.client.HARNESS_RELEASE_SIDECAR``.
@@ -106,18 +113,7 @@ def _compose_env_var(descriptor: AdapterDescriptor) -> tuple[str, str]:
     entry the user-facing wrapper needs (session/state dirs use the binary's
     own defaults outside episodes).
     """
-    primary = PurePosixPath(descriptor.config_targets["primary"].path)
-    for parent in primary.parents:
-        if parent == PurePosixPath("."):
-            break
-        marker = f"{{root}}/{parent}"
-        for key, value in descriptor.env.items():
-            if value == marker:
-                return key, str(parent)
-    raise DescriptorError(
-        f"adapter {descriptor.name!r} has no env var relocating a directory above {str(primary)!r} "
-        "(expected an entry with a {root}/<dir> value)"
-    )
+    return descriptor.compose_relocation()
 
 
 def _wrapper_lines(
@@ -131,7 +127,7 @@ def _wrapper_lines(
 
     Written inside the install script's ``else`` branch (only when the
     composition changed), after the checksum verifies and before the sidecar.
-    The wrapper calls ``reef_client.harness_wrapper``, which starts a local
+    The wrapper calls ``reef.harness.client.wrapper``, which starts a local
     proxy between the agent binary and Reef — capturing receipts so
     ``reef-<adapter> report`` can report without manual receipt handling.
     """
@@ -151,12 +147,16 @@ def _wrapper_lines(
         f'export REEF_HARNESS_SCENARIO="{_double_quoted(scenario)}"',
         f'export REEF_HARNESS_ADAPTER="{_double_quoted(descriptor.name)}"',
         f'export REEF_HARNESS_ENV_VAR="{_double_quoted(env_var)}"',
-        'exec python3 -m reef.harness.harness_wrapper "\\$@"',
+        'exec python3 -m reef.harness.client.wrapper "\\$@"',
         "REEF_WRAPPER_EOF",
         f'    chmod +x "$DEST/{_double_quoted(wrapper_name)}"',
-        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH.",
+        f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH. The link target",
+        "    # must be absolute: DEST defaults to the relative ./reef-harness, and a",
+        "    # relative target resolves against the link's own directory, so the link",
+        f"    # dangles and {wrapper_name} is not runnable from anywhere.",
+        '    DEST_ABS="$(cd "$DEST" && pwd)"',
         '    mkdir -p "$HOME/.local/bin"',
-        f'    ln -sf "$DEST/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        f'    ln -sf "$DEST_ABS/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
         '    case ":$PATH:" in',
         '        *":$HOME/.local/bin:"*) ;;',
         f"        *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
@@ -204,12 +204,16 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         pin = f"{install.package}@{install.version}"
         steps = [f'        npm install --prefix "$PREFIX" {_single_quoted(pin)}']
         pattern = f'    *" {install.version} "*)'
+    probe_env = " ".join(
+        f"{key}={_single_quoted(value)}" for key, value in descriptor.env.items() if "{root}" not in value
+    )
+    probe = f'{probe_env} "$BINARY"'.lstrip()
     return [
         f"# Ensure the pinned binary ({pin}) via the vendor's channel.",
         *prelude,
         'installed=""',
         f'if [ -x "$BINARY" ]{gate}; then',
-        '    installed="$("$BINARY" --version 2>/dev/null || true)"',
+        f'    installed="$({probe} --version 2>/dev/null || true)"',
         "fi",
         'case " $installed " in',
         pattern,
@@ -222,11 +226,59 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "esac",
         "",
         "# Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.",
+        # The distribution is `reef-infra`; naming it `reef` here makes pip
+        # reject the requirement ("produced metadata for project name
+        # reef-infra") on every run. The install stays best effort - a managed
+        # interpreter (PEP 668) refuses it too - so the import is rechecked
+        # after and the wrapper's own failure is named here rather than
+        # surfacing later as a bare ModuleNotFoundError from the launcher.
         (
-            "python3 -c 'import reef_client.serve, reef.harness.harness_wrapper' 2>/dev/null || "
-            'python3 -m pip install --quiet --user reef-client "reef @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+            "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
+            'python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+        ),
+        (
+            "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
+            'echo "reef: warning: reef-client and reef-infra are not importable by python3; '
+            'install them into the environment that runs the wrapper" >&2'
         ),
     ]
+
+
+def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
+    """Shell that writes the model binding files over the pulled tree, the token filled from the environment.
+
+    The binding is written after the checksum and on every run, so a rerun
+    re-points an installed tree at the Reef the script came from; the
+    checksum still covers the served composition alone."""
+    if not bindings:
+        return []
+    lines = [
+        "",
+        "# The model binding: the adapter's config pointed at the Reef this script was",
+        "# fetched from, with the client's own token; written on every run, after the",
+        "# checksum, so the served composition stays what the sidecar records.",
+        'if [ -z "${REEF_TOKEN:-}" ]; then',
+        '    echo "reef: REEF_TOKEN is not set; the harness will reach Reef without a token" >&2',
+        "fi",
+    ]
+    for relative in sorted(bindings):
+        lines.append(_write_file_block(relative, bindings[relative]).rstrip("\n"))
+        lines.extend(
+            [
+                f"python3 - \"$DEST/{_double_quoted(relative)}\" <<'REEF_BIND_EOF'",
+                "import os, sys",
+                "path = sys.argv[1]",
+                'text = open(path, encoding="utf-8").read()',
+                f'open(path, "w", encoding="utf-8").write(text.replace({TOKEN_PLACEHOLDER!r}, os.environ.get("REEF_TOKEN", "")))',
+                "REEF_BIND_EOF",
+            ]
+        )
+    return lines
+
+
+#: The literal the model binding overlay carries where the client's own token goes; the script swaps in
+#: ``$REEF_TOKEN`` at install time, so the served script itself never holds a credential.
+TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
 
 
 def render_install_script(
@@ -236,13 +288,18 @@ def render_install_script(
     release_id: str,
     content_id: str,
     scenario: str = "",
+    binding_files: Mapping[str, str] | None = None,
 ) -> str:
     """The complete install script for one adapter and one served manifest.
 
     The manifest side (``files``, ``release_id``) is adapter-agnostic;
     the descriptor contributes the binary's vendor install path. ``scenario``
     is baked into the wrapper so ``reef-<adapter> report`` knows which
-    scenario to report to. Raises ``DescriptorError`` when the descriptor
+    scenario to report to. ``binding_files`` are the adapter's config targets
+    re-rendered with the model binding that points the harness at Reef; they
+    carry ``TOKEN_PLACEHOLDER`` where the token goes, and the script writes
+    them over the pulled files after the checksum, filling the placeholder
+    from ``$REEF_TOKEN``. Raises ``DescriptorError`` when the descriptor
     declares no install section and ``ValueError`` when a composition path is
     absolute or escapes the destination through a ``..`` part, the same rule
     the stdlib client pull applies to served paths.
@@ -256,7 +313,8 @@ def render_install_script(
         raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
     env_var, compose_dir = _compose_env_var(descriptor)
     wrapper_name = f"reef-{descriptor.name}"
-    for relative in files:
+    bindings = dict(binding_files or {})
+    for relative in (*files, *bindings):
         if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
             raise ValueError(f"composition path {relative!r} escapes the destination")
     ordered = sorted(files)
@@ -290,7 +348,7 @@ def render_install_script(
         "set -eu",
         "",
         'DEST="${1:-./reef-harness}"',
-        f'PREFIX="${{2:-$HOME/.local/share/reef-harness/{descriptor.name}}}"',
+        f'PREFIX="${{2:-${{{PREFIX_ENV}:-{_SHELL_PREFIX_ROOT}}}/{descriptor.name}}}"',
         f'BINARY="$PREFIX/{_double_quoted(install.binary_path)}"',
         f'CHECKSUM="{checksum}"',
         f'SIDECAR_CHECKSUM="{sidecar_checksum}"',
@@ -360,6 +418,7 @@ def render_install_script(
         "    # The same sidecar the stdlib client pull writes: pulled version and file list.",
         _write_file_block(HARNESS_RELEASE_SIDECAR, sidecar_text).rstrip("\n"),
         "fi",
+        *_binding_lines(bindings),
         "",
         f'echo "run:     $DEST/{wrapper_name}"',
         'echo "binary:  $BINARY"',

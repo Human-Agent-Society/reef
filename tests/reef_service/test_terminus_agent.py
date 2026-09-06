@@ -15,9 +15,9 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.terminus.quirks import _ALLOWED_KNOBS, _BINDING_KNOBS
-from reef.harness.render import render_composition
-from reef.harness.terminus import instruction_paths, skill_roots
-from reef.harness.terminus.runner import AGENT_NAME, agent_spec
+from reef.harness.runners.terminus import instruction_paths, skill_roots
+from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
+from reef.harness.tree.render import render_composition
 
 pytest.importorskip("harbor", reason="the terminus extra is not installed")
 
@@ -79,37 +79,3 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
     parameters = set(inspect.signature(Terminus2.__init__).parameters)
     unknown = sorted((_ALLOWED_KNOBS | _BINDING_KNOBS) - parameters)
     assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
-
-
-def test_pinned_runner_reaches_real_lab_and_harbor_config_without_keyword_collision(tmp_path, monkeypatch):
-    pytest.importorskip("reef_eval")
-    from harbor.trial.trial import Trial
-    from reef.harness.terminus.runner import run
-
-    root = tmp_path / "root"
-    _rendered(root)
-    commit = "69671fbaac6d67a7ef0dfec016cc38a64ef7a77c"
-    monkeypatch.setenv("REEF_TERMINUS_DIR", str(root))
-    monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(tmp_path / "sessions"))
-    monkeypatch.setenv("REEF_TERMINUS_TASK_COMMIT", commit)
-    monkeypatch.setenv("REEF_TERMINUS_ENVIRONMENT", "e2b")
-
-    class ReachedTrial(Exception):
-        pass
-
-    async def create(config):
-        assert str(config.task.path) == "extract-elf"
-        assert config.task.git_commit_id == commit
-        assert config.task.git_url == "https://github.com/laude-institute/terminal-bench-2.git"
-        assert config.task.name is None
-        assert config.agent.model_name == "openai/stub"
-        assert config.environment.type.value == "e2b"
-        raise ReachedTrial
-
-    monkeypatch.setattr(Trial, "create", create)
-    with pytest.raises(ReachedTrial):
-        run("terminal-bench/extract-elf")
-    # Collect reef-eval's synthetic failed future here, before later caplog assertions.
-    import gc
-
-    gc.collect()

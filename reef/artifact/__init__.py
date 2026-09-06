@@ -20,14 +20,14 @@ through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
 any ``RepositoryBackendFactory``. ``tests/reef_service/test_reef_git_lfs.py``
 and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 
-Scenario checkpoints require two-phase publication. ``publish`` must accept
+Journaled scenario checkpoints require two-phase publication. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
 After the scenario journal commits, ``commit_release(ref, expected_parent=...)``
 advances that pointer. It must be idempotent when ``ref`` is already current and
 reject an unrelated head. A failed pointer update is repaired from the journal
 on restart; the pointer never overrides committed scenario state. The memory
 and Git LFS backends implement this contract. Custom backends lacking either
-operation are rejected for scenario checkpoints.
+operation are rejected for journaled scenario checkpoints.
 """
 
 from reef.artifact.artifact import (

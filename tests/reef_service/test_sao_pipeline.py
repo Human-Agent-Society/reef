@@ -417,7 +417,7 @@ def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
         if dispatcher.get_or_create_scenario("math").scenario_step == step:
             return
         Event().wait(0.01)
-    pytest.fail(f"scenario did not reach step {step}: {dispatcher.training_status}")
+    pytest.fail(f"scenario did not reach step {step}: {dispatcher.build_training_status()}")
 
 
 @pytest.mark.integration
@@ -610,8 +610,10 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         )
         batch = first.reserve_training_batch()
         assert batch is not None
-        assert first.execute_reserved_step(0).result is not None
-        prepared = first.commit()
+        result = first.execute_reserved_step(0).result
+        assert result is not None
+        prepared = first.prepare_commit(result)
+        first.commit(prepared)
         first.apply_compaction(prepared.compacted_ids)
 
     with RecordStore(database) as second_store:

@@ -26,7 +26,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict, cast
 
-from reef.harness.episode import EpisodeResult
+from reef.harness.episodes.run import EpisodeResult
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.

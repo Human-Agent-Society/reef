@@ -18,6 +18,10 @@ responsible for each piece:
   record consumption at the committed high-water mark.
 - **rollback** — ``commit_protocol`` republishes an older checkpointed
   version as a new fenced commit; history is never rewritten.
+- **read** — ``commit_protocol`` serializes catalog and artifact snapshots
+  with publication and rollback, but not with long-running step preparation.
+  Writers acquire the operation lock before the publication lock; readers
+  take only the publication lock and must not acquire the operation lock.
 
 The scenario aggregate does not retain recipe identity: the deployment's
 recipe configures its runtime binding through the factory, and the aggregate

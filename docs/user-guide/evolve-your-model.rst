@@ -1,5 +1,5 @@
-Evolve your model
-=================
+Train model weights from agent feedback
+=======================================
 
 Weight training runs three processes. Reef hot-swaps each accepted update into
 the serving engine, so inference keeps answering across the update.
@@ -55,10 +55,13 @@ Start from a config
 Each weight-training example ships a complete ``serve.yaml`` that starts the
 three processes in the required order. Copy the closest one and edit it.
 
-- ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
+- `SAO rollout training <recipes/sao.rst>`__ uses
+  ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
   with the critic colocated on it, one rollout engine.
-- ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
-- ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
+- `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
+  ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
+- `OpenClaw-RL conversation learning <recipes/openclawrl.rst>`__ uses
+  ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
   stack with a PRM engine and a student model.
 
 `Configuration <../reference/configuration.rst>`__ covers interpolation, command-line
@@ -176,3 +179,11 @@ is admitted the same way. It enters the release chain only if
 ``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
+
+Connect your agent
+------------------
+
+Use the `HTTP API reference <../reference/http-api.rst>`__ for inference,
+feedback reports, and release queries. To compare learning signals before
+choosing a training config, see `Choose a recipe for agent learning
+<recipes.rst>`__.

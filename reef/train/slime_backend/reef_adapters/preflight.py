@@ -10,6 +10,10 @@ from __future__ import annotations
 import os
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
+    require_lora_distributed_request_schema,
+    require_lora_tensor_request_schema,
+)
 from reef.train.slime_backend.reef_adapters.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
 from reef.train.slime_backend.reef_adapters.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
@@ -75,8 +79,8 @@ def configure_sglang_runtime(args) -> None:
     os.environ["SGLANG_PLUGINS"] = ",".join(dict.fromkeys((*plugins, SGLANG_PLUGIN_NAME)))
 
     if int(getattr(args, "megatron_lora_rank", 0) or 0) > 0:
-        _require_lora_tensor_schema()
-        _require_lora_distributed_schema()
+        require_lora_tensor_request_schema()
+        require_lora_distributed_request_schema()
 
     if colocate and int(getattr(args, "prefill_num_servers", 0) or 0) > 0:
         raise ValueError("colocated Reef serving requires a regular SGLang engine, not PD disaggregation")
@@ -98,34 +102,6 @@ def configure_sglang_runtime(args) -> None:
                     "Reef weight updates require disable_radix_cache=true "
                     f"for SGLang model {model.name!r} group {group.worker_type!r}"
                 )
-
-
-def _require_lora_distributed_schema() -> None:
-    """Fail before GPU startup when SGLang cannot receive distributed LoRA updates."""
-    required = {"lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"}
-    message = "loaded SGLang does not support Reef's distributed LoRA upsert schema"
-    try:
-        from sglang.srt.managers.io_struct import LoadLoRAAdapterFromDistributedReqInput
-    except ImportError as exc:
-        raise RuntimeError(message) from exc
-    fields = set(getattr(LoadLoRAAdapterFromDistributedReqInput, "__struct_fields__", ()))
-    missing = sorted(required - fields)
-    if missing:
-        raise RuntimeError(f"{message}; missing fields: {missing}")
-
-
-def _require_lora_tensor_schema() -> None:
-    """Fail before GPU startup when SGLang cannot receive colocated LoRA updates."""
-    required = {"lora_name", "config_dict", "serialized_named_tensors", "load_format", "expected_checksums"}
-    message = "loaded SGLang does not support Reef's colocated LoRA tensor schema"
-    try:
-        from sglang.srt.managers.io_struct import LoadLoRAAdapterFromTensorsReqInput
-    except ImportError as exc:
-        raise RuntimeError(message) from exc
-    fields = set(getattr(LoadLoRAAdapterFromTensorsReqInput, "__struct_fields__", ()))
-    missing = sorted(required - fields)
-    if missing:
-        raise RuntimeError(f"{message}; missing fields: {missing}")
 
 
 def configure_megatron_runtime(args) -> None:

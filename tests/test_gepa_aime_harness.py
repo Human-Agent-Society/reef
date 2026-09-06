@@ -18,7 +18,7 @@ import pytest
 
 from reef.harness import EpisodeResult
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"

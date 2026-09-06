@@ -17,8 +17,8 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
@@ -27,7 +27,6 @@ from reef.train.cordis_backend.strategies import Mutation
 from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
-
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -63,10 +62,11 @@ class ServedModel(ModelBinding):
         super().__init__(base_url="http://127.0.0.1:9", model="served-model", api_key="dummy")
 
 
-class QueueChat:
+class QueueChat(ModelBinding):
     def __init__(self, *replies: str) -> None:
-        self.replies = list(replies)
-        self.prompts: list[str] = []
+        super().__init__(base_url="http://127.0.0.1:9", model="proposer", api_key="dummy")
+        object.__setattr__(self, "replies", list(replies))
+        object.__setattr__(self, "prompts", [])
 
     def chat(self, messages, **params):
         self.prompts.append(messages[-1]["content"])
@@ -188,6 +188,16 @@ def test_a_reordered_composition_is_replaced_atomically_in_target_order() -> Non
         Mutation("create", "b", {"name": "rules", "config": {"text": "b"}}),
         Mutation("create", "a", {"name": "rules", "config": {"text": "a"}}),
     )
+
+
+def test_changing_a_node_kind_is_admitted_as_remove_and_create() -> None:
+    from reef.train.cordis_backend.backend import admit_mutations
+
+    target = ({"id": "rules", "name": "skill", "config": {"name": "review", "text": "Check the result."}},)
+    admitted, refusal = admit_mutations(SEED, mutations_between(SEED, target), get_adapter("pi"))
+
+    assert refusal is None
+    assert tuple(admitted) == target
 
 
 # -- population and history-aware proposal ----------------------------------
@@ -416,6 +426,18 @@ def test_recipe_rejects_a_selection_override_that_would_split_population_from_se
     config["evolution"]["selection"] = "always"
 
     with pytest.raises(RecipeConfigError, match=r"owns evolution\.selection"):
+        build_recipe(config["implementation"], {}, config=config, runtime=runtime())
+
+
+@pytest.mark.parametrize(
+    "option,value",
+    [("publish", "review"), ("review_kinds", ["rules"]), ("recheck_every", 1), ("promote_failures", True)],
+)
+def test_recipe_rejects_options_that_diverge_from_committed_search(tmp_path, option, value):
+    config = sections(tmp_path)
+    config["evolution"][option] = value
+
+    with pytest.raises((ValueError, RecipeConfigError), match="Meta-Harness requires"):
         build_recipe(config["implementation"], {}, config=config, runtime=runtime())
 
 

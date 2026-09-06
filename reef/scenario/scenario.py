@@ -181,19 +181,16 @@ class Scenario:
         """Materialize a catalog version for read-only serving; absence raises ArtifactNotFound."""
         return self._commit_protocol.artifact_for_version(release_id)
 
+    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries behind a catalog version, if its training commit logged them."""
+        return self._commit_protocol.entries_for_version(release_id)
+
     def artifact_snapshot(
         self,
         release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Freeze one artifact and its gate metrics outside an in-flight commit."""
-        with self._commit_protocol.lock:
-            artifact = (
-                Artifact(self.repository.require_current_artifact(), self.repository)
-                if release_id is None
-                else self._commit_protocol.artifact_for_version(release_id)
-            )
-            metrics = self._commit_protocol.metrics_for_version(artifact.ref.release_id)
-            return artifact, metrics
+        """Freeze one artifact and its gate metrics without waiting for preparation."""
+        return self._commit_protocol.artifact_snapshot(release_id)
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current

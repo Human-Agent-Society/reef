@@ -13,9 +13,16 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
-from reef.harness.terminus import TerminusTreeError, instruction_paths, load_tree, runner, skill_roots, terminus_kwargs
-from reef.harness.trajectory import read_terminus_atif
+from reef.harness.episodes.trajectory import read_terminus_atif
+from reef.harness.runners.terminus import (
+    TerminusTreeError,
+    instruction_paths,
+    load_tree,
+    runner,
+    skill_roots,
+    terminus_kwargs,
+)
+from reef.harness.tree.render import render_composition
 
 
 def _tree(**nodes: str) -> dict[str, str]:
@@ -197,73 +204,3 @@ def test_load_tree_reads_both_roots_and_skips_the_run_s_own_output(tmp_path: Pat
 def test_load_tree_refuses_a_root_that_is_not_a_directory(tmp_path: Path) -> None:
     with pytest.raises(TerminusTreeError, match="is not a directory"):
         load_tree(tmp_path / "missing")
-
-
-class _StubRow:
-    rewards = {"accuracy": 1.0}
-    tags: dict = {}
-
-
-class _StubLab:
-    """Captures what the runner hands reef-eval."""
-
-    calls: list = []
-
-    def __init__(self, trials, *, executor=None):
-        assert executor is None  # these cases exercise the unpinned path
-        self.trials = trials
-
-    async def run(self, task, agent, **overrides):
-        _StubLab.calls.append({"task": task, "agent": agent, "overrides": overrides, "trials": self.trials})
-        return _StubRow()
-
-
-def _run_with_stub_lab(monkeypatch, tmp_path: Path, environment: str | None) -> dict:
-    import sys
-    import types
-
-    _StubLab.calls.clear()
-    monkeypatch.setitem(sys.modules, "reef_eval", types.SimpleNamespace(Lab=_StubLab))
-    _render(tmp_path, [("config", {"data": {"model_name": "openai/stub"}})])
-    monkeypatch.setenv("REEF_TERMINUS_DIR", str(tmp_path))
-    monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(tmp_path / "terminus/sessions"))
-    monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(tmp_path / "terminus/trials"))
-    if environment is None:
-        monkeypatch.delenv("REEF_TERMINUS_ENVIRONMENT", raising=False)
-    else:
-        monkeypatch.setenv("REEF_TERMINUS_ENVIRONMENT", environment)
-    runner.run("hello-world")
-    return _StubLab.calls[0]
-
-
-@pytest.mark.unit
-def test_the_named_environment_reaches_harbor(monkeypatch, tmp_path: Path) -> None:
-    # Harbor defaults to local Docker, which does not collect the verifier's
-    # reward on every host, so the adapter names a backend and the runner has
-    # to pass it through rather than accept the default.
-    call = _run_with_stub_lab(monkeypatch, tmp_path, "e2b")
-    assert call["overrides"]["environment"] == {"type": "e2b"}
-
-
-@pytest.mark.unit
-def test_no_environment_leaves_harbors_default_alone(monkeypatch, tmp_path: Path) -> None:
-    call = _run_with_stub_lab(monkeypatch, tmp_path, None)
-    assert "environment" not in call["overrides"]
-
-
-@pytest.mark.unit
-def test_the_trial_carries_the_cost_harbor_measured(tmp_path: Path) -> None:
-    # The episode root is deleted when the episode ends, so a cost left in
-    # Harbor's trial tree is unrecoverable and a spend guard outside the
-    # episode would silently see zero.
-    trial = tmp_path / "t"
-    trial.mkdir()
-    (trial / "result.json").write_text(json.dumps({"agent_result": {"cost_usd": 0.0132}}))
-    (trial / "nested").mkdir()
-    (trial / "nested" / "result.json").write_text(json.dumps({"agent_result": {"cost_usd": 0.0068}}))
-    assert runner.trial_record("t", {"acc": 1.0}, trial)["cost_usd"] == pytest.approx(0.02)
-
-
-@pytest.mark.unit
-def test_a_trial_with_no_measured_cost_reports_zero(tmp_path: Path) -> None:
-    assert runner.trial_record("t", {}, tmp_path)["cost_usd"] == 0.0

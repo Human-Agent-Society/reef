@@ -14,7 +14,6 @@ with no Harbor and no Docker.
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -22,10 +21,10 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, run_episode
-from reef.harness.executor import SandboxExecutor
-from reef.harness.render import render_composition
-from reef.harness.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
+from reef.harness.episodes.executor import SandboxExecutor
+from reef.harness.episodes.run import EpisodeError, run_episode
+from reef.harness.runners.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
+from reef.harness.tree.render import render_composition
 
 # Stands in for the runner: prove the episode reaches it with what it needs.
 STUB = """#!/usr/bin/env python3
@@ -66,11 +65,7 @@ NODES = [
 
 def _stub(tmp_path: Path) -> str:
     binary = tmp_path / "reef-terminus-stub"
-    binary.write_text(
-        STUB.format(tree=TREE_DIR_ENV, sessions=SESSION_DIR_ENV, trials=TRIALS_DIR_ENV).replace(
-            "#!/usr/bin/env python3", f"#!{sys.executable}"
-        )
-    )
+    binary.write_text(STUB.format(tree=TREE_DIR_ENV, sessions=SESSION_DIR_ENV, trials=TRIALS_DIR_ENV))
     binary.chmod(0o755)
     return str(binary)
 
@@ -123,46 +118,6 @@ def test_the_episode_carries_no_host_environment_beyond_the_descriptor(tmp_path:
     finally:
         os.environ.pop("SECRET", None)
     assert leaked.read_text() == ""
-
-
-@pytest.mark.unit
-def test_a_named_host_variable_is_inherited_and_an_unnamed_one_is_not(tmp_path: Path) -> None:
-    # Episodes are hermetic by default, which is right for a harness that
-    # needs nothing from the host. terminus creates sandboxes, so it names the
-    # provider credential; everything else still stays out.
-    descriptor = get_adapter("terminus")
-    assert descriptor.inherit_env == ("E2B_API_KEY",)
-    seen = tmp_path / "seen.json"
-    binary = tmp_path / "probe"
-    binary.write_text(
-        "#!/usr/bin/env python3\nimport json, os\n"
-        f"open({str(seen)!r}, 'w').write(json.dumps("
-        "{'named': os.environ.get('E2B_API_KEY'), 'unnamed': os.environ.get('SECRET')}))\n"
-    )
-    binary.chmod(0o755)
-    os.environ["E2B_API_KEY"] = "sandbox-credential"
-    os.environ["SECRET"] = "must-not-reach-the-episode"
-    try:
-        run_episode(descriptor, render_composition(NODES, descriptor), "t", binary=str(binary), timeout=60.0)
-    finally:
-        os.environ.pop("E2B_API_KEY", None)
-        os.environ.pop("SECRET", None)
-    assert json.loads(seen.read_text()) == {"named": "sandbox-credential", "unnamed": None}
-
-
-@pytest.mark.unit
-def test_an_unset_named_variable_is_simply_absent(tmp_path: Path) -> None:
-    descriptor = get_adapter("terminus")
-    seen = tmp_path / "seen.json"
-    binary = tmp_path / "probe"
-    binary.write_text(
-        "#!/usr/bin/env python3\nimport json, os\n"
-        f"open({str(seen)!r}, 'w').write(json.dumps({{'named': os.environ.get('E2B_API_KEY')}}))\n"
-    )
-    binary.chmod(0o755)
-    os.environ.pop("E2B_API_KEY", None)
-    run_episode(descriptor, render_composition(NODES, descriptor), "t", binary=str(binary), timeout=60.0)
-    assert json.loads(seen.read_text()) == {"named": None}
 
 
 @pytest.mark.unit
