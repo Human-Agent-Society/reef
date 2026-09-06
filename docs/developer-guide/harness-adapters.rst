@@ -43,7 +43,7 @@ Harbor's own ``terminus-2`` agent as native configuration, runs the task the
 prompt names, and writes the verifier's reward and the ATIF trajectory under
 ``REEF_TERMINUS_SESSION_DIR`` for the ``terminus-atif-json`` reader. It
 reaches Harbor through reef-eval, the same primitive the examples under
-``recipes/`` use. Nothing of Reef's runs inside the agent. The prompt is a
+``recipes/`` use. The prompt is a
 Harbor task directory or a registry id, so an episode needs no dataset
 location in its environment, which ``run_episode`` would not carry anyway.
 
@@ -51,14 +51,26 @@ location in its environment, which ``run_episode`` would not carry anyway.
 key is not one; ``rules`` becomes an ``extra_instruction_paths`` entry; and
 ``skill`` and ``agent_command`` become two ``AgentConfig.skills`` roots, so
 Harbor keeps its progressive skill loading rather than pasting every body
-into the prompt. ``code_extension`` is rejected: an evolved module would run
-in the runner's process, outside the container that isolates the agent's own
-commands, and it is outside Meta-Harness's search space in any case. On an
-empty tree every mapping is a no-op and the agent is stock Terminus 2, the
-equivalence the measured baseline rests on. Isolation is Harbor's task
-container: Docker does not nest in bubblewrap, so ``run_episode`` refuses
-this adapter under ``evolution.executor: sandbox``. The extra needs Python
-3.12, above Reef's own floor.
+into the prompt. One ``code_extension`` may define ``Agent(Terminus2)``;
+rendering checks syntax without executing it, and the runner uses Harbor's
+native ``AgentConfig.import_path`` contract. No extension means stock Terminus 2.
+
+Extensions require ``evolution.executor: sandbox`` to isolate the Python
+runner, with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY`` explicitly
+forwarded through ``evolution.sandbox.env_from``. Harbor then runs the terminal
+task remotely. Network access must be enabled with ``sandbox.egress_hosts``;
+that setting currently enables networking without enforcing a hostname firewall.
+The runtime needs Linux, bubblewrap, Python 3.12+, ``reef-infra[terminus]``, and
+``harbor[e2b]``. The interpreter and local task directories must be visible in
+the sandbox (for example under ``/opt``). Ordinary declarative trees can still
+use the local executor and Docker. Docker inside bubblewrap and extensions in
+an unisolated runner are rejected before process launch.
+
+An adapter quirk can expose ``validate_execution(files, executor)`` to check its
+rendered tree against the configured executor before any episode files are
+written. It raises ``EpisodeLaunchError`` for unsupported combinations and
+replaces the default ``self_isolating`` nesting restriction. The Terminus quirk
+uses this seam; execution, timeout, cleanup and trajectory handling remain shared.
 
 The ``dsh`` adapter runs DeepSeek Harness headless (``dsh --profile headless
 "<task>"``) with its whole home relocated by ``DSH_HOME``. dsh composes its

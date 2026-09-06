@@ -4,8 +4,7 @@ Stdlib only, and free of any Harbor import: this is the half of the runner
 that loads anywhere, including CI without Docker, so the mapping from node
 kind to agent input is testable without the benchmark.
 
-Harbor already accepts everything this adapter needs, so there is no Terminus
-2 subclass and no Reef code inside the agent:
+Harbor accepts the declarative nodes as native inputs:
 
 - ``config`` becomes Terminus 2 constructor arguments.
 - ``rules`` becomes a trial ``extra_instruction_paths`` entry.
@@ -16,6 +15,7 @@ Harbor already accepts everything this adapter needs, so there is no Terminus
 
 from __future__ import annotations
 
+import ast
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -27,6 +27,8 @@ CONFIG_PATH = "terminus/config.json"
 RULES_PATH = "terminus/AGENTS.md"
 SKILL_ROOT = "terminus/skills"
 COMMAND_ROOT = "terminus-commands"
+CONTEXT_ROOT = "terminus/context/"
+ENVIRONMENT_ENV = "REEF_TERMINUS_ENVIRONMENT"
 #: Where the adapter renders. ``terminus-commands`` is a sibling of
 #: ``terminus``, not a child, so the tree is read from the episode root.
 TREE_PREFIXES = ("terminus/", "terminus-commands/")
@@ -36,6 +38,27 @@ RUNTIME_PREFIXES = ("terminus/sessions/", "terminus/trials/")
 
 class TerminusTreeError(ReefError):
     """The rendered tree cannot drive Terminus 2."""
+
+
+def extension_source(files: Mapping[str, str]) -> tuple[str, str] | None:
+    """Validate one self-contained Agent module without importing or executing it."""
+    modules = [(path, code) for path, code in files.items() if path.startswith(CONTEXT_ROOT)]
+    if not modules:
+        return None
+    if len(modules) != 1:
+        raise TerminusTreeError("terminus accepts exactly one code_extension defining class Agent")
+    path, code = modules[0]
+    name = path.removeprefix(CONTEXT_ROOT)
+    if "/" in name or not name.endswith(".py") or not name[:-3].isidentifier():
+        raise TerminusTreeError("terminus code_extension must have a Python identifier name")
+    try:
+        module = ast.parse(code, filename=path)
+        compile(module, path, "exec")
+    except (SyntaxError, ValueError) as exc:
+        raise TerminusTreeError(f"invalid terminus code_extension: {exc}") from exc
+    if not any(isinstance(node, ast.ClassDef) and node.name == "Agent" for node in module.body):
+        raise TerminusTreeError("terminus code_extension must define class Agent inheriting Harbor's Terminus2")
+    return path, code
 
 
 def load_tree(root: Path | str) -> dict[str, str]:

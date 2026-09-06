@@ -295,6 +295,7 @@ class MetaHarnessProposer(Proposer):
             for sample in samples
         ]
         surface = {
+            "adapter": self._descriptor.name,
             "mode": self._mode,
             "node_config_schema": {
                 kind: schema for kind, schema in _NODE_CONFIG_SCHEMA.items() if kind in self._kinds

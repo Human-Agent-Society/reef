@@ -136,11 +136,15 @@ def run_episode(
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
     """
     executor = executor or LocalExecutor()
-    # An adapter that isolates episodes itself cannot also run inside the jail:
-    # a task container does not nest in bubblewrap. Refuse at the shared
-    # boundary so every caller is told, rather than quietly getting the
-    # adapter's own boundary instead of the one the deployment configured.
-    if descriptor.self_isolating and isinstance(executor, SandboxExecutor):
+    # Adapters can validate a conditional boundary (for example, remote task
+    # containers with a sandboxed runner). Otherwise keep the default refusal
+    # to nest an adapter's local container inside bubblewrap.
+    if descriptor.validate_execution is not None:
+        try:
+            descriptor.validate_execution(files, executor)
+        except EpisodeLaunchError as exc:
+            raise EpisodeError(str(exc)) from exc
+    elif descriptor.self_isolating and isinstance(executor, SandboxExecutor):
         raise EpisodeError(
             f"adapter {descriptor.name!r} isolates episodes in its own container and cannot run under "
             "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"

@@ -492,6 +492,93 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
     assert [row["outcome"] for row in committed["candidates"]] == ["selected", "selected"]
 
 
+def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tmp_path, monkeypatch) -> None:
+    # Replace only process launch and the remote trial. Rendering, model
+    # binding, Harbor's agent contract, scoring, selection and commit are real.
+    pytest.importorskip("reef_eval")
+    pytest.importorskip("harbor")
+    from types import SimpleNamespace
+
+    from harbor.agents.terminus_2 import Terminus2
+    from harbor.models.trial.config import TrialConfig
+    from harbor.utils.import_path import import_class
+
+    from reef.harness.episodes.executor import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
+    from reef.harness.runners.terminus import runner
+
+    code = (Path(__file__).parents[2] / "recipes/meta_harness/results/reef_harness.py").read_text()
+    proposed = (*SEED, {"id": "agent", "name": "code_extension", "config": {"name": "agent", "code": code}})
+    launches, agents = [], []
+    monkeypatch.setattr(Terminus2, "_get_completion_confirmation_message", lambda self, output: "stock")
+
+    class Lab:
+        def __init__(self, trials):
+            self.trials = trials
+
+        async def run(self, task, agent, **overrides):
+            config = TrialConfig.model_validate(
+                {"task": {"name": task}, "agent": agent, "trials_dir": self.trials, **overrides}
+            )
+            assert config.environment.type.value == "e2b"
+            assert config.agent.model_name == "served-model"
+            assert config.agent.kwargs["llm_kwargs"]["api_key"] == "dummy"
+            assert config.extra_instruction_paths[0].read_text() == SEED[0]["config"]["text"] + "\n"
+            agents.append(config.agent)
+            if config.agent.import_path:
+                cls = import_class(config.agent.import_path)
+                assert issubclass(cls, Terminus2)
+                assert "MANDATORY FALSIFICATION CHECKPOINT" in cls._get_completion_confirmation_message(
+                    object.__new__(cls), "output"
+                )
+            return SimpleNamespace(rewards={"accuracy": float(bool(config.agent.import_path))}, tags={})
+
+    def launch(self, argv, *, root, workspace, env, timeout, writable_paths, readonly_paths):
+        launches.append(root)
+        assert argv[0] == "reef-terminus" and timeout == 17
+        assert set(writable_paths) == {root / "terminus/sessions", root / "terminus/trials"}
+        assert root / "terminus/config.json" in readonly_paths
+        with monkeypatch.context() as context:
+            for key, value in {**env, **self.env, ISOLATION_ENV: "bwrap"}.items():
+                context.setenv(key, value)
+            return ProcessOutcome(runner.run(argv[-1]), "", "")
+
+    monkeypatch.setattr("reef_eval.Lab", Lab)
+    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr(SandboxExecutor, "launch", launch)
+    config = sections(tmp_path, adapter="terminus", scorer=lambda task, result: result.trajectory[0]["reward"])
+    config["evolution"].pop("binary")
+    config["evolution"].update(
+        executor="sandbox",
+        episode_timeout_s=17,
+        forbid_residue=True,
+        tasks=["test/hello-world"],
+        sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},
+    )
+    recipe = build_recipe(
+        config["implementation"],
+        {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},
+        config=config,
+        runtime=runtime(),
+    )
+    recipe = dataclasses.replace(recipe, models={"proposer": QueueChat(reply(content_id(SEED), proposed))})
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    dispatcher = Dispatcher(recipe, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("terminus-meta")
+        _report_once(scenario, "terminus-meta", "1")
+        result = scenario.prepare_training_step()
+        assert result.metrics["selected"] is True
+        scenario.commit(result)
+        assert scenario.trainer.state[POPULATION_STATE_KEY]["served_id"] == content_id(proposed)
+        assert next((tmp_path / "repository").rglob("context/agent.py")).read_text() == code
+    finally:
+        dispatcher.close()
+    assert len(agents) == len(launches) == 2
+    assert sum(bool(agent.import_path) for agent in agents) == 1
+    assert all(not root.exists() for root in launches)
+
+
 def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Path) -> None:
     make_binary(tmp_path)
     config = sections(tmp_path, scorer=non_finite_score)

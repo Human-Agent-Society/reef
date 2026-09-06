@@ -134,3 +134,22 @@ def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path
             timeout=60.0,
             executor=SandboxExecutor(),
         )
+
+
+@pytest.mark.unit
+def test_code_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
+    descriptor = get_adapter("terminus")
+    files = render_composition(
+        [*NODES, ("code_extension", {"name": "agent", "code": "class Agent: pass\n"})], descriptor
+    )
+    with pytest.raises(EpisodeError, match=r"code_extension requires evolution\.executor: sandbox"):
+        run_episode(descriptor, files, "hello-world", binary="must-never-be-launched")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("egress,key", [((), "dummy"), (("api.e2b.dev",), "")])
+def test_remote_terminus_requires_explicit_network_and_credentials(egress, key) -> None:
+    descriptor = get_adapter("terminus")
+    executor = SandboxExecutor(egress_hosts=egress, env={"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": key})
+    with pytest.raises(EpisodeError, match="requires egress_hosts and E2B_API_KEY"):
+        run_episode(descriptor, render_composition(NODES, descriptor), "task", executor=executor)

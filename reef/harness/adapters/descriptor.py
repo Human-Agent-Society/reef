@@ -23,9 +23,8 @@ everything the shared engines need to drive one harness binary:
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
-  container, so it cannot be nested in Reef's jail. A deployment that
-  configures the sandbox executor for one of these refuses to boot rather
-  than running it unisolated under a config that promised otherwise.
+  container, so nesting in Reef's jail is refused unless its execution quirk
+  validates a compatible configuration (such as a remote task environment).
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -42,11 +41,19 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
 from reef.core.errors import ReefError
+from reef.harness.episodes.executor import EpisodeExecutor
+
+
+class ExecutionValidator(Protocol):
+    """Adapter-specific constraints checked by the shared episode lifecycle."""
+
+    def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
+
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
 
@@ -126,8 +133,8 @@ class AdapterDescriptor:
     writable_paths: tuple[str, ...] = ()
     finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
     install: InstallSpec | None = None
-    #: True when the adapter isolates episodes itself (a task container) and
-    #: cannot be nested inside :class:`~reef.harness.episodes.executor.SandboxExecutor`.
+    #: True when the adapter isolates episodes itself; nesting is refused
+    #: unless validate_execution checks a compatible configuration.
     self_isolating: bool = False
     #: ``config`` node templates that point this harness at a model endpoint,
     #: keyed by API dialect (``openai``, ``responses``, ``anthropic``): ``{base_url}``,
@@ -139,6 +146,9 @@ class AdapterDescriptor:
     #: array of ``{id, name, config}``), so a resident process can reconcile the
     #: tree entry by entry; None for an adapter whose binary reads files only.
     tree_path: str | None = None
+    #: Optional quirk that validates the executor against the rendered tree,
+    #: replacing the blanket self_isolating restriction before launch.
+    validate_execution: ExecutionValidator | None = None
 
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
@@ -209,7 +219,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
-    finalize, quirk_whitelist = _load_quirks(data.get("quirks"), where)
+    finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
@@ -226,6 +236,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         self_isolating=self_isolating,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
+        validate_execution=validate_execution,
     )
 
 
@@ -337,9 +348,9 @@ def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
 
 def _load_quirks(
     module_name: Any, where: str
-) -> tuple[Callable[[dict[str, str]], dict[str, str]] | None, tuple[str, ...]]:
+) -> tuple[Callable[[dict[str, str]], dict[str, str]] | None, tuple[str, ...], ExecutionValidator | None]:
     if module_name is None:
-        return None, ()
+        return None, (), None
     if not isinstance(module_name, str):
         raise DescriptorError(f"{where} 'quirks' must be a dotted module name")
     try:
@@ -352,7 +363,10 @@ def _load_quirks(
     whitelist = tuple(getattr(module, "cleanup_whitelist", ()))
     if not all(isinstance(item, str) and item for item in whitelist):
         raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")
-    return finalize, whitelist
+    validate_execution = getattr(module, "validate_execution", None)
+    if validate_execution is not None and not callable(validate_execution):
+        raise DescriptorError(f"{where} quirks validate_execution must be callable")
+    return finalize, whitelist, validate_execution
 
 
 def external_descriptors() -> dict[str, AdapterDescriptor]:

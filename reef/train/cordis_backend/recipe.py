@@ -263,7 +263,7 @@ class CordisRecipe(Recipe):
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
         try:
-            executor = build_executor(evolution)
+            executor = build_executor(evolution, environ=values)
         except ReefError as exc:
             raise RecipeConfigError(str(exc)) from exc
         budget_defaults = {

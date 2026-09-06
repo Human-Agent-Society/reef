@@ -43,3 +43,10 @@ adaptations. It is not the paper's full benchmark or an unmodified upstream
 performance reference. The local campaign measured the baseline once and only
 new candidates thereafter; the reusable recipe uses Reef's paired evaluator.
 The campaign scripts, raw histories, and audit records remain internal.
+
+These measurements used the local experiment runner, before the shared
+Terminus adapter supported Python extensions. They validate the search method;
+they are not benchmark measurements of the updated adapter. A focused contract
+test now loads the exact selected harness as a `code_extension` through the
+shared recipe, episode lifecycle, Terminus runner, and publication path, with
+process launch and the remote trial replaced by test doubles.

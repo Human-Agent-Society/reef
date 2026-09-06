@@ -13,8 +13,8 @@
 # an episode only the descriptor's own env, and {root}/{prompt} are the only
 # substitutions.
 #
-# Isolation is Harbor's task container, not Reef's jail: Docker cannot nest in
-# bubblewrap, so a sandbox-executor deployment refuses to boot instead.
+# Evolved Python requires Reef's sandbox around this runner and remote E2B
+# tasks. Declarative trees can use the default local runner with Docker.
 name: terminus
 binary: reef-terminus
 argv:
@@ -26,6 +26,7 @@ env:
   REEF_TERMINUS_DIR: "{root}"
   REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
   REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
+  HOME: "{root}/workspace"
 files:
   config:
     primary:
@@ -37,9 +38,7 @@ files:
   # loading, so a command is discovered rather than pasted into the prompt.
   agent_command: "terminus-commands/{name}/SKILL.md"
   skill: "terminus/skills/{name}/SKILL.md"
-  # Kept as the shared schema's render target; the quirk rejects this node
-  # because evolved Python would run in the runner's process, outside the
-  # container that isolates the agent's own commands.
+  # One module exporting Agent(Terminus2), imported only inside Reef's jail.
   code_extension: "terminus/context/{name}.py"
 trajectory:
   format: terminus-atif-json
@@ -49,8 +48,10 @@ cleanup_whitelist:
   # Harbor writes its trial tree here: logs, the container's outputs, and the
   # ATIF trajectory the runner reads back.
   - "terminus/trials/**"
-# Docker does not nest in bubblewrap: Harbor's task container is the
-# boundary, so a sandbox-executor deployment refuses to boot instead.
+writable_paths:
+  - "terminus/sessions"
+  - "terminus/trials"
+# The execution quirk permits nesting only with remote task environments.
 self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks
 # Terminus 2 reaches the model through litellm, so the binding is the provider

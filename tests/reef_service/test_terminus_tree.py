@@ -109,6 +109,19 @@ def test_a_tree_without_a_model_name_cannot_run() -> None:
 
 
 @pytest.mark.unit
+def test_runner_refuses_extension_before_importing_or_executing_it(monkeypatch) -> None:
+    from reef.harness.episodes.executor import ISOLATION_ENV
+
+    monkeypatch.delenv(ISOLATION_ENV, raising=False)
+    tree = {
+        "terminus/config.json": '{"model_name":"stub"}',
+        "terminus/context/agent.py": "raise RuntimeError('must not run')\nclass Agent: pass\n",
+    }
+    with pytest.raises(TerminusTreeError, match="must run inside Reef's sandbox"):
+        runner.agent_spec("/root", tree)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("task", [".", "..", "", ".hidden", "we*ird?"])
 def test_a_task_that_cannot_name_a_trial_file_is_refused(task: str) -> None:
     # The task arrives in the episode prompt, and a promoted task can come from

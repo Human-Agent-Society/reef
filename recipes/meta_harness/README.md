@@ -78,6 +78,47 @@ With no `components` setting, every node kind the selected adapter exposes is
 eligible. The adapter's own render/finalization checks remain authoritative;
 for example, an adapter may still reject an otherwise valid Reef node kind.
 
+### Terminus 2 code evolution
+
+Use Reef's `terminus` adapter and its `code_extension` node to evolve Python
+behavior. It accepts one self-contained module defining `Agent(Terminus2)`.
+Start from a no-op subclass so the proposer sees the adapter contract:
+
+```yaml
+evolution:
+  adapter: terminus
+  executor: sandbox
+  sandbox:
+    egress_hosts: [api.e2b.dev, api.openai.com]
+    env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+  seed:
+    - id: agent
+      name: code_extension
+      config:
+        name: agent
+        code: |
+          from harbor.agents.terminus_2 import Terminus2
+          class Agent(Terminus2):
+              pass
+  meta_harness:
+    archive: ./meta-harness
+    components: [code_extension]
+```
+
+Combine this with the tasks, scorer, model, and proposer settings above. Export
+`REEF_TERMINUS_ENVIRONMENT=e2b` and `E2B_API_KEY` in the deployment. Install
+`reef-infra[terminus]` and `harbor[e2b]` on Linux with Python 3.12+ and bubblewrap;
+place the runtime and any local task directories under `/usr` or `/opt`, which
+the existing sandbox mounts read-only. Registry task ids also work.
+
+Reef's sandbox isolates the Python runner; Harbor uses E2B for the terminal
+task. Rendering never imports candidate code, and local execution refuses
+extensions. Rules, skills, model binding, timeouts, trajectories, scoring, and
+publication all use Reef's existing components. `egress_hosts` currently enables
+network access; it does not enforce a hostname firewall. Only explicitly named
+deployment variables are forwarded. A tree without an extension can still run
+stock Terminus 2 locally with Docker.
+
 ## Population and commits
 
 Every unique valid candidate is retained, including non-winners, and can be a
