@@ -51,6 +51,9 @@ from reef.train.types import PolicySample, ProcessorContext, TrainingBatch
 
 logger = logging.getLogger(__name__)
 
+#: Units a processor in manual mode holds beyond this many batches are released, oldest first.
+_MANUAL_UNIT_CAP_BATCHES = 4
+
 __all__ = [
     "NEVER",
     "WAIT",
@@ -339,15 +342,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         #    reason), release the report.
         if decision.outcome is Outcome.NEVER:
             if decision.reason is not None:
-                if decision.reason not in self._never_reasons:
-                    logger.warning(
-                        "%s scenario %r rejected report %s: %s (further occurrences counted silently)",
-                        type(self).__name__,
-                        self.scenario,
-                        report.agent_record_id,
-                        decision.reason,
-                    )
-                self._never_reasons[decision.reason] += 1
+                self._count_never(decision.reason, report.agent_record_id)
             self._terminate(report)
             return
         # 3. TRAIN: a retry at an occupied slot (or a discarded group) is
@@ -373,6 +368,54 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         else:
             self._groups.setdefault(key, {})[slot] = candidate
             self._refresh_group(key)
+        self._cap_manual_units()
+
+    def _count_never(self, reason: str, report_id: str, verb: str = "rejected") -> None:
+        """Warn once per distinct reason, then count silently."""
+        if reason not in self._never_reasons:
+            logger.warning(
+                "%s scenario %r %s report %s: %s (further occurrences counted silently)",
+                type(self).__name__,
+                self.scenario,
+                verb,
+                report_id,
+                reason,
+            )
+        self._never_reasons[reason] += 1
+
+    def set_training_mode(self, training_mode: str) -> None:
+        super().set_training_mode(training_mode)
+        # The base selects the initial mode inside __init__, before any unit store exists; a switch trims at once.
+        if hasattr(self, "_singletons"):
+            self._cap_manual_units()
+
+    def _cap_manual_units(self) -> None:
+        """Manual mode batches on instructions, not units, so the pile is bounded here instead."""
+        limit = self._batch_size * _MANUAL_UNIT_CAP_BATCHES
+        if self.training_mode != "manual" or self._ready_count() <= limit:
+            return
+        # The reserved batch is handed out until acknowledged, so its units stay put.
+        reserved = {c.report_agent_record_id for unit in self._pending_units or () for c in unit.candidates}
+        for unit in self._ordered_units():
+            if self._ready_count() <= limit:
+                return
+            if unit.candidates[0].report_agent_record_id in reserved:
+                continue
+            self._release_unit(unit)
+            self._count_never(
+                f"more than {limit} units held in manual mode", unit.candidates[0].report_agent_record_id, "released"
+            )
+
+    def _release_unit(self, unit: BatchUnit) -> None:
+        """Drop one held unit: its reports turn terminal and own their sources, so retention frees both."""
+        if unit.group_key is not None:
+            self._discard_group(unit.group_key)
+        for candidate in unit.candidates:
+            report = self._reports.pop(candidate.report_agent_record_id, None)
+            self._singletons.pop(candidate.report_agent_record_id, None)
+            if report is not None:
+                self._terminate(report)
+            self._terminal_owned_sources.update(candidate.source_agent_record_ids)
 
     def _terminate(self, report: AgentRecord) -> None:
         """Drop a report from the live set and mark it terminal.
@@ -456,7 +499,11 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         return self.make_batch(units, batch_number)
 
     def _select_units(self) -> tuple[BatchUnit, ...]:
-        """Select up to ``batch_size`` batch units in priority order.
+        """Select up to ``batch_size`` batch units in priority order."""
+        return tuple(self._ordered_units()[: self._batch_size])
+
+    def _ordered_units(self) -> list[BatchUnit]:
+        """Every held unit in priority order.
 
         By default everything shares arrival order. With ``ordered_groups``,
         singletons batch first (arrival order), then groups in key order.
@@ -470,7 +517,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         else:
             units = singletons + [BatchUnit(key, self._group_candidates(key)) for key in self._ready_groups]
             units.sort(key=lambda unit: unit.candidates[0].order)
-        return tuple(units[: self._batch_size])
+        return units
 
     def _consume_pending(self) -> frozenset[str]:
         if self._pending_units is None:

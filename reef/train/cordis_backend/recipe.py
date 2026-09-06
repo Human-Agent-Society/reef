@@ -486,8 +486,11 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
     ) -> Trainer:
-        if self.training_mode == "manual" and not self.propose.reads_requests:
-            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
+        if self.training_mode != "auto" and not self.propose.reads_requests:
+            raise RecipeConfigError(
+                f"harness evolution in training_mode={self.training_mode!r} requires a proposer "
+                "that accepts the 'requests' keyword"
+            )
         return Trainer.build(
             scenario,
             records,

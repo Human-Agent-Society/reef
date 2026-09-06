@@ -17,8 +17,8 @@ class ProcessorContext:
     training_mode: str = "auto"
 
     def __post_init__(self) -> None:
-        if self.training_mode not in ("auto", "manual"):
-            raise ValueError("training_mode must be 'auto' or 'manual'")
+        if self.training_mode not in ("auto", "manual", "both"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'both'")
 
     def with_config(self, config: Mapping[str, Any]) -> ProcessorContext:
         return replace(self, config=config)

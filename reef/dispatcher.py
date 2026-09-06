@@ -273,13 +273,13 @@ class Dispatcher:
         if item.request_type is RequestType.TRAIN:
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
-            if current.trainer.training_mode != "manual":
-                raise ValueError("explicit training requests require training_mode='manual'")
+            if current.trainer.training_mode == "auto":
+                raise ValueError("explicit training requests require training_mode='manual' or 'both'")
             if current.trainer.training_backend is None:
                 raise ValueError("explicit training requests require a training backend")
             request = TrainingRequest.from_dict(item.payload)
             if item.references:
-                raise ValueError("manual training requests do not reference inference receipts")
+                raise ValueError("training instructions do not reference inference receipts")
             refusal = training_request_refusal(request.text)
             if refusal is not None:
                 raise ValueError(refusal)

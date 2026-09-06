@@ -65,6 +65,8 @@ data:
   # batches - the SkillClaw move: learn from failures.
   batch_size: 1
   max_score: 0.0
+  # The default: nobody asks in this demo, and auto refuses POST /reef/train.
+  training_mode: auto
 
 reef:
   host: 127.0.0.1

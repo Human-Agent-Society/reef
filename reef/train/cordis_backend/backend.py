@@ -747,7 +747,8 @@ class CordisBackend(TrainingBackend):
             )
         manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
         # Failing traces become permanent gate tasks; off by default. The method picks which, Reef screens them.
-        if self._promote_failures and batch.request is None:
+        # An instruction step consumes the failures it carries, so it promotes them too or they are lost.
+        if self._promote_failures:
             if self._promote_task is None:
                 candidates: Sequence[str] = _default_promote(batch.samples)
             elif self._promote_accepts_manifest:
@@ -835,7 +836,7 @@ class CordisBackend(TrainingBackend):
                 extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
             if batch.request is not None:
                 if not self._propose.reads_requests:
-                    raise ValueError("manual harness evolution requires a proposer that accepts 'requests'")
+                    raise ValueError("an instruction step requires a proposer that accepts 'requests'")
                 extra["requests"] = ({"id": batch.request.id, **batch.request.to_dict(), "untrusted": True},)
             try:
                 proposal = self._propose(self._nodes(), batch.samples, models, **extra)

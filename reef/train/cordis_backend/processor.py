@@ -25,17 +25,21 @@ class CordisProcessor(ReportedFeedbackProcessor):
     outside it are terminal and release their records. A report may reference
     one request or a whole run's worth; several references become one
     trajectory sample. The backends consume
-    the resulting trace batches without adding processor logic.
+    the resulting trace batches without adding processor logic. In ``both``
+    a queued instruction batches with the failing traces an automatic batch
+    would take next, up to ``batch_size``, so the proposer reads the request
+    beside them; in ``manual`` it runs alone.
     """
 
     output_schema = TraceBatch
-    supported_training_modes = frozenset({"auto", "manual"})
+    supported_training_modes = frozenset({"auto", "manual", "both"})
     required_request_types = frozenset(RequestType)
 
     def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
-        if request is not None:
+        if request is not None and self.training_mode == "manual":
             self._pending_units = ()
             return TraceBatch(request.id, ())
+        # In both an instruction takes the units an automatic batch would, none included; the base attaches it.
         return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:
@@ -97,16 +101,19 @@ class RecordDrivenTraceProcessor(DataProcessor):
     ``score=None``, and the proposer contract requires handling unscored
     samples. Reports that arrive under this policy are released untouched;
     a deployment with real outcome signal selects the reported policy
-    instead, because a measured result beats model self judgment.
+    instead, because a measured result beats model self judgment. In ``both``
+    a queued instruction batches with the oldest held records, up to
+    ``batch_size``, as an automatic batch would; in ``manual`` it runs alone.
     """
 
     output_schema = TraceBatch
-    supported_training_modes = frozenset({"auto", "manual"})
+    supported_training_modes = frozenset({"auto", "manual", "both"})
     required_request_types = frozenset(RequestType)
 
     def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
-        if request is not None:
+        if request is not None and self.training_mode == "manual":
             return TraceBatch(request.id, ())
+        # In both an instruction takes the records an automatic batch would, none included; the base attaches it.
         return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:

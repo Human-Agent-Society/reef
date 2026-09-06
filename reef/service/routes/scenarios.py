@@ -45,8 +45,8 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if set(payload) != {"training_mode"} or payload["training_mode"] not in ("auto", "manual"):
-            raise ValueError("expected training_mode 'auto' or 'manual'")
+        if set(payload) != {"training_mode"} or payload["training_mode"] not in ("auto", "manual", "both"):
+            raise ValueError("expected training_mode 'auto', 'manual' or 'both'")
         result = await asyncio.to_thread(
             request_service.dispatcher.set_training_mode,
             request.match_info["scenario"],

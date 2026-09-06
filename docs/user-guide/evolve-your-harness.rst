@@ -136,28 +136,39 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
 The loop
 --------
 
-The default ``data.training_mode: auto`` follows the batching loop below.
-For user-directed evolution, set ``data.training_mode: manual`` and submit
-``POST /reef/train`` with ``text``, ``session`` and ``release_id`` (see the
-`manual training API <../reference/http-api.rst#manual-training>`__).
-No inference receipts or failure report are needed. Each request starts
-one step; ordinary traffic never starts evolution in this mode. A request
+The loop below runs in the default ``data.training_mode: auto``, from
+failures alone; an ask is refused there. A deployment that also takes asks
+sets ``data.training_mode: both``, as the tutorial's ``deployment.yaml``
+does: ``POST /reef/train`` with ``text``, ``session`` and ``release_id``
+(see the `manual training API
+<../reference/http-api.rst#manual-training>`__) queues an instruction, and
+the next step that reads it runs it first, oldest first, one per step,
+with no call to the update route; the failure path continues between
+instructions. ``data.training_mode: manual`` runs instructions only:
+ordinary traffic never starts evolution in that mode. No inference receipts
+or failure report are needed for an ask. A request
 whose text is credential shaped or directive shaped is refused with the
 rule named, and the scenario must already exist. A request whose step fails
 is not retried: it is consumed with a ``skipped`` row in the catalog that
-carries the error, and you send it again if you want it run. The step cap
-and the failure streak count every step, a request's step included, and
-stop automatic steps only; a request still runs past them.
+carries the error, and you send it again if you want it run; the failures
+beside it in ``both`` stay held for the next step. The step cap and the
+failure streak count every step, a request's step included, and stop
+automatic steps only; a request still runs past them.
+``POST /reef/scenarios/{scenario}/update`` switches a running deployment
+between the three.
 
-The proposer must explicitly accept ``requests``. It receives one request
-mapping containing ``id``, ``text``, ``session``, ``release_id`` and
-``untrusted=True``, together with the current harness and model bindings.
-``samples`` is empty in this path: the method answers the user's request
-instead of learning from failed exchanges. Its mutations pass through the
-same gate and ``evolution.publish`` policy. Pending agent proposals and
-periodic rollback rechecks cannot take the step reserved for a user's
-instruction. The tutorial's failure-only proposer must be extended with
-a ``requests`` branch before selecting manual mode.
+The proposer must explicitly accept ``requests`` before the recipe builds
+in ``manual`` or ``both``. It receives one request mapping containing
+``id``, ``text``, ``session``, ``release_id`` and ``untrusted=True``,
+together with the current harness and model bindings. In ``both``,
+``samples`` carries what an automatic batch would take next, up to
+``batch_size`` and possibly none (failing traces in the score window, or
+records under ``data.batch_policy: records``), so the method answers the
+request with the failures beside it; in ``manual`` it is empty. Its mutations pass
+through the same gate and ``evolution.publish`` policy. Pending agent
+proposals and periodic rollback rechecks cannot take the step an
+instruction owns. The tutorial's ``propose`` takes ``requests``; a
+failure-only proposer must be extended with a ``requests`` branch first.
 
 .. flow::
    :loop: publish the winner, or restore the snapshot
@@ -178,7 +189,9 @@ window entries have accumulated, one step runs the loop once. With
 ``evolution.promote_failures: true`` a failing trace's prompt is added to the
 gate as a permanent task, so the seed tasks are the floor of a suite that
 grows from real failures and no later candidate can win while bringing one
-back (the method's ``evaluate`` must score an arbitrary prompt). A prompt is
+back (the method's ``evaluate`` must score an arbitrary prompt); an
+instruction step in ``both`` promotes the failures it carries the same way.
+A prompt is
 real traffic, so it meets the tree's own credential tripwire first: a prompt
 carrying a key-shaped literal is never promoted, never persisted, and never
 re-run as a task, and the step goes on without it. A prompt shaped like an
