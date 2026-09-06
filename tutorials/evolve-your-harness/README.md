@@ -80,6 +80,9 @@ reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 
 Use the exact model ID accepted by your provider, not the placeholder above.
 An unset or empty `REEF_UPSTREAM_MODEL` is reported at startup.
+The deployment resolves this variable in `reef.upstream_model`. The recipe
+omits `model.path` and uses the resolved runtime's model; recipe YAML loading
+does not read environment variables or expand `${...}` references.
 
 Use your provider's API key, or omit it for a local endpoint without authentication.
 `deployment.yaml` keeps Reef running until interrupted. It contains both the

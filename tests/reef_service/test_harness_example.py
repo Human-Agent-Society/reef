@@ -420,6 +420,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
         assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
     service = service_settings_from_config(config)
+    monkeypatch.delenv("REEF_UPSTREAM_MODEL")  # Recipe construction uses the resolved runtime, not the environment.
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(recipe_dir)},

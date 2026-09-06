@@ -78,7 +78,8 @@ def build_named_recipe(
     (defaulting to ``REEF_RECIPE_CONFIG_DIR``), or the reserved core name
     ``recipe``. Reef bundles no presets — they are deployment data (see
     ``docs/reference/configuration.rst``). A preset's ``runtime`` section builds the recipe's
-    runtime; without one the recipe gets ``default_runtime``. Dotted references are
+    runtime; without one the recipe gets ``default_runtime`` and may omit
+    ``model.path`` to use that runtime's model. Dotted references are
     not names: they are operator configuration for :func:`build_recipe`, so a
     name never triggers an import.
     """
@@ -98,11 +99,16 @@ def build_named_recipe(
             f"unknown deployment recipe {name!r}; available recipes: {', '.join(sorted(available))}"
         )
 
-    settings = load_recipe_config(path, environ=values)
-    model_path = settings["model"].get("path")
-    if not isinstance(model_path, str) or not model_path:
-        raise RecipeConfigError(f"recipe {name!r} must configure a non-empty model.path")
+    settings = load_recipe_config(path)
     runtime_config = settings["runtime"]
+    if "path" not in settings["model"] and not runtime_config and default_runtime is not None:
+        settings["model"]["path"] = getattr(default_runtime, "model_path", None)
+    model_path = settings["model"].get("path")
+    if not isinstance(model_path, str) or not model_path.strip():
+        raise RecipeConfigError(
+            f"recipe {name!r} requires a non-empty model.path or a default runtime with a model "
+            "(set reef.upstream_model for an upstream deployment)"
+        )
     # Training runtimes are Ray-based and cannot be built from YAML, so a
     # preset without a runtime section gets the default and the recipe itself
     # reports whether it needs a training runtime injected instead.
