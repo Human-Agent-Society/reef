@@ -115,6 +115,13 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         committed_head = scenario.current_artifact_ref()
         assert committed_head != old_head
         assert scenario.repository.backend.current() == old_head
+        sync = scenario.commit_status["artifact_head_sync"]
+        assert sync == {
+            "state": "pending",
+            "release_id": committed_head.release_id,
+            "error": "backend pointer unavailable",
+        }
+        assert dispatcher.build_training_status()["scenarios"]["stale-artifact-head"]["artifact_head_sync"] == sync
         assert scenario.commit_log.records()[-1].artifact_ref == committed_head
     finally:
         dispatcher.close()
@@ -146,6 +153,11 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
         assert scenario.commit_log is None
         assert scenario.trainer.state == result.state
         assert scenario.current_artifact_ref() == scenario.repository.backend.current() != head
+        assert scenario.commit_status["artifact_head_sync"] == {
+            "state": "synchronized",
+            "release_id": scenario.current_artifact_ref().release_id,
+            "error": None,
+        }
     finally:
         dispatcher.close()
 
@@ -213,6 +225,8 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         assert scenario.trainer.state == committed.algorithm_state == result.state
         assert scenario.current_artifact_ref() == committed.artifact_ref
         assert backend.current() == unrelated
+        assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
+        assert scenario.commit_status["artifact_head_sync"]["release_id"] == committed.artifact_ref.release_id
         assert unrelated not in (old_head, committed.artifact_ref)
         with pytest.raises(ArtifactConflict):
             scenario.repository.synchronize_checkpoint()

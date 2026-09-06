@@ -11,15 +11,19 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from copy import deepcopy
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Literal
 
 from reef.artifact.artifact import (
     Artifact,
+    ArtifactConflict,
     ArtifactError,
     ArtifactNotFound,
+    ArtifactPublicationError,
     ArtifactRef,
     LiveWeightArtifactRef,
     is_local_release,
@@ -40,6 +44,13 @@ from reef.train.types import (
     SavedArtifactPublication,
     TrainStepResult,
 )
+
+
+@dataclass(frozen=True)
+class _ArtifactHeadSync:
+    state: Literal["synchronized", "pending", "conflict"]
+    release_id: str
+    error: str | None = None
 
 
 class ScenarioCommitProtocol:
@@ -84,7 +95,8 @@ class ScenarioCommitProtocol:
             (record for record in reversed(records) if record.operation == "training"),
             None,
         )
-        self._commit_status_snapshot = (scenario_step, self._latest_training_record)
+        self._artifact_head_sync = _ArtifactHeadSync("synchronized", artifacts.checkpoint.release_id)
+        self._commit_status_snapshot = (scenario_step, self._latest_training_record, self._artifact_head_sync)
 
     @property
     def lock(self) -> RLock:
@@ -109,9 +121,10 @@ class ScenarioCommitProtocol:
     @property
     def commit_status(self) -> Mapping[str, Any]:
         """Current step and latest training outcome from one non-blocking snapshot."""
-        step, record = self._commit_status_snapshot
+        step, record, head_sync = self._commit_status_snapshot
         return {
             "scenario_step": step,
+            "artifact_head_sync": asdict(head_sync),
             "last_committed_step": (
                 None
                 if record is None
@@ -127,7 +140,7 @@ class ScenarioCommitProtocol:
         if step != self._step + 1:
             raise ValueError(f"scenario step must advance from {self._step} to {self._step + 1}")
         self._step = step
-        self._commit_status_snapshot = (step, self._latest_training_record)
+        self._commit_status_snapshot = (step, self._latest_training_record, self._artifact_head_sync)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
@@ -198,6 +211,8 @@ class ScenarioCommitProtocol:
                 self._reconcile_recorded_artifact(recorded)
                 self._settle_trainer_commit(prepared, recorded, next_step)
                 return recorded.artifact_ref
+            if self._commit_log is not None:
+                self._synchronize_checkpoint()
             source = artifacts.resolve(target_ref)
             has_commit_log = self._commit_log is not None
             surface = self._binding.surface
@@ -238,7 +253,7 @@ class ScenarioCommitProtocol:
                     rollback_target_release_id=release_id,
                 )
                 if has_commit_log:
-                    artifacts.commit_checkpoint(published_ref, expected=current_ref, expected_checkpoint=checkpoint)
+                    self._commit_checkpoint(published_ref, expected=current_ref, expected_checkpoint=checkpoint)
             except Exception:
                 artifacts.discard(staged)
                 raise
@@ -256,6 +271,8 @@ class ScenarioCommitProtocol:
                 self._settle_trainer_commit(prepared, recorded, next_step)
                 return result.state
 
+            if self._commit_log is not None:
+                self._synchronize_checkpoint()
             publication = result.publication
             if isinstance(publication, DurableWeightsPublication):
                 # Checkpoint policy lives here, so a backend that exported
@@ -375,7 +392,7 @@ class ScenarioCommitProtocol:
                 )
             if not pending:
                 if checkpointed and has_commit_log:
-                    artifacts.commit_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
+                    self._commit_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
                 elif not checkpointed:
                     artifacts.advance(local_artifact.ref, expected=head)
         except Exception:
@@ -390,6 +407,32 @@ class ScenarioCommitProtocol:
         self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
+    def _commit_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        self._artifacts.commit_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+        self._refresh_committed_checkpoint()
+
+    def _refresh_committed_checkpoint(self) -> None:
+        # The step is already committed. Expose the pointer failure in
+        # commit_status without making the caller repeat a successful step.
+        # A new commit must synchronize first and propagates any failure.
+        with suppress(ArtifactPublicationError, ArtifactConflict):
+            self._synchronize_checkpoint()
+
+    def _synchronize_checkpoint(self) -> None:
+        checkpoint = self._artifacts.checkpoint
+        try:
+            self._artifacts.repository.synchronize_checkpoint()
+        except ArtifactConflict as exc:
+            self._artifact_head_sync = _ArtifactHeadSync("conflict", checkpoint.release_id, str(exc))
+            raise
+        except ArtifactPublicationError as exc:
+            self._artifact_head_sync = _ArtifactHeadSync("pending", checkpoint.release_id, str(exc))
+            raise
+        else:
+            self._artifact_head_sync = _ArtifactHeadSync("synchronized", checkpoint.release_id)
+        finally:
+            self._commit_status_snapshot = (self._step, self._latest_training_record, self._artifact_head_sync)
+
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         loader = self._binding.surface.loader
         if isinstance(loader, ArtifactActivator):
@@ -400,6 +443,8 @@ class ScenarioCommitProtocol:
         self._trainer.commit_applied(prepared.algorithm_state)
         self._trainer.apply_compaction(prepared.compacted_ids)
         self._trainer.commit(prepared)
+        if self._commit_log is None:
+            self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
         if record.operation == "training":
             self._latest_training_record = record
         self.advance_to(next_step)
@@ -460,7 +505,11 @@ class ScenarioCommitProtocol:
 
     def _reconcile_recorded_artifact(self, record: CommitRecord) -> None:
         current = self._artifacts.current
-        if record.pending or current == record.artifact_ref:
+        if record.pending:
+            return
+        if current == record.artifact_ref:
+            if record.checkpoint:
+                self._refresh_committed_checkpoint()
             return
         if self._commit_log is None:
             raise RuntimeError("a recorded retry requires a commit log")
@@ -470,7 +519,7 @@ class ScenarioCommitProtocol:
             self._creation_artifact,
         )
         if record.checkpoint:
-            self._artifacts.commit_checkpoint(
+            self._commit_checkpoint(
                 record.artifact_ref, expected=previous, expected_checkpoint=self._artifacts.checkpoint
             )
         else:

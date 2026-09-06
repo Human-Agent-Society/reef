@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import logging
 import shutil
 import tempfile
 import uuid
@@ -20,8 +19,6 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactRef,
 )
-
-_LOG = logging.getLogger(__name__)
 
 
 class RepositoryBackend(ABC):
@@ -234,23 +231,12 @@ class Repository:
             self._current_artifact = ref
 
     def commit_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        """Install committed serving state and refresh its durable mirror."""
-        backend = self.require_staged_commit_support()
+        """Install already-committed serving and checkpoint refs without storage I/O."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
                 raise ArtifactConflict("repository heads changed before the committed release was installed")
             self._current_artifact = ref
             self._checkpoint_artifact = ref
-        try:
-            backend.commit_release(ref, expected_parent=expected_checkpoint)
-        except (ArtifactPublicationError, ArtifactConflict):
-            # The commit log is already durable. Its state must remain installed;
-            # recovery or the next publication repairs this derived pointer.
-            # An unrelated head still fails synchronization; leave it untouched
-            # without reporting an already-committed scenario step as failed.
-            _LOG.warning(
-                "could not refresh the committed artifact head; the commit log remains authoritative", exc_info=True
-            )
 
     def synchronize_checkpoint(self) -> None:
         """Repair a stale backend head from the committed checkpoint, never vice versa."""
@@ -336,7 +322,6 @@ class Repository:
         ``advance_head``). ``False`` mints a pending release that no head
         moves to.
         """
-        self.synchronize_checkpoint()
         ref = self._backend.publish(
             (
                 artifact.with_repository(self)

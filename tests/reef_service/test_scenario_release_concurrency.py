@@ -9,7 +9,7 @@ from threading import Event
 
 import pytest
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactConflict, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
@@ -278,3 +278,132 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     assert historical[0].ref == previous_ref
     assert historical[1] == {"score": 2.0}
     assert version.ref == previous_ref
+
+
+@pytest.mark.parametrize("checkpoint", [False, True])
+def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scenario, monkeypatch, checkpoint):
+    scenario, _ = local_scenario
+    backend = scenario.repository.backend
+    first = _prepare(scenario)
+
+    def unavailable(*args, **kwargs):
+        raise ArtifactPublicationError("storage unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "commit_release", unavailable)
+        scenario.commit(first)
+        committed = scenario.current_artifact_ref()
+        assert scenario.scenario_step == 1
+        assert scenario.commit_status["artifact_head_sync"] == {
+            "state": "pending",
+            "release_id": committed.release_id,
+            "error": "storage unavailable",
+        }
+        second = _prepare(scenario)
+        monkeypatch.setattr(scenario._commit_protocol, "_should_checkpoint", lambda result: checkpoint)
+
+        def unexpected_publish(*args, **kwargs):
+            pytest.fail("a new release must not publish while its committed parent is unsynchronized")
+
+        patch.setattr(backend, "publish", unexpected_publish)
+        with pytest.raises(ArtifactPublicationError, match="storage unavailable"):
+            scenario.commit(second)
+        assert scenario.scenario_step == 1
+        assert len(scenario.commit_log.records()) == 1
+        assert scenario.current_artifact_ref() == committed
+
+    # Retry the same prepared step after storage recovers; the committed
+    # parent is repaired first, and the new step advances exactly once.
+    scenario.commit(second)
+    assert scenario.scenario_step == 2
+    assert len(scenario.commit_log.records()) == 2
+    assert scenario.repository.checkpoint_artifact == backend.current()
+    assert scenario.commit_status["artifact_head_sync"] == {
+        "state": "synchronized",
+        "release_id": backend.current().release_id,
+        "error": None,
+    }
+
+
+def test_pointer_conflict_preserves_committed_step_and_blocks_rollback(local_scenario, monkeypatch, tmp_path):
+    scenario, _ = local_scenario
+    backend = scenario.repository.backend
+    initial = scenario.current_artifact_ref()
+    first = _prepare(scenario)
+    foreign_path = tmp_path / "foreign"
+    foreign_path.mkdir()
+    (foreign_path / "model.txt").write_text("another writer")
+    promote = backend.commit_release
+    unrelated = None
+
+    def competing_writer(ref, *, expected_parent):
+        nonlocal unrelated
+        unrelated = backend.publish(Artifact.local(foreign_path), expected_parent=expected_parent)
+        promote(ref, expected_parent=expected_parent)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "commit_release", competing_writer)
+        scenario.commit(first)
+    assert scenario.scenario_step == 1
+    assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
+    assert backend.current() == unrelated
+    with pytest.raises(ArtifactConflict):
+        scenario.rollback(initial.release_id)
+    assert scenario.scenario_step == 1
+    assert len(scenario.commit_log.records()) == 1
+    assert backend.current() == unrelated
+
+
+def test_rollback_exposes_pointer_failure_after_its_commit(local_scenario, monkeypatch):
+    scenario, _ = local_scenario
+    initial = scenario.current_artifact_ref()
+    scenario.commit(_prepare(scenario))
+    backend = scenario.repository.backend
+    previous = backend.current()
+
+    def unavailable(*args, **kwargs):
+        raise ArtifactPublicationError("storage unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(backend, "commit_release", unavailable)
+        rolled_back = scenario.rollback(initial.release_id)
+    assert scenario.scenario_step == 2
+    assert scenario.commit_log.records()[-1].operation == "rollback"
+    assert scenario.current_artifact_ref() == rolled_back
+    assert backend.current() == previous
+    assert scenario.commit_status["artifact_head_sync"] == {
+        "state": "pending",
+        "release_id": rolled_back.release_id,
+        "error": "storage unavailable",
+    }
+
+
+def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
+    scenario, _ = local_scenario
+    result = _prepare(scenario)
+    append = scenario.commit_log.append
+
+    def lose_ack(record):
+        append(record)
+        raise OSError("commit acknowledgment lost")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(scenario.commit_log, "append", lose_ack)
+        with pytest.raises(OSError, match="acknowledgment lost"):
+            scenario.commit(result)
+    committed = scenario.commit_log.records()[-1]
+
+    def unavailable(*args, **kwargs):
+        raise ArtifactPublicationError("storage unavailable")
+
+    monkeypatch.setattr(scenario.repository.backend, "commit_release", unavailable)
+    scenario.commit(result)
+    assert scenario.scenario_step == 1
+    assert len(scenario.commit_log.records()) == 1
+    assert scenario.trainer.state == result.state
+    assert scenario.current_artifact_ref() == committed.artifact_ref
+    assert scenario.commit_status["artifact_head_sync"] == {
+        "state": "pending",
+        "release_id": committed.artifact_ref.release_id,
+        "error": "storage unavailable",
+    }
