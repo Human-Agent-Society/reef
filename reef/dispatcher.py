@@ -20,7 +20,6 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
-from reef.core.configuration import ConfigManager
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -123,9 +122,6 @@ class Dispatcher:
         experiment_tracker: ExperimentTracker | None = None,
     ) -> None:
         self._recipe = recipe
-        self.config_manager = ConfigManager(
-            None if agent_record_dir is None else Path(agent_record_dir) / "configuration.sqlite3"
-        )
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self._registry = ScenarioRegistry(
             recipe,
@@ -747,7 +743,6 @@ class Dispatcher:
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
             scenario.close()
-        self.config_manager.close()
         try:
             self._experiment_tracker.close()
         except Exception:

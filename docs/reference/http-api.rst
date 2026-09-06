@@ -60,36 +60,6 @@ Routes
 | ``GET /reef/status``                            | training, serving, and storage state              |
 +-------------------------------------------------+---------------------------------------------------+
 
-Runtime configuration
----------------------
-
-``GET /reef/config`` reads supported deployment settings, their active
-revision, and update history. GET includes an ``ETag`` containing the latest
-accepted revision. ``revision`` advances on acceptance; ``active_revision``
-advances only after successful application.
-
-Create an update with ``POST /reef/config/updates``:
-
-.. code:: bash
-
-   curl -X POST http://127.0.0.1:8900/reef/config/updates \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -H 'If-Match: "0"' \
-     -d '{"reef":{"inference_retry_timeout_s":60}}'
-
-``If-Match`` is optional; a stale revision returns ``409``. Invalid or
-unsupported fields return ``400`` without enqueuing an update. Acceptance
-returns ``202`` with ``scope``, ``id``, ``revision``, ``patch`` and
-``status: "pending"``. Application may already be complete by the time this
-receipt arrives. Poll GET for ``pending``, ``applied`` or ``failed``; failed
-updates include ``error``.
-
-Updates support the three ``reef.inference_retry_*`` fields and apply to
-subsequent non-streaming inference requests. An in-flight request keeps the
-same policy across retries. Scenario configuration is selected at creation;
-there is no ``POST /reef/scenarios/{scenario}/config/updates`` endpoint.
-
 Headers
 -------
 

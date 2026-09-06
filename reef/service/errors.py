@@ -14,7 +14,6 @@ from aiohttp import web
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.configuration import ConfigConflict
 from reef.core.errors import ReefError, UnknownScenario
 from reef.records import RecordConflict
 from reef.runtime.inference import UpstreamStatusError
@@ -30,7 +29,6 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactConflict, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPConflict),
     (RecordConflict, web.HTTPConflict),
-    (ConfigConflict, web.HTTPConflict),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),

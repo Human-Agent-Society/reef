@@ -1211,9 +1211,6 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
 
     class Dispatcher:
         def __init__(self, scenario) -> None:
-            from reef.core.configuration import ConfigManager
-
-            self.config_manager = ConfigManager()
             self.current = scenario
 
         def get_or_create_scenario(self, *args, **kwargs):
@@ -1293,11 +1290,6 @@ def test_stream_and_failure_release_their_inference_admission_handles() -> None:
             self.runtime = runtime
 
     class Dispatcher:
-        def __init__(self) -> None:
-            from reef.core.configuration import ConfigManager
-
-            self.config_manager = ConfigManager()
-
         @staticmethod
         def get_or_create_scenario(*args, **kwargs):
             del args, kwargs

@@ -152,29 +152,6 @@ return ``409``. There is no scenario configuration update API. Create a new
 scenario to select different settings. Unbounded numeric defaults are encoded
 as JSON strings such as ``"inf"``.
 
-Runtime deployment configuration
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-``ConfigManager`` owns deployment settings and a persisted FIFO update queue.
-``GET /reef/config`` reads active values and update status;
-``POST /reef/config/updates`` accepts supported changes. Each non-streaming
-inference request holds one immutable retry policy for all of its attempts.
-
-Supported fields are ``reef.inference_retry_initial_s``,
-``reef.inference_retry_max_s`` and ``reef.inference_retry_timeout_s``. Updates
-apply to subsequent requests. The manager validates updates before acceptance
-and application, and persists activation before exposing the new snapshot.
-
-The queue and active values live in ``configuration.sqlite3`` under
-``reef.agent_record_dir``; an in-memory dispatcher has in-memory configuration.
-This manager coordinates one Reef HTTP service process. Ports, model loading,
-storage paths, optimizer configuration and worker topology remain deployment
-startup settings. The API does not reconfigure external worker processes or
-expose credentials.
-
-See `runtime configuration API <http-api.rst#runtime-configuration>`__ for
-payloads, revisions, and update status.
-
 A recipe is selected three ways:
 
 - **The core record-only recipe:** ``recipe: recipe``

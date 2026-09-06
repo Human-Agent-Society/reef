@@ -128,8 +128,7 @@ Recovery reconstructs the recipe from that stored configuration even when the
 deployment's defaults have changed. A conflicting repeat creation returns
 ``409``; use a new scenario name for a different configuration.
 
-Only deployment service settings use ``ConfigManager`` and its runtime update
-API. See ``test_scenario_configuration.py`` for creation, recovery, and conflict
+See ``test_scenario_configuration.py`` for creation, recovery, and conflict
 contracts.
 
 The two feedback paths
