@@ -4,9 +4,10 @@ import copy
 import json
 
 import pytest
-from tests.reef_service.test_meta_harness_health import raw_trial
 
 from recipes.meta_harness.examples.terminal_bench import agent_failure_policy as policy
+
+from .test_meta_harness_health import raw_trial
 
 
 def completed_loss():
@@ -119,7 +120,7 @@ def test_incomplete_unaccounted_or_different_failures_remain_unscored(change):
     elif change == "other_exception":
         row["exception_type"] = "TimeoutException"
     else:
-        from tests.reef_service.test_meta_harness_terminal_evidence import pane_record
+        from .test_meta_harness_terminal_evidence import pane_record
 
         row["terminal_evidence"] = pane_record()
         row["terminal_evidence"]["text_sha256" if change == "bad_terminal_hash" else "protocol"] = "invalid"
@@ -136,7 +137,7 @@ def test_completed_proof_rechecks_raw_times_trace_optional_pane_and_bill(change)
     elif change == "cost_usd":
         row[change] = 0.2
     else:
-        from tests.reef_service.test_meta_harness_terminal_evidence import pane_record
+        from .test_meta_harness_terminal_evidence import pane_record
 
         row[change] = pane_record()
     with pytest.raises(ValueError, match="retained terminal evidence"):

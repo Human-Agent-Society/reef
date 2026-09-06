@@ -7,6 +7,8 @@ import pytest
 from recipes.meta_harness.examples.terminal_bench import e2b_transport as transport
 from reef.harness.executor import EpisodeLaunchError, EpisodeTimeout
 
+pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
+
 
 class Clock:
     now = 0
@@ -93,6 +95,7 @@ def test_initial_acknowledgement_loss_never_repeats_command(clock):
 
 
 def test_stream_timeout_before_episode_deadline_reconnects(clock):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.exceptions import TimeoutException
 
     result = SimpleNamespace(exit_code=0)
@@ -122,6 +125,7 @@ def test_repeated_immediate_drops_stop_bounded_without_repeating_work(clock):
 
 
 def test_nonzero_reconnected_result_keeps_diagnostics(clock):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.sandbox.commands.command_handle import CommandExitException
 
     result = CommandExitException(stdout="out", stderr="err", exit_code=7, error="failed")

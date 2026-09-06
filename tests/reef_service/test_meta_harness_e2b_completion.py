@@ -105,6 +105,7 @@ class DroppedStream(SandboxDouble):
         self.commands.connect = self.connect
 
     def connect(self, pid, **kwargs):
+        pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
         from e2b.exceptions import NotFoundException
 
         self.connections.append(pid)
@@ -148,6 +149,7 @@ def test_drop_then_not_found_recovers_exact_completed_runner_without_restarting(
 def test_unrecoverable_stream_retains_evidence_before_cleanup_without_inventing_bill(monkeypatch, tmp_path, state):
     import hashlib
 
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Sandbox
 
     from recipes.meta_harness.examples.terminal_bench import e2b_transport

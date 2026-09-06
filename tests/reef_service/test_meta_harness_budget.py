@@ -1,9 +1,10 @@
 """Campaign budget configuration rejects unbounded or ambiguous work."""
 
 import pytest
-from tests.reef_service.test_meta_harness_driver import arguments
 
 from recipes.meta_harness.examples.terminal_bench.run import make_recipe
+
+from .test_meta_harness_driver import arguments
 
 
 @pytest.mark.parametrize("cap", [0, -1, float("inf"), float("nan")])

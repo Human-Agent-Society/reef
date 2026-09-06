@@ -141,6 +141,7 @@ def test_proposer_receives_tool_results_before_returning_composition():
 
 def test_e2b_install_timeout_is_caught_without_mutating_hardlinked_runtime(tmp_path):
     pytest.importorskip("harbor")
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.exceptions import TimeoutException
 
     original = tmux_source()

@@ -89,6 +89,11 @@ where upstream spends one; budgets expressed in episodes are not directly
 comparable to upstream's iteration counts. Failed episodes count as zero; a
 non-finite score is rejected by Reef before settlement.
 
+The [Terminal-Bench example](examples/terminal_bench/README.md) supplies a
+committed campaign that measures the baseline once and only the new candidate
+each iteration. Its [results](examples/terminal_bench/RESULTS.md) compare that
+execution with upstream and include the selected harness and recorded scores.
+
 The complete population, parents, scores, served id, proposal attempts, and
 budget counters live under `meta_harness_population` in Reef's algorithm
 state. Proposal and selection changes are staged until the scenario commit is
@@ -105,4 +110,3 @@ incumbent, multiplied by `episode_repeats`. A proposal is not started unless
 the complete next gate fits. Zero disables a budget; Reef's shared
 `max_steps`, `max_model_calls_per_step`, executor, timeout, and residue options
 remain available as usual.
-

@@ -2,8 +2,6 @@ import copy
 import json
 
 import pytest
-from tests.reef_service.test_commit_log import sample_record
-from tests.reef_service.test_meta_harness_driver import campaign, finish  # noqa: F401
 
 from recipes.meta_harness.examples.terminal_bench.campaign import CAMPAIGN_STATE_KEY
 from recipes.meta_harness.examples.terminal_bench.journal_storage import (
@@ -14,6 +12,9 @@ from recipes.meta_harness.examples.terminal_bench.journal_storage import (
 from recipes.meta_harness.examples.terminal_bench.run import SCENARIO, advance, baseline_ready
 from reef.artifact import GitLFSRepositoryBackend
 from reef.scenario.commit_log import CommitLogError
+
+from .test_commit_log import sample_record
+from .test_meta_harness_driver import campaign, finish  # noqa: F401
 
 
 def test_compressed_frames_preserve_exact_state_and_lazy_records(tmp_path, monkeypatch):

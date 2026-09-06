@@ -4,13 +4,14 @@ import hashlib
 import json
 
 import pytest
-from tests.reef_service.test_meta_harness_agent_failure_policy import failed  # noqa: F401
-from tests.reef_service.test_meta_harness_driver import campaign, finish, open_campaign  # noqa: F401
-from tests.reef_service.test_meta_harness_health import raw_trial
 
 from recipes.meta_harness.examples.terminal_bench import agent_failure_policy as policy
 from recipes.meta_harness.examples.terminal_bench import terminal_evidence as terminal
 from recipes.meta_harness.examples.terminal_bench.campaign import CAMPAIGN_STATE_KEY, TerminalBenchBackend
+
+from .test_meta_harness_agent_failure_policy import failed  # noqa: F401
+from .test_meta_harness_driver import campaign, finish, open_campaign  # noqa: F401
+from .test_meta_harness_health import raw_trial
 
 COMMAND = (
     "set -e; cd /app; test -s /app/model.bin; ./checker test /app/model.bin /app/data.txt 1; "
@@ -173,11 +174,13 @@ def test_shared_e2b_download_passes_pane_through_the_normal_reef_reader(tmp_path
     import io
     import tarfile
 
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Sandbox
-    from tests.reef_service.test_meta_harness_e2b import SandboxDouble
 
     from recipes.meta_harness.examples.terminal_bench.e2b_executor import E2BEpisodeExecutor
     from reef.harness.trajectory import read_terminus_atif
+
+    from .test_meta_harness_e2b import SandboxDouble
 
     sandbox = SandboxDouble()
     raw = json.dumps(raw_trial(cost=0.1, reward=None, exception="RuntimeError")).encode()

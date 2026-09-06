@@ -2,10 +2,11 @@ import copy
 from types import SimpleNamespace
 
 import pytest
-from tests.reef_service.test_meta_harness_driver import campaign, finish, open_campaign  # noqa: F401
 
 from recipes.meta_harness.examples.terminal_bench import agent_failure_policy as policy
 from recipes.meta_harness.examples.terminal_bench.campaign import TerminalBenchBackend
+
+from .test_meta_harness_driver import campaign, finish, open_campaign  # noqa: F401
 
 ORIGINAL_EPISODE = TerminalBenchBackend._episode
 

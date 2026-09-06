@@ -62,6 +62,7 @@ def test_resources_require_actual_capacity_and_no_model_credentials(field, value
 
 
 def test_ambiguous_template_start_cannot_silently_repeat(tmp_path, monkeypatch):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Template
 
     old, _ = receipts()
@@ -83,7 +84,10 @@ def test_ambiguous_template_start_cannot_silently_repeat(tmp_path, monkeypatch):
 
 
 def test_poll_existing_build_without_starting_another(tmp_path, monkeypatch):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Template
+
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.template.types import BuildInfo
 
     old, _ = receipts()
@@ -100,7 +104,10 @@ def test_poll_existing_build_without_starting_another(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("failure", [None, "manifest", "capacity", "cleanup"])
 def test_finished_build_publishes_only_after_identity_capacity_and_cleanup(tmp_path, monkeypatch, failure):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Sandbox, Template
+
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.template.types import BuildInfo
 
     old, new = receipts()
@@ -157,6 +164,7 @@ def test_finished_build_publishes_only_after_identity_capacity_and_cleanup(tmp_p
 
 
 def test_archive_mismatch_rejected_before_external_calls(tmp_path, monkeypatch):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Template
 
     old, _ = receipts()

@@ -117,6 +117,9 @@ def test_dry_run_does_not_need_sandbox_access(monkeypatch, tmp_path):
 
     monkeypatch.setitem(sys.modules, "e2b", None)
     monkeypatch.setattr(driver, "runtime_fingerprint", dict)
+    monkeypatch.setattr(
+        "recipes.meta_harness.examples.terminal_bench.proposer_usage.freeze_pricing", lambda model: {"test": True}
+    )
     assert (
         driver.main(
             [

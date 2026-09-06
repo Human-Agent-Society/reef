@@ -80,6 +80,7 @@ class SandboxDouble:
                 "stderr_truncated": False,
             }
             if self.failure:
+                pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
                 from e2b.sandbox.commands.command_handle import CommandExitException
 
                 if not isinstance(self.failure, CommandExitException):
@@ -99,6 +100,7 @@ class SandboxDouble:
 
 
 def launch(monkeypatch, tmp_path, sandbox):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Sandbox
 
     monkeypatch.setattr(Sandbox, "create", lambda *args, **kwargs: sandbox)
@@ -116,6 +118,7 @@ def launch(monkeypatch, tmp_path, sandbox):
 
 
 def test_nonzero_run_collects_evidence_and_kills_sandbox(monkeypatch, tmp_path):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.sandbox.commands.command_handle import CommandExitException
 
     sandbox = SandboxDouble(failure=CommandExitException(stdout="out", stderr="err", exit_code=7, error="failure"))
@@ -128,6 +131,7 @@ def test_nonzero_run_collects_evidence_and_kills_sandbox(monkeypatch, tmp_path):
 
 
 def test_timeout_kills_runner_and_never_reports_success(monkeypatch, tmp_path):
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b.exceptions import TimeoutException
 
     sandbox = SandboxDouble(failure=TimeoutException("elapsed"))
@@ -199,6 +203,7 @@ def test_cleanup_failure_keeps_final_cost_and_collected_evidence(monkeypatch, tm
         raise ConnectionError("secret cleanup request")
 
     sandbox.kill = kill
+    pytest.importorskip("e2b", reason="install the Terminal-Bench example dependencies")
     from e2b import Sandbox
 
     monkeypatch.setattr(Sandbox, "create", lambda *a, **k: sandbox)
@@ -230,10 +235,10 @@ def test_cleanup_failure_keeps_final_cost_and_collected_evidence(monkeypatch, tm
 
 @pytest.mark.parametrize("finished", [False, True])
 def test_killed_runner_partial_evidence_reaches_normal_reader_without_inventing_usage(tmp_path, finished):
-    from tests.reef_service.test_meta_harness_health import raw_trial
-
     from recipes.meta_harness.examples.terminal_bench.e2b_executor import preserve_missing_summary
     from reef.harness.trajectory import read_terminus_atif
+
+    from .test_meta_harness_health import raw_trial
 
     sessions, trials = tmp_path / "terminus/sessions", tmp_path / "terminus/trials"
     (trials / "a/agent").mkdir(parents=True)
@@ -300,6 +305,7 @@ def test_isolated_runner_refuses_host_invocation():
 def test_remote_import_uses_content_identity_and_requires_terminus(monkeypatch, tmp_path):
     import sys
 
+    pytest.importorskip("harbor", reason="install the Terminal-Bench example dependencies")
     from harbor.agents.terminus_2 import Terminus2
 
     from recipes.meta_harness.examples.terminal_bench import isolated_runner
@@ -315,6 +321,7 @@ def test_remote_import_uses_content_identity_and_requires_terminus(monkeypatch, 
     name = agent["import_path"].split(":")[0]
     assert name.startswith("reef_candidate_")
     # Real Harbor import resolution, without constructing an LLM or a trial.
+    pytest.importorskip("harbor", reason="install the Terminal-Bench example dependencies")
     from harbor.agents.factory import _import_agent_class
 
     assert issubclass(_import_agent_class(agent["import_path"]), Terminus2)

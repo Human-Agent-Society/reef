@@ -27,6 +27,7 @@ def test_patch_refuses_unreviewed_or_already_patched_verifiers(source):
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_staging_restores_verifier_and_preserves_task_even_on_failure(tmp_path, monkeypatch, source, fail):
+    pytest.importorskip("harbor", reason="install the Terminal-Bench example dependencies")
     from harbor.verifier.verifier import Verifier
 
     original, patched = source
@@ -76,6 +77,7 @@ def test_staging_restores_verifier_and_preserves_task_even_on_failure(tmp_path, 
 
 
 def test_other_tasks_use_unmodified_verifier(monkeypatch, tmp_path):
+    pytest.importorskip("harbor", reason="install the Terminal-Bench example dependencies")
     from harbor.verifier.verifier import Verifier
 
     async def original_verify(self):
