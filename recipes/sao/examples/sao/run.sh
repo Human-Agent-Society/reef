@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 mkdir -p work
 
 # Start the Reef training stack, stop it again when this script exits.
-PYTHONPATH=../../../.. python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
+PYTHONPATH="$(cd ../../../.. && pwd)${PYTHONPATH:+:$PYTHONPATH}" python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
 trap 'kill %1' EXIT
 
 # Ray + Slime/Megatron + SGLang take minutes to come up.
