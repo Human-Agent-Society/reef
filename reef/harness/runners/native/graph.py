@@ -6,6 +6,10 @@ graph reproduces the fixed loop this replaced, event for event, apart from
 the ``stage/enter`` and ``stage/exit`` events that now name the path. The
 tools, hooks, agents, graphs and prompt come from a ``NativeHost`` read at
 each use, so what a step runs on is what the host holds when the step starts.
+
+A ``native_loop`` node replaces the graph for the root turn with code:
+``run_turn(ctx)`` over a ``LoopContext`` whose every call is one stage handler
+of the same ``Run``, so the hooks, budgets, enforcer and log stay reef's.
 """
 
 from __future__ import annotations
@@ -21,7 +25,13 @@ from typing import Any, NoReturn, Protocol
 
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native.seed import SEED_GRAPH
-from reef.harness.tree.nodes import NATIVE_MATCH_WINDOW, NATIVE_PATTERN_TIMEOUT_S, validate_native_graph
+from reef.harness.tree.nodes import (
+    _NAME,
+    NATIVE_END_REASONS,
+    NATIVE_MATCH_WINDOW,
+    NATIVE_PATTERN_TIMEOUT_S,
+    validate_native_graph,
+)
 
 #: The child side of a bounded search: the pattern and the text arrive as one JSON pair on stdin, the answer is one
 #: character. No reef import, so the child starts in tens of milliseconds and inherits nothing from the loop.
@@ -70,6 +80,10 @@ def _unanswered(misses: dict[str, str]) -> dict[str, Any]:
 
 #: Transitions one run may take beyond what the step budget implies; admission proves termination, this is the guard.
 TRANSITIONS_PER_STEP = 16
+#: Serialized characters one ``ctx.log`` event may carry; a loop cannot fill the session with one call.
+LOOP_LOG_CHARS = 4096
+#: The frame's own event names; ``ctx.log`` refuses them, so a logged event never reads as the frame's.
+LOOP_FRAME_EVENTS = ("enter", "exit")
 #: The context window a compact stage measures against when models.json names none.
 DEFAULT_CONTEXT_WINDOW = 32_768
 #: One token per this many characters of a serialized message: the closed estimate the compact stage uses.
@@ -120,8 +134,11 @@ class Host(Protocol):
     def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str: ...
 
 
-class _Stop(Exception):
-    """The run ended inside a stage; carries the exit status and, for an agent's turn, its outcome."""
+class _Stop(BaseException):
+    """The run ended inside a stage; carries the exit status and, for an agent's turn, its outcome.
+
+    A BaseException: the end of a turn crosses a ``native_loop``'s own code,
+    and an ``except Exception`` there must not swallow it."""
 
     def __init__(self, exit_code: int, outcome: str = "completed") -> None:
         super().__init__(exit_code)
@@ -596,4 +613,210 @@ def run_graph(run: Run, graph: Graph) -> int:
     finally:
         for session in run.loop.open:
             session.close()
+    return 0
+
+
+# -- the loop as code: a native_loop node's run_turn over the context API ------------------------------------
+
+
+class TurnLoop(Protocol):
+    """What the interpreter reads of a mounted ``native_loop``: its name, its step budget and its ``run_turn``."""
+
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def max_steps(self) -> int: ...
+
+    def run_turn(self, ctx: Any) -> Any: ...
+
+
+def _text_keys(value: Any) -> Any:
+    """``value`` with every mapping key as its ``str``, so a loop's log data can carry any key JSON cannot."""
+    if isinstance(value, Mapping):
+        return {str(k): _text_keys(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_text_keys(v) for v in value]
+    return value
+
+
+class _LoopFrame:
+    """The root's session while a loop runs: ``loop/exit`` goes in front of the first ``turn/end``, and that end is final.
+
+    Loop code can catch the turn's end; a later ``turn/end`` or ``loop/exit``
+    is dropped, so one turn has one end and the exit status it recorded."""
+
+    def __init__(self, session: Any) -> None:
+        self.session = session
+        self.exited = False
+        self.exit_code = 0
+
+    def write(self, type_: str, data: Mapping[str, Any]) -> None:
+        if type_ == "turn/end":
+            if self.exited:
+                return
+            self.exited = True
+            reason = data.get("reason") or {}
+            self.exit_code = 1 if reason.get("kind") == "error" else 0
+            self.session.write("loop/exit", {"reason": reason.get("kind")})
+        elif type_ == "loop/exit" and self.exited:
+            return
+        self.session.write(type_, data)
+
+
+class LoopContext:
+    """What ``run_turn`` gets: the turn's state, read only, and one method per stage, each a call into ``Run``.
+
+    The stages behave as their graph counterparts do, hooks and budgets
+    included. ``ctx.log`` cannot write a core event; the loop code itself
+    runs with the process's privileges, which is why the kind is reviewed."""
+
+    def __init__(self, run: Run, module: TurnLoop, frame: _LoopFrame) -> None:
+        self._run = run
+        self._frame = frame
+        self._name = module.name
+        # The stage handlers read the step budget from a graph; the seed's shape carries the loop's number.
+        self._budget = Graph(SEED_GRAPH, source=module.name)
+        self._budget.max_steps = module.max_steps
+        self._limit = (module.max_steps + 1) * TRANSITIONS_PER_STEP
+        self._transitions = 0
+
+    @property
+    def prompt(self) -> str:
+        return self._run.prompt
+
+    @property
+    def step(self) -> int:
+        return self._run.step
+
+    @property
+    def max_steps(self) -> int:
+        return self._budget.max_steps
+
+    @property
+    def tools(self) -> tuple[str, ...]:
+        return tuple(self._run.tools)
+
+    @property
+    def messages(self) -> list[dict[str, Any]]:
+        return copy.deepcopy(self._run.messages)
+
+    @property
+    def last(self) -> dict[str, Any]:
+        return copy.deepcopy(self._run.last)
+
+    def _ended(self) -> None:
+        """After the turn's end, a call that acts gets the end again: loop code that caught it cannot act past it."""
+        if self._frame.exited:
+            raise _Stop(self._frame.exit_code)
+
+    def _transition(self) -> None:
+        """One call into the run; past the cap the turn aborts with ``LOOP_ERROR`` as a graph's does with ``GRAPH_ERROR``."""
+        self._ended()
+        self._transitions += 1
+        if self._transitions > self._limit:
+            run = self._run
+            run.close_step()
+            failure = {
+                "code": "LOOP_ERROR",
+                "message": f"loop {self._name!r} took more than {self._limit} transitions",
+            }
+            run.loop._abort(run.session, failure, turn=run.turn)
+            raise _Stop(1)
+
+    def model(self) -> str:
+        """One model step; ``"tool_calls"`` or ``"text"``. The step budget ends the turn with ``max-steps`` as a graph does."""
+        self._transition()
+        return self._run.model(self._budget, {"kind": "model"})
+
+    def run_tools(self, allow: Sequence[str] | None = None) -> None:
+        """Run the last message's tool calls; ``allow`` narrows them to these names, and empty or absent it is no restriction, as in the tools stage."""
+        self._transition()
+        self._run.tools_stage(self._budget, {"kind": "tools", "allow": None if allow is None else list(allow)})
+
+    def text(self) -> str:
+        return _last_assistant_text(self._run.messages)
+
+    def say(self, text: str) -> None:
+        """A user message from the loop; a transition, so the cap bounds a loop that only talks."""
+        self._transition()
+        self._run.say(str(text), {"kind": "loop", "loop": self._name})
+
+    def agent(self, name: str, text: str | None = None) -> tuple[str, str]:
+        """Hand ``text`` (default the last assistant text, else the task) to an agent; its text comes back as a user message."""
+        self._transition()
+        run = self._run
+        if name not in run.agents:
+            raise ValueError(f"agent {name!r} is not in the tree")
+        prompt = text if text is not None else (_last_assistant_text(run.messages) or run.prompt)
+        try:
+            outcome, result, _ = run.run_agent(name, prompt)
+        except _Stop as stop:
+            # An agent's abort ends the run without a root turn/end, as under a graph; the frame records it as the end.
+            self._frame.exited = True
+            self._frame.exit_code = stop.exit_code
+            raise
+        content = result or f"{name} ended with {outcome}"
+        if outcome == "ask":
+            content = f"{name} asks: {result}"
+        run.say(content, {"kind": "agent", "agent": name, "outcome": outcome})
+        return outcome, result
+
+    def end(self, reason: str = "completed") -> NoReturn:
+        self._ended()
+        if reason not in NATIVE_END_REASONS:
+            raise ValueError(f"end reason must be one of {', '.join(NATIVE_END_REASONS)}; got {reason!r}")
+        self._run.end_turn({"kind": reason}, reason)
+
+    def log(self, event: str, data: Mapping[str, Any]) -> None:
+        """One ``loop/<event>`` in the session; the name is checked and prefixed, so this call cannot write a core event."""
+        self._transition()
+        if not isinstance(event, str) or not _NAME.fullmatch(event) or event in LOOP_FRAME_EVENTS:
+            raise ValueError(f"loop event {event!r} must match {_NAME.pattern} and not be one of {LOOP_FRAME_EVENTS}")
+        if not isinstance(data, Mapping):
+            raise ValueError("loop event data must be an object")
+        # default= covers values only; a key that is not a JSON key (a tuple, say) is written as its text at every depth.
+        plain = json.loads(json.dumps(_text_keys(data), default=str))
+        text = json.dumps(plain, ensure_ascii=False)
+        if len(text) > LOOP_LOG_CHARS:
+            plain = {"text": text[:LOOP_LOG_CHARS], "truncated": True}
+        self._run.session.write(f"loop/{event}", plain)
+
+
+def run_loop_module(run: Run, module: TurnLoop) -> int:
+    """The root turn as code: ``run_turn`` over the context, its end mapped to the episode's exit status.
+
+    Returning ends the turn ``completed``; an exception that is not the
+    turn's own end aborts it with ``LOOP_ERROR``, exit status 1. The first
+    end is final: once the frame has one, the turn keeps that end and its
+    status whatever the loop code does after catching it."""
+    session = run.session
+    frame = run.session = _LoopFrame(session)
+    run.max_steps = module.max_steps
+    frame.write("loop/enter", {"name": module.name})
+    try:
+        try:
+            module.run_turn(LoopContext(run, module, frame))
+        except (_Stop, KeyboardInterrupt):
+            raise
+        except BaseException as exc:
+            if frame.exited:
+                # The end stands; the exception the cleanup raised after it is named on stderr and nowhere else.
+                print(
+                    f"[reef-native] loop {module.name!r} raised after the end: {type(exc).__name__}: {exc}"[:600],
+                    file=sys.stderr,
+                )
+                return frame.exit_code
+            run.close_step()
+            failure = {"code": "LOOP_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600]}
+            return run.loop._abort(frame, failure, turn=run.turn)
+        if frame.exited:
+            return frame.exit_code
+        run.end_turn_quietly({"kind": "completed"})
+    except _Stop as stop:
+        return frame.exit_code if frame.exited else stop.exit_code
+    finally:
+        run.session = session
+        for child in run.loop.open:
+            child.close()
     return 0
