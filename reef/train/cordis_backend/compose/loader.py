@@ -94,7 +94,12 @@ class Entry:
     def _resolve_config(self) -> Any:
         # The reference interpolates JS expressions into the config here; a
         # permanent omission, so the options hold the config literally.
-        return self.options.get("config")
+        config = self.options.get("config")
+        if self.options.get("group") and not isinstance(config, list):
+            # A group's config is its children's live list, so a config that is not a list becomes the one list
+            # the entry keeps and the group shares (group.ts:47-49 over entry.ts:80).
+            config = self.options["config"] = list(config or [])
+        return config
 
     def _patch_context(self, diff: Sequence[str]) -> None:
         """Re-attach the entry context under its (possibly new) group and
@@ -230,7 +235,9 @@ class EntryGroup:
         """Reconcile the desired child list: create or update every entry
         still present, remove every entry that is not."""
         old = self.data
-        self.data = list(config)
+        # The list itself, as upstream: a group entry's ``options["config"]`` is its children's live list, so a
+        # move, create or remove inside the group lands in the entry's own options.
+        self.data = config if isinstance(config, list) else list(config)
         old_map = {str(options["id"]): options for options in old if options.get("id")}
         new_map = {self.tree.ensure_id(options): options for options in self.data}
         for id_ in {**old_map, **new_map}:
@@ -260,14 +267,17 @@ class Group(EntryGroup):
         if owner is None:
             raise RuntimeError("the group plugin only loads under a loader entry")
         super().__init__(ctx, owner.parent.tree)
-        self.config = list(config or [])
+        # The entry resolved its config to the list it keeps; a group built any other way gets a list of its own.
+        self.config = config if isinstance(config, list) else list(config or [])
         ctx.on("internal/update", self._on_update)
 
     def _on_update(
         self, fiber: Fiber, config: Sequence[EntryOptions], no_save: bool, next_: Callable[[], Any]
     ) -> None:
         # Deliberately do not call through: reconfiguring a group does not restart it.
-        self.update(config or [])
+        self.update(config if isinstance(config, list) else list(config or []))
+        # The call through is what would have stored the config on the fiber; a restart must rebuild from the live list.
+        fiber.config = self.data
 
     def __compose_init__(self) -> Any:
         yield self.stop
