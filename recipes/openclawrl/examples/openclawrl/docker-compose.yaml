@@ -30,7 +30,6 @@ services:
       # Optional external cluster; empty means Reef owns a local runtime.
       RAY_ADDRESS: ${RAY_ADDRESS:-}
       REEF_TOKEN: ${REEF_TOKEN}
-      REEF_INFERENCE_HOST: ${HOST_IP}
       PYTHONPATH: /workspace/Reef:/root/Megatron-LM
       WANDB_API_KEY: ${WANDB_API_KEY:-}
     healthcheck:

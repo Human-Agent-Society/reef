@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -87,6 +88,97 @@ def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> PolicySamp
         topk_log_probs=tuple((-0.5, -1.0, -1.5, -2.0) for _ in range(n)),
         extras={"teacher_cands": cands},
     )
+
+
+class _FakeBackuper:
+    """slime's TensorBackuper surface, over dicts of CPU tensors."""
+
+    def __init__(self, live):
+        self.live = live
+        self.backups: dict[str, dict] = {}
+
+    @property
+    def backup_tags(self):
+        return list(self.backups)
+
+    def get(self, tag):
+        return self.backups[tag]
+
+    def backup(self, tag):
+        self.backups[tag] = {name: tensor.clone() for name, tensor in self.live.items()}
+
+    def restore(self, tag):
+        for name, tensor in self.backups[tag].items():
+            self.live[name].copy_(tensor)
+
+
+class _FakeActor:
+    """The two slime actor calls the init hook makes, over a fake model."""
+
+    def __init__(self, load, hf_checkpoint, base, trained):
+        torch = pytest.importorskip("torch")
+        self.args = SimpleNamespace(load=load, hf_checkpoint=hf_checkpoint)
+        self._base = base
+        self.live = {"w": torch.tensor(trained)}
+        self.weights_backuper = _FakeBackuper(self.live)
+        self.weights_backuper.backup("actor")  # what init leaves behind
+        self.calls: list = []
+
+    def load_other_checkpoint(self, tag, path):
+        torch = pytest.importorskip("torch")
+        self.calls.append(("load", tag, path))
+        self.live["w"].copy_(torch.tensor(self._base))
+        self.weights_backuper.backup(tag)
+
+    def _switch_model(self, tag):
+        self.calls.append(("switch", tag))
+        self.weights_backuper.restore(tag)
+
+
+@pytest.fixture
+def megatron_checkpoint_probe(monkeypatch):
+    """The one slime checkpoint helper the init hook imports, without Megatron."""
+    checkpoint = ModuleType("slime.backends.megatron_utils.checkpoint")
+    checkpoint._is_megatron_checkpoint = lambda path: (Path(path) / "latest_checkpointed_iteration.txt").is_file()
+    monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.checkpoint", checkpoint)
+
+
+def test_actor_init_backs_up_the_fresh_load_as_the_teacher(
+    tmp_path, topk_objective, megatron_checkpoint_probe
+) -> None:
+    torch = pytest.importorskip("torch")
+    actor = _FakeActor(str(tmp_path / "megatron"), str(tmp_path / "hf"), base=[1.0, 2.0], trained=[1.0, 2.0])
+
+    topk_objective.openclawrl_actor_init(actor)
+
+    assert actor.calls == []  # a fresh bridge load IS the base: no reload
+    assert torch.equal(actor.weights_backuper.get("openclaw_teacher")["w"], torch.tensor([1.0, 2.0]))
+
+
+def test_actor_init_reloads_the_base_teacher_on_resume(tmp_path, topk_objective, megatron_checkpoint_probe) -> None:
+    torch = pytest.importorskip("torch")
+    load = tmp_path / "megatron"
+    load.mkdir()
+    (load / "latest_checkpointed_iteration.txt").write_text("1")
+    actor = _FakeActor(str(load), str(tmp_path / "hf"), base=[1.0, 2.0], trained=[1.5, 2.5])
+
+    topk_objective.openclawrl_actor_init(actor)
+
+    # The base HF weights become the teacher; the trained weights stay the actor.
+    assert actor.calls == [("load", "openclaw_teacher", str(tmp_path / "hf")), ("switch", "actor")]
+    assert torch.equal(actor.weights_backuper.get("openclaw_teacher")["w"], torch.tensor([1.0, 2.0]))
+    assert torch.equal(actor.live["w"], torch.tensor([1.5, 2.5]))
+
+
+def test_actor_init_on_resume_needs_the_base_checkpoint(tmp_path, topk_objective, megatron_checkpoint_probe) -> None:
+    load = tmp_path / "megatron"
+    load.mkdir()
+    (load / "latest_checkpointed_iteration.txt").write_text("1")
+    actor = _FakeActor(str(load), None, base=[1.0], trained=[2.0])
+
+    with pytest.raises(RuntimeError, match="--hf-checkpoint"):
+        topk_objective.openclawrl_actor_init(actor)
+    assert actor.calls == []
 
 
 def test_topk_preserves_external_advantages_through_slime_hook(topk_objective) -> None:
