@@ -24,7 +24,7 @@ from reef.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import DefaultCandidateEvaluationPlugin
-from reef.train.processors.base import INSTRUCTION_FAILURE_LIMIT, DataProcessor, InstructionFailure
+from reef.train.processors.base import DataProcessor
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
 
 
@@ -143,19 +143,24 @@ class Trainer:
             )
             return self._processor.buffered_requests() + unread
 
-    def set_instruction_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
-        """Carry failed steps into this trainer's processor; a rebuilt scenario starts without them."""
-        with self._lock:
-            self._processor.set_request_failures(failures)
-
-    def drop_reserved_instruction(self) -> None:
-        """Give a reserved instruction batch back after its step failed, so the next build selects again."""
+    def fail_pending_instruction(self, error: str) -> bool:
+        """Mark the reserved instruction as failed, so its next batch is a skip row; False when none is reserved."""
         with self._lock:
             pending = self._pending
             if pending is None or pending.result is not None or pending.batch.request is None:
-                return
-            self._processor.release_batch(pending.batch_id)
-            self._pending = None
+                return False
+            self._processor.mark_request_failed(pending.batch.request.id, error)
+            return True
+
+    def instruction_failures(self) -> Mapping[str, str]:
+        """The failed instructions this trainer still holds, for the trainer that replaces it."""
+        with self._lock:
+            return self._processor.request_failures()
+
+    def set_instruction_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry failed instructions into this trainer's processor; a rebuilt scenario starts without them."""
+        with self._lock:
+            self._processor.set_request_failures(failures)
 
     @property
     def processor(self) -> DataProcessor:
@@ -233,8 +238,7 @@ class Trainer:
                     self._processor.ingest(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                # An instruction that already failed does not stop the read: it goes on for one that has not.
-                if self._processor.ready() and not self._processor.retrying_only():
+                if self._processor.ready():
                     return
 
     def run_once(self, scenario_step: int = 0) -> TrainStepResult | None:
@@ -277,11 +281,10 @@ class Trainer:
         backend = self._training_backend
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
-        request = batch.request
-        failure = None if request is None else self._processor.request_failure(request.id)
-        if failure is not None and failure.count >= INSTRUCTION_FAILURE_LIMIT:
-            # Committed without the backend: the instruction is consumed and the catalog row names why.
-            metrics = {"skipped": f"instruction failed {failure.count} times", "error": failure.error}
+        error = None if batch.request is None else self._processor.request_failure(batch.request.id)
+        if error is not None:
+            # Committed without the backend: the failed instruction is consumed and the catalog row names why.
+            metrics = {"skipped": "instruction failed", "error": error}
             return StepExecution("commit", TrainStepResult(dict(self._state), metrics))
         prepared = backend.prepare_step(batch, self._state, scenario_step)
         if not isinstance(prepared, PreparedStep):

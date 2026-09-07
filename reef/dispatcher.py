@@ -36,7 +36,6 @@ from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
-from reef.train.processors.base import InstructionFailure
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -95,8 +94,6 @@ class _TrainingState:
     undrained_warned: bool = False
     thread: Thread | None = None
     local_workers: dict[str, _LocalBackendWorkerState] = field(default_factory=dict)
-    # Failed steps per queued instruction, by scenario; a reload rebuilds the processor, this survives it.
-    instruction_failures: dict[str, dict[str, InstructionFailure]] = field(default_factory=dict)
 
 
 @dataclass
@@ -327,10 +324,7 @@ class Dispatcher:
         except Exception:
             logger.exception("experiment tracker failed to prepare correlation metadata")
 
-        batch = current.trainer.pending_batch
         value = current.commit(tracked_result)
-        if batch is not None and batch.request is not None:
-            self._forget_instruction_failures(scenario, batch.request.id)
         self._publication.record(scenario, value)
         try:
             self._experiment_tracker.record(
@@ -446,53 +440,34 @@ class Dispatcher:
             return
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
-                self._registry.reload(scenario)
-            recovered = self._registry.get_optional(scenario)
-        if recovered is not None:
-            self._carry_instruction_failures(scenario, recovered)
+                self._reload_with_instruction_failures(scenario, current)
 
     def _recover_failed_step(self, scenario: str, current: Scenario, cause: Exception) -> None:
-        """Count a failed step against its instruction, then reload; a logless scenario gives the batch back."""
-        self._count_instruction_failure(scenario, current, cause)
-        if current.commit_log is None:
-            # No durable state to reload from: the batch goes back so the next build selects in failure order.
-            current.trainer.drop_reserved_instruction()
-            self._carry_instruction_failures(scenario, current)
+        """Mark the failed instruction, then reload; a logless scenario keeps the batch and skips it on its next wake."""
+        self._fail_instruction(current, cause)
         self._reload_durable_local_scenario(scenario, current)
 
-    def _count_instruction_failure(self, scenario: str, current: Scenario, cause: Exception) -> None:
-        batch = current.trainer.pending_batch
-        if batch is None or batch.request is None:
-            return
-        request_id = batch.request.id
-        with self._training.lock:
-            failures = self._training.instruction_failures.setdefault(scenario, {})
-            previous = failures.get(request_id)
-            count = 1 if previous is None else previous.count + 1
-            failures[request_id] = InstructionFailure(count, self._error_text(cause))
-        # A queue full of failing instructions admits no record to wake on; the failure limit bounds these wakes.
-        self._wake_training(current)
+    def _fail_instruction(self, current: Scenario, cause: Exception) -> None:
+        """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
+        if current.trainer.fail_pending_instruction(self._error_text(cause)):
+            # A queue full of failing instructions admits no record to wake on; each skip row is one wake.
+            self._wake_training(current)
 
-    def _carry_instruction_failures(self, scenario: str, current: Scenario) -> None:
-        with self._training.lock:
-            failures = dict(self._training.instruction_failures.get(scenario, {}))
-        current.trainer.set_instruction_failures(failures)
-
-    def _forget_instruction_failures(self, scenario: str, request_id: str) -> None:
-        with self._training.lock:
-            failures = self._training.instruction_failures.get(scenario)
-            if failures is None:
-                return
-            failures.pop(request_id, None)
-            if not failures:
-                self._training.instruction_failures.pop(scenario)
+    def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
+        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
+        failures = current.trainer.instruction_failures()
+        recovered = self._registry.reload(scenario)
+        if failures:
+            recovered.trainer.set_instruction_failures(failures)
+        return recovered
 
     def _reload_after_training_failure(self, scenario: str, cause: Exception) -> None:
         current = self._registry.get_optional(scenario)
-        if current is not None:
-            self._count_instruction_failure(scenario, current, cause)
-        recovered = self._registry.reload(scenario)
-        self._carry_instruction_failures(scenario, recovered)
+        if current is None:
+            self._registry.reload(scenario)
+            return
+        self._fail_instruction(current, cause)
+        self._reload_with_instruction_failures(scenario, current)
 
     def _process_local_backend_step(self, scenario: str) -> bool:
         current = self._registry.get_optional(scenario)
@@ -643,8 +618,6 @@ class Dispatcher:
                 current.name,
             )
             current.reject_pending(execution.metrics)
-            if batch.request is not None:
-                self._forget_instruction_failures(current.name, batch.request.id)
             return True
         result = execution.result
         if execution.outcome != "commit" or result is None:

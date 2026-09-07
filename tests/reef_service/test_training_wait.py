@@ -52,7 +52,8 @@ def _bind(
     trainer = SimpleNamespace(
         processor=processor,
         training_mode="auto",
-        pending_batch=None,
+        fail_pending_instruction=lambda error: False,
+        instruction_failures=dict,
         batch_ready=lambda: batch_ready,
         processor_status=lambda: dict(processor_status or {}),
     )

@@ -16,17 +16,6 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
 
-#: Failed steps one instruction may cause before it is consumed with a skip row instead of run again.
-INSTRUCTION_FAILURE_LIMIT = 3
-
-
-@dataclass(frozen=True)
-class InstructionFailure:
-    """How many steps one queued instruction failed, and what the last failure said."""
-
-    count: int
-    error: str
-
 
 @dataclass(frozen=True)
 class RetentionDecision:
@@ -108,7 +97,8 @@ class DataProcessor:
         self.set_training_mode(context.training_mode)
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
-        self._request_failures: dict[str, InstructionFailure] = {}
+        # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
+        self._request_failures: dict[str, str] = {}
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -151,26 +141,21 @@ class DataProcessor:
         """How many instructions are read into memory and not yet consumed."""
         return len(self._training_requests)
 
-    def request_failures(self, request_id: str) -> int:
-        """How many steps the instruction has failed so far."""
-        failure = self._request_failures.get(request_id)
-        return 0 if failure is None else failure.count
-
-    def request_failure(self, request_id: str) -> InstructionFailure | None:
-        """The instruction's failed step count and last error, when it failed at all."""
+    def request_failure(self, request_id: str) -> str | None:
+        """What the instruction's failed step said, when it failed at all."""
         return self._request_failures.get(request_id)
 
-    def set_request_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
-        """Carry the failed steps of queued instructions into this processor."""
-        self._request_failures = {request_id: failure for request_id, failure in failures.items() if failure.count > 0}
+    def request_failures(self) -> Mapping[str, str]:
+        """The failed instructions still buffered, by id, with what their step said."""
+        return dict(self._request_failures)
 
-    def retrying_only(self) -> bool:
-        """Whether every buffered instruction already failed a step, so the trainer keeps reading for one that has not."""
-        return (
-            self.training_mode == "manual"
-            and bool(self._training_requests)
-            and all(request_id in self._request_failures for request_id in self._training_requests)
-        )
+    def mark_request_failed(self, request_id: str, error: str) -> None:
+        """Record that the instruction's step failed; its next batch is consumed with a skip row."""
+        self._request_failures[request_id] = error
+
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry the failed instructions of a replaced processor into this one."""
+        self._request_failures = dict(failures)
 
     @property
     def experiment_logger(self) -> ExperimentLogger:
@@ -210,7 +195,7 @@ class DataProcessor:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            request = self._next_request() if self.training_mode == "manual" else None
+            request = next(iter(self._training_requests.values())) if self.training_mode == "manual" else None
             self._pending = self.make_training_batch(self._batch_number, request)
             if request is not None:
                 self._pending = replace(
@@ -240,22 +225,6 @@ class DataProcessor:
             consumed = consumed | {request_id}
         self._pending = None
         return consumed
-
-    def release_batch(self, batch_id: str) -> None:
-        """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
-        if self._pending is None or self._pending.batch_id != batch_id:
-            raise ValueError(f"unknown batch_id {batch_id!r}")
-        self._pending = None
-
-    def _next_request(self) -> TrainingRequest:
-        # One at the limit first (its skip row consumes it), then the fewest failures, so a failing one waits.
-        return min(
-            self._training_requests.values(),
-            key=lambda request: (
-                self.request_failures(request.id) < INSTRUCTION_FAILURE_LIMIT,
-                self.request_failures(request.id),
-            ),
-        )
 
     def _ready_count(self) -> int:
         """How many batch-ready units are held.

@@ -110,14 +110,14 @@ The response is ``{agent_record_id, scenario, request_type: "train"}``.
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
-instruction (a proposer error, for one) moves that instruction behind the
-ones that have not failed; after three failed steps it is consumed with a
-committed row whose ``skipped`` reads ``instruction failed 3 times`` and
-whose ``error`` carries the last failure. The ``evolution.max_steps`` and
-``evolution.max_failure_streak`` budgets count every step, instruction
-steps included, and stop automatic steps only; an instruction still runs
-past them. The existing evaluation and publication rules still determine
-whether the result becomes served.
+instruction (a proposer error, for one) is not retried: the next step
+consumes the instruction with a committed row whose ``skipped`` reads
+``instruction failed`` and whose ``error`` carries the failure, and the
+queue moves on. Send the instruction again to run it again. The
+``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
+every step, instruction steps included, and stop automatic steps only; an
+instruction still runs past them. The existing evaluation and publication
+rules still determine whether the result becomes served.
 ``GET /reef/status`` reports ``training_mode``. Processors using the shared
 manual request queue also report ``buffered_requests`` (requests already
 read into the processor; later records may still wait in storage) and
