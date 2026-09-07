@@ -264,3 +264,37 @@ def test_a_freshly_drained_ready_batch_does_not_warn(caplog) -> None:
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
         assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True
     assert not caplog.records
+
+
+def test_a_storage_block_logs_its_reasons_once_per_stall(caplog) -> None:
+    # The other stall signature: the backend returns retry with a storage
+    # status, and the thread retries forever. Until now the reasons were
+    # visible only on the authenticated status endpoint; a run could sit
+    # for hours with idle GPUs and nothing in the logs saying why.
+    dispatcher = _dispatcher()
+    blocked = {"blocked": True, "reasons": ["checkpoint reservation would violate the filesystem free-space floor"]}
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        for _ in range(3):
+            dispatcher._set_training_storage_status(dict(blocked))
+    warnings = [r for r in caplog.records if "blocked on checkpoint storage" in r.message]
+    assert len(warnings) == 1
+    assert "free-space floor" in warnings[0].getMessage()
+
+
+def test_a_cleared_storage_block_logs_the_recovery_once(caplog) -> None:
+    dispatcher = _dispatcher()
+    dispatcher._set_training_storage_status({"blocked": True, "reasons": ["x"]})
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        for _ in range(2):
+            dispatcher._set_training_storage_status(None)
+    cleared = [r for r in caplog.records if "storage block cleared" in r.message]
+    assert len(cleared) == 1
+
+
+def test_an_unblocked_commit_does_not_log_storage_noise(caplog) -> None:
+    # Every successful step clears the (already clear) status; that must
+    # stay silent.
+    dispatcher = _dispatcher()
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        dispatcher._set_training_storage_status(None)
+    assert not caplog.records
