@@ -76,7 +76,7 @@ A weight recipe is four pieces plus the class that binds them.
    step preparer | a plain function turning a typed batch into a ``StepSignal``: the loss family, the per-sample advantages, and the next algorithm state. No torch, Ray, or Slime import.
    processor | decides which reports are eligible and shapes the accepted ones into one typed batch
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise
-   candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default selects whatever the backend produced
+   candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``AlwaysSelect``, selects whatever the backend produced
    recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the preparer (by dotted path), and the loss family
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
