@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import importlib
 import json
+import os
 import sys
 import threading
 import time
@@ -269,9 +270,11 @@ class TestHarness:
         class FakeEnvironment:
             def __init__(self):
                 self.commands = []
+                self.users = []
 
-            async def exec(self, command):
+            async def exec(self, command, user=None):
                 self.commands.append(command)
+                self.users.append(user)
                 if "cat /agent/problem.json" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(problem), stderr="")
                 if "cat /reef_eval/state/scenario" in command:
@@ -325,6 +328,14 @@ class TestHarness:
         assert "--resume" not in hermes_calls[0]  # first turn starts fresh
         assert f"--resume latest {stderr}" in hermes_calls[1]  # later turns continue the session
         assert "hermes -z" not in " ".join(environment.commands)
+        # Every command runs as the host user, so nothing on the state mount
+        # ends up root-owned; only the wipe that hands the home over runs as root.
+        host_user = f"{os.getuid()}:{os.getgid()}"
+        root_commands = [c for c, u in zip(environment.commands, environment.users, strict=True) if u is None]
+        assert len(root_commands) == 1 and f"chown -R {host_user} /reef_eval/state/hermes" in root_commands[0]
+        assert all(
+            u == host_user for c, u in zip(environment.commands, environment.users, strict=True) if "hermes chat" in c
+        )
         config_writes = [c for c in environment.commands if ".hermes/config.yaml" in c]
         assert config_writes and "enabled: false" in config_writes[0]  # compression off
         assert "show_reasoning: false" in config_writes[0]  # stdout is the reply alone

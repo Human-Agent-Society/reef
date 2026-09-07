@@ -9,6 +9,12 @@ reef-eval invokes this once per stream position. It owns the whole session:
 * the **reef scenario id**, minted at position 0 and carried in
   ``$REEF_EVAL_STATE_DIR`` — one stream, one scenario, one weight chain; a
   fresh variant starts fresh;
+* **host ownership of the state mount**: every command in the container,
+  hermes included, runs as the user running reef-eval, and each position
+  first hands the hermes home back to that user. reef-eval resets the live
+  state directory between positions with ``rmtree``; files the container had
+  created as root would fail that on the next run after a kill (Harbor only
+  chowns the mount back when a trial ends normally);
 * **hermes itself**, run inside the task container (the environment image
   installs it) with its home on the state mount, so optional agent memory
   rides reef-eval's one cross-position channel. The config is written at the
@@ -126,6 +132,10 @@ class HermesStreamAgent(BaseAgent):
         if not self._reef_url:
             raise ValueError("the hermes stream harness requires --agent-arg reef_url=http://<host>:<port>")
         self._hermes_memory = str(kwargs.get("hermes_memory", "")).strip().lower() in ("1", "true", "yes")
+        # The container user for every command the harness runs: the host
+        # user, so the state mount never holds root-owned files. None (the
+        # image's default user) where the host has no POSIX ids.
+        self._container_user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else None
         self._capture = CaptureStore()  # replaced per session by _start_shim
 
     @staticmethod
@@ -157,8 +167,15 @@ class HermesStreamAgent(BaseAgent):
 
     # ------------------------------------------------------------- plumbing
 
-    async def _exec(self, environment: BaseEnvironment, command: str, *, ok_codes: tuple[int, ...] = (0,)) -> str:
-        result = await environment.exec(command)
+    async def _exec(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        *,
+        ok_codes: tuple[int, ...] = (0,),
+        as_root: bool = False,
+    ) -> str:
+        result = await environment.exec(command, user=None if as_root else self._container_user)
         if result.return_code not in ok_codes:
             raise RuntimeError(
                 f"exec failed ({result.return_code}): {command[:120]} :: {(result.stderr or '')[-300:]}"
@@ -227,6 +244,17 @@ class HermesStreamAgent(BaseAgent):
         # The directory is wiped first because HOME rides the state mount —
         # left alone, every past session's solved homework would stay readable
         # and become a third adaptation channel behind weights and memory.
+        # Root does the wipe and hands the whole home to the host user: a
+        # state directory from an earlier harness, or from a killed run, may
+        # still hold root-owned files the host user could neither delete nor
+        # write into.
+        if self._container_user is not None:
+            await self._exec(
+                environment,
+                f"rm -rf {HERMES_HOME}/homework && mkdir -p {HERMES_HOME} && "
+                f"chown -R {self._container_user} {HERMES_HOME}",
+                as_root=True,
+            )
         homework = f"Problem:\n{problem['question']}\n\nSolution:\n"
         await self._exec(
             environment,

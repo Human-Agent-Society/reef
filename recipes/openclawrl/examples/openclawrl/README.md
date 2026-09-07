@@ -214,10 +214,11 @@ committed head is republished. Two cases need a hand:
   `artifacts.git`, `artifact-work`, `artifact-cache`, `agent-record` and
   `prm-records.jsonl` out of `$RUN_DIR`. The lab and stream state stay, and
   a re-run continues at the next position.
-- A run killed mid-session leaves root-owned files in
-  `$RUN_DIR/lab/streams/<stream>/state` (Harbor only hands the mount back to
-  your user on a normal trial end), and reef-eval then fails to reset it with
-  `Permission denied`. Chown the directory to your user and re-run.
+- The harness runs every container command, hermes included, as your user
+  and hands the hermes home to you at the start of each position, so a
+  killed run leaves nothing root-owned in `$RUN_DIR/lab/streams/<stream>/state`
+  that reef-eval could not reset. A state directory written by an earlier
+  harness may still need a one-time chown to your user.
 
 ### Reading a run
 
