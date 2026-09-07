@@ -26,7 +26,8 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 **[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
 [Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
-[Join Discord](https://discord.gg/5y8e5f937k)**
+[Join Discord](https://discord.gg/5y8e5f937k) |
+[Join WeChat Group](docs/community/wechat.md)**
 
 </div>
 
@@ -283,6 +284,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 Working on continual self-improving agent?
 
 - [Join Discord](https://discord.gg/5y8e5f937k) to share your recipes, ask implementation questions, and discuss new features.
+- [Join the WeChat group](docs/community/wechat.md) by scanning the QR code.
 - Join the [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) to ask questions, share ideas, and connect with the community.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).

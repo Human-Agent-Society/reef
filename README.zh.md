@@ -26,7 +26,8 @@ harness，包括提示词、规则和技能。
 **[快速上手](https://reefinfra.ai/docs/getting-started/quickstart/) |
 [路线图](https://github.com/Human-Agent-Society/reef/issues/25) |
 [发布文章](https://x.com/ao_qu18465/status/2094867930081337730) |
-[加入 Discord](https://discord.gg/5y8e5f937k)**
+[加入 Discord](https://discord.gg/5y8e5f937k) |
+[加入微信群](docs/community/wechat.md)**
 
 </div>
 
@@ -272,6 +273,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 你是否也在研究持续自我进化的 Agent？
 
 - 加入 [Discord](https://discord.gg/5y8e5f937k)，分享 recipe、交流实现细节、讨论新功能。
+- 扫码[加入微信群](docs/community/wechat.md)。
 - 在 [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) 提问、分享想法、与社区交流。
 - 参与开发请从[贡献指南](CONTRIBUTING.md)开始。
 - 设计方案请通过 [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml) 提出。
