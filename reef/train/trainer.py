@@ -19,6 +19,7 @@ from typing import Any
 
 from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
+from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
@@ -39,6 +40,8 @@ class _PendingStep:
     batch: TrainingBatch
     result: TrainStepResult | None
     prepared_commit: PreparedCommit | None = None
+    # Set once the processor has the batch back and the step consumed these ids on its own, so no acknowledgement.
+    consumed_ids: frozenset[str] | None = None
 
     @property
     def batch_id(self) -> str:
@@ -274,11 +277,11 @@ class Trainer:
         backend = self._training_backend
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
-        error = None if batch.request is None else self._processor.request_failure(batch.request.id)
-        if error is not None:
-            # Committed without the backend: the failed instruction is consumed and the catalog row names why.
-            metrics = {"skipped": "instruction failed", "error": error}
-            return StepExecution("commit", TrainStepResult(dict(self._state), metrics))
+        request = batch.request
+        error = None if request is None else self._processor.request_failure(request.id)
+        if request is not None and error is not None:
+            # Committed without the backend: the failed instruction is consumed alone and the catalog row names why.
+            return StepExecution("commit", self._skip_failed_instruction(batch, request, error))
         prepared = backend.prepare_step(batch, self._state, scenario_step)
         if not isinstance(prepared, PreparedStep):
             raise TypeError(f"{type(backend).__name__}.prepare_step must return PreparedStep")
@@ -299,6 +302,17 @@ class Trainer:
         except BaseException:
             backend.abort_step(prepared)
             raise
+
+    def _skip_failed_instruction(self, batch: TrainingBatch, request: TrainingRequest, error: str) -> TrainStepResult:
+        """Consume the instruction alone; the units beside it go back to the processor for a batch a proposer reads."""
+        with self._lock:
+            pending = self._pending
+            if pending is None or pending.batch_id != batch.batch_id:
+                raise RuntimeError("trainer reservation changed while its instruction was being skipped")
+            self._processor.release_batch(batch.batch_id)
+            pending.consumed_ids = self._processor.discard_request(request.id)
+        metrics = {"skipped": "instruction failed", "error": error}
+        return TrainStepResult(dict(self._state), metrics)
 
     def _evaluate_candidate(self, candidate: UpdateCandidate) -> SelectionDecision:
         evaluator = self._candidate_evaluator
@@ -369,7 +383,9 @@ class Trainer:
                 raise RuntimeError("trainer pending batch has no result")
             if not isinstance(result.state, Mapping):
                 raise TypeError("training step state must be a mapping")
-            consumed = self._processor.acknowledge(batch_id)
+            consumed = self._pending.consumed_ids
+            if consumed is None:
+                consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
             metrics = dict(result.metrics)
@@ -448,13 +464,17 @@ class Trainer:
             backend.commit_applied(state)
 
     def close(self) -> None:
-        """Release the processor's resources; the trainer owns its lifecycle.
+        """Release processor and backend resources owned by the trainer.
 
         Held under the trainer lock so a processor is never closed while a
         batch is being ingested or built on the training thread.
         """
         with self._lock:
-            self._processor.close()
+            try:
+                self._processor.close()
+            finally:
+                if self._training_backend is not None:
+                    self._training_backend.close()
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.

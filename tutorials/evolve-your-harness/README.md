@@ -64,6 +64,39 @@ Every run ends by writing `work/replay.html`: the release chain with each step's
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
+## Worker execution
+
+The configs default to `auto`; the single service controller resolves to `uni`.
+Worker placement defaults to `execution.evolution.backend: auto` with
+`execution.evolution.workers: 1`: one CPU worker uses `uni`; increasing the count selects
+spawned `mp` workers. Model inference still runs at the configured upstream
+endpoint, so these scorers do not reserve GPUs.
+
+The YAML only needs the worker count; `backend: auto` and resource requests
+can be omitted. Local workers are not pinned or limited to one CPU core.
+
+The worker/scorer pool is reused across evaluations and released when its
+scenario closes. Each episode still starts a separate harness process in a
+fresh temporary directory. This is a fixed-size pool, not autoscaling.
+`evolution.executor` is a separate episode-isolation option (`local` or
+`sandbox`), not a worker backend selector.
+
+The demo's materializer also preserves optional top-level `execution` and
+`executors` sections. For example, choose a reusable worker/resource profile:
+
+```yaml
+execution:
+  evolution: cpu-pool
+executors:
+  cpu-pool:
+    workers: 8
+```
+
+CPU requests do not enforce core limits on local workers. Ray uses CPU/GPU
+requests as per-worker scheduling reservations. The old `episode_workers`,
+`worker_executor` and `worker_resources` fields are deprecated; remove them
+when migrating to the new structure. Conflicting resource values are rejected.
+
 ## Keep a deployment running
 
 Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
@@ -92,6 +125,8 @@ and the upstream runtime, so inference, proposal, and evaluation use the same mo
 Defaults: port `8901`, Reef access token `reef-local`, state under
 `work/deployment/`. Use `--reef.port` and `--reef.token` to override the port
 and access token. The `run.sh` demo keeps its separate configuration and state.
+
+`data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step that reads it runs it first, with no mode switch. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never batches on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.
 
 Install a harness from this service and submit feedback as shown in the
 [root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s

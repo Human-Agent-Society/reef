@@ -47,8 +47,8 @@ class Recipe:
     training_mode: str = config_field("auto")
 
     def __post_init__(self) -> None:
-        if self.training_mode not in ("auto", "manual"):
-            raise ValueError("training_mode must be 'auto' or 'manual'")
+        if self.training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
 
     @classmethod
     def from_environment(

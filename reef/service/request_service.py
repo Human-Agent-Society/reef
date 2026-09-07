@@ -509,6 +509,15 @@ class RequestService:
                 "evolution recipe with a proposal inbox"
             )
         head = scenario.repository.require_current_artifact().release_id
+        proposal_id = ProposalInbox.new_id()
+        # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
+        if scenario.trainer.training_mode == "manual":
+            return {
+                "proposal_id": proposal_id,
+                "admitted": False,
+                "reason": "manual mode takes instructions only",
+                "release_id": head,
+            }
         # The entries the head commit logged, which the served tree.json carries too, not the trainer's live
         # state, which a step in flight has already moved; the seed before the first commit.
         logged = scenario.entries_for_version(head)
@@ -516,7 +525,6 @@ class RequestService:
         if logged is None and info is not None:
             logged = info.seed_entries
         entries = [dict(entry) for entry in logged or ()]
-        proposal_id = ProposalInbox.new_id()
         try:
             mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
             _, refusal = backend.admit(entries, mutations)

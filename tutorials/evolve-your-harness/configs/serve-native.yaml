@@ -4,6 +4,10 @@
 
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 
+execution:
+  evolution:
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
+
 model:
   path: qwen3-8b
 
@@ -59,6 +63,8 @@ data:
   # batches - the SkillClaw move: learn from failures.
   batch_size: 1
   max_score: 0.0
+  # The default: nobody asks in this demo, and auto refuses POST /reef/train.
+  training_mode: auto
 
 reef:
   host: 127.0.0.1

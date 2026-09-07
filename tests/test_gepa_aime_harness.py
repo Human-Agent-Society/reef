@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import pickle
 import sys
 import urllib.request
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,6 +80,159 @@ def test_a_dirty_episode_scores_zero_however_it_answered(aime, exit_code, residu
 def test_an_unregistered_task_refuses_rather_than_scoring_zero(aime):
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
         aime.evaluate("never seen", pi_episode("### 17"))
+
+
+def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aime):
+    aime.register([{"input": "problem", "answer": "### 17", "additional_context": {"solution": "explanation"}}])
+    scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
+    aime.CONTEXTS["problem"]["solution"] = "changed"
+    evaluate, feedback = pickle.loads(pickle.dumps((scorer.evaluate, scorer.feedback)))
+    aime.ANSWERS.clear()
+    aime.CONTEXTS.clear()
+    assert evaluate("problem", pi_episode("### 17")) == 1.0
+    assert "solution: explanation" in feedback("problem", "wrong", 0.0)
+    assert evaluate("problem", pi_episode("### 17", exit_code=1)) == 0.0
+    assert evaluate("problem", pi_episode("### 17", residue=("stray",))) == 0.0
+    with pytest.raises(RuntimeError, match="no AIME answer is registered"):
+        evaluate("unknown", pi_episode("### 17"))
+
+
+@pytest.mark.parametrize("selector", ["role", "worker"])
+def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selector):
+    driver = load("run")
+    config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
+    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
+    config["execution"] = {"evolution": "cpu-pool"}
+    if selector == "worker":
+        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["execution"]["evolution"] = "uni"
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    assert recipe.worker_executor.backend == "mp"
+
+
+def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tmp_path):
+    from reef.records import RecordStore
+
+    driver = load("run")
+    driver.aime.register([{"input": "problem", "answer": "### 17"}])
+    config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
+    assert config["execution"]["evolution"]["backend"] == "auto"
+    config["execution"]["evolution"]["workers"] = 1
+    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    with RecordStore() as records:
+        trainer = recipe.build("test", records)
+        try:
+            backend = trainer.training_backend
+            assert backend._worker_selection.settings.backend == "uni"
+            assert [row.score for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
+            driver.aime.register([{"input": "problem", "answer": "### 18"}])
+            assert backend._evaluate_pairings([({}, "problem")])[0].score == 1.0
+        finally:
+            trainer.close()
+
+
+@pytest.mark.parametrize(
+    "executor",
+    [
+        "auto",
+        "uni",
+        "mp",
+        pytest.param(
+            "ray",
+            marks=pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration"),
+        ),
+    ],
+)
+def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, executor):
+    from reef.records import RecordStore
+
+    monkeypatch.setenv("REEF_GEPA_EXECUTOR", executor)
+    monkeypatch.setenv("REEF_GEPA_WORKERS", "1" if executor == "uni" else "2")
+    monkeypatch.setenv("REEF_WORK", str(tmp_path))
+    monkeypatch.setenv("RAY_ADDRESS", "local")
+    if executor == "ray":
+        pytest.importorskip("ray")
+    driver = load("run")
+    driver.aime.register([{"input": "problem", "answer": "### 17"}])
+    binary = tmp_path / "fake-pi"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import os\nfrom pathlib import Path\n"
+        "root = Path(os.environ['PI_CODING_AGENT_SESSION_DIR'])\n"
+        "root.mkdir(parents=True, exist_ok=True)\n"
+        "(root / 'session.jsonl').write_text('{\"type\":\"agent_end\"}\\n')\n"
+        "print('### 17')\n"
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("REEF_PI_BINARY", str(binary))
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    # Validation workers use the runtime's upstream, not the loopback service
+    # used by the driver's minibatch and held-out passes.
+    assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
+    driver.aime.ANSWERS.clear()
+    with driver.worker_runtime(recipe), RecordStore() as records:
+        trainer = recipe.build("isolated", records)
+        try:
+            backend = trainer.training_backend
+            assert backend._worker_selection.settings.backend == ("mp" if executor == "auto" else executor)
+            rows = backend._evaluate_pairings([({}, "problem"), ({}, "problem")])
+            assert [row.score for row in rows] == [1.0, 1.0]
+            with pytest.raises(Exception, match="no AIME answer is registered"):
+                backend._evaluate_pairings([({}, "unknown")])
+        finally:
+            trainer.close()
+
+
+def test_driver_keeps_custom_task_hooks(load, monkeypatch):
+    driver = load("run")
+    config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
+
+    def scorer(task, result):
+        return 0.5
+
+    def feedback(task, output, score):
+        return "custom"
+
+    config["evolution"].update(evaluate=scorer, feedback=feedback)
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    assert recipe.score_episode("problem", pi_episode("anything")) == 0.5
+    assert recipe.feedback("problem", "anything", 0.5) == "custom"
+
+
+@pytest.mark.parametrize("already_initialized", [False, True])
+def test_worker_runtime_owns_only_its_own_ray_session(load, monkeypatch, already_initialized):
+    monkeypatch.setenv("REEF_GEPA_EXECUTOR", "ray")
+    driver = load("run")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    calls = []
+    fake_ray = SimpleNamespace(
+        is_initialized=lambda: already_initialized,
+        init=lambda **kwargs: calls.append(("init", kwargs)),
+        shutdown=lambda: calls.append(("shutdown", None)),
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    with pytest.raises(RuntimeError, match="campaign failed"), driver.worker_runtime(recipe):
+        raise RuntimeError("campaign failed")
+    assert calls == (
+        []
+        if already_initialized
+        else [("init", {"runtime_env": {"py_modules": [driver.harness]}}), ("shutdown", None)]
+    )
+
+
+def test_local_worker_runtime_does_not_require_ray(load, monkeypatch):
+    monkeypatch.setenv("REEF_GEPA_EXECUTOR", "auto")
+    driver = load("run")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    monkeypatch.setitem(sys.modules, "ray", None)
+    with driver.worker_runtime(recipe):
+        pass
 
 
 def test_feedback_reproduces_the_upstream_evaluator_wording(aime):

@@ -5,6 +5,9 @@
 # ./run.sh demo for its pi and native variants.
 implementation: reef.train.cordis_backend.recipe:CordisRecipe
 # The recipe uses the upstream runtime's model for evaluation as well as serving.
+execution:
+  evolution:
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
 
 evolution:
   adapter: pi
@@ -57,6 +60,8 @@ evolution:
 data:
   batch_size: 1
   max_score: 0.0
+  # The person asks with POST /reef/train while the deployment keeps learning from failures.
+  training_mode: hybrid
 
 reef:
   host: 127.0.0.1

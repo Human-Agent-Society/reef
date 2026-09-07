@@ -10,6 +10,7 @@ import pytest
 import reef.service.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
 from reef.service.deploy.config import DeployConfigError, load_config, validate_services
+from reef.service.deploy.process import _command_argv
 
 VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"
 
@@ -91,11 +92,11 @@ def test_service_command_must_be_a_string_or_string_list(command) -> None:
 def test_command_argv_supports_exact_lists_and_legacy_strings() -> None:
     config = {"reef": {"port": 9123}}
 
-    assert orchestrator._command_argv(
+    assert _command_argv(
         config,
         ["/opt/reef env/bin/python", "-m", "reef.service", "--port=${reef.port}", ""],
     ) == ["/opt/reef env/bin/python", "-m", "reef.service", "--port=9123", ""]
-    assert orchestrator._command_argv(config, "python -m worker --port=${reef.port}") == [
+    assert _command_argv(config, "python -m worker --port=${reef.port}") == [
         "python",
         "-m",
         "worker",

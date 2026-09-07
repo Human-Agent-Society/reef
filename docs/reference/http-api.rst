@@ -33,7 +33,7 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                           | submit feedback about one or more receipts        |
 +-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/train``                            | enqueue one explicit manual training instruction  |
+| ``POST /reef/train``                            | enqueue one training instruction                  |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios``                         | every known scenario and current release          |
 +-------------------------------------------------+---------------------------------------------------+
@@ -90,13 +90,23 @@ Headers
 Manual training
 ---------------
 
-``POST /reef/train`` is available to a scenario configured with
-``data.training_mode: manual``. It takes the user's ``text``, originating
-``session`` and ``release_id``. The latter two are provenance, not a request
-to restore an old release. The backend operates on the current committed
-state. The API requires no inference receipts or score. The processor
-determines what inputs it needs for manual training; harness evolution
-can execute the request without any inference data or ready automatic batch.
+``POST /reef/train`` queues one training instruction for a scenario in
+``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
+proposer that accepts ``requests``). It takes the user's ``text``,
+originating ``session`` and ``release_id``. The latter two are provenance,
+not a request to restore an old release. The backend operates on the
+current committed state. The API requires no inference receipts or score.
+
+The three modes differ in what starts a step. ``auto``, the default,
+batches on traffic and refuses an instruction with HTTP 400. ``manual``
+runs instructions only and never batches on traffic; harness evolution
+runs an instruction alone, without samples. ``hybrid`` batches on traffic and
+runs instructions: a queued instruction goes first, oldest first, one per
+step, and the units an automatic batch would take next, up to
+``batch_size`` and possibly none, ride beside it as the batch's samples
+(failing traces in the score window, or records under
+``data.batch_policy: records``), so the proposer reads the request next
+to them; with none queued the step batches as ``auto`` does.
 
 .. code:: bash
 
@@ -113,13 +123,15 @@ do not change a step already in flight. A step that fails with an
 instruction (a proposer error, for one) is not retried: the next step
 consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
-queue moves on. Send the instruction again to run it again. The
+queue moves on. Send the instruction again to run it again. That row
+consumes the instruction alone: in ``hybrid`` the units that rode beside it
+stay held for the next batch, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
 every step, instruction steps included, and stop automatic steps only; an
 instruction still runs past them. The existing evaluation and publication
 rules still determine whether the result becomes served.
 ``GET /reef/status`` reports ``training_mode``. Processors using the shared
-manual request queue also report ``buffered_requests`` (requests already
+instruction queue also report ``buffered_requests`` (requests already
 read into the processor; later records may still wait in storage) and
 ``pending_instructions`` (accepted instructions not yet consumed: the
 buffered ones plus those still unread in storage).
@@ -188,12 +200,13 @@ To change the data processor's mode:
    {"training_mode": "manual"}
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
-Use ``"auto"`` to resume recipe batching. The change selects subsequent
-batches; a batch already reserved or running completes in its original mode.
-Both modes share buffered data, so auto can batch traffic collected while
-manual was selected. Accepted
-manual instructions wait for manual mode, including instructions not yet read
-when the selector changes to auto.
+The values are ``auto``, ``manual`` and ``hybrid``: ``"auto"`` resumes recipe
+batching alone, ``"hybrid"`` keeps it and takes instructions too. The change
+selects subsequent batches; a batch already reserved or running completes
+in its original mode. The modes share buffered data, so auto and hybrid can
+batch traffic collected while manual was selected. Accepted instructions
+wait for a mode that takes them, including instructions not yet read when
+the selector changes to auto.
 
 A Reef process runs at most one scenario that trains full weights, on a single
 thread, so preparation, remote execution, and commit never interleave. It may
@@ -203,8 +216,8 @@ so record acceptance never waits for artifact evolution.
 
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
-``501`` without changing its state. Harness manual mode also requires a
-proposer that explicitly accepts ``requests``.
+``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
+require a proposer that explicitly accepts ``requests``.
 
 ``GET /reef/status`` reports the selected ``training_mode``. This selector
 is runtime state, not persisted scenario configuration: a service restart
@@ -434,7 +447,10 @@ scenario's inbox (``evolution.proposals_dir``) until the next evolve step takes
 it, oldest first, before the method's own ``propose`` is asked; the step admits
 it again against its own entries, since the head may have moved, and the gate
 settles it like any mutation. When ``evolution.max_pending_proposals`` already
-wait, the answer is ``admitted: false`` with reason ``inbox full``. A malformed
+wait, the answer is ``admitted: false`` with reason ``inbox full``; on a
+scenario in ``data.training_mode: manual`` it is ``admitted: false`` with
+reason ``manual mode takes instructions only``, since no automatic step runs
+there to take the inbox. A malformed
 body is HTTP 400; a scenario whose recipe is not a harness evolution recipe is
 HTTP 404 naming that. `Operate a deployment
 <../user-guide/operate.rst#read-the-proposal-inbox>`__ describes the inbox

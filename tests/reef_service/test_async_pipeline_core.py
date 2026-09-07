@@ -426,7 +426,7 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
 
 @pytest.mark.unit
 def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, monkeypatch) -> None:
-    monkeypatch.setattr("reef.dispatcher._STORAGE_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr("reef.dispatcher.Dispatcher.storage_retry_seconds", 0.01)
     runtime, dispatcher = start_dispatcher(block_storage=True)
     _submit_pair(dispatcher)
     assert runtime.started.wait(1)

@@ -40,19 +40,6 @@ from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
 
-_STORAGE_RETRY_SECONDS = 5.0
-# Poll cadence while a processor reports asynchronous derivation in flight
-# (see DataProcessor.derivation_pending): its judgments land without a new
-# record ever setting the ready event, so readiness is re-checked on a
-# bounded interval instead of sleeping until the next accept.
-_DERIVATION_POLL_SECONDS = 1.0
-# One drain, plus one more after reloading the scenario from durable state.
-_DRAIN_ATTEMPTS = 2
-# A ready batch should be reserved by the next drain; one that sits longer
-# means the training thread is not waking. Status reads perform the check,
-# so the alarm rides the health polling that already watches the service.
-_UNDRAINED_WARNING_SECONDS = 60.0
-
 
 @dataclass(frozen=True)
 class _LocalBackendWorkerState:
@@ -120,7 +107,21 @@ class Dispatcher:
     ``TrainingRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
+    The dispatcher owns its recipe's runtime and closes it after all scenarios.
     """
+
+    storage_retry_seconds: float = 5.0
+    # Poll cadence while a processor reports asynchronous derivation in flight
+    # (see DataProcessor.derivation_pending): its judgments land without a new
+    # record ever setting the ready event, so readiness is re-checked on a
+    # bounded interval instead of sleeping until the next accept.
+    derivation_poll_seconds: float = 1.0
+    # One drain, plus one more after reloading the scenario from durable state.
+    drain_attempts: int = 2
+    # A ready batch should be reserved by the next drain; one that sits longer
+    # means the training thread is not waking. Status reads perform the check,
+    # so the alarm rides the health polling that already watches the service.
+    undrained_warning_seconds: float = 60.0
 
     def __init__(
         self,
@@ -273,13 +274,13 @@ class Dispatcher:
         if item.request_type is RequestType.TRAIN:
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
-            if current.trainer.training_mode != "manual":
-                raise ValueError("explicit training requests require training_mode='manual'")
+            if current.trainer.training_mode == "auto":
+                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
             if current.trainer.training_backend is None:
                 raise ValueError("explicit training requests require a training backend")
             request = TrainingRequest.from_dict(item.payload)
             if item.references:
-                raise ValueError("manual training requests do not reference inference receipts")
+                raise ValueError("training instructions do not reference inference receipts")
             refusal = training_request_refusal(request.text)
             if refusal is not None:
                 raise ValueError(refusal)
@@ -523,11 +524,13 @@ class Dispatcher:
         new record ever setting the event, so it is polled on a bounded
         interval. Otherwise sleep until the next accept.
         """
-        timeout: float | None = _STORAGE_RETRY_SECONDS if self._training.storage_status is not None else None
+        timeout: float | None = self.storage_retry_seconds if self._training.storage_status is not None else None
         for name in self._training_scenario_names():
             current = self._registry.get_optional(name)
             if current is not None and current.trainer.processor.derivation_pending():
-                timeout = _DERIVATION_POLL_SECONDS if timeout is None else min(timeout, _DERIVATION_POLL_SECONDS)
+                timeout = (
+                    self.derivation_poll_seconds if timeout is None else min(timeout, self.derivation_poll_seconds)
+                )
         return timeout
 
     def _drain_training(self) -> None:
@@ -537,7 +540,7 @@ class Dispatcher:
         # second failure still reloads (leaving a clean scenario for the next
         # wake-up) but is not spun on; the cause is reported through
         # training_status.
-        for _ in range(_DRAIN_ATTEMPTS):
+        for _ in range(self.drain_attempts):
             try:
                 while self._process_training():
                     pass
@@ -649,7 +652,7 @@ class Dispatcher:
             self._training.undrained_warned = False
 
     def _warn_if_undrained(self, scenario: str, last_drain: float | None) -> None:
-        if last_drain is None or time.time() - last_drain < _UNDRAINED_WARNING_SECONDS:
+        if last_drain is None or time.time() - last_drain < self.undrained_warning_seconds:
             return
         with self._training.lock:
             first = not self._training.undrained_warned
@@ -777,6 +780,7 @@ class Dispatcher:
     # -- Lifecycle -------------------------------------------------------
 
     def close(self) -> None:
+        """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
         self._lifecycle.closed.set()
@@ -791,15 +795,26 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         for scenario in self._registry.close_all():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
-            scenario.close()
+            try:
+                scenario.close()
+            except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
+                errors.append(exc)
+        if self._recipe.runtime is not None:
+            try:
+                self._recipe.runtime.shutdown()
+            except BaseException as exc:
+                errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        if errors:
+            raise errors[0]
 
 
 def build_default_dispatcher(

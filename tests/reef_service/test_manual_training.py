@@ -1,8 +1,9 @@
-"""Native manual scheduling: instructions authorize one durable step without a data batch."""
+"""Training instructions: manual runs them alone, hybrid runs them ahead of automatic batches, auto refuses them."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import replace
 from threading import Event
@@ -62,6 +63,21 @@ def instruction(receipt):
     )
 
 
+def report(receipt):
+    return AgentRecord.create(
+        scenario="s",
+        request_type=RequestType.REPORT,
+        payload={"score": 0, "references": [receipt]},
+        agent_record_id=f"report-{receipt}",
+    )
+
+
+def failure(records, receipt):
+    """One failing exchange: the inference and its score 0 report."""
+    records.append(inference(receipt))
+    records.append(report(receipt))
+
+
 def build(records, backend, processor=RecordDrivenTraceProcessor, mode="manual", batch_size=1):
     return Trainer.build(
         "s",
@@ -70,6 +86,20 @@ def build(records, backend, processor=RecordDrivenTraceProcessor, mode="manual",
         training_backend=backend,
         training_mode=mode,
     )
+
+
+def _wait(predicate, seconds=10.0):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _release_texts(dispatcher, scenario="s"):
+    rows = dispatcher.get_or_create_scenario(scenario).releases()
+    return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
@@ -165,6 +195,8 @@ def test_manual_requires_an_explicit_recipe_assembler():
     records = RecordStore()
     with pytest.raises(NotImplementedError, match="does not implement training_mode='manual'"):
         build(records, CaptureBackend(), DataProcessor)
+    with pytest.raises(NotImplementedError, match="does not implement training_mode='hybrid'"):
+        build(records, CaptureBackend(), DataProcessor, mode="hybrid")
     with pytest.raises(ValueError, match="training_mode"):
         build(records, CaptureBackend(), mode="typo")
     records.close()
@@ -273,6 +305,8 @@ def test_missing_mode_implementation_fails_at_processor_initialization():
 
     with pytest.raises(NotImplementedError, match=r"AutoOnlyProcessor.*manual"):
         AutoOnlyProcessor(ProcessorContext("s", training_mode="manual"))
+    with pytest.raises(NotImplementedError, match=r"AutoOnlyProcessor.*hybrid"):
+        AutoOnlyProcessor(ProcessorContext("s", training_mode="hybrid"))
     with pytest.raises(ValueError, match="training_mode"):
         ProcessorContext("s", training_mode="invalid")
 
@@ -283,14 +317,29 @@ def test_unimplemented_manual_assembly_never_falls_back_to_auto():
 
     processor = IncompleteProcessor(ProcessorContext("s", training_mode="manual"))
     processor.ingest(instruction("one"))
-    with pytest.raises(NotImplementedError, match="manual batch assembly"):
+    with pytest.raises(NotImplementedError, match="instruction batch assembly"):
         processor.build_batch()
 
 
-@pytest.mark.parametrize("mode", ["auto", "manual"])
+def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_hybrid_only():
+    class HybridOnlyProcessor(DataProcessor):
+        supported_training_modes = frozenset({"auto", "hybrid"})
+        required_request_types = frozenset(RequestType)
+
+    processor = HybridOnlyProcessor(ProcessorContext("s", training_mode="hybrid"))
+    processor.ingest(instruction("one"))
+    assert processor.status() == {"buffered_requests": 1}
+    processor.close()
+    auto_only = DataProcessor(ProcessorContext("s"))
+    auto_only.ingest(instruction("one"))
+    assert auto_only.status() == {}
+    auto_only.close()
+
+
+@pytest.mark.parametrize("mode", ["auto", "manual", "hybrid"])
 def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
     class TrajectoryProcessor(DataProcessor):
-        supported_training_modes = frozenset({"auto", "manual"})
+        supported_training_modes = frozenset({"auto", "manual", "hybrid"})
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
         output_schema = ExampleBatch
 
@@ -322,7 +371,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
     try:
         records.append(inference("first"))
         assert trainer.run_once() is None
-        if mode == "manual":
+        if mode != "auto":
             records.append(instruction("use-the-trajectory"))
             assert trainer.run_once() is None
         records.append(inference("second"))
@@ -330,7 +379,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         assert backend.batches[0].values == ("first", "second")
         assert (backend.batches[0].request is None) == (mode == "auto")
         prepared = trainer.prepare_commit(result)
-        expected = {"first", "second"} | ({"use-the-trajectory"} if mode == "manual" else set())
+        expected = {"first", "second"} | ({"use-the-trajectory"} if mode != "auto" else set())
         assert prepared.consumed_ids == frozenset(expected)
         trainer.commit(prepared)
         assert trainer.run_once() is None
@@ -385,8 +434,9 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     records.close()
 
 
-def test_manual_harness_requires_explicit_requests_keyword(tmp_path):
-    recipe = replace(_recipe(tmp_path, lambda n, s, m, **kwargs: None), training_mode="manual")
+@pytest.mark.parametrize("mode", ["manual", "hybrid"])
+def test_harness_instruction_modes_require_explicit_requests_keyword(tmp_path, mode):
+    recipe = replace(_recipe(tmp_path, lambda n, s, m, **kwargs: None), training_mode=mode)
     records = RecordStore()
     with pytest.raises(RecipeConfigError, match="requests"):
         recipe.build("s", records)
@@ -476,15 +526,19 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
         await client.start_server()
         try:
             url = "/reef/scenarios/s/update"
-            response = await client.post(url, json={"training_mode": "manual"})
-            assert response.status == (200 if reads_requests else 501)
-            if reads_requests:
-                assert await response.json() == {"scenario": "s", "training_mode": "manual"}
-            assert scenario.trainer.training_mode == ("manual" if reads_requests else "auto")
-            assert scenario.trainer.processor is processor
+            for mode in ("manual", "hybrid"):
+                response = await client.post(url, json={"training_mode": mode})
+                assert response.status == (200 if reads_requests else 501)
+                if reads_requests:
+                    assert await response.json() == {"scenario": "s", "training_mode": mode}
+                assert scenario.trainer.training_mode == (mode if reads_requests else "auto")
+                assert scenario.trainer.processor is processor
+                status = await (await client.get("/reef/status")).json()
+                assert status["scenarios"]["s"]["training_mode"] == scenario.trainer.training_mode
             for invalid in (
                 {},
                 {"training_mode": "bad"},
+                {"training_mode": "either"},
                 {"training_mode": []},
                 {"training_mode": "auto", "batch_size": 2},
             ):
@@ -573,15 +627,6 @@ def test_mode_selection_survives_a_reload_and_resets_on_restart(tmp_path):
         restarted.close()
 
 
-def _wait(predicate, seconds=10.0):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def _committed_row(dispatcher, text):
     for row in dispatcher.get_or_create_scenario("s").releases():
         metrics = row.get("metrics") or {}
@@ -593,6 +638,15 @@ def _committed_row(dispatcher, text):
 def _committed_skip(dispatcher, text):
     row = _committed_row(dispatcher, text)
     return None if row is None else row.get("skipped")
+
+
+def _automatic_traces(dispatcher):
+    """The trace count of every committed step that ran without an instruction."""
+    return [
+        metrics["traces"]
+        for row in dispatcher.get_or_create_scenario("s").releases()
+        if (metrics := row.get("metrics")) and "training_request" not in metrics
+    ]
 
 
 def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
@@ -664,6 +718,122 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
     finally:
         release.set()
         dispatcher.close()
+
+
+def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_path(tmp_path):
+    calls = []
+    entered, release = Event(), Event()
+
+    def propose(nodes, samples, models, *, requests=()):
+        text = requests[0]["text"] if requests else None
+        calls.append((text, tuple(sample.source_agent_record_id for sample in samples)))
+        if text == "poison":
+            if len(calls) == 1:
+                entered.set()
+                release.wait(10)
+            raise RuntimeError("poison proposer")
+        return
+
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
+    try:
+        dispatcher.get_or_create_scenario("s")
+        dispatcher.accept_record(instruction("poison"))
+        assert entered.wait(5)
+        dispatcher.accept_record(instruction("fine"))
+        release.set()
+        assert _wait(lambda: _committed_skip(dispatcher, "fine") == "no proposal")
+        # The wake after the failure consumed the failed instruction with its skip row, no second call, then ran the fresh one.
+        assert calls == [("poison", ()), ("fine", ())]
+        assert _committed_skip(dispatcher, "poison") == "instruction failed"
+        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison proposer"
+        current = dispatcher.get_or_create_scenario("s")
+        assert current.trainer.pending_instructions() == 0
+        assert current.trainer.training_mode == "hybrid"
+        assert current.trainer.instruction_failures() == {}
+        # With the queue empty, one failing exchange at batch_size 1 is an automatic step with no instruction.
+        dispatcher.accept_record(inference("a"))
+        dispatcher.accept_record(report("a"))
+        assert _wait(lambda: _automatic_traces(dispatcher) == [1])
+        assert calls[-1] == (None, ("a",))
+        # The next instruction runs as an instruction step again, with nothing held beside it.
+        dispatcher.accept_record(instruction("after"))
+        assert _wait(lambda: _committed_skip(dispatcher, "after") == "no proposal")
+        assert calls[2:] == [(None, ("a",)), ("after", ())]
+        assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
+    finally:
+        release.set()
+        dispatcher.close()
+
+
+def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(tmp_path):
+    calls = []
+    entered, release, automatic, outage = Event(), Event(), Event(), Event()
+
+    def propose(nodes, samples, models, *, requests=()):
+        text = requests[0]["text"] if requests else None
+        calls.append((text, tuple(sample.source_agent_record_id for sample in samples)))
+        if text == "poison":
+            if len(calls) == 1:
+                entered.set()
+                release.wait(10)
+            raise RuntimeError("poison proposer")
+        # The automatic step holds so the skip row can be read, then fails so the unit stays stored for the restart.
+        automatic.set()
+        outage.wait(10)
+        raise RuntimeError("proposer outage")
+
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
+    try:
+        dispatcher.get_or_create_scenario("s")
+        dispatcher.accept_record(instruction("poison"))
+        assert entered.wait(5)
+        # The failing exchange arrives while the attempt holds, so the skip row's batch carries it as its sample.
+        dispatcher.accept_record(inference("a"))
+        dispatcher.accept_record(report("a"))
+        release.set()
+        assert automatic.wait(5)
+        # The skip row took no proposer call; the automatic step that followed read the unit the skip row gave back.
+        assert calls == [("poison", ()), (None, ("a",))]
+        assert _committed_skip(dispatcher, "poison") == "instruction failed"
+        current = dispatcher.get_or_create_scenario("s")
+        skip = next(
+            record
+            for record in current.commit_log.records()
+            if record.metrics is not None and "training_request" in record.metrics
+        )
+        # The skip row consumed the instruction alone: the unit it carried is held for the automatic step.
+        assert skip.consumed_ids == frozenset({"poison"})
+        assert skip.compacted_ids == frozenset({"poison"})
+        assert current.records.get("s", "poison") is None
+        assert current.records.get("s", "report-a") is not None
+        assert current.trainer.pending_instructions() == 0
+        assert current.trainer.instruction_failures() == {}
+        outage.set()
+    finally:
+        release.set()
+        outage.set()
+        dispatcher.close()
+
+    seen = []
+
+    def propose_again(nodes, samples, models, *, requests=()):
+        seen.append((requests[0]["text"] if requests else None, tuple(s.source_agent_record_id for s in samples)))
+        return
+
+    restarted = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose_again), training_mode="hybrid"))
+    try:
+        loaded = restarted.get_or_create_scenario("s")
+        assert loaded.scenario_step == 1
+        assert loaded.records.get("s", "poison") is None
+        # Recovery replays the unit as unconsumed and never the instruction the skip row named.
+        restarted.set_training_mode("s", "hybrid")
+        assert _wait(lambda: _automatic_traces(restarted) == [1])
+        assert seen == [(None, ("a",))]
+        assert _wait(lambda: loaded.records.get("s", "report-a") is None)
+        assert loaded.trainer.pending_instructions() == 0
+        assert restarted.get_or_create_scenario("s").scenario_step == 2
+    finally:
+        restarted.close()
 
 
 def test_a_queue_of_failing_instructions_drains_without_another_record(tmp_path):
@@ -854,3 +1024,365 @@ def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
     finally:
         trainer.close()
         records.close()
+
+
+# -- training_mode: hybrid --------------------------------------------------
+
+
+def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_path):
+    def propose(nodes, samples, models, *, requests=()):
+        return None
+
+    recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid")
+    records = RecordStore()
+    try:
+        trainer = recipe.build("s", records)
+        assert trainer.training_mode == "hybrid"
+        assert trainer.processor.training_mode == "hybrid"
+        assert trainer.processor.status() == {"buffered_requests": 0}
+        trainer.close()
+        with pytest.raises(ValueError, match="training_mode"):
+            replace(recipe, training_mode="either")
+        with pytest.raises(ValueError, match="training_mode"):
+            ProcessorContext("s", training_mode="either")
+        with pytest.raises(ValueError, match="training_mode"):
+            CordisProcessor(ProcessorContext("s")).set_training_mode("either")
+    finally:
+        records.close()
+
+
+@pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
+def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor):
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
+    try:
+        assert trainer.run_once() is None
+        records.append(instruction("alone"))
+        result = trainer.run_once()
+        assert result is not None
+        batch = backend.batches[0]
+        assert batch.batch_id == "s:instruction:alone"
+        assert batch.request.text == "alone"
+        assert batch.samples == ()
+        prepared = trainer.prepare_commit(result)
+        assert prepared.consumed_ids == frozenset({"alone"})
+        assert prepared.metrics["training_request"]["id"] == "alone"
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        assert records.get("s", "alone") is None
+        assert trainer.run_once() is None
+        assert trainer.training_mode == "hybrid"
+    finally:
+        trainer.close()
+        records.close()
+
+
+@pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
+def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(processor):
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
+    try:
+        failure(records, "a")
+        assert trainer.run_once() is None
+        records.append(instruction("with-context"))
+        result = trainer.run_once()
+        batch = backend.batches[0]
+        assert batch.request.id == "with-context"
+        assert [sample.source_agent_record_id for sample in batch.samples] == ["a"]
+        prepared = trainer.prepare_commit(result)
+        assert {"a", "with-context"} <= prepared.consumed_ids
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        assert records.get("s", "a") is None
+        records.append(instruction("after"))
+        assert trainer.run_once() is not None
+        assert backend.batches[1].request.id == "after"
+        assert backend.batches[1].samples == ()
+    finally:
+        trainer.close()
+        records.close()
+
+
+def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
+    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode="hybrid"))
+    processor.ingest(instruction("first"))
+    processor.ingest(instruction("second"))
+    assert processor.status() == {"buffered_requests": 2}
+    assert processor.ready()
+    batch = processor.build_batch()
+    assert batch.batch_id == "s:instruction:first"
+    assert batch.request.id == "first"
+    assert processor.build_batch() is batch
+    assert processor.acknowledge(batch.batch_id) == frozenset({"first"})
+    assert processor.build_batch().request.id == "second"
+    assert processor.acknowledge("s:instruction:second") == frozenset({"second"})
+    assert not processor.ready()
+    processor.close()
+
+
+def test_hybrid_batches_as_auto_does_without_an_instruction():
+    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode="hybrid"))
+    processor.ingest(inference("a"))
+    processor.ingest(report("a"))
+    batch = processor.build_batch()
+    assert batch.batch_id == "s:harness_evolve:1"
+    assert batch.request is None
+    assert [sample.source_agent_record_id for sample in batch.samples] == ["a"]
+    assert processor.acknowledge(batch.batch_id) == frozenset({"a", "report-a"})
+    processor.close()
+
+
+def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_mode_change():
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
+
+    def step():
+        result = trainer.run_once()
+        if result is None:
+            return None
+        prepared = trainer.prepare_commit(result)
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        batch = backend.batches[-1]
+        request = None if batch.request is None else batch.request.id
+        return request, [sample.source_agent_record_id for sample in batch.samples]
+
+    try:
+        failure(records, "a")
+        failure(records, "b")
+        assert step() == (None, ["a", "b"])
+        failure(records, "c")
+        assert step() is None
+        # An instruction goes first, and the failure held below the batch size rides beside it.
+        records.append(instruction("one"))
+        assert step() == ("one", ["c"])
+        failure(records, "d")
+        failure(records, "e")
+        assert step() == (None, ["d", "e"])
+        records.append(instruction("two"))
+        assert step() == ("two", [])
+        failure(records, "f")
+        records.append(instruction("three"))
+        failure(records, "g")
+        assert step() == ("three", ["f"])
+        assert step() is None
+        failure(records, "h")
+        assert step() == (None, ["g", "h"])
+        assert trainer.training_mode == "hybrid"
+    finally:
+        trainer.close()
+        records.close()
+
+
+def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_takes_it():
+    records, backend = RecordStore(), CaptureBackend()
+    trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
+    try:
+        records.append(instruction("later"))
+        trainer.set_training_mode("auto")
+        assert trainer.run_once() is None
+        assert trainer.processor.status() == {"buffered_requests": 1}
+        failure(records, "a")
+        failure(records, "b")
+        result = trainer.run_once()
+        assert backend.batches[-1].request is None
+        assert [sample.source_agent_record_id for sample in backend.batches[-1].samples] == ["a", "b"]
+        prepared = trainer.prepare_commit(result)
+        trainer.commit(prepared)
+        trainer.apply_compaction(prepared.compacted_ids)
+        assert records.get("s", "later") is not None
+        trainer.set_training_mode("hybrid")
+        result = trainer.run_once(1)
+        assert backend.batches[-1].request.id == "later"
+        assert backend.batches[-1].samples == ()
+        prepared = trainer.prepare_commit(result)
+        trainer.commit(prepared)
+        assert trainer.run_once(2) is None
+    finally:
+        trainer.close()
+        records.close()
+
+
+def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_path):
+    seen = []
+
+    def propose(nodes, samples, models, *, requests=()):
+        seen.append(
+            (
+                tuple(request["text"] for request in requests),
+                tuple(sample.source_agent_record_id for sample in samples),
+            )
+        )
+
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
+
+    async def run():
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
+            body = {
+                "agent_record_id": "ask-1",
+                "text": "Prefer tests first",
+                "session": "session-1",
+                "release_id": "release-1",
+            }
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            assert response.status == 200, await response.text()
+            assert await asyncio.to_thread(_wait, lambda: "Prefer tests first" in _release_texts(dispatcher))
+            assert seen == [(("Prefer tests first",), ())]
+            # The failure path stays on: a failing exchange batches by itself with no instruction queued.
+            dispatcher.accept_record(inference("a"))
+            dispatcher.accept_record(report("a"))
+            assert await asyncio.to_thread(_wait, lambda: len(seen) == 2)
+            assert seen[1] == ((), ("a",))
+            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("target", ["auto", "hybrid"])
+def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batching_mode(tmp_path, target):
+    def propose(nodes, samples, models, *, requests=()):
+        return None
+
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="manual"))
+    proposal = {
+        "mutations": [{"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}],
+        "reason": "because",
+        "session": "3f1c2a9d0b7e",
+        "release_id": "rel-0",
+    }
+    inbox = tmp_path / "inbox" / "s"
+
+    async def run():
+        assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "manual"
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            headers = {"x-reef-scenario": "s"}
+            response = await client.post("/reef/harness/proposals", headers=headers, json=proposal)
+            assert response.status == 200
+            answer = await response.json()
+            assert answer["admitted"] is False
+            assert answer["reason"] == "manual mode takes instructions only"
+            assert not inbox.exists() or not list(inbox.glob("*.json"))
+            response = await client.post("/reef/scenarios/s/update", json={"training_mode": target})
+            assert response.status == 200
+            response = await client.post("/reef/harness/proposals", headers=headers, json=proposal)
+            answer = await response.json()
+            assert answer["admitted"] is True and answer["reason"] is None
+            assert [path.name for path in inbox.glob("*.json")] == [f"{answer['proposal_id']}.json"]
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold_them_all(caplog):
+    def fill(mode):
+        processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode=mode))
+        for i in range(20):
+            processor.ingest(inference(f"inf-{i}"))
+            processor.ingest(
+                AgentRecord.create(
+                    scenario="s",
+                    request_type=RequestType.REPORT,
+                    payload={"score": 0, "references": [f"inf-{i}"]},
+                    agent_record_id=f"rep-{i}",
+                )
+            )
+        return processor
+
+    with caplog.at_level(logging.WARNING, logger="reef.train.processors.reported"):
+        manual = fill("manual")
+    assert manual._ready_count() == 4
+    assert not manual.ready()
+    retention = manual.retention_decision()
+    shed = {f"inf-{i}" for i in range(16)} | {f"rep-{i}" for i in range(16)}
+    assert shed <= retention.releasable_agent_record_ids
+    kept = {f"inf-{i}" for i in range(16, 20)} | {f"rep-{i}" for i in range(16, 20)}
+    assert kept <= retention.protected_agent_record_ids
+    assert manual.never_reasons == {"more than 4 units held in manual mode": 16}
+    assert sum("released report rep-0" in record.message for record in caplog.records) == 1
+    assert len(caplog.records) == 1
+    manual.ingest(instruction("do-it"))
+    batch = manual.build_batch()
+    assert batch.samples == ()
+    assert manual.acknowledge(batch.batch_id) == frozenset({"do-it"})
+    assert manual._ready_count() == 4
+    manual.close()
+
+    for mode in ("auto", "hybrid"):
+        uncapped = fill(mode)
+        assert uncapped._ready_count() == 20
+        assert uncapped.never_reasons == {}
+        # The switch to manual trims the pile at once; the batch already handed out keeps its unit.
+        reserved = uncapped.build_batch()
+        uncapped.set_training_mode("manual")
+        assert uncapped._ready_count() == 4
+        assert uncapped.never_reasons == {"more than 4 units held in manual mode": 16}
+        assert "inf-0" in uncapped.retention_decision().protected_agent_record_ids
+        assert uncapped.acknowledge(reserved.batch_id) == frozenset({"inf-0", "rep-0"})
+        assert uncapped._ready_count() == 3
+        uncapped.close()
+
+
+def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
+    calls = []
+
+    def propose(nodes, samples, models, *, requests=()):
+        calls.append(
+            (
+                tuple(request["text"] for request in requests),
+                tuple(sample.source_agent_record_id for sample in samples),
+            )
+        )
+
+    recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid", promote_failures=True, batch_size=2)
+    dispatcher = _dispatcher(tmp_path, recipe)
+
+    def gate_rows():
+        rows = dispatcher.get_or_create_scenario("s").releases()
+        return [
+            (metrics["traces"], metrics["promoted_tasks"], metrics["gate_tasks"], "training_request" in metrics)
+            for row in rows
+            if (metrics := row.get("metrics"))
+        ]
+
+    async def run():
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            # One failure held below the batch size; the instruction step takes it and promotes it.
+            dispatcher.accept_record(inference("fails-1"))
+            dispatcher.accept_record(report("fails-1"))
+            body = {"agent_record_id": "ask-1", "text": "do it", "session": "session-1", "release_id": "release-1"}
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            assert response.status == 200, await response.text()
+            assert await asyncio.to_thread(_wait, lambda: len(gate_rows()) == 1)
+            assert calls == [(("do it",), ("fails-1",))]
+            assert gate_rows() == [(1, 1, 2, True)]
+            # The automatic step after grows the gate on top of the promoted one.
+            for receipt in ("fails-2", "fails-3"):
+                dispatcher.accept_record(inference(receipt))
+                dispatcher.accept_record(report(receipt))
+            assert await asyncio.to_thread(_wait, lambda: len(gate_rows()) == 2)
+            # Newest first: the automatic step's row, then the instruction step's.
+            assert gate_rows() == [(2, 3, 4, False), (1, 1, 2, True)]
+            assert calls[1] == ((), ("fails-2", "fails-3"))
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()

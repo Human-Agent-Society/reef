@@ -1,6 +1,6 @@
 """Process orchestrator behind ``reef serve``.
 
-Starts every service a config declares in dependency order, probes readiness,
+Starts independent services concurrently while honoring readiness dependencies,
 mirrors child output, watches for unexpected exits, and tears the stack down
 in reverse order on signal. Assembly of the Reef HTTP application itself
 lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
@@ -8,23 +8,26 @@ lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
 
 from __future__ import annotations
 
-import contextlib
 import copy
+import json
 import os
-import shlex
 import signal
-import subprocess
 import sys
 import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from types import FrameType
-from typing import Any, TextIO
+from typing import Any
 
 import yaml
 
+from reef.runtime.executor import Executor
+from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
+from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.service.deploy.config import (
     PROJECT_ROOT,
     config_value,
@@ -34,30 +37,15 @@ from reef.service.deploy.config import (
     resolve_model_paths,
     validate_services,
 )
+from reef.service.deploy.execution import service_executor_config, service_executor_selection
 from reef.service.deploy.settings import build_parser
 
 _DEFAULT_GRACE_TIMEOUT = 30
-_PROCESS_REAP_TIMEOUT = 5
 _WATCHDOG_INTERVAL = 5
 
 
 def _log(msg: str) -> None:
     print(f"[reef] {msg}", file=sys.stderr)
-
-
-def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:
-    """Materialize a service command without changing its executable semantics."""
-    if isinstance(command, str):
-        return shlex.split(interpolate_config(config, command))
-    return [interpolate_config(config, argument) for argument in command]
-
-
-def _with_path_entry(current: str | None, entry: Path) -> str:
-    """``current`` with ``entry`` appended once, in ``os.pathsep`` form."""
-    entries = [item for item in (current or "").split(os.pathsep) if item]
-    if str(entry) not in entries:
-        entries.append(str(entry))
-    return os.pathsep.join(entries)
 
 
 class InvalidOverrideError(ValueError):
@@ -138,61 +126,8 @@ def _write_override_config(config: dict[str, Any]) -> Path:
     return Path(tmp)
 
 
-class _TeeStream:
-    """Pipe a child's stdout to a file and the terminal simultaneously.
-
-    Popen needs a real fd for the child's stdout, so we give it a pipe
-    (``os.pipe``) and run a background thread that reads from the read end
-    and fans writes out to both the per-service log file and the orchestrator's
-    own stdout. This lets the operator see live output without ``tail -f``.
-    """
-
-    def __init__(self, log_fp: TextIO, terminal: TextIO) -> None:
-        self._read_fd, self._write_fd = os.pipe()
-        self._log_fp = log_fp
-        self._terminal = terminal
-        self._thread = threading.Thread(target=self._pump, daemon=True)
-        self._thread.start()
-
-    @property
-    def write_fd(self) -> int:
-        return self._write_fd
-
-    def _pump(self) -> None:
-        while True:
-            try:
-                chunk = os.read(self._read_fd, 4096)
-            except OSError:
-                break
-            if not chunk:
-                break
-            text = chunk.decode("utf-8", errors="replace")
-            # Each sink fails independently: a broken pipe on one must not
-            # stop mirroring to the other.
-            for s in (self._log_fp, self._terminal):
-                try:
-                    s.write(text)
-                    s.flush()
-                except (OSError, ValueError):  # noqa: PERF203
-                    pass
-        with contextlib.suppress(OSError):
-            os.close(self._read_fd)
-
-    def close(self) -> None:
-        with contextlib.suppress(OSError):
-            os.close(self._write_fd)
-        self._thread.join(timeout=5)
-
-
 class _Stack:
-    """Manages the lifecycle of all declared services.
-
-    Holds Popen handles (source of truth for liveness via ``proc.poll()``),
-    writes pidfiles for external consumers, probes readiness, runs a watchdog
-    thread that detects unexpected exits, and tears down in reverse-dependency
-    order on signal. Follows the same pattern as TGI's launcher and SGLang's
-    Engine: spawn → probe readiness → block → signal-driven shutdown.
-    """
+    """Dependency orchestration over Executor RPCs, independent of placement."""
 
     def __init__(
         self,
@@ -203,7 +138,7 @@ class _Stack:
         config_path: str | Path,
         source_root: Path | None = None,
     ) -> None:
-        self.config = config
+        self.config = copy.deepcopy(config)
         self.services = services
         self.run_dir = run_dir
         self.ready_timeout_default = ready_timeout_default
@@ -211,148 +146,170 @@ class _Stack:
         # Where the deployment's dotted recipe package lives (see
         # ``recipe_source_root``); every service gets it on ``PYTHONPATH``.
         self.source_root = source_root
-        self._procs: dict[str, subprocess.Popen[bytes]] = {}
-        # Every POSIX service starts a fresh session, so its process-group ID
-        # is the leader PID. Keep that identity after the leader exits:
-        # launchers such as Ray and SGLang can leave workers alive after their
-        # direct child has gone, and shutdown must still reach those workers.
-        self._process_groups: dict[str, int] = {}
-        self._log_fps: dict[str, TextIO] = {}
-        self._tees: dict[str, _TeeStream] = {}
-        self._names = [svc["name"] for svc in services]
+        self._executors: dict[str, Executor] = {}
+        self._log_offsets: dict[str, int] = {}
         self._stopping = threading.Event()
         self._unexpected_exit = threading.Event()
-
-    def _pid_file(self, name: str) -> Path:
-        return self.run_dir / f"{name}.pid"
-
-    def _log_file(self, name: str) -> Path:
-        return self.run_dir / f"{name}.log"
+        self._closed = False
+        self._ray_runtime: RayRuntimeLease | None = None
 
     def _is_alive(self, name: str) -> bool:
-        proc = self._procs.get(name)
-        return proc is not None and proc.poll() is None
+        executor = self._executors.get(name)
+        if executor is None:
+            return False
+        status = executor.rpc(0, "status", timeout=10)
+        return name in status and status[name] is None
 
-    def _service_env(self, svc: Mapping[str, Any]) -> dict[str, str]:
-        """The environment a service and its ready probe run under.
+    def _drain_log(self, name: str) -> None:
+        executor = self._executors[name]
+        content, offset = executor.rpc(0, "read_log", args=(name, self._log_offsets.get(name, 0)), timeout=10)
+        self._log_offsets[name] = offset
+        if content:
+            with (self.run_dir / f"{name}.log").open("a") as handle:
+                handle.write(content)
+            print(content, end="", flush=True)
 
-        The bridge driver's readiness marker lives under ``run_dir`` with the
-        stack's pid and log files, so two stacks on one machine never share
-        one; the driver reads the path from ``REEF_BRIDGE_READY_FILE``.
-
-        The recipe's source root is appended to ``PYTHONPATH`` rather than
-        prepended, so an inherited entry such as the reef image's Megatron
-        checkout keeps its precedence. A service's own ``env`` map is applied
-        last and can still replace the whole variable.
-        """
-        env = dict(os.environ)
-        env["REEF_CONFIG"] = str(self.config_path)
-        env["REEF_BRIDGE_READY_FILE"] = str(self.run_dir / "bridge.ready")
-        if self.source_root is not None:
-            env["PYTHONPATH"] = _with_path_entry(env.get("PYTHONPATH"), self.source_root)
-        for k, v in (svc.get("env") or {}).items():
-            env[k] = interpolate_config(self.config, str(v))
-        cuda = svc.get("cuda")
-        if cuda:
-            env["CUDA_VISIBLE_DEVICES"] = interpolate_config(self.config, str(cuda))
-        return env
-
-    def _check_deps(self, svc: Mapping[str, Any]) -> None:
-        name = svc["name"]
-        for dep in svc.get("depends_on") or []:
-            if dep not in self._names:
-                sys.exit(f"[reef] ERROR: service {name!r} depends on unknown service {dep!r}")
-            if not self._is_alive(dep):
-                sys.exit(f"[reef] ERROR: service {name!r} requires {dep!r}, which is not running")
-
-    def _wait_ready(self, svc: Mapping[str, Any], proc: subprocess.Popen[bytes]) -> None:
-        name = svc["name"]
-        ready = svc.get("ready")
-        if not ready:
-            time.sleep(2)
-            return
-        ready_cmd = interpolate_config(self.config, ready)
-        env = self._service_env(svc)
-        timeout = int(svc.get("ready_timeout", self.ready_timeout_default))
-        waited = 0
-        while True:
-            if subprocess.run(ready_cmd, shell=True, capture_output=True, env=env).returncode == 0:
+    def _wait_ready(self, service: Mapping[str, Any], executor: Executor, deadline: float) -> None:
+        while not self._stopping.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"service {service['name']!r} did not become ready")
+            ready = executor.rpc(0, "probe", args=(service["name"], min(5, remaining)), timeout=min(5, remaining) + 2)
+            self._drain_log(service["name"])
+            if ready:
                 return
-            if proc.poll() is not None:
-                _log(f"ERROR: {name!r} exited before ready; see {self._log_file(name)}")
-                sys.exit(1)
-            if waited >= timeout:
-                _log(f"ERROR: {name!r} not ready after {timeout}s; see {self._log_file(name)}")
-                sys.exit(1)
-            time.sleep(5)
-            waited += 5
+            self._stopping.wait(min(0.25, max(0, deadline - time.monotonic())))
+        raise InterruptedError("stack stopped during startup")
 
-    def _start_service(self, svc: Mapping[str, Any]) -> None:
-        name = svc["name"]
-        if self._is_alive(name):
-            _log(f"{name}: already running (pid {self._procs[name].pid})")
-            return
-        self._check_deps(svc)
-        command = _command_argv(self.config, svc["command"])
-        env = self._service_env(svc)
-        _log(f"starting {name}: {shlex.join(command)}")
-        # The handle outlives this scope (closed in stop()); a context manager
-        # would close it under the running service.
-        log_fp = open(self._log_file(name), "a")  # noqa: SIM115
-        self._log_fps[name] = log_fp
-        # Mirror stdout/stderr to both the log file and the terminal so the
-        # operator sees live output without `tail -f`.
-        tee = _TeeStream(log_fp, sys.stdout)
-        self._tees[name] = tee
-        proc = subprocess.Popen(
-            command,
-            env=env,
-            cwd=svc.get("cwd"),
-            stdout=tee.write_fd,
-            stderr=subprocess.STDOUT,
-            start_new_session=os.name == "posix",
+    def _prepare_services(self, services: Sequence[dict[str, Any]]) -> None:
+        # Only prepare eligible services: an explicitly managed Ray head may
+        # itself be an upstream dependency. Placement does not load models.
+        selections = [service_executor_selection(self.config, service) for service in services]
+        ray_services = any(
+            issubclass(Executor.get_class(selection.settings.backend), RayExecutor) for selection in selections
         )
-        self._procs[name] = proc
-        if os.name == "posix":
-            self._process_groups[name] = proc.pid
-        self._pid_file(name).write_text(str(proc.pid))
-        self._wait_ready(svc, proc)
-        _log(f"{name}: ready")
+        ray_roles = any(
+            select_executor(role_executor_settings(self.config, role), role=role).settings.backend == "ray"
+            for role in ("training", "rollout")
+            if role in self.config.get("execution", {})
+        )
+        if services and self._ray_runtime is None and (ray_services or ray_roles):
+            address = os.environ.get("RAY_ADDRESS") or self.config.get("reef", {}).get("ray_address")
+            address = interpolate_config(self.config, address) if address else None
+            # Local Slime drivers connect to an explicitly supplied cluster
+            # themselves, after their dependencies (possibly a Ray head) are ready.
+            # Without an address, own one runtime without reserving driver GPUs.
+            if ray_services or not address or address == "local":
+                self._ray_runtime = acquire_ray_runtime(address)
+                address = self._ray_runtime.address
+            self.config.setdefault("reef", {})["ray_address"] = address
+        # Publish all eligible endpoints before any of their processes start.
+        for service, selection in zip(services, selections, strict=True):
+            self._prepare_service(service, selection)
+
+    def _prepare_service(self, service: Mapping[str, Any], selection: ExecutorSelection) -> None:
+        name = service["name"]
+        for dependency in service.get("depends_on") or []:
+            if not self._is_alive(dependency):
+                raise RuntimeError(f"service {name!r} requires healthy dependency {dependency!r}")
+        _log(f"{name}: executor={selection.settings.backend} ({selection.reason})")
+        address = self.config.get("reef", {}).get("ray_address")
+        if address:
+            service = {**service, "env": {"RAY_ADDRESS": address, **service.get("env", {})}}
+        executor = Executor.create(
+            service_executor_config(
+                self.config,
+                service,
+                self.run_dir / name,
+                self.ready_timeout_default,
+                self.config_path,
+                selection=selection,
+                source_root=self.source_root,
+            )
+        )
+        # Register immediately: prepare/start/readiness failures must release it.
+        self._executors[name] = executor
+        info = executor.rpc(0, "describe", timeout=30)
+        endpoint = service.get("endpoint")
+        if endpoint:
+            host = interpolate_config(self.config, service.get("advertise_host", info["host"]))
+            host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+            endpoint = interpolate_config(self.config, endpoint).replace("{host}", host)
+            self.config.setdefault("endpoints", {})[name] = endpoint
+
+    def _start_service(self, service: Mapping[str, Any], config: dict[str, Any]) -> None:
+        name = service["name"]
+        executor = self._executors[name]
+        if self._stopping.is_set():
+            raise InterruptedError("stack stopped during startup")
+        executor.rpc(0, "prepare", args=(config,), timeout=30)
+        if self._stopping.is_set():
+            raise InterruptedError("stack stopped during startup")
+        deadline = time.monotonic() + float(service.get("ready_timeout", self.ready_timeout_default))
+        executor.rpc(0, "start", timeout=30)
+        info = executor.rpc(0, "describe", timeout=30)
+        with (self.run_dir / f"{name}.worker.json").open("w") as handle:
+            json.dump(info, handle)
+        self._wait_ready(service, executor, deadline)
+        endpoint = config.get("endpoints", {}).get(name)
+        _log(f"{name}: ready" + (f" at {endpoint}" if endpoint else ""))
 
     def start(self) -> None:
-        # A crashed run can leave this behind. Clear it before any service
-        # starts so readiness can only come from the current bridge driver.
-        (self.run_dir / "bridge.ready").unlink(missing_ok=True)
-        for svc in self.services:
-            self._start_service(svc)
+        try:
+            # Launch/readiness tasks never mutate the deployment config. The
+            # coordinator alone publishes addresses and unlocks dependents.
+            with ThreadPoolExecutor(max_workers=max(1, len(self.services)), thread_name_prefix="reef-start") as pool:
+                try:
+                    pending = list(self.services)
+                    running: dict[Future[None], str] = {}
+                    ready: set[str] = set()
+                    while pending or running:
+                        if self._stopping.is_set():
+                            raise InterruptedError("stack stopped during startup")
+                        eligible = [svc for svc in pending if ready.issuperset(svc.get("depends_on", []))]
+                        self._prepare_services(eligible)
+                        for service in eligible:
+                            pending.remove(service)
+                            future = pool.submit(self._start_service, service, copy.deepcopy(self.config))
+                            running[future] = service["name"]
+                        done, _ = wait(running, timeout=0.25, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            future.result()
+                            ready.add(running.pop(future))
+                        # Readiness is not a permanent liveness guarantee. A
+                        # previously ready service may die while peers load.
+                        for name in ready:
+                            if not self._is_alive(name):
+                                raise RuntimeError(f"service {name!r} exited during startup")
+                except BaseException:
+                    # Wake peer readiness loops before joining launch tasks.
+                    # Join first so none can create a process after cleanup.
+                    self._stopping.set()
+                    raise
+        except BaseException:
+            self.shutdown()
+            raise
         _log(f"stack up. logs: {self.run_dir}/*.log")
 
     def _watchdog(self) -> None:
-        """Poll Popen handles; bring down the stack if any service exits.
-
-        GPU processes that crash leave CUDA state suspect, so — following TGI /
-        SGLang / vLLM convention — we do not auto-restart. The whole stack goes
-        down so the operator can restart cleanly.
-        """
         while not self._stopping.is_set():
-            for name, proc in list(self._procs.items()):
-                if proc.poll() is not None:
-                    # A signal may arrive while this polling pass is already
-                    # in progress. Child exits after that stop request belong
-                    # to deliberate teardown, not to the watchdog.
+            for name in list(self._executors):
+                try:
+                    alive = self._is_alive(name)
+                    self._drain_log(name)
+                except Exception as exc:
+                    _log(f"{name}: execution backend failed: {exc}")
+                    alive = False
+                if not alive:
                     if self._stopping.is_set():
                         return
-                    code = proc.returncode
-                    _log(f"{name}: exited (code {code}); bringing down the stack")
+                    _log(f"{name}: exited; bringing down the stack")
                     self._unexpected_exit.set()
                     self._stopping.set()
                     return
             self._stopping.wait(_WATCHDOG_INTERVAL)
 
     def block(self) -> None:
-        """Run the watchdog thread and block until a signal arrives or a
-        service exits."""
-
         def _request_stop(signum: int, frame: FrameType | None) -> None:
             _log("received signal, shutting down")
             self._stopping.set()
@@ -362,119 +319,49 @@ class _Stack:
         watcher = threading.Thread(target=self._watchdog, daemon=True)
         watcher.start()
         self._stopping.wait()
-
-    def _safe_process_group(self, name: str, proc: subprocess.Popen[bytes]) -> int | None:
-        """Return the spawn-time PGID only when it is safe to signal."""
-        pgid = self._process_groups.get(name)
-        if os.name != "posix" or pgid is None or pgid <= 1 or pgid != proc.pid or pgid == os.getpgrp():
-            return None
-
-        # A process group may outlive its leader, but the numeric PID can be
-        # reused once that group disappears.  If the leader has exited and a
-        # process with its PID is present again, the stored PGID is stale and
-        # must never be signalled.  ``getpgid`` raising is the expected state
-        # while descendants keep the original leaderless group alive.
-        leader_exited = proc.poll() is not None
-        try:
-            current_pgid = os.getpgid(proc.pid)
-        except ProcessLookupError:
-            if not leader_exited and proc.poll() is None:
-                return None
-        except PermissionError:
-            return None
-        else:
-            if leader_exited or current_pgid != pgid:
-                return None
-        return pgid
-
-    def _process_tree_alive(self, name: str, proc: subprocess.Popen[bytes]) -> bool:
-        """Whether a managed leader or one of its process-group children lives."""
-        # Reap an exited direct child before probing the group; otherwise its
-        # zombie can make killpg(..., 0) report a group that has already gone.
-        proc.poll()
-        pgid = self._safe_process_group(name, proc)
-        if pgid is None:
-            return proc.returncode is None
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            return proc.returncode is None
-        except PermissionError:
-            # The group still exists even if the current process unexpectedly
-            # lost permission to signal it.
-            return True
-        return True
-
-    def _signal_process_tree(self, name: str, proc: subprocess.Popen[bytes], signum: int) -> None:
-        """Signal one service's whole tree, with a direct-child test fallback."""
-        pgid = self._safe_process_group(name, proc)
-        if pgid is not None:
-            try:
-                os.killpg(pgid, signum)
-                return
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                _log(f"could not signal {name} process group {pgid}; falling back to leader {proc.pid}")
-        if proc.poll() is None:
-            if signum == signal.SIGTERM:
-                proc.terminate()
-            else:
-                proc.kill()
+        watcher.join(timeout=15)
 
     def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
-        """Kill service process groups in reverse order: SIGTERM → wait → SIGKILL."""
+        if self._closed:
+            return
+        self._closed = True
         self._stopping.set()
+        ordered = list(reversed(self._executors.items()))
+        # Signal every dependent before its dependencies, with one grace window.
+        for name, executor in ordered:
+            try:
+                executor.rpc(0, "request_stop", timeout=10)
+            except Exception as exc:  # noqa: PERF203 -- each remote worker must be cleaned independently
+                _log(f"{name}: stop RPC failed: {exc}")
         deadline = time.monotonic() + max(0, grace)
-        targets = []
-        for name in reversed(self._names):
-            proc = self._procs.get(name)
-            if proc is None or not self._process_tree_alive(name, proc):
-                continue
-            pgid = self._safe_process_group(name, proc)
-            identity = f"process group {pgid}" if pgid is not None else f"pid {proc.pid}"
-            _log(f"stopping {name} ({identity})")
-            self._signal_process_tree(name, proc, signal.SIGTERM)
-            targets.append((name, proc))
-
-        # Every group gets the full grace window concurrently. Waiting for
-        # leaders one by one would both miss descendants and let an early
-        # service consume the entire shared deadline.
-        pending = targets
+        pending = ordered
         while pending and time.monotonic() < deadline:
-            pending = [(name, proc) for name, proc in pending if self._process_tree_alive(name, proc)]
+            living = []
+            for name, executor in pending:
+                try:
+                    if executor.rpc(0, "tree_alive", timeout=min(2, max(0.01, deadline - time.monotonic()))):
+                        living.append((name, executor))
+                except Exception:  # noqa: PERF203 -- a failed node must not skip other nodes
+                    living.append((name, executor))
+            pending = living
             if pending:
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-
-        pending = [(name, proc) for name, proc in pending if self._process_tree_alive(name, proc)]
-        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
-        for name, proc in pending:
-            _log(f"{name}: process tree did not exit in {grace}s, SIGKILL")
-            self._signal_process_tree(name, proc, kill_signal)
-
-        reap_deadline = time.monotonic() + _PROCESS_REAP_TIMEOUT
-        for name in reversed(self._names):
-            proc = self._procs.get(name)
-            if proc is None:
-                continue
-            if proc.poll() is None:
+        for name, executor in ordered:
+            try:
+                executor.rpc(0, "shutdown", kwargs={"grace": 0}, timeout=15)
+                self._drain_log(name)
+            except Exception as exc:  # noqa: PERF203 -- continue teardown after a worker failure
+                _log(f"{name}: process cleanup failed: {exc}")
+            finally:
                 try:
-                    proc.wait(timeout=max(0, reap_deadline - time.monotonic()))
-                except subprocess.TimeoutExpired:
-                    _log(f"{name}: leader pid {proc.pid} could not be reaped after SIGKILL")
-            self._pid_file(name).unlink(missing_ok=True)
-        for tee in self._tees.values():
-            tee.close()
-        for fp in self._log_fps.values():
-            with contextlib.suppress(Exception):
-                fp.close()
+                    executor.shutdown()
+                except Exception as exc:
+                    _log(f"{name}: executor cleanup failed: {exc}")
+        if self._ray_runtime is not None:
+            self._ray_runtime.close()
 
     @property
     def exit_code(self) -> int:
-        """1 when a service exited unexpectedly, else 0.
-
-        If we got here via a signal, exit 0; if a service died, exit 1.
-        """
         return int(self._unexpected_exit.is_set())
 
 

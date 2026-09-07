@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from reef.core.errors import ReefError
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TraceSample
 
@@ -85,17 +86,20 @@ class Proposer(ABC):
     only forwarded to callables whose signature names it, so earlier
     proposers run unchanged.
 
-    In manual mode, ``requests`` contains exactly one mapping with ``id``,
-    ``text``, ``session``, ``release_id`` and ``untrusted=True``. It is the
-    instruction that authorized this step; ``samples`` is empty. The
-    proposer must explicitly name ``requests`` to support manual evolution.
-    It generates mutations against the current tree, then the same gate
-    and publication policy used by automatic evolution apply.
+    In ``manual`` and ``hybrid`` mode, when an instruction is queued,
+    ``requests`` contains exactly one mapping with ``id``, ``text``,
+    ``session``, ``release_id`` and ``untrusted=True``. It is the
+    instruction that owns this step; ``samples`` is empty in ``manual``, and
+    in ``hybrid`` it is what an automatic batch would take next, up to
+    ``batch_size`` and possibly none (failing traces in the score window, or
+    records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
+    instructions. It generates mutations against the current tree, then the
+    same gate and publication policy used by automatic evolution apply.
     """
 
     @property
     def reads_requests(self) -> bool:
-        """Whether this proposer can honor an explicit manual training request."""
+        """Whether this proposer can honor a training instruction (``manual`` and ``hybrid``)."""
         return names_keyword(self.__call__, "requests")
 
     @abstractmethod
@@ -125,6 +129,14 @@ class EpisodeScorer(ABC):
     def __call__(self, task: str, result: EpisodeResult) -> float:
         """Score one episode result for a task."""
 
+    def execution_requirements(self) -> ExecutionRequirements:
+        """Override when scoring loads a local GPU model or needs cluster placement.
+
+        API calls do not request local GPUs. GPU scorers must initialize their
+        model lazily in the allocated worker, not while the recipe is built.
+        """
+        return ExecutionRequirements()
+
 
 def accepts_keyword(fn: Callable[..., Any], name: str) -> bool:
     """Whether ``fn`` names ``name`` or takes ``**kwargs``; a keyword is only passed to code that declared it."""
@@ -141,7 +153,7 @@ def accepts_manifest(fn: Callable[..., Any]) -> bool:
 
 
 def names_keyword(fn: Callable[..., Any], name: str) -> bool:
-    """A manual instruction must be explicitly accepted, not swallowed by **kwargs."""
+    """An instruction must be explicitly accepted, not swallowed by **kwargs."""
     try:
         parameter = inspect.signature(fn).parameters.get(name)
     except (TypeError, ValueError):

@@ -107,27 +107,33 @@ Recipe configuration
 --------------------
 
 ``data.training_mode`` is shared by all recipes and defaults to ``auto``.
-In ``auto``, the recipe's processor decides when its data can form a batch.
-In ``manual``, inference and reports cannot authorize training by themselves;
-``POST /reef/train`` supplies the user instruction. The processor defines
-the manual mode's input requirements and batching, independently of its
-automatic batching policy. Harness evolution needs only the instruction.
+In ``auto``, the recipe's processor decides when its data can form a batch,
+and ``POST /reef/train`` is refused. In ``manual``, inference and reports
+cannot authorize training by themselves; ``POST /reef/train`` supplies the
+user instruction, and harness evolution runs it alone. In ``hybrid``, the
+processor batches as in ``auto`` and runs instructions too, a queued
+instruction first; harness evolution hands the proposer, beside the
+instruction, the units an automatic batch would take next, up to
+``batch_size`` and possibly none: failing traces in the score window, or
+records under ``data.batch_policy: records``. The processor defines
+what an instruction batch carries, independently of its automatic batching
+policy.
 For a dotted weight-training deployment this field is also accepted as
 ``reef.training_mode``. Named presets set it in their own ``data`` section.
 
 The processor receives ``ProcessorContext.training_mode`` as its initial
-batching mode. Both modes share ingestion and retention; the
+batching mode. The modes share ingestion and retention; the
 ``make_training_batch(batch_number, request)`` hook selects batch inputs.
 Processors declare ``supported_training_modes``; unsupported modes or missing
-manual assembly raise ``NotImplementedError``.
-Harness evolution supports both modes and requires a proposer that explicitly
-accepts ``requests`` for manual operation. Setting ``manual`` on an
-inference-only recipe does not create a training backend.
+instruction assembly raise ``NotImplementedError``.
+Harness evolution supports the three modes and requires a proposer that
+explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
+on an inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
    data:
-     training_mode: manual
+     training_mode: hybrid
 
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
@@ -135,11 +141,13 @@ Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent batches; a reserved batch completes under
 its original mode. Mode changes are not persisted: a service restart uses the
 recipe's configured mode again, while a scenario reload after a failed step
-keeps the selected mode.
+keeps the selected mode. In ``manual`` the reported-feedback processor holds
+at most four batches of units and releases the oldest beyond that with a
+warning, at the switch to ``manual`` and as reports arrive.
 
 .. config::
 
-   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules
+   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
 
 A recipe is selected three ways:
 
@@ -195,6 +203,62 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A preset's ``runtime.type: executor_training`` selects an executor-backed
+training coordinator. Its ``executor`` mapping accepts ``backend`` (default
+``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
+``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
+configuration still connects to a named bridge. The Slime driver's separate
+``--reef-executor-backend`` selects the model worker executor and defaults to
+``auto`` (currently Slime's Ray launcher). See `Worker executors <../developer-guide/executors.rst>`__ for the full
+contracts and examples.
+
+Stack execution backends
+------------------------
+
+``execution.services`` selects the deployment executor (default ``auto``).
+``services[].executor`` overrides it for one service, including SGLang, PRM,
+Slime driver or Reef itself. ``execution.training`` and ``execution.rollout``
+select the Slime training-worker and rollout-control executors (both default
+``auto``, resolving to ``ray``). All selectors accept a backend name/import path or a profile under
+``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
+``options``, ``workers``, and ``resources`` containing ``cpus_per_worker`` and
+``gpus_per_worker``. Counts must be positive integers; resource quantities must
+be finite nonnegative numbers. Numeric environment interpolation is accepted.
+
+``execution.evolution`` selects harness evaluation workers (default ``auto``).
+Unlike Slime, ordinary harness evolution calls external model endpoints and
+does not need local GPUs: one worker selects ``uni``, multiple workers select
+``mp``. Local GPU worker requirements follow the same topology rule after
+checking visible CUDA capacity; insufficient GPUs fail with a prompt to
+explicitly select ``ray``. Multiple workers inside a Ray placement group or
+declared cluster/actor options select ``ray``. Local allocations require whole
+GPUs; fractional reservations require explicit Ray. The former worker-level
+``local`` executor is removed (the separate episode-isolation option is unchanged).
+Omitted resources retain component defaults (normally one CPU and no GPUs).
+CPU-only local executors do not reserve cores or enforce CPU quotas.
+
+Service executors accept the same resources, mapped to per-service launch
+requests, but ``workers`` must be one: service replicas are not implemented.
+Slime training/rollout reject these generic workers/resources fields; their
+model-parallel topology and placement groups still come from Slime's existing
+training configuration. Resource declarations are never silently treated as
+model-parallel resizing.
+
+For services, ``auto`` selects ``uni`` unless resource/worker options
+or an existing Ray placement group call for Ray. Explicit local CUDA visibility
+selects ``uni`` and cannot be combined with cluster resource options.
+Explicit service selectors and Slime CLI flags override the corresponding role
+defaults. Backend startup failures never silently fall back to another backend.
+
+For Ray services, ``resources`` supplies actor launch options such as
+``num_gpus`` and ``num_cpus``; do not also set ``cuda``. A service can publish
+``endpoint: http://{host}:23001`` and dependents can use
+``${endpoints.SERVICE_NAME}``. Readiness runs on the service's execution node,
+and dependencies are topologically sorted. Local services advertise localhost
+unless ``advertise_host`` is set. See the `whole-stack examples and backend
+contracts <../developer-guide/executors.rst#whole-stack-deployment-configuration>`__
+before moving services across nodes.
+
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -226,6 +290,10 @@ zero.
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
+   execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
+   execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
+   execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
+   evolution.episode_workers / worker_executor / worker_resources | | deprecated compatibility aliases; conflicting resource values are rejected; legacy worker_executor cannot accompany role-level workers/resources
    evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
@@ -237,7 +305,7 @@ zero.
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
-   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` or ``response`` or ``error``, and ``seconds``; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each gate episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the

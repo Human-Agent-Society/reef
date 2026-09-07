@@ -3,8 +3,9 @@
 configs/serve.yaml (or configs/serve-native.yaml, the argument run.sh passes
 for the native variant) carries both the deployment (`reef:`, `services:`)
 and the harness_evolve recipe itself. The registry loads named recipes from
-REEF_RECIPE_CONFIG_DIR, so run.sh drops those four sections there before
-starting Reef, and the task list beside them for run.py.
+REEF_RECIPE_CONFIG_DIR, so run.sh drops the recipe sections plus optional model,
+execution selectors and executor profiles there before starting Reef, and the
+task list beside them for run.py. An omitted model uses the deployment runtime.
 """
 
 import argparse
@@ -13,13 +14,14 @@ from pathlib import Path
 
 import yaml
 
-RECIPE_SECTIONS = ("implementation", "model", "evolution", "data")
+RECIPE_SECTIONS = ("implementation", "evolution", "data")
 
 
 def materialize(serve: Path, work: Path) -> None:
     """Write ``work/recipes/harness_evolve.yaml`` and ``work/tasks.json`` from ``serve``."""
     config = yaml.safe_load(serve.read_text())
     recipe = {key: config[key] for key in RECIPE_SECTIONS}
+    recipe.update({key: config[key] for key in ("model", "execution", "executors") if key in config})
     (work / "recipes").mkdir(parents=True, exist_ok=True)
     (work / "recipes" / "harness_evolve.yaml").write_text(yaml.safe_dump(recipe, sort_keys=False))
     (work / "tasks.json").write_text(json.dumps(recipe["evolution"]["tasks"], indent=2) + "\n")

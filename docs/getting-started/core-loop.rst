@@ -45,6 +45,11 @@ The core loop
          end
        end
 
+Training runtimes call a backend-neutral group handle. Worker launch and RPC
+sit behind a configurable ``Executor``; the Slime backend uses the same
+interface for its model worker groups. See
+`Worker executors <../developer-guide/executors.rst>`__ for that boundary.
+
 Learn more
 ----------------------
 
