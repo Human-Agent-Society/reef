@@ -43,7 +43,14 @@ class ConfiguredRecipe(WeightTrainingRecipe):
 def test_config_fields_declare_the_whole_configuration_surface() -> None:
     config_fields = recipe_config_fields(ConfiguredRecipe)
 
-    assert sorted(config_fields) == ["batch_size", "label", "max_staleness", "strict", "temperature", "training_mode"]
+    assert sorted(config_fields) == [
+        "batch_size",
+        "label",
+        "max_staleness",
+        "strict",
+        "temperature",
+        "training_mode",
+    ]
     assert config_fields["batch_size"].env == "REEF_CONFIGURED_BATCH_SIZE"
     assert config_fields["batch_size"].default == 4
     assert config_fields["max_staleness"].env == "REEF_MAX_STALENESS"

@@ -23,6 +23,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
+from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
     ExperimentTracker,
     NullExperimentTracker,
@@ -101,6 +102,16 @@ class _LifecycleState:
     preload_thread: Thread | None = None
 
 
+def training_request_refusal(text: str) -> str | None:
+    """Why admission refuses an instruction's text; the reason names the rule, never the text."""
+    # The text becomes proposer input and a catalog row, so it meets the screens a promoted task prompt meets.
+    if secret_shaped(text):
+        return "the request text carries a credential shaped literal; a request never holds secrets"
+    if directive_shaped(text):
+        return "the request text carries an instruction override phrasing or a chat template control token"
+    return None
+
+
 class Dispatcher:
     """Coordinate scenario creation, inference state, training, and model commits.
 
@@ -171,13 +182,15 @@ class Dispatcher:
 
     def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
-            current = self._registry.require(scenario)
-            current.set_training_mode(training_mode)
-            if isinstance(current.runtime, TrainingRuntime):
-                self._training.ready.set()
-            elif current.trainer.training_backend is not None:
-                self._start_local_backend_worker(scenario)
+            current = self._registry.set_training_mode(scenario, training_mode)
+            self._wake_training(current)
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
+
+    def _wake_training(self, current: Scenario) -> None:
+        if isinstance(current.runtime, TrainingRuntime):
+            self._training.ready.set()
+        elif current.trainer.training_backend is not None:
+            self._start_local_backend_worker(current.name)
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
@@ -246,7 +259,12 @@ class Dispatcher:
         release_id: str | None = None,
     ) -> AgentRecord:
         with self._registry.lock_for(item.scenario):
-            current = self.get_or_create_scenario(item.scenario, release_id=release_id)
+            # An instruction names a scenario that exists; inference and reports keep implicit creation.
+            current = self.get_or_create_scenario(
+                item.scenario,
+                release_id=release_id,
+                allow_implicit_creation=False if item.request_type is RequestType.TRAIN else None,
+            )
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             return self._accept_record(current, item)
@@ -259,9 +277,12 @@ class Dispatcher:
                 raise ValueError("explicit training requests require training_mode='manual'")
             if current.trainer.training_backend is None:
                 raise ValueError("explicit training requests require a training backend")
-            TrainingRequest.from_dict(item.payload)
+            request = TrainingRequest.from_dict(item.payload)
             if item.references:
                 raise ValueError("manual training requests do not reference inference receipts")
+            refusal = training_request_refusal(request.text)
+            if refusal is not None:
+                raise ValueError(refusal)
         # Schema enforcement: reject a malformed report before it is durably
         # appended, so the producer's POST fails with the violation naming
         # the broken field instead of the record dying silently at training
@@ -417,7 +438,34 @@ class Dispatcher:
             return
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
-                self._registry.reload(scenario)
+                self._reload_with_instruction_failures(scenario, current)
+
+    def _recover_failed_step(self, scenario: str, current: Scenario, cause: Exception) -> None:
+        """Mark the failed instruction, then reload; a logless scenario keeps the batch and skips it on its next wake."""
+        self._fail_instruction(current, cause)
+        self._reload_durable_local_scenario(scenario, current)
+
+    def _fail_instruction(self, current: Scenario, cause: Exception) -> None:
+        """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
+        if current.trainer.fail_pending_instruction(self._error_text(cause)):
+            # Wake the worker so failed instructions settle even when no new records arrive.
+            self._wake_training(current)
+
+    def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
+        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
+        failures = current.trainer.instruction_failures()
+        recovered = self._registry.reload(scenario)
+        if failures:
+            recovered.trainer.set_instruction_failures(failures)
+        return recovered
+
+    def _reload_after_training_failure(self, scenario: str, cause: Exception) -> None:
+        current = self._registry.get_optional(scenario)
+        if current is None:
+            self._registry.reload(scenario)
+            return
+        self._fail_instruction(current, cause)
+        self._reload_with_instruction_failures(scenario, current)
 
     def _process_local_backend_step(self, scenario: str) -> bool:
         current = self._registry.get_optional(scenario)
@@ -428,11 +476,8 @@ class Dispatcher:
         self._record_training_error(scenario, None)
         try:
             result = current.prepare_training_step()
-        except Exception:
-            # Durable records let recovery reconstruct the reserved batch. A
-            # logless deployment must retain its in-memory pending batch for a
-            # later wake instead.
-            self._reload_durable_local_scenario(scenario, current)
+        except Exception as exc:
+            self._recover_failed_step(scenario, current, exc)
             raise
         if result is None:
             return False
@@ -501,12 +546,12 @@ class Dispatcher:
                 name = failure.scenario
                 logger.exception("training thread failed to commit for scenario %r", name)
                 self._record_training_error(name, self._error_text(failure.cause))
-                self._registry.reload(name)
+                self._reload_after_training_failure(name, failure.cause)
             except Exception as exc:
                 name = self._registry.training_scenario_name or "<unbound>"
                 logger.exception("training thread failed to commit for scenario %r", name)
                 self._record_training_error(name, self._error_text(exc))
-                self._registry.reload(name)
+                self._reload_after_training_failure(name, exc)
 
     def _training_scenario_names(self) -> tuple[str, ...]:
         names = getattr(self._registry, "training_scenario_names", None)
@@ -677,6 +722,10 @@ class Dispatcher:
         batch_ready = current.trainer.batch_ready()
         if batch_ready:
             self._warn_if_undrained(scenario_name, last_drain)
+        processor = dict(current.trainer.processor_status())
+        if "buffered_requests" in processor:
+            # Include instructions still unread in storage alongside the buffered ones.
+            processor["pending_instructions"] = current.trainer.pending_instructions()
         block: dict[str, Any] = {
             **current.commit_status,
             # A version is current only after Reef commits its head
@@ -688,7 +737,7 @@ class Dispatcher:
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
             "training_mode": current.trainer.training_mode,
-            "processor": current.trainer.processor_status(),
+            "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
         if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:

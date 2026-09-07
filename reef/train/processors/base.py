@@ -97,6 +97,8 @@ class DataProcessor:
         self.set_training_mode(context.training_mode)
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
+        # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
+        self._request_failures: dict[str, str] = {}
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -129,6 +131,26 @@ class DataProcessor:
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
+
+    def buffered_requests(self) -> int:
+        """How many instructions are read into memory and not yet consumed."""
+        return len(self._training_requests)
+
+    def request_failure(self, request_id: str) -> str | None:
+        """What the instruction's failed step said, when it failed at all."""
+        return self._request_failures.get(request_id)
+
+    def request_failures(self) -> Mapping[str, str]:
+        """The failed instructions still buffered, by id, with what their step said."""
+        return dict(self._request_failures)
+
+    def mark_request_failed(self, request_id: str, error: str) -> None:
+        """Record that the instruction's step failed; its next batch is consumed with a skip row."""
+        self._request_failures[request_id] = error
+
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry the failed instructions of a replaced processor into this one."""
+        self._request_failures = dict(failures)
 
     @property
     def experiment_logger(self) -> ExperimentLogger:
@@ -193,6 +215,7 @@ class DataProcessor:
         if self._pending.request is not None:
             request_id = self._pending.request.id
             self._training_requests.pop(request_id)
+            self._request_failures.pop(request_id, None)
             self._consumed_requests.add(request_id)
             consumed = consumed | {request_id}
         self._pending = None
@@ -255,7 +278,7 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
-        return {"buffered_requests": len(self._training_requests)} if "manual" in self.supported_training_modes else {}
+        return {"buffered_requests": self.buffered_requests()} if "manual" in self.supported_training_modes else {}
 
     def close(self) -> None:
         """Release resources the processor owns; safe to call more than once.

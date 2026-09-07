@@ -109,11 +109,20 @@ can execute the request without any inference data or ready automatic batch.
 The response is ``{agent_record_id, scenario, request_type: "train"}``.
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
-do not change a step already in flight. The existing evaluation and
-publication rules still determine whether the result becomes served.
+do not change a step already in flight. A step that fails with an
+instruction (a proposer error, for one) is not retried: the next step
+consumes the instruction with a committed row whose ``skipped`` reads
+``instruction failed`` and whose ``error`` carries the failure, and the
+queue moves on. Send the instruction again to run it again. The
+``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
+every step, instruction steps included, and stop automatic steps only; an
+instruction still runs past them. The existing evaluation and publication
+rules still determine whether the result becomes served.
 ``GET /reef/status`` reports ``training_mode``. Processors using the shared
 manual request queue also report ``buffered_requests`` (requests already
-read into the processor; later records may still wait in storage).
+read into the processor; later records may still wait in storage) and
+``pending_instructions`` (accepted instructions not yet consumed: the
+buffered ones plus those still unread in storage).
 Committed step metrics include ``training_request``
 with the instruction id, text, session and release id.
 
@@ -122,7 +131,11 @@ without another step, including after record compaction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
 session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
-The normal bearer authentication and implicit-scenario-creation setting apply.
+Text that carries a credential shaped literal or an instruction override
+phrasing is refused with HTTP 400 and a reason that names the rule, never
+the text; nothing is stored. The scenario must exist: an unknown scenario
+answers HTTP 404 and creates nothing, whatever the implicit-scenario-creation
+setting says. The normal bearer authentication applies.
 
 Scenarios
 ---------
@@ -182,8 +195,9 @@ return ``400``. A processor that does not support the requested mode returns
 proposer that explicitly accepts ``requests``.
 
 ``GET /reef/status`` reports the selected ``training_mode``. This selector
-is runtime state, not persisted scenario configuration: service restart or
-scenario reload uses the recipe's configured mode again.
+is runtime state, not persisted scenario configuration: a service restart
+uses the recipe's configured mode again, while a scenario reload after a
+failed step keeps the selected mode.
 
 Inference
 ---------
@@ -449,9 +463,10 @@ Status codes
 |        | own: an unaccepted token is 401, and per-scenario           |
 |        | authorization belongs to the gateway in front of Reef.      |
 +--------+-------------------------------------------------------------+
-| 404    | unknown scenario (with implicit creation off), unknown      |
-|        | release, unknown adapter, no configured harness             |
-|        | recipe, or a scenario that serves no files                  |
+| 404    | unknown scenario (with implicit creation off, or on         |
+|        | ``POST /reef/train``), unknown release, unknown adapter, no |
+|        | configured harness recipe, or a scenario that serves no     |
+|        | files                                                       |
 +--------+-------------------------------------------------------------+
 | 409    | a base artifact conflicting with the scenario registration, |
 |        | record id resent with different content, a rollback naming  |

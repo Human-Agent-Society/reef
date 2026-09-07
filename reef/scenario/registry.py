@@ -57,6 +57,8 @@ class ScenarioRegistry:
         self._lock = Lock()
         self._training_scenario: str | None = None
         self._training_scenarios: list[str] = []
+        # The mode a person selected per scenario; a reload in this process applies it again, a restart does not.
+        self._training_modes: dict[str, str] = {}
         self._preload_errors: dict[str, str] = {}
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
@@ -178,10 +180,27 @@ class ScenarioRegistry:
                 self._scenario_locks[scenario] = lock
             return lock
 
+    def set_training_mode(self, scenario: str, training_mode: str) -> Scenario:
+        """Select an existing scenario's mode and keep it for the reloads this process runs."""
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            current.set_training_mode(training_mode)
+            with self._lock:
+                self._training_modes[scenario] = training_mode
+            return current
+
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(scenario, None)
+            with self._lock:
+                training_mode = self._training_modes.get(scenario)
+            if training_mode is not None and recovered.trainer.training_mode != training_mode:
+                try:
+                    recovered.set_training_mode(training_mode)
+                except Exception:
+                    recovered.close()
+                    raise
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered

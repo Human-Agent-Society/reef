@@ -133,8 +133,13 @@ The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
 Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent batches; a reserved batch completes under
-its original mode. Mode changes are not persisted, and rebuilding the scenario
-uses the recipe's configured mode again.
+its original mode. Mode changes are not persisted: a service restart uses the
+recipe's configured mode again, while a scenario reload after a failed step
+keeps the selected mode.
+
+.. config::
+
+   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules
 
 A recipe is selected three ways:
 
@@ -217,8 +222,8 @@ zero.
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
-   evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
-   evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
+   evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
+   evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
    evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
