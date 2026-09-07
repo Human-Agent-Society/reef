@@ -68,7 +68,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.14.7",
+    "ruff==0.16.6",
 ]
 
 [dependency-groups]
