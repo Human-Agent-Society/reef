@@ -30,6 +30,7 @@ from reef.service.deploy.config import (
     config_value,
     interpolate_config,
     load_config,
+    recipe_source_root,
     resolve_model_paths,
     validate_services,
 )
@@ -49,6 +50,14 @@ def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> li
     if isinstance(command, str):
         return shlex.split(interpolate_config(config, command))
     return [interpolate_config(config, argument) for argument in command]
+
+
+def _with_path_entry(current: str | None, entry: Path) -> str:
+    """``current`` with ``entry`` appended once, in ``os.pathsep`` form."""
+    entries = [item for item in (current or "").split(os.pathsep) if item]
+    if str(entry) not in entries:
+        entries.append(str(entry))
+    return os.pathsep.join(entries)
 
 
 class InvalidOverrideError(ValueError):
@@ -192,12 +201,16 @@ class _Stack:
         run_dir: Path,
         ready_timeout_default: int,
         config_path: str | Path,
+        source_root: Path | None = None,
     ) -> None:
         self.config = config
         self.services = services
         self.run_dir = run_dir
         self.ready_timeout_default = ready_timeout_default
         self.config_path = Path(config_path)
+        # Where the deployment's dotted recipe package lives (see
+        # ``recipe_source_root``); every service gets it on ``PYTHONPATH``.
+        self.source_root = source_root
         self._procs: dict[str, subprocess.Popen[bytes]] = {}
         # Every POSIX service starts a fresh session, so its process-group ID
         # is the leader PID. Keep that identity after the leader exits:
@@ -226,10 +239,17 @@ class _Stack:
         The bridge driver's readiness marker lives under ``run_dir`` with the
         stack's pid and log files, so two stacks on one machine never share
         one; the driver reads the path from ``REEF_BRIDGE_READY_FILE``.
+
+        The recipe's source root is appended to ``PYTHONPATH`` rather than
+        prepended, so an inherited entry such as the reef image's Megatron
+        checkout keeps its precedence. A service's own ``env`` map is applied
+        last and can still replace the whole variable.
         """
         env = dict(os.environ)
         env["REEF_CONFIG"] = str(self.config_path)
         env["REEF_BRIDGE_READY_FILE"] = str(self.run_dir / "bridge.ready")
+        if self.source_root is not None:
+            env["PYTHONPATH"] = _with_path_entry(env.get("PYTHONPATH"), self.source_root)
         for k, v in (svc.get("env") or {}).items():
             env[k] = interpolate_config(self.config, str(v))
         cuda = svc.get("cuda")
@@ -467,6 +487,13 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
         config = _apply_overrides(config, overrides)
     # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
     services = validate_services(config, resolved_config_path)
+    # Resolved against the operator's config, before any override copy
+    # relocates the path the services read.
+    source_root = recipe_source_root(config, resolved_config_path)
+    if source_root is not None:
+        _log(f"recipe package resolves from {source_root}")
+        if str(source_root) not in sys.path:
+            sys.path.append(str(source_root))
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     if overrides or paths_changed:
@@ -482,6 +509,7 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
         run_dir,
         ready_timeout_default,
         resolved_config_path,
+        source_root=source_root,
     )
     try:
         stack.start()
