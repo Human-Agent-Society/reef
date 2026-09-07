@@ -140,6 +140,7 @@ setting says. The normal bearer authentication applies.
 Scenarios
 ---------
 
+A scenario isolates the records, trainer, and release chain for one workload.
 The first inference request or report carrying a new ``x-reef-scenario`` creates
 the scenario using the deployment's configured recipe. Requests never select a
 recipe.
@@ -151,6 +152,11 @@ recipe.
      -H "x-reef-scenario: hello-reef" \
      -H "Content-Type: application/json" \
      -d '{"model": "m", "messages": [{"role": "user", "content": "fix it"}]}'
+
+The bindings never change; a request naming a different recipe with the same
+scenario returns HTTP 409. This means the surface, runtime, inference backend,
+and optional report schema chosen when the recipe is constructed are fixed with
+it.
 
 If the deployment sets ``reef.allow_implicit_scenario_creation: false``, an
 unknown scenario returns HTTP 404 and you create it first:
@@ -189,6 +195,12 @@ manual was selected. Accepted
 manual instructions wait for manual mode, including instructions not yet read
 when the selector changes to auto.
 
+A Reef process runs at most one scenario that trains full weights, on a single
+thread, so preparation, remote execution, and commit never interleave. It may
+run any number of scenarios that produce no updates or that update text
+artifacts in process. Each one grows and commits on its own background thread,
+so record acceptance never waits for artifact evolution.
+
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
 ``501`` without changing its state. Harness manual mode also requires a
@@ -202,8 +214,17 @@ failed step keeps the selected mode.
 Inference
 ---------
 
+Request
+~~~~~~~
+
 Send the same body you would send to the provider. Reef never touches your
-sampling parameters. On a weight-serving deployment it adds engine
+sampling parameters. 
+
+Before calling the model, Reef reads the scenario's current artifact ref and
+builds the request against that release. The stored exchange uses the same ref,
+so an update completing mid-request does not change what the receipt records.
+
+On a weight-serving deployment it adds engine
 bookkeeping keys: ``lora_path`` to address the served adapter and
 ``return_meta_info`` so the record proves which weights answered; a body
 naming a different ``lora_path`` is refused. Set ``"stream": true`` and read
@@ -230,6 +251,29 @@ the response is written, so a head that moves during the call shows on the
 next one. A resident ``reef-native serve`` process compares it with the
 release it mounted and learns of a new head on its next model call, with no
 extra request. A weight serving scenario sends no such header.
+
+Response
+~~~~~~~~
+
+Reef validates a response before recording it. ``prepare_request`` transforms
+the outgoing payload, and Reef forwards *and records* the transformed payload.
+``verify_response`` checks the provider's answer against the frozen release. On
+failure Reef records nothing and returns the error.
+
+Rejection if out of release window
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For live weights, Reef asks the engine to report the ``runtime_load_id`` for
+each generated token span. A response may cover several runtime loads if an
+update lands mid-generation; Reef accepts it only when the span information
+accounts for
+every generated token and is consistent with the frozen release. Missing or
+inconsistent spans are a backend contract error and return HTTP 409.
+
+Pass-through streaming cannot do that check. Reef leaves ``return_meta_info``
+disabled when ``stream`` is true and records a plain SSE exchange. The training
+backend buffers its stream instead and validates the complete response against
+the frozen release before recording.
 
 Report
 ------
@@ -276,11 +320,29 @@ HTTP 400 on a violation; ``feedback`` and undeclared ``metadata`` keys pass
 through unvalidated. To record a report but keep it out of training, send
 ``"metadata": {"training": {"eligible": false}}``.
 
+Record
+------
+
+Reef stores every exchange of inference and every report as ``AgentRecord``.
+These records are referenced via a record id. In ``/reef/train`` and
+``/reef/report`` API calls, users can provide an optional ``agent_record_id``
+field for retry-safety. Appending the same id with different content returns a
+conflict rather than overwriting. Reef keeps track of consumed records so
+retried reports and late reports whose references already trained are not
+counted twice.
+
 Receiving an update
 -------------------
 
 For weight-training scenarios there is nothing to do: keep calling the same
-inference endpoint and it serves the latest published weights.
+inference endpoint and it serves the latest published weights. The artifact
+lives in the inference runtime, so requests reach the new release directly.
+
+A scenario whose artifact is the harness tree works the other way: the client
+pulls. The harness should fetch the currently served tree with
+``GET /reef/harness``, or the install script built on it, and run the agent on
+that release. So the harness it uses is the one whose receipts it will later
+report against.
 
 Harness artifacts
 ~~~~~~~~~~~~~~~~~

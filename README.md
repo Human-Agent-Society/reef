@@ -264,9 +264,6 @@ page documents its task, evaluation setup, measurements, and limitations.
 </picture>
 </div>
 
-See the [architecture guide](https://reefinfra.ai/docs/getting-started/architecture/)
-for the request path, scenarios, and release lifecycle.
-
 ## Learn more
 
 The [documentation](https://reefinfra.ai/docs/) is organized in the following order:
@@ -278,7 +275,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/): configure and operate a training deployment
 - [Recipes](https://reefinfra.ai/docs/user-guide/recipes/): additional references on
   the cookbook implementations in this repository
-- [Architecture](https://reefinfra.ai/docs/getting-started/architecture/): Overall architecture of Reef
+- [The core loop](https://reefinfra.ai/docs/getting-started/core-loop/): The core loop of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
 ## Community & Contributing

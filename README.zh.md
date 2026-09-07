@@ -254,8 +254,6 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 </picture>
 </div>
 
-请求路径、scenario 和 release 生命周期详见[架构指南](https://reefinfra.ai/docs/getting-started/architecture/)。
-
 ## 进一步了解
 
 [文档](https://reefinfra.ai/docs/)按以下顺序组织：
@@ -266,7 +264,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 - [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训练权重，改进 harness
 - [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：配置并运维训练部署
 - [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：本仓库 cookbook 实现的进一步说明
-- [架构](https://reefinfra.ai/docs/getting-started/architecture/)：Reef 的整体架构
+- [核心循环](https://reefinfra.ai/docs/getting-started/core-loop/)：Reef 的核心循环
 - [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档所用术语的解释
 
 ## 社区与贡献

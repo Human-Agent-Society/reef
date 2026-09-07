@@ -59,7 +59,7 @@ const shelves = [
       ["Introduction", "/docs/getting-started/intro"],
       ["Installation", "/docs/getting-started/installation"],
       ["Quickstart", "/docs/getting-started/quickstart"],
-      ["Architecture", "/docs/getting-started/architecture"],
+      ["Core loop", "/docs/getting-started/core-loop"],
     ],
   },
   {
@@ -198,7 +198,7 @@ curl http://localhost:8900/healthz`}</code></pre>
         <div>
           <h2>How Reef learns</h2>
           <p>Your harness keeps its prompts, tools, environments, and graders. Reef records which release served each response.</p>
-          <Link className="text-link" href="/docs/getting-started/architecture">Read the architecture <ArrowRight size={15} /></Link>
+          <Link className="text-link" href="/docs/getting-started/core-loop">Read the core loop <ArrowRight size={15} /></Link>
         </div>
         <ol className="step-list">
           {steps.map((step, index) => <li key={step}><span>{index + 1}</span>{step}</li>)}

@@ -49,7 +49,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "getting-started/intro.rst",
       "getting-started/installation.rst",
       "getting-started/quickstart.rst",
-      "getting-started/architecture.rst",
+      "getting-started/core-loop.rst",
     ],
   },
   {
@@ -97,6 +97,12 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     ],
   },
   {
+    title: "Advanced Topics",
+    files: [
+      "advanced_topics/state-model.rst",
+    ],
+  },
+  {
     title: "Contributing",
     files: [
       "contributing/codebase-structure.rst",
@@ -114,7 +120,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
 const navigated = new Set<string>(navigationSources.flatMap((group) => group.files));
 // Pages live in one directory per navigation section, so a page's path names
 // its section and the URL follows the path.
-const sectionDirectories = ["getting-started", "user-guide", "user-guide/recipes", "developer-guide", "reference", "contributing"];
+const sectionDirectories = ["getting-started", "user-guide", "user-guide/recipes", "developer-guide", "reference", "advanced_topics", "contributing"];
 const navigableSources = [
   ...readdirSync(docsRoot),
   ...sectionDirectories.flatMap((directory) =>

@@ -163,8 +163,9 @@ Runtime
 Two meanings.
 
 1. **The request-plane contract:** ``InferenceRuntime`` and
-   ``TrainingRuntime``: the external service that executes model work. Inference
-   is always required; GPU training only for weight recipes.
+   ``TrainingRuntime``: the external service that executes model work.
+   ``InferenceRuntime`` is always required while ``TrainingRuntime`` is only
+   required for weight recipes.
 2. **A training backend integration:** a concrete implementation of that
    contract, such as Reef's Slime runtime.
 
