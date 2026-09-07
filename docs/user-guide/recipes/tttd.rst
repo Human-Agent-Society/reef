@@ -445,7 +445,8 @@ latest checkpoint under its storage policy. The formal circle-packing jobs used
 an interval of one version so that each completed step could be recovered from
 disk. Select the interval before the run. The retention policy controls which
 completed checkpoints remain stored; it does not change the creation interval.
-`Architecture <../../getting-started/architecture.rst>`__ describes the commit and recovery model.
+`State model <../../advanced_topics/state-model.rst>`__ describes the commit
+and recovery model.
 
 Add another problem
 -------------------

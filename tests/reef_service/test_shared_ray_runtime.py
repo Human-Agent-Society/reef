@@ -36,6 +36,8 @@ class FakeRay:
 def runtime(monkeypatch):
     fake = FakeRay()
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    monkeypatch.delenv("RAY_TMPDIR", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
     monkeypatch.setattr(ray_runtime, "_require_ray", lambda: fake)
     return ray_runtime._RayRuntime(), fake
 
@@ -68,6 +70,22 @@ def test_environment_address_takes_precedence(runtime, monkeypatch):
     monkeypatch.setenv("RAY_ADDRESS", "10.0.0.2:12345")
     manager.acquire("10.0.0.1:12345").close()
     assert ray.init_calls == [{"address": "10.0.0.2:12345"}]
+
+
+def test_local_runtime_rejects_temp_path_that_cannot_fit_ray_socket(runtime, monkeypatch):
+    manager, ray = runtime
+    monkeypatch.setenv("RAY_TMPDIR", f"/tmp/{'nested-' * 20}")
+    with pytest.raises(RuntimeError, match=r"RAY_TMPDIR is too long.*Set RAY_TMPDIR"):
+        manager.acquire()
+    assert ray.init_calls == []
+    assert manager._users == 0
+
+
+def test_external_runtime_ignores_local_temp_path_limit(runtime, monkeypatch):
+    manager, ray = runtime
+    monkeypatch.setenv("RAY_TMPDIR", f"/tmp/{'nested-' * 20}")
+    manager.acquire("10.0.0.1:12345").close()
+    assert ray.init_calls == [{"address": "10.0.0.1:12345"}]
 
 
 def test_initialized_runtime_is_borrowed(runtime):

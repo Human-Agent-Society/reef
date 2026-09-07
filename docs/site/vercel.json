@@ -62,12 +62,22 @@
     },
     {
       "source": "/docs/architecture",
-      "destination": "/docs/getting-started/architecture",
+      "destination": "/docs/getting-started/core-loop",
       "permanent": true
     },
     {
       "source": "/docs/architecture/",
-      "destination": "/docs/getting-started/architecture/",
+      "destination": "/docs/getting-started/core-loop/",
+      "permanent": true
+    },
+    {
+      "source": "/docs/getting-started/architecture",
+      "destination": "/docs/getting-started/core-loop",
+      "permanent": true
+    },
+    {
+      "source": "/docs/getting-started/architecture/",
+      "destination": "/docs/getting-started/core-loop/",
       "permanent": true
     },
     {
