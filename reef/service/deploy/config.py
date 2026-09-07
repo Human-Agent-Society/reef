@@ -97,6 +97,32 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     return _deep_interp_env(config, environ)
 
 
+def recipe_source_root(config: Mapping[str, Any], config_path: str | Path) -> Path | None:
+    """The directory a dotted ``reef.recipe`` class imports from, found beside the config.
+
+    A dotted reference such as ``recipes.sao.recipe:SAORecipe`` names a
+    package that is not pip-installed: the ``recipes/`` cookbook ships with
+    the source checkout, next to the ``serve.yaml`` that selects it. Walk up
+    from the config file to the nearest directory holding that top-level
+    package and return it, so ``reef serve`` can put it on the import path
+    of every service instead of each launcher exporting ``PYTHONPATH`` by
+    hand. ``None`` when the recipe is a bare name (core or preset) or when no
+    ancestor of the config holds the package; the import then fails in the
+    service exactly as it does today.
+    """
+    reference = config_value(config, "reef", "recipe")
+    if not isinstance(reference, str) or ":" not in reference:
+        return None
+    top_level = reference.partition(":")[0].partition(".")[0]
+    if not top_level:
+        return None
+    config_dir = Path(config_path).resolve().parent
+    for ancestor in (config_dir, *config_dir.parents):
+        if (ancestor / top_level / "__init__.py").is_file():
+            return ancestor
+    return None
+
+
 def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
     """Services with valid commands and unique names, checked before any process starts."""
     services = config.get("services")

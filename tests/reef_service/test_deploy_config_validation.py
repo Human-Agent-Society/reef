@@ -145,7 +145,7 @@ def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeyp
     class StackStub:
         exit_code = 0
 
-        def __init__(self, config, services, run_dir, ready_timeout_default, config_path):
+        def __init__(self, config, services, run_dir, ready_timeout_default, config_path, source_root=None):
             captured["services"] = services
 
         def start(self):

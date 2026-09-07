@@ -146,6 +146,16 @@ A recipe is selected three ways:
 There is no recipe-implementation registry. A bare name other than ``recipe``
 is always a preset name; it never imports a learning method implicitly.
 
+A dotted class does not have to be pip-installed. ``reef serve`` looks for
+its top-level package beside the config, walking up from the config file's
+directory to the nearest ancestor that holds ``<package>/__init__.py``, and
+appends that directory to ``PYTHONPATH`` for every service it starts. This is
+how ``recipes.sao.recipe:SAORecipe`` resolves from a source checkout: the
+``recipes/`` cookbook sits next to the example's ``serve.yaml``, so the
+launcher does not export ``PYTHONPATH`` itself. Entries already in
+``PYTHONPATH`` keep their precedence, and a service's ``env`` map can still
+set the variable outright.
+
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
 
