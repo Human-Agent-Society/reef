@@ -24,6 +24,7 @@ import hashlib
 import json
 import random
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 from reef.harness.episodes.run import EpisodeResult
@@ -71,6 +72,32 @@ SKILL_SEED_NAME = "aime-solver"
 #: mechanism only ever passes tasks that came from those splits.
 ANSWERS: dict[str, str] = {}
 CONTEXTS: dict[str, dict[str, str]] = {}
+
+
+@dataclass(frozen=True)
+class AIMEScorer:
+    """A pickleable snapshot, independent of any worker's module globals.
+
+    The driver registry is only an input at recipe construction time. Later
+    registrations do not change a running campaign's scoring or feedback.
+    These labels belong to the scorer, never to an episode's prompt/files.
+    """
+
+    answers: dict[str, str] = field(repr=False)
+    contexts: dict[str, dict[str, str]] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "answers", dict(self.answers))
+        object.__setattr__(self, "contexts", {task: dict(context) for task, context in self.contexts.items()})
+
+    def answer_for(self, task: str) -> str:
+        return _answer_for(self.answers, task)
+
+    def evaluate(self, task: str, result: EpisodeResult) -> float:
+        return _evaluate(self.answers, task, result)
+
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return _feedback(self.answers, self.contexts, task, output, score)
 
 
 class AIMEExample(TypedDict, total=False):
@@ -128,8 +155,12 @@ def register(*splits: Sequence[Mapping[str, Any]]) -> None:
 
 def answer_for(task: str) -> str:
     """The expected ``### <answer>`` string for one problem statement."""
+    return _answer_for(ANSWERS, task)
+
+
+def _answer_for(answers: Mapping[str, str], task: str) -> str:
     try:
-        return ANSWERS[task]
+        return answers[task]
     except KeyError:
         raise RuntimeError(f"no AIME answer is registered for this task: {task[:120]!r}") from None
 
@@ -141,15 +172,25 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     scores zero rather than being read for an answer, so a broken harness can
     never be selected on the strength of stdout it happened to leave behind.
     """
+    return _evaluate(ANSWERS, task, result)
+
+
+def _evaluate(answers: Mapping[str, str], task: str, result: EpisodeResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout
-    return 1.0 if answer_for(task) in response else 0.0
+    return 1.0 if _answer_for(answers, task) in response else 0.0
 
 
 def feedback(task: str, output: str, score: float) -> str:
     """``ContainsAnswerEvaluator``'s wording, reproduced without importing it."""
-    answer = answer_for(task)
+    return _feedback(ANSWERS, CONTEXTS, task, output, score)
+
+
+def _feedback(
+    answers: Mapping[str, str], contexts: Mapping[str, Mapping[str, str]], task: str, output: str, score: float
+) -> str:
+    answer = _answer_for(answers, task)
     if score >= 1.0:
         return f"The generated response is correct. The response include the correct answer '{answer}'"
     # ``output`` is part of the hook's contract but not of upstream's wording:
@@ -158,7 +199,7 @@ def feedback(task: str, output: str, score: float) -> str:
         f"The generated response is incorrect. The correct answer is '{answer}'. "
         "Ensure that the correct answer is included in the response exactly as it is."
     )
-    context = "\n".join(f"{key}: {value}" for key, value in CONTEXTS.get(task, {}).items())
+    context = "\n".join(f"{key}: {value}" for key, value in contexts.get(task, {}).items())
     if context:
         text += f" Here is some additional context that might be helpful:\n{context}"
     return text

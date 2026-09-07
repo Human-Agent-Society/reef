@@ -7,17 +7,20 @@ native loop's, so the stage path metric is checked against a kept file."""
 from __future__ import annotations
 
 import json
+import tarfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation
-from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
+from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, EpisodeEvaluationWorker
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 from .test_harness_recipe import (
@@ -112,6 +115,25 @@ def pi_backend(tmp_path: Path, propose, **options) -> CordisBackend:
 
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_remote_worker_returns_records_without_touching_driver_path(tmp_path):
+    blocker = tmp_path / "driver-only"
+    blocker.write_text("this path cannot be a directory on the worker")
+    worker = EpisodeEvaluationWorker(
+        get_adapter("native"),
+        resolve_episode_scorer(native_score),
+        str(make_native_binary(tmp_path)),
+        10,
+        LocalExecutor(),
+        False,
+        transfer_records=True,
+    )
+    scored = worker.run({}, "one", blocker / "episode")
+    assert scored.record_archive is not None
+    assert blocker.read_text() == "this path cannot be a directory on the worker"
+    with tarfile.open(fileobj=BytesIO(scored.record_archive), mode="r:gz") as archive:
+        assert {"./session.jsonl", "./agents/002-checker.jsonl", "./episode.json"} <= set(archive.getnames())
 
 
 # -- the proposer's calls ---------------------------------------------------
@@ -224,11 +246,21 @@ def test_a_rejected_remove_records_its_absent_options(tmp_path: Path) -> None:
 # -- the step's files and the stage path -----------------------------------
 
 
+@pytest.mark.parametrize("workers", [1, 2])
 def test_step_record_writes_the_proposal_and_every_episode_and_the_path_matches_the_kept_trajectory(
     tmp_path: Path,
+    workers: int,
 ) -> None:
-    b = native_backend(tmp_path, step_record_dir=tmp_path / "record", episode_repeats=2)
+    from reef.runtime.executor.config import ExecutorSettings
+
+    b = native_backend(
+        tmp_path,
+        step_record_dir=tmp_path / "record",
+        episode_repeats=2,
+        worker_executor=ExecutorSettings(workers=workers),
+    )
     result = run_backend_step(b, batch(), b.initial_state())
+    b.close()
     assert result.metrics["selected"] is True
 
     step = tmp_path / "record" / "1"

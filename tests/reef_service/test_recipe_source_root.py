@@ -16,7 +16,9 @@ from pathlib import Path
 import pytest
 
 from reef.service.deploy.config import recipe_source_root
-from reef.service.deploy.orchestrator import _run_orchestrator, _Stack
+from reef.service.deploy.execution import service_executor_config
+from reef.service.deploy.orchestrator import _run_orchestrator
+from reef.service.deploy.process import ProcessWorker
 
 
 def _checkout(tmp_path: Path, package: str = "recipes") -> tuple[Path, Path]:
@@ -65,7 +67,7 @@ def test_a_directory_without_init_is_not_the_package(tmp_path: Path) -> None:
 def test_source_root_is_appended_to_pythonpath_once(tmp_path: Path, monkeypatch) -> None:
     root, config_path = _checkout(tmp_path)
     monkeypatch.setenv("PYTHONPATH", "/opt/sglang/python:/root/Megatron-LM")
-    stack = _Stack({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
+    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
 
     env = stack._service_env({"name": "reef"})
 
@@ -79,7 +81,7 @@ def test_source_root_is_appended_to_pythonpath_once(tmp_path: Path, monkeypatch)
 def test_source_root_starts_pythonpath_when_unset(tmp_path: Path, monkeypatch) -> None:
     root, config_path = _checkout(tmp_path)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    stack = _Stack({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
+    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
 
     assert stack._service_env({"name": "reef"})["PYTHONPATH"] == str(root)
 
@@ -88,7 +90,7 @@ def test_source_root_starts_pythonpath_when_unset(tmp_path: Path, monkeypatch) -
 def test_service_env_map_still_owns_pythonpath(tmp_path: Path, monkeypatch) -> None:
     root, config_path = _checkout(tmp_path)
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    stack = _Stack({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
+    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
 
     env = stack._service_env({"name": "reef", "env": {"PYTHONPATH": "/explicit"}})
 
@@ -98,13 +100,14 @@ def test_service_env_map_still_owns_pythonpath(tmp_path: Path, monkeypatch) -> N
 @pytest.mark.unit
 def test_without_a_source_root_pythonpath_is_untouched(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("PYTHONPATH", raising=False)
-    stack = _Stack({}, [{"name": "reef"}], tmp_path / "stack", 60, tmp_path / "serve.yaml")
+    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, tmp_path / "serve.yaml")
 
     assert "PYTHONPATH" not in stack._service_env({"name": "reef"})
 
 
 @pytest.mark.integration
-def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("backend", ["uni", "mp"])
+def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, monkeypatch, backend: str) -> None:
     """End to end: a service started from an example directory imports the
     cookbook package without the launcher exporting ``PYTHONPATH``."""
     root, config_path = _checkout(tmp_path, package="probe_recipes")
@@ -117,6 +120,7 @@ def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, 
         f"run_dir: {tmp_path / 'run'}\n"
         "services:\n"
         "  - name: probe\n"
+        f"    executor: {backend}\n"
         f'    command: ["${{REEF_PYTHON}}", "-c", {probe!r}, "{marker}"]\n'
     )
     monkeypatch.delenv("PYTHONPATH", raising=False)
@@ -135,3 +139,18 @@ def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, 
 
     assert Path(marker.read_text()).resolve() == (root / "probe_recipes" / "method.py").resolve()
     assert str(root) in sys.path
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("backend", ["uni", "mp", "ray"])
+def test_executor_passes_source_root_to_service_worker(tmp_path: Path, monkeypatch, backend: str) -> None:
+    root, config_path = _checkout(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", "/root/Megatron-LM")
+    service = {"name": "reef", "executor": backend}
+    config = service_executor_config({}, service, tmp_path / "stack", 60, config_path, source_root=root)
+    spec = config.workers[0]
+    worker = spec.worker_cls(*spec.args, **spec.kwargs)
+    try:
+        assert worker._service_env(service)["PYTHONPATH"].split(os.pathsep) == ["/root/Megatron-LM", str(root)]
+    finally:
+        worker.shutdown(grace=0)

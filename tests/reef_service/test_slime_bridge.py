@@ -31,6 +31,70 @@ def _local_ray_get(monkeypatch):
     monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
 
 
+def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failure(monkeypatch):
+    from threading import Lock
+
+    events = []
+
+    class Group:
+        def __init__(self, name):
+            self.name = name
+
+        def release_train(self):
+            events.append(self.name)
+            if self.name == "critic":
+                raise RuntimeError("critic unavailable")
+
+    class Dispose:
+        def remote(self):
+            events.append("rollout-dispose")
+
+    manager = SimpleNamespace(dispose=Dispose())
+    actor = object.__new__(bridge.TrainBridgeActorImpl)
+    actor._closed = False
+    actor._operation_lock = Lock()
+    actor._critic_group = Group("critic")
+    actor._group = Group("actor")
+    actor._rollout_manager = manager
+    actor._manager_executor = bridge.RayExecutor.from_workers([manager])
+    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
+    with pytest.raises(RuntimeError, match="critic unavailable"):
+        actor.shutdown()
+    actor.shutdown()
+    assert events == ["critic", "actor", "rollout-dispose", "rollout-kill"]
+    assert actor._phase == "stopped"
+
+
+def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tmp_path, monkeypatch):
+    import importlib
+
+    events = []
+
+    class Dispose:
+        def remote(self):
+            events.append("dispose")
+
+    manager = SimpleNamespace(dispose=Dispose())
+    pg = SimpleNamespace(id="shared")
+    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill"))
+    pg_module = importlib.import_module("ray.util.placement_group")
+    monkeypatch.setattr(pg_module, "remove_placement_group", lambda target: events.append("remove-pg"))
+    monkeypatch.setattr(
+        bridge, "create_placement_groups", lambda args: {"actor": (pg, [], []), "rollout": (pg, [], [])}
+    )
+    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: manager)
+    monkeypatch.setattr(
+        bridge, "create_train_groups", lambda *args: (_ for _ in ()).throw(RuntimeError("training failed"))
+    )
+    monkeypatch.setattr(
+        bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
+    )
+    with pytest.raises(RuntimeError, match="training failed"):
+        bridge.start_bridge(_bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")))
+    assert events == ["dispose", "kill", "remove-pg"]
+
+
 def _row(
     source_id: str,
     *,
