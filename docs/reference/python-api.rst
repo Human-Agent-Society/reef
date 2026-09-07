@@ -247,7 +247,7 @@ thread, so they must not block on network or model latency.
 ``DataProcessor.training_mode`` selects automatic, instruction-triggered or
 combined batching on the same processor. Declare ``supported_training_modes`` and
 implement ``make_training_batch(batch_number, request)`` to select inputs;
-``request`` is the queued instruction in ``manual`` and ``both`` and ``None``
+``request`` is the queued instruction in ``manual`` and ``hybrid`` and ``None``
 for an automatic batch. Ingestion, acknowledgement, retention,
 compaction and background derivation are shared. See
 `Processors <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.

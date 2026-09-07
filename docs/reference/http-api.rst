@@ -91,7 +91,7 @@ Manual training
 ---------------
 
 ``POST /reef/train`` queues one training instruction for a scenario in
-``data.training_mode: manual`` or ``both`` (harness evolution with a
+``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
 proposer that accepts ``requests``). It takes the user's ``text``,
 originating ``session`` and ``release_id``. The latter two are provenance,
 not a request to restore an old release. The backend operates on the
@@ -100,7 +100,7 @@ current committed state. The API requires no inference receipts or score.
 The three modes differ in what starts a step. ``auto``, the default,
 batches on traffic and refuses an instruction with HTTP 400. ``manual``
 runs instructions only and never batches on traffic; harness evolution
-runs an instruction alone, without samples. ``both`` batches on traffic and
+runs an instruction alone, without samples. ``hybrid`` batches on traffic and
 runs instructions: a queued instruction goes first, oldest first, one per
 step, and the units an automatic batch would take next, up to
 ``batch_size`` and possibly none, ride beside it as the batch's samples
@@ -124,7 +124,7 @@ instruction (a proposer error, for one) is not retried: the next step
 consumes the instruction with a committed row whose ``skipped`` reads
 ``instruction failed`` and whose ``error`` carries the failure, and the
 queue moves on. Send the instruction again to run it again. That row
-consumes the instruction alone: in ``both`` the units that rode beside it
+consumes the instruction alone: in ``hybrid`` the units that rode beside it
 stay held for the next batch, so no failing trace is consumed unread. The
 ``evolution.max_steps`` and ``evolution.max_failure_streak`` budgets count
 every step, instruction steps included, and stop automatic steps only; an
@@ -194,17 +194,17 @@ To change the data processor's mode:
    {"training_mode": "manual"}
 
 HTTP 200 returns ``{"scenario": "agents", "training_mode": "manual"}``.
-The values are ``auto``, ``manual`` and ``both``: ``"auto"`` resumes recipe
-batching alone, ``"both"`` keeps it and takes instructions too. The change
+The values are ``auto``, ``manual`` and ``hybrid``: ``"auto"`` resumes recipe
+batching alone, ``"hybrid"`` keeps it and takes instructions too. The change
 selects subsequent batches; a batch already reserved or running completes
-in its original mode. The modes share buffered data, so auto and both can
+in its original mode. The modes share buffered data, so auto and hybrid can
 batch traffic collected while manual was selected. Accepted instructions
 wait for a mode that takes them, including instructions not yet read when
 the selector changes to auto.
 
 Unknown scenarios return ``404`` without implicit creation; invalid payloads
 return ``400``. A processor that does not support the requested mode returns
-``501`` without changing its state. Harness ``manual`` and ``both`` also
+``501`` without changing its state. Harness ``manual`` and ``hybrid`` also
 require a proposer that explicitly accepts ``requests``.
 
 ``GET /reef/status`` reports the selected ``training_mode``. This selector

@@ -1,4 +1,4 @@
-"""Training instructions: manual runs them alone, both runs them ahead of automatic batches, auto refuses them."""
+"""Training instructions: manual runs them alone, hybrid runs them ahead of automatic batches, auto refuses them."""
 
 from __future__ import annotations
 
@@ -195,8 +195,8 @@ def test_manual_requires_an_explicit_recipe_assembler():
     records = RecordStore()
     with pytest.raises(NotImplementedError, match="does not implement training_mode='manual'"):
         build(records, CaptureBackend(), DataProcessor)
-    with pytest.raises(NotImplementedError, match="does not implement training_mode='both'"):
-        build(records, CaptureBackend(), DataProcessor, mode="both")
+    with pytest.raises(NotImplementedError, match="does not implement training_mode='hybrid'"):
+        build(records, CaptureBackend(), DataProcessor, mode="hybrid")
     with pytest.raises(ValueError, match="training_mode"):
         build(records, CaptureBackend(), mode="typo")
     records.close()
@@ -305,8 +305,8 @@ def test_missing_mode_implementation_fails_at_processor_initialization():
 
     with pytest.raises(NotImplementedError, match=r"AutoOnlyProcessor.*manual"):
         AutoOnlyProcessor(ProcessorContext("s", training_mode="manual"))
-    with pytest.raises(NotImplementedError, match=r"AutoOnlyProcessor.*both"):
-        AutoOnlyProcessor(ProcessorContext("s", training_mode="both"))
+    with pytest.raises(NotImplementedError, match=r"AutoOnlyProcessor.*hybrid"):
+        AutoOnlyProcessor(ProcessorContext("s", training_mode="hybrid"))
     with pytest.raises(ValueError, match="training_mode"):
         ProcessorContext("s", training_mode="invalid")
 
@@ -321,12 +321,12 @@ def test_unimplemented_manual_assembly_never_falls_back_to_auto():
         processor.build_batch()
 
 
-def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_both_only():
-    class BothOnlyProcessor(DataProcessor):
-        supported_training_modes = frozenset({"auto", "both"})
+def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_hybrid_only():
+    class HybridOnlyProcessor(DataProcessor):
+        supported_training_modes = frozenset({"auto", "hybrid"})
         required_request_types = frozenset(RequestType)
 
-    processor = BothOnlyProcessor(ProcessorContext("s", training_mode="both"))
+    processor = HybridOnlyProcessor(ProcessorContext("s", training_mode="hybrid"))
     processor.ingest(instruction("one"))
     assert processor.status() == {"buffered_requests": 1}
     processor.close()
@@ -336,10 +336,10 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
     auto_only.close()
 
 
-@pytest.mark.parametrize("mode", ["auto", "manual", "both"])
+@pytest.mark.parametrize("mode", ["auto", "manual", "hybrid"])
 def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
     class TrajectoryProcessor(DataProcessor):
-        supported_training_modes = frozenset({"auto", "manual", "both"})
+        supported_training_modes = frozenset({"auto", "manual", "hybrid"})
         required_request_types = frozenset({RequestType.INFERENCE, RequestType.TRAIN})
         output_schema = ExampleBatch
 
@@ -434,7 +434,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
     records.close()
 
 
-@pytest.mark.parametrize("mode", ["manual", "both"])
+@pytest.mark.parametrize("mode", ["manual", "hybrid"])
 def test_harness_instruction_modes_require_explicit_requests_keyword(tmp_path, mode):
     recipe = replace(_recipe(tmp_path, lambda n, s, m, **kwargs: None), training_mode=mode)
     records = RecordStore()
@@ -526,7 +526,7 @@ def test_http_training_mode_updates_only_existing_supported_processors(tmp_path,
         await client.start_server()
         try:
             url = "/reef/scenarios/s/update"
-            for mode in ("manual", "both"):
+            for mode in ("manual", "hybrid"):
                 response = await client.post(url, json={"training_mode": mode})
                 assert response.status == (200 if reads_requests else 501)
                 if reads_requests:
@@ -720,7 +720,7 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         dispatcher.close()
 
 
-def test_both_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_path(tmp_path):
+def test_hybrid_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_path(tmp_path):
     calls = []
     entered, release = Event(), Event()
 
@@ -734,7 +734,7 @@ def test_both_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_p
             raise RuntimeError("poison proposer")
         return
 
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="both"))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("poison"))
@@ -748,7 +748,7 @@ def test_both_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_p
         assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison proposer"
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pending_instructions() == 0
-        assert current.trainer.training_mode == "both"
+        assert current.trainer.training_mode == "hybrid"
         assert current.trainer.instruction_failures() == {}
         # With the queue empty, one failing exchange at batch_size 1 is an automatic step with no instruction.
         dispatcher.accept_record(inference("a"))
@@ -759,13 +759,13 @@ def test_both_skips_a_failed_instruction_before_the_next_and_keeps_the_failure_p
         dispatcher.accept_record(instruction("after"))
         assert _wait(lambda: _committed_skip(dispatcher, "after") == "no proposal")
         assert calls[2:] == [(None, ("a",)), ("after", ())]
-        assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "both"
+        assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
     finally:
         release.set()
         dispatcher.close()
 
 
-def test_both_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(tmp_path):
+def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(tmp_path):
     calls = []
     entered, release, automatic, outage = Event(), Event(), Event(), Event()
 
@@ -782,7 +782,7 @@ def test_both_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(tm
         outage.wait(10)
         raise RuntimeError("proposer outage")
 
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="both"))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("poison"))
@@ -820,13 +820,13 @@ def test_both_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(tm
         seen.append((requests[0]["text"] if requests else None, tuple(s.source_agent_record_id for s in samples)))
         return
 
-    restarted = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose_again), training_mode="both"))
+    restarted = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose_again), training_mode="hybrid"))
     try:
         loaded = restarted.get_or_create_scenario("s")
         assert loaded.scenario_step == 1
         assert loaded.records.get("s", "poison") is None
         # Recovery replays the unit as unconsumed and never the instruction the skip row named.
-        restarted.set_training_mode("s", "both")
+        restarted.set_training_mode("s", "hybrid")
         assert _wait(lambda: _automatic_traces(restarted) == [1])
         assert seen == [(None, ("a",))]
         assert _wait(lambda: loaded.records.get("s", "report-a") is None)
@@ -1026,19 +1026,19 @@ def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
         records.close()
 
 
-# -- training_mode: both --------------------------------------------------
+# -- training_mode: hybrid --------------------------------------------------
 
 
-def test_both_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_path):
+def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_path):
     def propose(nodes, samples, models, *, requests=()):
         return None
 
-    recipe = replace(_recipe(tmp_path, propose), training_mode="both")
+    recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid")
     records = RecordStore()
     try:
         trainer = recipe.build("s", records)
-        assert trainer.training_mode == "both"
-        assert trainer.processor.training_mode == "both"
+        assert trainer.training_mode == "hybrid"
+        assert trainer.processor.training_mode == "hybrid"
         assert trainer.processor.status() == {"buffered_requests": 0}
         trainer.close()
         with pytest.raises(ValueError, match="training_mode"):
@@ -1052,9 +1052,9 @@ def test_both_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp_p
 
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
-def test_both_runs_a_queued_instruction_alone_when_no_units_are_held(processor):
+def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor):
     records, backend = RecordStore(), CaptureBackend()
-    trainer = build(records, backend, processor, mode="both", batch_size=2)
+    trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
     try:
         assert trainer.run_once() is None
         records.append(instruction("alone"))
@@ -1071,16 +1071,16 @@ def test_both_runs_a_queued_instruction_alone_when_no_units_are_held(processor):
         trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "alone") is None
         assert trainer.run_once() is None
-        assert trainer.training_mode == "both"
+        assert trainer.training_mode == "hybrid"
     finally:
         trainer.close()
         records.close()
 
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
-def test_both_runs_a_queued_instruction_with_the_held_units_as_samples(processor):
+def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(processor):
     records, backend = RecordStore(), CaptureBackend()
-    trainer = build(records, backend, processor, mode="both", batch_size=2)
+    trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
     try:
         failure(records, "a")
         assert trainer.run_once() is None
@@ -1103,8 +1103,8 @@ def test_both_runs_a_queued_instruction_with_the_held_units_as_samples(processor
         records.close()
 
 
-def test_both_runs_two_queued_instructions_oldest_first_one_per_step():
-    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode="both"))
+def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
+    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode="hybrid"))
     processor.ingest(instruction("first"))
     processor.ingest(instruction("second"))
     assert processor.status() == {"buffered_requests": 2}
@@ -1120,8 +1120,8 @@ def test_both_runs_two_queued_instructions_oldest_first_one_per_step():
     processor.close()
 
 
-def test_both_batches_as_auto_does_without_an_instruction():
-    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode="both"))
+def test_hybrid_batches_as_auto_does_without_an_instruction():
+    processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1, "max_score": 0.0}, training_mode="hybrid"))
     processor.ingest(inference("a"))
     processor.ingest(report("a"))
     batch = processor.build_batch()
@@ -1132,9 +1132,9 @@ def test_both_batches_as_auto_does_without_an_instruction():
     processor.close()
 
 
-def test_both_alternates_the_instruction_path_and_the_failure_path_without_a_mode_change():
+def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_mode_change():
     records, backend = RecordStore(), CaptureBackend()
-    trainer = build(records, backend, CordisProcessor, mode="both", batch_size=2)
+    trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
 
     def step():
         result = trainer.run_once()
@@ -1168,15 +1168,15 @@ def test_both_alternates_the_instruction_path_and_the_failure_path_without_a_mod
         assert step() is None
         failure(records, "h")
         assert step() == (None, ["g", "h"])
-        assert trainer.training_mode == "both"
+        assert trainer.training_mode == "hybrid"
     finally:
         trainer.close()
         records.close()
 
 
-def test_switching_both_to_auto_holds_the_unread_instruction_for_a_mode_that_takes_it():
+def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_takes_it():
     records, backend = RecordStore(), CaptureBackend()
-    trainer = build(records, backend, CordisProcessor, mode="both", batch_size=2)
+    trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
     try:
         records.append(instruction("later"))
         trainer.set_training_mode("auto")
@@ -1191,7 +1191,7 @@ def test_switching_both_to_auto_holds_the_unread_instruction_for_a_mode_that_tak
         trainer.commit(prepared)
         trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "later") is not None
-        trainer.set_training_mode("both")
+        trainer.set_training_mode("hybrid")
         result = trainer.run_once(1)
         assert backend.batches[-1].request.id == "later"
         assert backend.batches[-1].samples == ()
@@ -1203,7 +1203,7 @@ def test_switching_both_to_auto_holds_the_unread_instruction_for_a_mode_that_tak
         records.close()
 
 
-def test_both_runs_an_instruction_from_the_route_without_an_update_call(tmp_path):
+def test_hybrid_runs_an_instruction_from_the_route_without_an_update_call(tmp_path):
     seen = []
 
     def propose(nodes, samples, models, *, requests=()):
@@ -1214,13 +1214,13 @@ def test_both_runs_an_instruction_from_the_route_without_an_update_call(tmp_path
             )
         )
 
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="both"))
+    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), training_mode="hybrid"))
 
     async def run():
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "both"
+            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
             body = {
                 "agent_record_id": "ask-1",
                 "text": "Prefer tests first",
@@ -1236,7 +1236,7 @@ def test_both_runs_an_instruction_from_the_route_without_an_update_call(tmp_path
             dispatcher.accept_record(report("a"))
             assert await asyncio.to_thread(_wait, lambda: len(seen) == 2)
             assert seen[1] == ((), ("a",))
-            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "both"
+            assert dispatcher.get_or_create_scenario("s").trainer.training_mode == "hybrid"
         finally:
             await client.close()
 
@@ -1246,7 +1246,7 @@ def test_both_runs_an_instruction_from_the_route_without_an_update_call(tmp_path
         dispatcher.close()
 
 
-@pytest.mark.parametrize("target", ["auto", "both"])
+@pytest.mark.parametrize("target", ["auto", "hybrid"])
 def test_the_proposal_route_refuses_in_manual_mode_and_admits_again_in_a_batching_mode(tmp_path, target):
     def propose(nodes, samples, models, *, requests=()):
         return None
@@ -1321,7 +1321,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
     assert manual._ready_count() == 4
     manual.close()
 
-    for mode in ("auto", "both"):
+    for mode in ("auto", "hybrid"):
         uncapped = fill(mode)
         assert uncapped._ready_count() == 20
         assert uncapped.never_reasons == {}
@@ -1336,7 +1336,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
         uncapped.close()
 
 
-def test_both_promotes_the_failures_an_instruction_step_carries(tmp_path):
+def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
     calls = []
 
     def propose(nodes, samples, models, *, requests=()):
@@ -1347,7 +1347,7 @@ def test_both_promotes_the_failures_an_instruction_step_carries(tmp_path):
             )
         )
 
-    recipe = replace(_recipe(tmp_path, propose), training_mode="both", promote_failures=True, batch_size=2)
+    recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid", promote_failures=True, batch_size=2)
     dispatcher = _dispatcher(tmp_path, recipe)
 
     def gate_rows():

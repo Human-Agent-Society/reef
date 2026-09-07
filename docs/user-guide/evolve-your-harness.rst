@@ -138,7 +138,7 @@ The loop
 
 The loop below runs in the default ``data.training_mode: auto``, from
 failures alone; an ask is refused there. A deployment that also takes asks
-sets ``data.training_mode: both``, as the tutorial's ``deployment.yaml``
+sets ``data.training_mode: hybrid``, as the tutorial's ``deployment.yaml``
 does: ``POST /reef/train`` with ``text``, ``session`` and ``release_id``
 (see the `manual training API
 <../reference/http-api.rst#manual-training>`__) queues an instruction, and
@@ -151,16 +151,16 @@ whose text is credential shaped or directive shaped is refused with the
 rule named, and the scenario must already exist. A request whose step fails
 is not retried: it is consumed with a ``skipped`` row in the catalog that
 carries the error, and you send it again if you want it run; the failures
-beside it in ``both`` stay held for the next step. The step cap and the
+beside it in ``hybrid`` stay held for the next step. The step cap and the
 failure streak count every step, a request's step included, and stop
 automatic steps only; a request still runs past them.
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
 between the three.
 
 The proposer must explicitly accept ``requests`` before the recipe builds
-in ``manual`` or ``both``. It receives one request mapping containing
+in ``manual`` or ``hybrid``. It receives one request mapping containing
 ``id``, ``text``, ``session``, ``release_id`` and ``untrusted=True``,
-together with the current harness and model bindings. In ``both``,
+together with the current harness and model bindings. In ``hybrid``,
 ``samples`` carries what an automatic batch would take next, up to
 ``batch_size`` and possibly none (failing traces in the score window, or
 records under ``data.batch_policy: records``), so the method answers the
@@ -190,7 +190,7 @@ window entries have accumulated, one step runs the loop once. With
 gate as a permanent task, so the seed tasks are the floor of a suite that
 grows from real failures and no later candidate can win while bringing one
 back (the method's ``evaluate`` must score an arbitrary prompt); an
-instruction step in ``both`` promotes the failures it carries the same way.
+instruction step in ``hybrid`` promotes the failures it carries the same way.
 A prompt is
 real traffic, so it meets the tree's own credential tripwire first: a prompt
 carrying a key-shaped literal is never promoted, never persisted, and never

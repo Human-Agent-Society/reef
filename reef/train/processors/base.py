@@ -92,9 +92,9 @@ class DataProcessor:
 
     def __init__(self, context: ProcessorContext) -> None:
         self._context = context
-        # Both modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
+        # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
         if not context.config.get("manual_enabled", True):
-            self.supported_training_modes = self.supported_training_modes - {"manual", "both"}
+            self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
         self.set_training_mode(context.training_mode)
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
@@ -127,8 +127,8 @@ class DataProcessor:
 
     def set_training_mode(self, training_mode: str) -> None:
         """Select future batches while preserving shared buffers and reservations."""
-        if training_mode not in ("auto", "manual", "both"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'both'")
+        if training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
@@ -174,7 +174,7 @@ class DataProcessor:
     # ------------------------------------------------------------ batch cycle
     #
     # The shape is the same for every processor: batch when enough units are
-    # held (auto, both) or an instruction is queued (manual, both), hand the
+    # held (auto, hybrid) or an instruction is queued (manual, hybrid), hand the
     # same batch out until it is acknowledged, then release what it consumed.
     # An engine fills in the three things that differ: what a unit is, how
     # the selected ones become a batch, and what consuming them releases.
@@ -184,7 +184,7 @@ class DataProcessor:
             return True
         if self.training_mode == "manual":
             return bool(self._training_requests)
-        if self.training_mode == "both" and self._training_requests:
+        if self.training_mode == "hybrid" and self._training_requests:
             return True
         return self._ready_count() >= self._batch_size
 
@@ -193,7 +193,7 @@ class DataProcessor:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            # Manual and both run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
+            # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
             request = (
                 next(iter(self._training_requests.values()))
                 if self.training_mode != "auto" and self._training_requests
@@ -207,7 +207,7 @@ class DataProcessor:
         return self._pending
 
     def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
-        """Select inputs for one batch; in ``manual`` and ``both`` a queued instruction arrives as ``request``.
+        """Select inputs for one batch; in ``manual`` and ``hybrid`` a queued instruction arrives as ``request``.
 
         Override this single assembly hook to take instructions. Ingestion,
         acknowledgement and retention operate on the same state in every mode.
@@ -305,7 +305,7 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
-        if self.supported_training_modes & {"manual", "both"}:
+        if self.supported_training_modes & {"manual", "hybrid"}:
             return {"buffered_requests": self.buffered_requests()}
         return {}
 

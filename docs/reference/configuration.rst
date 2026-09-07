@@ -110,7 +110,7 @@ Recipe configuration
 In ``auto``, the recipe's processor decides when its data can form a batch,
 and ``POST /reef/train`` is refused. In ``manual``, inference and reports
 cannot authorize training by themselves; ``POST /reef/train`` supplies the
-user instruction, and harness evolution runs it alone. In ``both``, the
+user instruction, and harness evolution runs it alone. In ``hybrid``, the
 processor batches as in ``auto`` and runs instructions too, a queued
 instruction first; harness evolution hands the proposer, beside the
 instruction, the units an automatic batch would take next, up to
@@ -127,13 +127,13 @@ batching mode. The modes share ingestion and retention; the
 Processors declare ``supported_training_modes``; unsupported modes or missing
 instruction assembly raise ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that
-explicitly accepts ``requests`` for ``manual`` and ``both``. Setting either
+explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
 on an inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
    data:
-     training_mode: both
+     training_mode: hybrid
 
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
@@ -147,7 +147,7 @@ warning, at the switch to ``manual`` and as reports arrive.
 
 .. config::
 
-   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``both`` batches by the recipe's rules and runs a queued instruction first
+   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
 
 A recipe is selected three ways:
 

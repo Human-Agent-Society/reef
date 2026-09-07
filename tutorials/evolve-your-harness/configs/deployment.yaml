@@ -58,7 +58,7 @@ data:
   batch_size: 1
   max_score: 0.0
   # The person asks with POST /reef/train while the deployment keeps learning from failures.
-  training_mode: both
+  training_mode: hybrid
 
 reef:
   host: 127.0.0.1

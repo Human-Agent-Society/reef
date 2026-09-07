@@ -48,9 +48,9 @@ the same methods and buffers in every mode. ``GET /reef/status`` reports
 instructions still unread in storage.
 
 The shared batching cycle waits for ``batch_size`` units in ``auto``, for a
-queued TRAIN instruction in ``manual``, and for either in ``both``, where a
+queued TRAIN instruction in ``manual``, and for either in ``hybrid``, where a
 queued instruction goes first. A processor that takes instructions declares
-``supported_training_modes = frozenset({"auto", "manual", "both"})`` and
+``supported_training_modes = frozenset({"auto", "manual", "hybrid"})`` and
 implements one assembly hook:
 
 .. code:: python
@@ -60,11 +60,11 @@ implements one assembly hook:
            # Manual runs the instruction alone; harness needs no samples.
            self._pending_units = ()
            return TraceBatch(request.id, ())
-       # Both hands the instruction the units an automatic batch would take.
+       # Hybrid hands the instruction the units an automatic batch would take.
        return self._make_pending(batch_number)
 
 This example extends the reported-feedback engine. ``request`` is a
-``TrainingRequest`` in ``manual`` and ``both`` when an instruction is queued
+``TrainingRequest`` in ``manual`` and ``hybrid`` when an instruction is queued
 and ``None`` for an automatic batch. The base class attaches the instruction
 to ``batch.request`` and replaces the hook's own batch id with
 ``<scenario>:instruction:<request id>``, the oldest instruction first, one
@@ -78,7 +78,7 @@ Processors receive TRAIN records by including ``RequestType.TRAIN`` in
 ``required_request_types`` and forwarding those records to ``super().ingest``.
 The base class queues them FIFO regardless of the selected mode; ``auto``
 leaves the queue for a mode that takes it. Data ingestion continues normally
-in manual mode, so changing to auto or both can batch data already collected;
+in manual mode, so changing to auto or hybrid can batch data already collected;
 the reported-feedback engine holds at most four batches of units in manual
 mode and releases the oldest beyond that with a warning, at the switch and
 as reports arrive. Custom retention
@@ -95,7 +95,7 @@ Changing training mode
 ----------------------
 
 ``POST /reef/scenarios/{scenario}/update`` selects ``auto``, ``manual`` or
-``both`` on the existing processor. The trainer serializes selection with
+``hybrid`` on the existing processor. The trainer serializes selection with
 ingestion and reservation. A reserved batch stays unchanged and acknowledgement
 consumes its actual contents, independently of subsequent mode changes.
 

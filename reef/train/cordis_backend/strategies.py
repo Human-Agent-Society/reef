@@ -85,11 +85,11 @@ class Proposer(ABC):
     only forwarded to callables whose signature names it, so earlier
     proposers run unchanged.
 
-    In ``manual`` and ``both`` mode, when an instruction is queued,
+    In ``manual`` and ``hybrid`` mode, when an instruction is queued,
     ``requests`` contains exactly one mapping with ``id``, ``text``,
     ``session``, ``release_id`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is empty in ``manual``, and
-    in ``both`` it is what an automatic batch would take next, up to
+    in ``hybrid`` it is what an automatic batch would take next, up to
     ``batch_size`` and possibly none (failing traces in the score window, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
@@ -98,7 +98,7 @@ class Proposer(ABC):
 
     @property
     def reads_requests(self) -> bool:
-        """Whether this proposer can honor a training instruction (``manual`` and ``both``)."""
+        """Whether this proposer can honor a training instruction (``manual`` and ``hybrid``)."""
         return names_keyword(self.__call__, "requests")
 
     @abstractmethod

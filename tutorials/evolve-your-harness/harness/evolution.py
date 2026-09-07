@@ -36,7 +36,7 @@ def propose(nodes, samples, models, *, requests=()):
     ``nodes`` are the composition's (kind, config) pairs and ``samples`` the
     batched failing requests. ``requests`` carries the one instruction a
     person queued with ``POST /reef/train`` (deployment.yaml runs in
-    ``training_mode: both``); the model then makes the change it names, with
+    ``training_mode: hybrid``); the model then makes the change it names, with
     the failures as context. Any endpoint or parse failure returns ``None``
     - a skipped step, never a crash.
     """

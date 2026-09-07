@@ -274,7 +274,7 @@ class Dispatcher:
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
             if current.trainer.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual' or 'both'")
+                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
             if current.trainer.training_backend is None:
                 raise ValueError("explicit training requests require a training backend")
             request = TrainingRequest.from_dict(item.payload)

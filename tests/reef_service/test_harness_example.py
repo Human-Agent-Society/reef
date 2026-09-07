@@ -462,10 +462,10 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
     # The person asks while it keeps learning from failures, so the tutorial proposer must take requests.
-    assert built.training_mode == "both"
+    assert built.training_mode == "hybrid"
     records = RecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
-    assert trainer.training_mode == "both"
+    assert trainer.training_mode == "hybrid"
     trainer.close()
     records.close()
 
