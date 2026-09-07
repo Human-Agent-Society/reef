@@ -623,7 +623,7 @@ class TrainBridgeActorImpl:
             for group in (self._critic_group, self._group):
                 if group is not None:
                     try:
-                        group.release_train()
+                        group.release()
                     except Exception as exc:
                         errors.append(exc)
             try:
@@ -1223,7 +1223,7 @@ def start_bridge(
         for group in (critic_group, actor_group):
             if group is not None:
                 with suppress(Exception):
-                    group.release_train()
+                    group.release()
         if rollout_manager is not None:
             with suppress(Exception):
                 RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)

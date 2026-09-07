@@ -34,16 +34,23 @@ def _local_ray_get(monkeypatch):
 def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failure(monkeypatch):
     from threading import Lock
 
+    from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+
     events = []
 
-    class Group:
+    class Executor:
         def __init__(self, name):
             self.name = name
 
-        def release_train(self):
+        def shutdown(self):
             events.append(self.name)
             if self.name == "critic":
                 raise RuntimeError("critic unavailable")
+
+    def group(name):
+        train_group = object.__new__(SlimeTrainGroup)
+        train_group._executor = Executor(name)
+        return train_group
 
     class Dispose:
         def remote(self):
@@ -53,8 +60,8 @@ def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failu
     actor = object.__new__(bridge.TrainBridgeActorImpl)
     actor._closed = False
     actor._operation_lock = Lock()
-    actor._critic_group = Group("critic")
-    actor._group = Group("actor")
+    actor._critic_group = group("critic")
+    actor._group = group("actor")
     actor._rollout_manager = manager
     actor._manager_executor = bridge.RayExecutor.from_workers([manager])
     monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
@@ -68,7 +75,24 @@ def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failu
 def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tmp_path, monkeypatch):
     import importlib
 
+    from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+
     events = []
+
+    class Executor:
+        def __init__(self, name):
+            self.name = name
+
+        def shutdown(self):
+            events.append(self.name)
+
+    def group(name):
+        train_group = object.__new__(SlimeTrainGroup)
+        train_group._executor = Executor(name)
+        return train_group
+
+    actor_group = group("actor")
+    critic_group = group("critic")
 
     class Dispose:
         def remote(self):
@@ -84,15 +108,22 @@ def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tm
         bridge, "create_placement_groups", lambda args: {"actor": (pg, [], []), "rollout": (pg, [], [])}
     )
     monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: manager)
-    monkeypatch.setattr(
-        bridge, "create_train_groups", lambda *args: (_ for _ in ()).throw(RuntimeError("training failed"))
-    )
+    monkeypatch.setattr(bridge, "create_train_groups", lambda *args: (actor_group, critic_group))
+
+    class FailingBridgeActor:
+        @staticmethod
+        def options(**kwargs):
+            return SimpleNamespace(
+                remote=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bridge creation failed"))
+            )
+
+    monkeypatch.setattr(bridge, "TrainBridgeActor", FailingBridgeActor)
     monkeypatch.setattr(
         bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
     )
-    with pytest.raises(RuntimeError, match="training failed"):
+    with pytest.raises(RuntimeError, match="bridge creation failed"):
         bridge.start_bridge(_bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")))
-    assert events == ["dispose", "kill", "remove-pg"]
+    assert events == ["critic", "actor", "dispose", "kill", "remove-pg"]
 
 
 def _row(
