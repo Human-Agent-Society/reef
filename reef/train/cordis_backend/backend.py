@@ -31,6 +31,7 @@ from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.nodes import (
     ALWAYS_REVIEWED_KINDS,
     NODE_KINDS,
+    RESERVED_ENTRY_IDS,
     directive_shaped,
     flat_entry_refusal,
     redact_secret_shaped,
@@ -461,7 +462,13 @@ def _resolve(loader: Loader, id_: str) -> Any:
 
 
 def _apply_mutation(loader: Loader, mutation: Mutation) -> None:
-    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id; every op refuses a group entry."""
+    """One mutation on the loader: create refuses an existing id, update a missing id or a changed kind, remove a missing id; every op refuses a group entry and a reserved id."""
+    if mutation.id in RESERVED_ENTRY_IDS:
+        # The seed and recovered state carry these entries; proposals cannot change them.
+        raise MutationError(
+            f"mutation {mutation.op} {mutation.id!r} rejected: entry {mutation.id!r} is reef's own, "
+            "and a proposal cannot create, update or remove it"
+        )
     if mutation.options is not None:
         # The loader would route a group entry to its Group plugin and mount the children through the kinds'
         # plugins, unseen by every check that walks the root; the tree is flat, so the shape never loads.
@@ -943,7 +950,12 @@ class CordisBackend(TrainingBackend):
         # not consume its batch without the proposer reading the instruction.
         claimed = None if inbox is None or batch.request is not None else inbox.claim()
         if inbox is not None and claimed is not None:
-            metrics["proposal"] = {"id": claimed.id, "session": claimed.session, "release_id": claimed.release_id}
+            metrics["proposal"] = {
+                "id": claimed.id,
+                "session": claimed.session,
+                "release_id": claimed.release_id,
+                "reason": claimed.reason,
+            }
             # An agent's proposal asks the method nothing, so the step's proposer record is empty.
             self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
             metrics["proposer_calls"] = 0

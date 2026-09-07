@@ -528,3 +528,26 @@ prompt offers to run the update or skip in interactive mode and prints the
 instructions in headless mode. An ``opencode`` recipe that sets it refuses to
 boot. An evolved tree is adapter-specific: ``config`` node contents follow each
 adapter's schema.
+
+``evolution.requests: true`` seeds two more reef owned entries for ``pi``
+after the notice: the ``code_extension`` ``reef-requests``
+(`reef/harness/adapters/pi/requests.ts <../../reef/harness/adapters/pi/requests.ts>`__:
+the ``/reef-harness <request>`` command, which files the request with
+``POST /reef/train`` in manual mode, leaves captured receipts available for
+feedback, and registers nothing under ``PI_OFFLINE``) and the
+``skill`` ``reef-pi-extension-api`` (`reef/harness/adapters/pi/pi_extension_api.md
+<../../reef/harness/adapters/pi/pi_extension_api.md>`__, the pi extension
+API reference the service proposer reads before it writes an extension). The
+agent only asks; the writing happens on the service, where the evolve step
+hands the request to the recipe's ``propose`` and settles it with the step.
+Asking needs no extension: ``reef-<adapter> harness "<request>"`` is a
+wrapper subcommand on every adapter. The ids ``reef-version-check``,
+``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in
+`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__: the seed
+and a recovered state carry them, and admission refuses a mutation that
+creates, updates or removes one, the way native tool names are reserved. An
+evolved extension runs in pi's process with the person's privileges, and
+admission screens its text for credential shaped literals only, so a pi
+deployment should set ``evolution.review_kinds: [code_extension]`` (the
+tutorial's deployment files gain it with the next stage): review is the
+boundary, and a release that touches an extension then waits for a promote.

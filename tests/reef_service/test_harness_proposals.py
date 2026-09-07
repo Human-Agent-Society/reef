@@ -12,6 +12,7 @@ from reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, _report
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
@@ -23,13 +24,15 @@ from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve
 CREATE_RULES = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
 
 
-def _recipe(tmp_path: Path, propose, *, max_pending: int = 8) -> CordisRecipe:
+def _recipe(
+    tmp_path: Path, propose, *, max_pending: int = 8, seed: tuple = (SEED_MODELS, SEED_SETTINGS)
+) -> CordisRecipe:
     return CordisRecipe(
         resolve_proposer(propose),
         resolve_episode_scorer(evaluate),
         ("task one",),
         binary=str(make_binary(tmp_path)),
-        seed=(SEED_MODELS, SEED_SETTINGS),
+        seed=seed,
         runtime=runtime(),
         proposals_dir=str(tmp_path / "inbox"),
         max_pending_proposals=max_pending,
@@ -239,7 +242,12 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_verdict_settles_i
         result = scenario.prepare_training_step()
         assert result is not None
         scenario.commit(result)
-        assert result.metrics["proposal"] == {"id": first["proposal_id"], "session": "s1", "release_id": "rel-0"}
+        assert result.metrics["proposal"] == {
+            "id": first["proposal_id"],
+            "session": "s1",
+            "release_id": "rel-0",
+            "reason": "because",
+        }
         assert result.metrics["published"] is True
         assert [entry["id"] for entry in result.state["entries"]] == ["models", "settings", "r1"]
         settled = json.loads((inbox / "settled" / f"{first['proposal_id']}.json").read_text(encoding="utf-8"))
@@ -269,6 +277,7 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_verdict_settles_i
             row["metrics"]["steps"]: row["metrics"] for row in scenario.releases() if row["operation"] == "training"
         }
         assert by_step[1]["proposal"]["session"] == "s1" and by_step[2]["proposal"]["session"] == "s2"
+        assert by_step[1]["proposal"]["reason"] == "because"
         assert "proposal" not in by_step[3]
     finally:
         dispatcher.close()
@@ -378,5 +387,53 @@ def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, m
         refused = json.loads((inbox / "refused" / f"{proposal_id}.json").read_text(encoding="utf-8"))
         assert refused["refused"] == "step aborted before a verdict" and refused["session"] == "3f1c2a9d0b7e"
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
+    finally:
+        dispatcher.close()
+
+
+def test_the_route_refuses_every_op_on_a_reserved_entry_id(tmp_path: Path) -> None:
+    """Reef's own entries ride the seed; a proposal cannot create, update or remove one, whether or not the
+    tree holds it, and a mutation beside them is admitted as before."""
+    notice = version_check_entry("pi")
+    recipe = _recipe(tmp_path, lambda n, s, m: None, seed=(SEED_MODELS, SEED_SETTINGS, notice))
+    dispatcher = _dispatcher(tmp_path, recipe)
+    assert dispatcher.get_or_create_scenario("agents") is not None
+    code = "export default function (pi) {}\n"
+    reserved = [
+        {
+            "op": "create",
+            "id": "reef-requests",
+            "options": {"name": "code_extension", "config": {"name": "x", "code": code}},
+        },
+        {
+            "op": "create",
+            "id": "reef-pi-extension-api",
+            "options": {"name": "skill", "config": {"name": "x", "text": "y"}},
+        },
+        {"op": "update", "id": "reef-version-check", "options": {"config": {"code": code}}},
+        {"op": "update", "id": "reef-version-check", "options": {"disabled": True}},
+        {"op": "remove", "id": "reef-version-check"},
+        {"op": "remove", "id": "reef-requests"},
+    ]
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            for mutation in reserved:
+                answer = await (await _post(client, _proposal(mutation))).json()
+                assert answer["admitted"] is False, answer
+                assert answer["reason"] == (
+                    f"mutation {mutation['op']} '{mutation['id']}' rejected: entry '{mutation['id']}' is reef's own, "
+                    "and a proposal cannot create, update or remove it"
+                )
+            answer = await (await _post(client, _proposal(CREATE_RULES))).json()
+            assert answer["admitted"] is True and answer["reason"] is None
+            assert len(list((tmp_path / "inbox" / "agents").glob("*.json"))) == 1
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
     finally:
         dispatcher.close()

@@ -22,6 +22,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.records import RecordStore
@@ -2404,3 +2405,37 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
     inbox = trainer.training_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2
     assert not inbox.directory.exists()
+
+
+def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: Path) -> None:
+    """The method's proposal meets the same rule as an agent's: reef's own ids are refused at admission, while
+    the seed and a recovered state carry them and a step beside them publishes as before."""
+    notice = version_check_entry("pi")
+    code = "export default function (pi) {}\n"
+    extension = {"name": "code_extension", "config": {"name": "reef-requests", "code": code}}
+    for mutation in (
+        Mutation("create", "reef-requests", extension),
+        Mutation("create", "reef-pi-extension-api", {"name": "skill", "config": {"name": "api", "text": "# api"}}),
+        Mutation("update", "reef-version-check", {"config": {"code": code}}),
+        Mutation("remove", "reef-version-check"),
+    ):
+        refusal = (
+            f"mutation {mutation.op} '{mutation.id}' rejected: entry '{mutation.id}' is reef's own, "
+            "and a proposal cannot create, update or remove it"
+        )
+        assert _admit([notice], mutation) == ([notice], refusal)
+        b = backend(tmp_path, lambda nodes, samples, models, mutation=mutation: mutation, seed=(notice,))
+        result = run_backend_step(b, batch(), b.initial_state())
+        assert result.metrics["skipped"] == refusal and "published" not in result.metrics
+        assert [entry["id"] for entry in result.state["entries"]] == ["reef-version-check"]
+    marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+    b = backend(tmp_path, lambda nodes, samples, models: marker)
+    result = run_backend_step(b, batch(), {"steps": 1, "entries": [notice]})
+    assert result.metrics["published"] is True
+    assert [entry["id"] for entry in result.state["entries"]] == ["reef-version-check", "r1"]
+    assert result.artifact is not None and result.artifact.local_path is not None
+    # The published tree renders reef's own entry beside the win and, pi declaring no list, carries no tree.json.
+    published = result.artifact.local_path / "pi-agent"
+    assert (published / "extensions" / "reef-version-check.ts").read_text(encoding="utf-8") == notice["config"]["code"]
+    assert (published / "AGENTS.md").read_text(encoding="utf-8") == "marker rules\n"
+    assert not (published / "tree.json").exists()

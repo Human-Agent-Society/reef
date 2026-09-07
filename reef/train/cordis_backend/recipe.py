@@ -24,6 +24,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.executor import EpisodeExecutor, build_executor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.observability import ExperimentLogger
@@ -126,7 +127,12 @@ class CordisRecipe(Recipe):
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
     the channel head; adapters without a shipped extension refuse boot),
-    and the agent proposal inbox: ``proposals_dir`` (default
+    optional ``requests`` (``true`` appends the adapter's shipped harness requests
+    extension and its pi extension API skill to the seed after the notice,
+    so a session can ask for a harness change from the TUI and the method
+    reads the API reference before it writes an extension; same refusal for
+    adapters without one),
+    the agent proposal inbox: ``proposals_dir`` (default
     ``.reef/proposals``, one directory per scenario under it, created when
     the first proposal arrives) and ``max_pending_proposals`` (default 8,
     the number of admitted proposals a scenario holds before the route
@@ -335,6 +341,14 @@ class CordisRecipe(Recipe):
         if version_check:
             try:
                 seed = (*seed, version_check_entry(adapter))
+            except DescriptorError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+        requests = evolution.get("requests", False)
+        if not isinstance(requests, bool):
+            raise RecipeConfigError("evolution.requests must be a boolean")
+        if requests:
+            try:
+                seed = (*seed, *request_entries(adapter))
             except DescriptorError as exc:
                 raise RecipeConfigError(str(exc)) from exc
         model = settings.get("model")

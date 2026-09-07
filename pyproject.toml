@@ -104,7 +104,7 @@ fallback_version = "0.0.0.dev0"
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md"]
 
 [tool.isort]
 profile = "black"  # black-compatible
