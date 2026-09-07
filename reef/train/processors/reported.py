@@ -51,9 +51,6 @@ from reef.train.types import PolicySample, ProcessorContext, TrainingBatch
 
 logger = logging.getLogger(__name__)
 
-#: Units a processor in manual mode holds beyond this many batches are released, oldest first.
-_MANUAL_UNIT_CAP_BATCHES = 4
-
 __all__ = [
     "NEVER",
     "WAIT",
@@ -258,6 +255,8 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     exclusive_sources: bool = False
     #: Batch ready groups in group-key order instead of arrival order.
     ordered_groups: bool = False
+    #: Units held in manual mode beyond this many batches are released, oldest first.
+    manual_unit_cap_batches: int = 4
 
     @abstractmethod
     def judge(self, context: ReportContext) -> ReportDecision:
@@ -391,7 +390,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     def _cap_manual_units(self) -> None:
         """Manual mode batches on instructions, not units, so the pile is bounded here instead."""
-        limit = self._batch_size * _MANUAL_UNIT_CAP_BATCHES
+        limit = self._batch_size * self.manual_unit_cap_batches
         if self.training_mode != "manual" or self._ready_count() <= limit:
             return
         # The reserved batch is handed out until acknowledged, so its units stay put.
