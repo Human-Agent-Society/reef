@@ -1,24 +1,17 @@
-"""Admission of POST /reef/train: the text screens, the pending cap, and a scenario that must already exist."""
+"""Admission of POST /reef/train: the text screens, pending status, and a scenario that must already exist."""
 
 from __future__ import annotations
 
 import asyncio
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
-from reef.recipe import Recipe, RecipeConfigError
-from reef.records import RecordStore
 from reef.service.app import create_app
-from reef.train.cordis_backend.processor import CordisProcessor
-from reef.train.cordis_backend.recipe import CordisRecipe
-from reef.train.trainer import Trainer
-from reef.train.types import ProcessorContext
 
 TEXT = "add a skill that runs the tests before it answers"
 
@@ -117,7 +110,7 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_the_cap_refuses_the_ninth_pending_request_and_admits_again_after_one_is_consumed(tmp_path: Path) -> None:
+def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
     propose, entered, release = _blocking_proposer()
     dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
 
@@ -128,33 +121,36 @@ def test_the_cap_refuses_the_ninth_pending_request_and_admits_again_after_one_is
         await client.start_server()
         try:
             ids = []
-            for index in range(8):
+            for index in range(10):
                 response = await _post(client, _request(f"request {index}"))
                 assert response.status == 200, await response.text()
                 ids.append((await response.json())["agent_record_id"])
             assert await asyncio.to_thread(entered.wait, 5)
-            # One is in flight and seven wait unread: the processor buffers one instruction at a time.
+            # One is in flight and nine wait unread: the processor buffers one instruction at a time.
             assert scenario.trainer.processor_status() == {"buffered_requests": 1}
-            assert scenario.trainer.pending_instructions() == 8
+            assert scenario.trainer.pending_instructions() == 10
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             processor = (await status.json())["scenarios"]["agents"]["processor"]
-            assert processor == {"buffered_requests": 1, "pending_instructions": 8}
-            response = await _post(client, _request("request 8"))
-            assert response.status == 400 and await response.text() == "requests full"
-            assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 8
-            # A retry of an accepted instruction is not a ninth one.
+            assert processor == {"buffered_requests": 1, "pending_instructions": 10}
+            assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 10
+            # Retrying an accepted instruction does not add another pending request.
             retry = await _post(client, {**_request("request 0"), "agent_record_id": ids[0]})
             assert retry.status == 200 and (await retry.json())["agent_record_id"] == ids[0]
 
+            assert scenario.trainer.pending_instructions() == 10
             release.set()
             for _ in range(200):
-                if scenario.trainer.pending_instructions() < 8:
+                if scenario.trainer.pending_instructions() == 0:
                     break
                 await asyncio.sleep(0.05)
-            assert scenario.trainer.pending_instructions() < 8
-            response = await _post(client, _request("request 8"))
-            assert response.status == 200, await response.text()
+            assert scenario.trainer.pending_instructions() == 0
+            status = await client.get("/reef/status")
+            assert status.status == 200, await status.text()
+            assert (await status.json())["scenarios"]["agents"]["processor"] == {
+                "buffered_requests": 0,
+                "pending_instructions": 0,
+            }
         finally:
             release.set()
             await client.close()
@@ -163,59 +159,4 @@ def test_the_cap_refuses_the_ninth_pending_request_and_admits_again_after_one_is
         asyncio.run(run())
     finally:
         release.set()
-        dispatcher.close()
-
-
-def test_the_recipe_refuses_a_zero_or_boolean_cap_and_hands_the_cap_to_the_processor(tmp_path: Path) -> None:
-    assert Recipe().max_pending_requests == 8
-    for bad in (0, -1, True, "2"):
-        with pytest.raises(ValueError, match="max_pending_requests must be an integer of at least 1"):
-            Recipe(max_pending_requests=bad)
-        with pytest.raises(ValueError, match="max_pending_requests must be an integer of at least 1"):
-            ProcessorContext("agents", max_pending_requests=bad)
-    for bad in (0, True):
-        with pytest.raises(RecipeConfigError, match="max_pending_requests"):
-            Recipe.from_environment({}, config={"data": {"max_pending_requests": bad}})
-    assert Recipe.from_environment({}, config={"data": {"max_pending_requests": 2}}).max_pending_requests == 2
-
-    recipe = replace(_recipe(tmp_path, lambda n, s, m: None), max_pending_requests=2)
-    records = RecordStore()
-    trainer = recipe.build("agents", records)
-    try:
-        assert trainer.max_pending_requests == 2 and trainer.processor.max_pending_requests == 2
-        assert trainer.processor.context.config == {"batch_size": 1, "max_score": 0.0, "manual_enabled": False}
-    finally:
-        trainer.close()
-        records.close()
-
-
-class _DroppingRecipe(CordisRecipe):
-    """A recipe whose build leaves the cap at the trainer's default, as a recipe written before the field would."""
-
-    def _build_trainer(self, scenario, records, training_backend, *, algorithm_state, experiment_logger):
-        return Trainer.build(
-            scenario,
-            records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config(
-                    {"batch_size": self.batch_size, "max_score": self.max_score, "manual_enabled": True}
-                )
-            ),
-            training_backend=training_backend,
-            algorithm_state=algorithm_state,
-            report_type=self.report_type,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-        )
-
-
-def test_the_factory_refuses_a_recipe_whose_build_drops_the_cap(tmp_path: Path) -> None:
-    base = _recipe(tmp_path, lambda n, s, m, *, requests=(): None)
-    recipe = _DroppingRecipe(**{field.name: getattr(base, field.name) for field in fields(base) if field.init})
-    dispatcher = _dispatcher(tmp_path, replace(recipe, max_pending_requests=3))
-    try:
-        with pytest.raises(ValueError, match=r"recipe\.build must pass its max_pending_requests to Trainer\.build"):
-            dispatcher.get_or_create_scenario("agents")
-        assert not dispatcher.has_loaded("agents")
-    finally:
         dispatcher.close()

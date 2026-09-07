@@ -666,20 +666,18 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         dispatcher.close()
 
 
-def test_a_full_queue_of_failing_instructions_drains_without_another_record(tmp_path):
+def test_a_queue_of_failing_instructions_drains_without_another_record(tmp_path):
     calls = []
     propose, entered, release = _raising_proposer(calls, poison=None, error="proposer outage")
-    recipe = replace(_recipe(tmp_path, propose), training_mode="manual", max_pending_requests=2)
+    recipe = replace(_recipe(tmp_path, propose), training_mode="manual")
     dispatcher = _dispatcher(tmp_path, recipe)
     try:
         dispatcher.get_or_create_scenario("s")
         dispatcher.accept_record(instruction("p1"))
         assert entered.wait(5)
         dispatcher.accept_record(instruction("p2"))
-        with pytest.raises(ValueError, match="requests full"):
-            dispatcher.accept_record(instruction("p3"))
         release.set()
-        # Nothing else is admitted, so the failures themselves wake the worker until both are consumed.
+        # No further records are submitted, so the failures wake the worker until both are consumed.
         assert _wait(lambda: _committed_skip(dispatcher, "p1") == "instruction failed")
         assert _wait(lambda: _committed_skip(dispatcher, "p2") == "instruction failed")
         assert calls == ["p1", "p2"]
@@ -761,7 +759,6 @@ def test_the_dispatched_training_thread_skips_a_failed_instruction(tmp_path):
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 training_mode=self.training_mode,
-                max_pending_requests=self.max_pending_requests,
             )
 
     dispatcher = _dispatcher(tmp_path, DispatchedRecipe(runtime=StubTrainingRuntime(), training_mode="manual"))

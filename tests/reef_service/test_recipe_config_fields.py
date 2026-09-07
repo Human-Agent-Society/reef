@@ -46,7 +46,6 @@ def test_config_fields_declare_the_whole_configuration_surface() -> None:
     assert sorted(config_fields) == [
         "batch_size",
         "label",
-        "max_pending_requests",
         "max_staleness",
         "strict",
         "temperature",
@@ -79,7 +78,6 @@ def test_config_field_casting_is_type_aware_for_every_annotation() -> None:
         "batch_size": 16,
         "max_staleness": 0,
         "training_mode": "auto",
-        "max_pending_requests": 8,
         "temperature": 0.25,
         "strict": True,
         "label": "run-a",

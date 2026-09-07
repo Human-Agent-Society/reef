@@ -140,7 +140,6 @@ keeps the selected mode.
 .. config::
 
    data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules
-   data.max_pending_requests | 8 | how many accepted instructions one scenario holds unconsumed, an integer of at least 1; ``POST /reef/train`` answers HTTP 400 ``requests full`` beyond it, until one is consumed
 
 A recipe is selected three ways:
 

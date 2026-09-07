@@ -43,11 +43,9 @@ Explicit manual training
 ``training_mode`` is an attribute of each ``DataProcessor``. The recipe passes
 its initial value through ``Trainer.build`` and ``ProcessorContext``; it
 defaults to ``auto``. Ingestion, acknowledgement, retention and compaction use
-the same methods and buffers in both modes. ``max_pending_requests`` travels
-the same way from ``data.max_pending_requests`` (8): the dispatcher admits no
-instruction while that many accepted ones are unconsumed, counting the ones
-the processor reports as ``buffered_requests`` and the ones still unread in
-storage.
+the same methods and buffers in both modes. ``GET /reef/status`` reports
+``pending_instructions`` as the processor's ``buffered_requests`` plus the
+instructions still unread in storage.
 
 The shared batching cycle waits for ``batch_size`` units in auto mode or a
 queued TRAIN instruction in manual mode. A processor supporting both declares

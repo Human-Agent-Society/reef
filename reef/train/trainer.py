@@ -63,7 +63,6 @@ class Trainer:
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
-        max_pending_requests: int = 8,
     ) -> Trainer:
         if training_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a training backend")
@@ -73,7 +72,6 @@ class Trainer:
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
-                max_pending_requests=max_pending_requests,
             )
         )
         if processor.training_mode != training_mode:
@@ -129,11 +127,6 @@ class Trainer:
         """Serialize mode selection with record ingestion and batch reservation."""
         with self._lock:
             self._processor.set_training_mode(training_mode)
-
-    @property
-    def max_pending_requests(self) -> int:
-        """The bound on accepted, unconsumed instructions the processor was built with."""
-        return self._processor.max_pending_requests
 
     def pending_instructions(self) -> int:
         """Instructions accepted and not yet consumed: the ones the processor buffers plus those unread in storage."""

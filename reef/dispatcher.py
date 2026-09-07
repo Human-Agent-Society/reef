@@ -283,8 +283,6 @@ class Dispatcher:
             refusal = training_request_refusal(request.text)
             if refusal is not None:
                 raise ValueError(refusal)
-            if current.trainer.pending_instructions() >= current.trainer.max_pending_requests:
-                raise ValueError("requests full")
         # Schema enforcement: reject a malformed report before it is durably
         # appended, so the producer's POST fails with the violation naming
         # the broken field instead of the record dying silently at training
@@ -450,7 +448,7 @@ class Dispatcher:
     def _fail_instruction(self, current: Scenario, cause: Exception) -> None:
         """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
         if current.trainer.fail_pending_instruction(self._error_text(cause)):
-            # A queue full of failing instructions admits no record to wake on; each skip row is one wake.
+            # Wake the worker so failed instructions settle even when no new records arrive.
             self._wake_training(current)
 
     def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
@@ -726,7 +724,7 @@ class Dispatcher:
             self._warn_if_undrained(scenario_name, last_drain)
         processor = dict(current.trainer.processor_status())
         if "buffered_requests" in processor:
-            # The count admission bounds: the buffered instructions plus the ones still unread in storage.
+            # Include instructions still unread in storage alongside the buffered ones.
             processor["pending_instructions"] = current.trainer.pending_instructions()
         block: dict[str, Any] = {
             **current.commit_status,

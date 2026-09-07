@@ -132,11 +132,6 @@ class DataProcessor:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
 
-    @property
-    def max_pending_requests(self) -> int:
-        """How many accepted instructions a scenario holds unconsumed before admission answers ``requests full``."""
-        return self._context.max_pending_requests
-
     def buffered_requests(self) -> int:
         """How many instructions are read into memory and not yet consumed."""
         return len(self._training_requests)

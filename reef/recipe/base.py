@@ -45,17 +45,10 @@ class Recipe:
     runtime: InferenceRuntime | None = None
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
     training_mode: str = config_field("auto")
-    max_pending_requests: int = config_field(8)
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
-        if (
-            isinstance(self.max_pending_requests, bool)
-            or not isinstance(self.max_pending_requests, int)
-            or self.max_pending_requests < 1
-        ):
-            raise ValueError("max_pending_requests must be an integer of at least 1")
 
     @classmethod
     def from_environment(
@@ -114,7 +107,6 @@ class Recipe:
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
-            max_pending_requests=self.max_pending_requests,
         )
 
     @property
@@ -323,7 +315,7 @@ class WeightTrainingRecipe(Recipe):
         return {
             name: getattr(self, name)
             for name in recipe_config_fields(type(self))
-            if name not in ("max_staleness", "training_mode", "max_pending_requests")
+            if name not in ("max_staleness", "training_mode")
         }
 
     def build(
@@ -402,5 +394,4 @@ class WeightTrainingRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
-            max_pending_requests=self.max_pending_requests,
         )

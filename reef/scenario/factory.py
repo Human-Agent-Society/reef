@@ -376,9 +376,6 @@ class ScenarioFactory:
         if trainer.training_mode != recipe.training_mode:
             trainer.close()
             raise ValueError("recipe.build must pass its training_mode to Trainer.build")
-        if trainer.max_pending_requests != recipe.max_pending_requests:
-            trainer.close()
-            raise ValueError("recipe.build must pass its max_pending_requests to Trainer.build")
         return trainer
 
     def _artifact_selector_matches(

@@ -122,8 +122,7 @@ rules still determine whether the result becomes served.
 manual request queue also report ``buffered_requests`` (requests already
 read into the processor; later records may still wait in storage) and
 ``pending_instructions`` (accepted instructions not yet consumed: the
-buffered ones plus those still unread in storage, the count that
-``data.max_pending_requests`` bounds).
+buffered ones plus those still unread in storage).
 Committed step metrics include ``training_request``
 with the instruction id, text, session and release id.
 
@@ -134,12 +133,9 @@ id. Empty text, text longer than 4000 characters, missing or non-string
 session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
 Text that carries a credential shaped literal or an instruction override
 phrasing is refused with HTTP 400 and a reason that names the rule, never
-the text; nothing is stored. While ``data.max_pending_requests`` (default 8)
-accepted instructions wait unconsumed, the route answers HTTP 400
-``requests full`` until one is consumed. The scenario must exist: an
-unknown scenario answers HTTP 404 and creates nothing, whatever the
-implicit-scenario-creation setting says. The normal bearer authentication
-applies.
+the text; nothing is stored. The scenario must exist: an unknown scenario
+answers HTTP 404 and creates nothing, whatever the implicit-scenario-creation
+setting says. The normal bearer authentication applies.
 
 Scenarios
 ---------
