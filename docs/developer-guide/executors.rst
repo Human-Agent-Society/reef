@@ -168,10 +168,12 @@ Python integrations may instead provide an ``ExecutorConfig`` or an already
 constructed executor under ``executor``. A factory-created executor is cleaned
 up if runtime initialization fails. An injected executor remains under its
 caller's control on initialization failure. Service-created runtimes close once
-after the dispatcher has stopped all scenario workers. A directly constructed
-``Dispatcher`` borrows its runtime unless ``owns_runtime=True`` is explicit.
-Other Python callers call ``runtime.shutdown()`` when their runtime is no
-longer in use.
+after the dispatcher has stopped all scenario workers. A ``Dispatcher`` always
+closes its recipe's runtime, including when constructed directly from Python.
+To reuse external workers across dispatchers, create a fresh runtime and a
+non-owning executor for each dispatcher; closing one leaves the workers alive.
+Python callers that do not use a dispatcher call ``runtime.shutdown()`` when
+their runtime is no longer in use.
 
 Slime integration
 -----------------

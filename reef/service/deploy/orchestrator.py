@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shlex
 import signal
 import sys
 import tempfile
@@ -47,13 +46,6 @@ _WATCHDOG_INTERVAL = 5
 
 def _log(msg: str) -> None:
     print(f"[reef] {msg}", file=sys.stderr)
-
-
-def _command_argv(config: Mapping[str, Any], command: str | Sequence[str]) -> list[str]:
-    """Materialize a service command without changing its executable semantics."""
-    if isinstance(command, str):
-        return shlex.split(interpolate_config(config, command))
-    return [interpolate_config(config, argument) for argument in command]
 
 
 class InvalidOverrideError(ValueError):

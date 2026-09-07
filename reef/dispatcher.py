@@ -100,7 +100,6 @@ class _TrainingState:
 class _LifecycleState:
     closed: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
-    owns_runtime: bool = False
 
 
 def training_request_refusal(text: str) -> str | None:
@@ -121,6 +120,7 @@ class Dispatcher:
     ``TrainingRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
+    The dispatcher owns its recipe's runtime and closes it after all scenarios.
     """
 
     def __init__(
@@ -132,7 +132,6 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
-        owns_runtime: bool = False,
     ) -> None:
         self._recipe = recipe
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -147,7 +146,7 @@ class Dispatcher:
         self._registry.set_training_scenario_callback(self._start_training)
         self._publication = _PublicationState()
         self._training = _TrainingState()
-        self._lifecycle = _LifecycleState(owns_runtime=owns_runtime)
+        self._lifecycle = _LifecycleState()
         if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self._lifecycle.preload_thread = Thread(
                 target=self._preload_scenarios,
@@ -779,7 +778,7 @@ class Dispatcher:
     # -- Lifecycle -------------------------------------------------------
 
     def close(self) -> None:
-        """Close scenarios, then the shared runtime when ownership was transferred."""
+        """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
         self._lifecycle.closed.set()
@@ -803,7 +802,7 @@ class Dispatcher:
                 scenario.close()
             except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
                 errors.append(exc)
-        if self._lifecycle.owns_runtime and self._recipe.runtime is not None:
+        if self._recipe.runtime is not None:
             try:
                 self._recipe.runtime.shutdown()
             except BaseException as exc:

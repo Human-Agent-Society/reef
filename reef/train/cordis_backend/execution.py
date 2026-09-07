@@ -40,9 +40,7 @@ class EvaluationWorkerPool:
             if not pairings:
                 return []
             if self._executor is None:
-                config = evaluation_executor_config(
-                    self._selection, self._requirements, self._worker, self._requirements.workers
-                )
+                config = evaluation_executor_config(self._selection, self._requirements, self._worker)
                 try:
                     self._executor = Executor.create(config)
                 except BaseException:
@@ -136,7 +134,7 @@ def evaluation_selection(
 
 
 def evaluation_executor_config(
-    selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec, count: int
+    selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec
 ) -> ExecutorConfig:
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
@@ -148,11 +146,11 @@ def evaluation_executor_config(
     logging.getLogger(__name__).info(
         "evolution: executor=%s workers=%s gpus_per_worker=%s (%s)",
         selection.settings.backend,
-        count,
+        requirements.workers,
         requirements.gpus_per_worker,
         selection.reason,
     )
-    workers = (worker,) * count
+    workers = (worker,) * requirements.workers
     if selection.settings.backend == "mp" and requirements.gpus_per_worker:
         workers = tuple(
             replace(worker, options={"cuda_visible_devices": ",".join(devices)})

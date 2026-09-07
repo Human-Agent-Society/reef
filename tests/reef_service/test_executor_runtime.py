@@ -291,7 +291,7 @@ runtime:
     assert worker.shutdown_events == ["shutdown"]
 
 
-def test_dispatcher_closes_owned_runtime_after_all_scenarios_but_not_on_reload(tmp_path):
+def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_path):
     class SharedCoordinator(Coordinator):
         def health(self):
             return {**super().health(), "lora_mode": "scenario"}
@@ -306,7 +306,6 @@ def test_dispatcher_closes_owned_runtime_after_all_scenarios_but_not_on_reload(t
     dispatcher = Dispatcher(
         Recipe(runtime=runtime),
         InMemoryRepositoryBackend.factory(initial),
-        owns_runtime=True,
         agent_record_dir=tmp_path / "records",
     )
     dispatcher.get_or_create_scenario("math")
@@ -330,20 +329,23 @@ def test_dispatcher_closes_owned_runtime_after_all_scenarios_but_not_on_reload(t
     assert events == ["math", "code", "shutdown"]
 
 
-def test_dispatcher_keeps_a_borrowed_runtime_alive(tmp_path):
+def test_dispatchers_close_their_runtimes_without_stopping_external_workers(tmp_path):
     worker = Coordinator()
-    executor = UniProcExecutor.from_workers((worker,), owned=True)
-    runtime = ExecutorTrainingRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
-    dispatcher = Dispatcher(Recipe(runtime=runtime), InMemoryRepositoryBackend.factory(tmp_path))
-    try:
-        dispatcher.close()
-        executor.check_health()
+    for _ in range(2):
+        executor = UniProcExecutor.from_workers((worker,), owned=False)
+        runtime = ExecutorTrainingRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
+        dispatcher = Dispatcher(Recipe(runtime=runtime), InMemoryRepositoryBackend.factory(tmp_path))
+        try:
+            executor.check_health()
+        finally:
+            dispatcher.close()
+        assert runtime.inference_admission_status["open"] is False
+        with pytest.raises(RuntimeError, match="shut down"):
+            executor.check_health()
         assert worker.shutdown_events == []
-    finally:
-        runtime.shutdown()
 
 
-def test_dispatcher_releases_owned_runtime_when_scenario_teardown_fails(tmp_path, monkeypatch):
+def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monkeypatch):
     # This ownership-only fake recipe has no training backend. Do not let a
     # background training failure reload the scenario before close is tested.
     monkeypatch.setattr(Dispatcher, "_start_training", lambda *args: None)
@@ -356,7 +358,6 @@ def test_dispatcher_releases_owned_runtime_when_scenario_teardown_fails(tmp_path
     dispatcher = Dispatcher(
         Recipe(runtime=runtime),
         InMemoryRepositoryBackend.factory(initial),
-        owns_runtime=True,
         agent_record_dir=tmp_path / "records",
     )
     scenario = dispatcher.get_or_create_scenario("math")

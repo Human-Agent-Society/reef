@@ -62,7 +62,7 @@ def test_gpu_resources_and_cpu_reservations_reach_ray_without_initializing_it():
         {}, {"backend": "ray", "workers": 3, "resources": {"cpus_per_worker": 2, "gpus_per_worker": 0.5}}
     )
     selection, needs = evaluation_selection(resolve_episode_scorer(scorer), None, settings)
-    config = evaluation_executor_config(selection, needs, WorkerSpec(dict), needs.workers)
+    config = evaluation_executor_config(selection, needs, WorkerSpec(dict))
     assert selection.settings.backend == "ray"
     assert len(config.workers) == 3
     assert config.options == {"num_cpus": 2, "num_gpus": 0.5}
@@ -117,7 +117,7 @@ def test_mp_assigns_disjoint_gpu_masks_before_worker_construction(monkeypatch):
     monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("GPU-first", "GPU-second"))
     settings = executor_settings({}, {"workers": 2, "resources": {"gpus_per_worker": 1}})
     selection, needs = evaluation_selection(resolve_episode_scorer(scorer), None, settings)
-    config = evaluation_executor_config(selection, needs, WorkerSpec(VisibleDeviceWorker), needs.workers)
+    config = evaluation_executor_config(selection, needs, WorkerSpec(VisibleDeviceWorker))
     executor = Executor.create(config)
     try:
         placements = executor.collective_rpc("placement")

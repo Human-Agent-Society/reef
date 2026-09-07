@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -12,6 +11,7 @@ from reef.runtime.executor.config import (
     ExecutorSelection,
     ExecutorSettings,
     executor_settings,
+    in_ray_placement_group,
     role_executor_settings,
     select_executor,
 )
@@ -47,21 +47,12 @@ def service_executor_selection(config: Mapping[str, Any], service: Mapping[str, 
     )
     resources = _service_resources(settings, service)
     local_cuda = service.get("cuda") is not None or "CUDA_VISIBLE_DEVICES" in (service.get("env") or {})
-    in_placement_group = False
-    # Importing Reef must not import/init Ray. An existing placement context,
-    # unlike an installed package or RAY_ADDRESS alone, implies scheduling intent.
-    ray = sys.modules.get("ray")
-    is_initialized = getattr(ray, "is_initialized", None)
-    if settings.backend == "auto" and not local_cuda and callable(is_initialized) and is_initialized():
-        from ray.util import get_current_placement_group
-
-        in_placement_group = get_current_placement_group() is not None
     return select_executor(
         settings,
         role="services",
         requires_resources=bool(resources),
         local_cuda=local_cuda,
-        in_ray_placement_group=in_placement_group,
+        in_ray_placement_group=settings.backend == "auto" and not local_cuda and in_ray_placement_group(),
     )
 
 

@@ -13,7 +13,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -71,7 +70,6 @@ class ProcessWorker:
         self._process_groups: dict[str, int] = {}
         self._log_fps: dict[str, TextIO] = {}
         self._names = [svc["name"] for svc in services]
-        self._stopping = threading.Event()
 
     def _pid_file(self, name: str) -> Path:
         return self.run_dir / f"{name}.pid"
@@ -200,7 +198,6 @@ class ProcessWorker:
 
     def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
         """Kill service process groups in reverse order: SIGTERM → wait → SIGKILL."""
-        self._stopping.set()
         deadline = time.monotonic() + max(0, grace)
         targets = []
         for name in reversed(self._names):
@@ -297,7 +294,6 @@ class ProcessWorker:
         return {name: proc.poll() for name, proc in self._procs.items()}
 
     def request_stop(self, force: bool = False) -> None:
-        self._stopping.set()
         signum = getattr(signal, "SIGKILL", signal.SIGTERM) if force else signal.SIGTERM
         for name in reversed(self._names):
             proc = self._procs.get(name)

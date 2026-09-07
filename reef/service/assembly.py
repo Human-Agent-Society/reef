@@ -225,7 +225,6 @@ def build_dispatcher(
             agent_record_dir=Path(settings.agent_record_dir),
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
-            owns_runtime=True,
         )
     except BaseException:
         if recipe.runtime is not None:
