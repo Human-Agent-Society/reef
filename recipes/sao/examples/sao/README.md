@@ -122,6 +122,23 @@ pip install -e .
 hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
 ```
 
+`run.py` also needs `docker`: Harbor runs each task's verifier in its own
+container. The `docker run` line in Evolve your model does not provide that,
+so when the stack itself runs inside the reef image, extend it:
+
+```bash
+docker run --gpus all --network host --ipc host --shm-size 32g -it \
+  -v ~/models:/root/models \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$REPO":"$REPO" -w "$REPO" \
+  reef bash
+# inside: apt-get update && apt-get install -y docker.io
+```
+
+Mount the repo at its host path (`-v "$REPO":"$REPO"`, not `/workspace/Reef`):
+Harbor's sibling containers bind-mount trial directories by path, and those
+paths must mean the same thing to the host docker daemon.
+
 ## Run
 
 ```bash
