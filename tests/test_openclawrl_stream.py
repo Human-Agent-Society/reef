@@ -261,7 +261,8 @@ class TestHarness:
         states = iter(
             [
                 {"message": "hey, do my homework", "done": False, "turn": 0},
-                {"message": "HOMEWORK_DONE", "done": True, "turn": 1},
+                {"message": "too robotic, redo it", "done": False, "turn": 1, "ready": True},
+                {"message": "HOMEWORK_DONE", "done": True, "turn": 2},
             ]
         )
 
@@ -277,9 +278,13 @@ class TestHarness:
                     return SimpleNamespace(return_code=0, stdout="", stderr="")
                 if "$JUDGE_URL/state" in command or "$JUDGE_URL/reply" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(next(states)), stderr="")
-                if "hermes -z" in command:
+                if "hermes chat" in command:
+                    # Quiet single-query mode: the reply alone on stdout, the
+                    # session id (and, on a resumed turn, the notice) on stderr.
                     return SimpleNamespace(
-                        return_code=0, stdout="<think>hm</think>we add 2 plus 2 equals 4, so 4", stderr=""
+                        return_code=0,
+                        stdout="we add 2 plus 2 equals 4, so 4\n",
+                        stderr="\nsession_id: 20260907_140709_77ea97\n",
                     )
                 return SimpleNamespace(return_code=0, stdout="", stderr="")
 
@@ -292,7 +297,7 @@ class TestHarness:
             def server_close(self):
                 pass
 
-        health = iter([(0, ""), (1, "")])
+        health = iter([(0, ""), (1, ""), (1, ""), (2, "")])
         stamped: list[str] = []
         monkeypatch.setattr(agent, "_start_shim", lambda _scenario, session: (stamped.append(session), FakeShim())[1])
         monkeypatch.setattr(agent, "_upstream_health", lambda: next(health))
@@ -300,17 +305,30 @@ class TestHarness:
         context = SimpleNamespace(metadata=None)
         asyncio.run(agent.run("ignored", environment, context))
 
-        assert context.metadata["openclawrl"]["turns"] == 1
+        assert context.metadata["openclawrl"]["turns"] == 2
         assert context.metadata["openclawrl"]["failure"] is None
         assert context.metadata["openclawrl"]["scenario"].startswith("openclawrl-stream-")
         # One position, one tagged conversation: the processor correlates on
-        # this instead of on a transcript hermes never resends.
+        # this rather than on whatever transcript hermes resends.
         assert stamped == [f"{context.metadata['openclawrl']['scenario']}-s0"]
-        hermes_calls = [c for c in environment.commands if "hermes -z" in c]
-        assert len(hermes_calls) == 1
+        hermes_calls = [c for c in environment.commands if "hermes chat" in c]
+        assert len(hermes_calls) == 2
+        # Quiet single-query chat mode, never the one-shot ``hermes -z``: that
+        # path ignores ``--resume``, so the second turn would forget the first.
+        # The working directory is the hermes home, where the homework lands;
+        # stderr is dropped because the exec transport folds it into stdout.
+        assert all(
+            "hermes chat -Q -q " in c and "--in /reef_eval/state/hermes" in c and c.endswith(" 2>/dev/null")
+            for c in hermes_calls
+        )
         assert "--resume" not in hermes_calls[0]  # first turn starts fresh
+        assert "--resume latest 2>/dev/null" in hermes_calls[1]  # later turns continue the session
+        assert "hermes -z" not in " ".join(environment.commands)
         config_writes = [c for c in environment.commands if ".hermes/config.yaml" in c]
         assert config_writes and "enabled: false" in config_writes[0]  # compression off
+        assert "show_reasoning: false" in config_writes[0]  # stdout is the reply alone
+        assert "tirith_enabled: false" in config_writes[0]  # no scanner warning ahead of the reply
+        assert "[ -f" not in config_writes[0]  # rewritten every position, never kept stale
 
 
 def test_reply_returns_before_the_reaction_exists(student_server):
