@@ -9,7 +9,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class TrainingRequest:
-    """Manual training input, independent of inference batches and feedback.
+    """A training instruction, independent of inference batches and feedback.
 
     ``id`` is filled from the enclosing AgentRecord when it becomes a batch.
     Session and release are provenance; they do not select an inference batch.

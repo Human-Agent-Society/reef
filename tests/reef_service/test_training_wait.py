@@ -23,7 +23,7 @@ import pytest
 
 import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.dispatcher import _DERIVATION_POLL_SECONDS, _STORAGE_RETRY_SECONDS, _UNDRAINED_WARNING_SECONDS, Dispatcher
+from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 
 pytestmark = pytest.mark.unit
@@ -88,14 +88,16 @@ def test_pending_derivation_polls_on_a_bounded_interval() -> None:
     # on a quiet workload.
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=True)
-    assert dispatcher._training_wait_timeout() == _DERIVATION_POLL_SECONDS
+    assert dispatcher._training_wait_timeout() == dispatcher.derivation_poll_seconds
 
 
 def test_blocked_storage_keeps_the_tighter_cadence() -> None:
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=True)
     dispatcher._training.storage_status = {"state": "blocked"}
-    assert dispatcher._training_wait_timeout() == min(_STORAGE_RETRY_SECONDS, _DERIVATION_POLL_SECONDS)
+    assert dispatcher._training_wait_timeout() == min(
+        dispatcher.storage_retry_seconds, dispatcher.derivation_poll_seconds
+    )
 
 
 def test_status_exposes_the_last_drain_time_and_ready_state() -> None:
@@ -245,7 +247,7 @@ def test_a_ready_batch_undrained_past_the_bound_warns_once(caplog) -> None:
     # must say so out loud, and exactly once per stall.
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=False, batch_ready=True)
-    dispatcher._training.last_drain = time.time() - _UNDRAINED_WARNING_SECONDS - 1
+    dispatcher._training.last_drain = time.time() - dispatcher.undrained_warning_seconds - 1
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
         for _ in range(2):
             assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True

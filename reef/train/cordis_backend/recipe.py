@@ -53,8 +53,6 @@ _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
     "score_comparison": ScoreComparisonSelector(),
     "always": AlwaysSelect(),
 }
-#: Where a scenario's proposal inbox lands when the recipe names no directory: beside the service's other state.
-DEFAULT_PROPOSALS_DIR = ".reef/proposals"
 
 
 def _resolve_callable(value: Any, what: str) -> Any:
@@ -194,7 +192,8 @@ class CordisRecipe(Recipe):
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
-    proposals_dir: str = DEFAULT_PROPOSALS_DIR
+    #: Default proposal inbox root, with one directory per scenario.
+    proposals_dir: str = ".reef/proposals"
     max_pending_proposals: int = 8
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
@@ -364,7 +363,7 @@ class CordisRecipe(Recipe):
         ):
             raise RecipeConfigError("evolution.episode_workers must be a positive integer")
         episode_workers = raw_workers
-        proposals_dir = evolution.get("proposals_dir", DEFAULT_PROPOSALS_DIR)
+        proposals_dir = evolution.get("proposals_dir", cls.proposals_dir)
         if not isinstance(proposals_dir, str) or not proposals_dir.strip():
             raise RecipeConfigError("evolution.proposals_dir must be a non-empty path")
         max_pending = evolution.get("max_pending_proposals", 8)
@@ -527,8 +526,11 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
     ) -> Trainer:
-        if self.training_mode == "manual" and not self.propose.reads_requests:
-            raise RecipeConfigError("manual harness evolution requires a proposer that accepts the 'requests' keyword")
+        if self.training_mode != "auto" and not self.propose.reads_requests:
+            raise RecipeConfigError(
+                f"harness evolution in training_mode={self.training_mode!r} requires a proposer "
+                "that accepts the 'requests' keyword"
+            )
         return Trainer.build(
             scenario,
             records,

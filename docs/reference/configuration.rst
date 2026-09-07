@@ -107,27 +107,33 @@ Recipe configuration
 --------------------
 
 ``data.training_mode`` is shared by all recipes and defaults to ``auto``.
-In ``auto``, the recipe's processor decides when its data can form a batch.
-In ``manual``, inference and reports cannot authorize training by themselves;
-``POST /reef/train`` supplies the user instruction. The processor defines
-the manual mode's input requirements and batching, independently of its
-automatic batching policy. Harness evolution needs only the instruction.
+In ``auto``, the recipe's processor decides when its data can form a batch,
+and ``POST /reef/train`` is refused. In ``manual``, inference and reports
+cannot authorize training by themselves; ``POST /reef/train`` supplies the
+user instruction, and harness evolution runs it alone. In ``hybrid``, the
+processor batches as in ``auto`` and runs instructions too, a queued
+instruction first; harness evolution hands the proposer, beside the
+instruction, the units an automatic batch would take next, up to
+``batch_size`` and possibly none: failing traces in the score window, or
+records under ``data.batch_policy: records``. The processor defines
+what an instruction batch carries, independently of its automatic batching
+policy.
 For a dotted weight-training deployment this field is also accepted as
 ``reef.training_mode``. Named presets set it in their own ``data`` section.
 
 The processor receives ``ProcessorContext.training_mode`` as its initial
-batching mode. Both modes share ingestion and retention; the
+batching mode. The modes share ingestion and retention; the
 ``make_training_batch(batch_number, request)`` hook selects batch inputs.
 Processors declare ``supported_training_modes``; unsupported modes or missing
-manual assembly raise ``NotImplementedError``.
-Harness evolution supports both modes and requires a proposer that explicitly
-accepts ``requests`` for manual operation. Setting ``manual`` on an
-inference-only recipe does not create a training backend.
+instruction assembly raise ``NotImplementedError``.
+Harness evolution supports the three modes and requires a proposer that
+explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
+on an inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
    data:
-     training_mode: manual
+     training_mode: hybrid
 
 The mode controls training initiation, independently of
 ``evolution.publish: auto | review``. It supplies the initial processor mode.
@@ -135,11 +141,13 @@ Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
 at runtime. This changes subsequent batches; a reserved batch completes under
 its original mode. Mode changes are not persisted: a service restart uses the
 recipe's configured mode again, while a scenario reload after a failed step
-keeps the selected mode.
+keeps the selected mode. In ``manual`` the reported-feedback processor holds
+at most four batches of units and releases the oldest beyond that with a
+warning, at the switch to ``manual`` and as reports arrive.
 
 .. config::
 
-   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules
+   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
 
 A recipe is selected three ways:
 
@@ -297,7 +305,7 @@ zero.
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
-   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` or ``response`` or ``error``, and ``seconds``; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each gate episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the

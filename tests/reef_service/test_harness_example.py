@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -31,6 +32,15 @@ EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-h
 NODES = (("skill", {"name": "answer-style", "text": "# answer-style\n\nStarter skill."}),)
 
 SAMPLES = (TraceSample("a1", {"messages": [{"role": "user", "content": "[fib] compute fib(90)"}]}, 0.0),)
+
+#: One queued instruction, as the backend forwards it to a proposer that names ``requests``.
+REQUEST = {
+    "id": "ask-1",
+    "text": "Add a skill that runs the tests before answering",
+    "session": "session-1",
+    "release_id": "release-1",
+    "untrusted": True,
+}
 
 
 def _method(monkeypatch: pytest.MonkeyPatch, module: str) -> ModuleType:
@@ -57,10 +67,12 @@ class Model:
 
     def __init__(self, reply: str | None = None, failure: Exception | None = None) -> None:
         self.reply, self.failure, self.calls = reply, failure, 0
+        self.prompt: str | None = None
         self.served = self
 
     def chat(self, messages, **params):
         self.calls += 1
+        self.prompt = messages[-1]["content"]
         if self.failure is not None:
             raise self.failure
         return self.reply
@@ -119,6 +131,22 @@ def test_propose_without_failures_skips_without_calling_the_model(evolution) -> 
     never = Model(failure=AssertionError("no samples, no model call"))
     assert evolution.propose(NODES, (), never) is None
     assert never.calls == 0
+
+
+def test_propose_answers_a_queued_request_with_the_failures_as_context(evolution) -> None:
+    model = canned(proposal("run-tests"))
+    mutation = evolution.propose(NODES, SAMPLES, model, requests=(REQUEST,))
+    assert (mutation.op, mutation.id) == ("create", "run-tests")
+    assert model.prompt.index(REQUEST["text"]) < model.prompt.index("[fib] compute fib(90)")
+    assert "makes the change the user asked for" in model.prompt
+
+
+def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
+    model = canned(proposal("answer-style"))
+    mutation = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert (mutation.op, mutation.id) == ("update", "answer-style")
+    assert model.calls == 1
+    assert REQUEST["text"] in model.prompt and "Failing requests" not in model.prompt
 
 
 # -- evaluate: exact last-line grading ------------------------------------
@@ -220,7 +248,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
     assert built.binary == str(tmp_path / "fake-pi")
     assert len(built.tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in built.tasks)
-    assert (built.batch_size, built.max_score) == (1, 0.0)
+    assert (built.batch_size, built.max_score, built.training_mode) == (1, 0.0, "auto")
 
     # The seed carries no provider node and the binding comes from the runtime.
     assert [entry["id"] for entry in built.seed] == ["answer-style"]
@@ -421,6 +449,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     assert built.adapter == "native" and built.binary is None
     # The same three tasks as the pi variant, so the two runs are comparable.
     assert built.tasks == tuple(load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["tasks"])
+    assert built.training_mode == "auto"
     assert [entry["id"] for entry in built.seed] == [
         "read_file",
         "write_file",
@@ -435,7 +464,9 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
 
 
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
-def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(monkeypatch, model_id) -> None:
+def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe(
+    monkeypatch, tmp_path, model_id
+) -> None:
     """The README deployment: ``reef.recipe: deployment`` is read back from the
     directory the service's own env names, and the harness package is on the
     PYTHONPATH the same env sets; a stale directory name here fails at boot, so
@@ -473,6 +504,13 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
+    # The person asks while it keeps learning from failures, so the tutorial proposer must take requests.
+    assert built.training_mode == "hybrid"
+    records = RecordStore()
+    trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
+    assert trainer.training_mode == "hybrid"
+    trainer.close()
+    records.close()
 
 
 def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evolution, tmp_path, monkeypatch) -> None:
