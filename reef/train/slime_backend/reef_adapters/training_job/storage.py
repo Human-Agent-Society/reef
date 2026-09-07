@@ -366,12 +366,6 @@ class CheckpointStorage:
         # critic checkpoint (when configured) is a second full model plus
         # optimizer state of roughly the same footprint.
         if self._lora:
-            # LoRA freezes the base model: one checkpoint pair is the base
-            # weights in distcp form plus a marginal adapter and its optimizer
-            # state. Measured on a Qwen3-8B r32 run: 17G distcp pair for a 16G
-            # HF source (~1.06x); 1.2 leaves margin. Do not sum hf+megatron:
-            # slime rewrites an empty --load to the HF source, so both point
-            # at the same base model and the sum double-counts it.
             return int(1.2 * max(hf_bytes, megatron_bytes))
         training_state = 8 * hf_bytes * (2 if self.critic_root is not None else 1)
         return max(hf_bytes + megatron_bytes, training_state)
