@@ -15,6 +15,7 @@ from reef.train.types.results import (
     DurableWeightsPublication,
     LiveWeightPublication,
     NoArtifactPublication,
+    RecoveredTrainingStep,
     SavedArtifactPublication,
     TrainStepResult,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "PolicySample",
     "PreparedCommit",
     "ProcessorContext",
+    "RecoveredTrainingStep",
     "RuntimeLoadSpan",
     "SavedArtifactPublication",
     "TraceBatch",

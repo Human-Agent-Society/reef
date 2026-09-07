@@ -15,7 +15,7 @@ from reef.core.errors import ReefError
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.train.evaluation.contracts import SelectionDecision
-from reef.train.types import TrainingBatch
+from reef.train.types import RecoveredTrainingStep, TrainingBatch
 
 
 class RuntimeContractError(ReefError):
@@ -308,13 +308,18 @@ class TrainingRuntime(InferenceRuntime, ABC):
         committed_training_job_id: str | None = None,
         committed_training_without_job_id: bool = False,
         scenario: str | None = None,
-    ) -> None:
+    ) -> RecoveredTrainingStep | None:
         """Reconcile a backend training job against Reef's durable commit.
+
+        Returns the step to commit when the backend holds a job that published
+        its weights before Reef committed it (a restart fell between the two);
+        ``None`` when nothing is left for the caller to do.
 
         ``scenario`` is passed only by a backend bound to a runtime that
         trains several scenarios at once (see
         :attr:`concurrent_training_scenarios`).
         """
+        return None
 
     @abstractmethod
     def prepare_training_step(

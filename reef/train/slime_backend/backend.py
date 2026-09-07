@@ -9,7 +9,7 @@ from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.runtime.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import RecoveredTrainingStep, TrainingBatch, TrainStepResult
 
 
 class SlimeTrainingBackend(TrainingBackend):
@@ -58,16 +58,15 @@ class SlimeTrainingBackend(TrainingBackend):
         *,
         committed_training_job_id: str | None = None,
         committed_training_without_job_id: bool = False,
-    ) -> None:
+    ) -> RecoveredTrainingStep | None:
         scenario = self._runtime_scenario()
         if scenario is None:
-            self._runtime.reconcile_training_job(
+            return self._runtime.reconcile_training_job(
                 scenario_step,
                 committed_training_job_id=committed_training_job_id,
                 committed_training_without_job_id=committed_training_without_job_id,
             )
-            return
-        self._runtime.reconcile_training_job(
+        return self._runtime.reconcile_training_job(
             scenario_step,
             committed_training_job_id=committed_training_job_id,
             committed_training_without_job_id=committed_training_without_job_id,

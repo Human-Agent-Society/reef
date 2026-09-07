@@ -110,3 +110,25 @@ class TrainStepResult:
                 return DurableWeightsPublication(self.checkpoint_path, self.runtime_load_id)
             return LiveWeightPublication(self.runtime_load_id)
         return NoArtifactPublication()
+
+
+@dataclass(frozen=True)
+class RecoveredTrainingStep:
+    """A backend step that published its weights before Reef could commit it.
+
+    A restart in that window leaves the backend serving, and paused on, a
+    job Reef has no commit for. Rebuilding the same batch is not possible in
+    general (a processor may judge with sampling, and new records may have
+    arrived since), so the runtime hands the step back with the commit
+    context it kept for Reef, and the dispatcher commits it like any settled
+    step. ``consumed_agent_record_ids`` are the records the job trained on;
+    the commit records them consumed and compacts them so they never train
+    twice.
+    """
+
+    result: TrainStepResult
+    consumed_agent_record_ids: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if self.result.training_job_id is None or self.result.runtime_load_id is None:
+            raise ValueError("a recovered training step must carry its training job id and runtime load id")

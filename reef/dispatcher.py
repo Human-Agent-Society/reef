@@ -598,11 +598,26 @@ class Dispatcher:
         backend = current.trainer.training_backend
         if backend is None or not backend.dispatched:
             raise RuntimeContractError(f"training scenario {current.name!r} has no dispatched training backend")
-        backend.recover_pending_step(
+        recovered = backend.recover_pending_step(
             current.scenario_step,
             committed_training_job_id=current.committed_training_job_id,
             committed_training_without_job_id=current.committed_training_without_job_id,
         )
+        if recovered is not None:
+            # The backend published this job's weights and the restart came
+            # before Reef's commit. Commit it first: the serving engines and
+            # the checkpoint on disk already are that step.
+            training_job_id = recovered.result.training_job_id
+            logger.warning(
+                "scenario %r: committing training job %s, published before the restart",
+                current.name,
+                training_job_id,
+            )
+            current.reserve_recovered_step(recovered)
+            self._commit_result(current.name, recovered.result)
+            if training_job_id is not None:
+                backend.acknowledge_commit(current.scenario_step, training_job_id)
+            return True
         if (batch := current.reserve_training_batch()) is None:
             return False
         execution = current.execute_reserved_training_step()

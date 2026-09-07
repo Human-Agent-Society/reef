@@ -764,6 +764,31 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
 
 
 @pytest.mark.unit
+def test_bridge_keeps_reef_commit_context_with_the_job_marker(tmp_path) -> None:
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    group = _DurableGroup(template)
+    manager = _FakeRolloutManager(["packed"])
+    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    context = {"agent_record_ids": ["a", "b", "c"], "next_algorithm_state": {"steps": 1}, "metrics": {"samples": 3}}
+    payload = _payload(loss="sft")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", reef_commit_context=context)
+
+    result = _execute_and_update_weights(actor, payload)
+
+    # Published and waiting for Reef's commit: the context rides the marker
+    # and health hands it back, so a restart here can still commit the job.
+    marker = read_marker(tmp_path / ".reef-latest-job.json")
+    assert result.outcome == "complete"
+    assert marker["status"] == "READY_TO_COMMIT"
+    assert marker["commit_context"] == context
+    assert actor.health()["training_job"]["commit_context"] == context
+
+    actor.acknowledge_training_commit(result.training_job_id)
+
+    assert read_marker(tmp_path / ".reef-latest-job.json")["commit_context"] == context
+
+
+@pytest.mark.unit
 def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)

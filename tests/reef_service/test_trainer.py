@@ -24,7 +24,7 @@ from reef.train.evaluation import (
 from reef.train.processors import DataProcessor
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import PolicyBatch, PolicySample, TrainStepResult
+from reef.train.types import PolicyBatch, PolicySample, RecoveredTrainingStep, TrainStepResult
 
 from ._grouped_pg import GROUPED_PG_PREPARER as _GROUPED_PG_PREPARER
 from ._grouped_pg import GroupedPolicyProcessor
@@ -463,6 +463,43 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
     assert trainer.state == {"steps": 1}
+
+
+@pytest.mark.unit
+def test_trainer_commits_a_recovered_step_and_compacts_the_rows_it_trained() -> None:
+    records = RecordStore()
+    records.append(inference("i1"))
+    records.append(report("r1", "i1", 1.0))
+    trainer = Trainer.build(
+        "math",
+        records,
+        processor_factory=lambda context: ThresholdProcessor(ProcessorContext(context.scenario, {"batch_size": 1})),
+        training_backend=_PreparingBackend(),
+    )
+    result = TrainStepResult(
+        {"steps": 7},
+        {"selected": True},
+        runtime_load_id="engine:1",
+        checkpoint_path="/checkpoint",
+        training_job_id="job-6",
+    )
+
+    trainer.reserve_recovered_step(RecoveredTrainingStep(result, frozenset({"i1"})))
+    with pytest.raises(RuntimeError, match="while a batch is reserved"):
+        trainer.reserve_recovered_step(RecoveredTrainingStep(result, frozenset()))
+    prepared = trainer.prepare_commit(result)
+
+    # The commit records what the job trained on and compacts it, whatever
+    # the re-ingested processor has made of those rows since.
+    assert prepared.training_job_id == "job-6"
+    assert prepared.consumed_ids == frozenset({"i1"})
+    assert "i1" in prepared.compacted_ids
+    assert prepared.algorithm_state == {"steps": 7}
+    trainer.commit(prepared)
+    trainer.apply_compaction(prepared.compacted_ids)
+    assert trainer.state == {"steps": 7}
+    assert trainer.pending_batch is None
+    assert records.get("math", "i1") is None
 
 
 @pytest.mark.unit

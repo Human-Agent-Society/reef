@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import pickle
 from collections.abc import Mapping
 from typing import Any
@@ -27,7 +28,7 @@ from reef.surface import RuntimeLoadMismatch, create_weight_surface
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
-from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
+from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample, RecoveredTrainingStep
 
 from ._grouped_pg import GROUPED_PG_PREPARER as _TEST_GROUPED_PREPARER
 
@@ -1107,6 +1108,92 @@ def test_recovery_acknowledges_a_training_job_after_the_scenario_commit() -> Non
 
     assert handle.calls == ["acknowledge"]
     assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+
+@pytest.mark.unit
+def test_recovery_commits_forward_a_job_published_before_reef_committed() -> None:
+    context = {
+        "agent_record_ids": ["i1", "i2"],
+        "next_algorithm_state": {"steps": 4},
+        "metrics": {"samples": 2},
+        "source_runtime_load_id": "engine:0",
+    }
+
+    class PublishedHandle(DeferredWeightUpdateTrainGroupHandle):
+        def health(self) -> Mapping[str, Any]:
+            health = dict(super().health())
+            health["training_job"] = {**health["training_job"], "commit_context": context}
+            return health
+
+        def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
+            # The idempotent replay of a published job: its recorded result.
+            self.calls.append("replay")
+            return TrainingJobResult(
+                outcome="complete",
+                runtime_load_id="engine:1",
+                checkpoint_path="/checkpoint",
+                metrics={"train/loss": 0.5},
+                training_job_id=training_job_id,
+            )
+
+    handle = PublishedHandle(status="READY_TO_COMMIT", rollout_id=3)
+    runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
+
+    # Reef's head is step 3, the job's commit never happened: the restart
+    # fell between the weight update and the commit.
+    recovered = runtime.reconcile_training_job(scenario_step=3, committed_training_job_id="job-2")
+
+    assert isinstance(recovered, RecoveredTrainingStep)
+    assert recovered.consumed_agent_record_ids == frozenset({"i1", "i2"})
+    result = recovered.result
+    assert (result.training_job_id, result.runtime_load_id, result.checkpoint_path) == (
+        handle.training_job_id,
+        "engine:1",
+        "/checkpoint",
+    )
+    assert result.state == {"steps": 4}
+    assert result.source_runtime_load_id == "engine:0"
+    assert result.metrics["train/loss"] == 0.5
+    assert result.metrics["samples"] == 2
+    assert result.metrics["selected"] is True
+    assert result.metrics["recovered_training_job"] is True
+    assert handle.calls == ["replay"]
+    # Requests stay held until Reef commits the step and acknowledges it.
+    assert runtime.inference_admission_status == {"open": False, "active": 0}
+
+    runtime.reconcile_training_job(scenario_step=4, committed_training_job_id=handle.training_job_id)
+
+    assert handle.calls == ["replay", "acknowledge"]
+    assert runtime.inference_admission_status == {"open": True, "active": 0}
+
+
+@pytest.mark.unit
+def test_recovery_leaves_a_published_job_without_commit_context_to_the_operator(caplog) -> None:
+    handle = DeferredWeightUpdateTrainGroupHandle(status="READY_TO_COMMIT", rollout_id=3)
+    runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
+
+    with caplog.at_level(logging.WARNING):
+        recovered = runtime.reconcile_training_job(scenario_step=3, committed_training_job_id="job-2")
+
+    assert recovered is None
+    assert handle.calls == []
+    assert runtime.inference_admission_status == {"open": False, "active": 0}
+    assert "kept no commit context" in caplog.text
+
+
+@pytest.mark.unit
+def test_prepared_training_step_carries_the_commit_context_for_recovery() -> None:
+    handle = DeferredWeightUpdateTrainGroupHandle()
+    runtime = RayRuntime(train_group_handle=handle, inference_url="http://router")
+
+    prepared = runtime.prepare_training_step(policy_batch(), "sft", {"steps": 3}, 3)
+
+    assert prepared.payload is not None
+    context = prepared.payload["reef_commit_context"]
+    assert context["agent_record_ids"] == [sample.source_agent_record_id for sample in policy_batch().samples]
+    assert context["next_algorithm_state"] == dict(prepared.next_algorithm_state)
+    assert context["metrics"] == dict(prepared.metrics)
+    assert context["source_runtime_load_id"] == runtime.current_runtime_load_id()
 
 
 @pytest.mark.unit

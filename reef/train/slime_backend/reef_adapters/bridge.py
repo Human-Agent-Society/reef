@@ -653,6 +653,8 @@ class TrainBridgeActorImpl:
             )
             if "scenario" in marker:
                 training_job["scenario"] = marker["scenario"]
+            if isinstance(marker.get("commit_context"), Mapping):
+                training_job["commit_context"] = dict(marker["commit_context"])
         ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed", "stopped"}
         return {
             "ok": ok,
@@ -986,6 +988,12 @@ class TrainBridgeActorImpl:
             }
             if scenario is not None:
                 marker.update(scenario=scenario, scenario_step=scenario_step)
+            commit_context = payload.get("reef_commit_context")
+            if isinstance(commit_context, Mapping):
+                # Reef's side of the commit, kept with the job: a restart
+                # between publication and Reef's commit hands it back through
+                # health() so Reef can still commit the job.
+                marker["commit_context"] = dict(commit_context)
             write_marker(self._marker_path(), marker)
             try:
                 if self._colocate:

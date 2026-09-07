@@ -20,7 +20,7 @@ from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_meta
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
 from reef.train.trainer import Trainer
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import RecoveredTrainingStep, TrainingBatch, TrainStepResult
 
 
 class Scenario:
@@ -132,6 +132,11 @@ class Scenario:
         """Drop the reserved batch and durably compact whatever it released."""
         with self._commit_protocol.lock:
             self._trainer.reject_pending(metrics)
+
+    def reserve_recovered_step(self, recovered: RecoveredTrainingStep) -> None:
+        """Reserve a step the backend settled before a restart, excluding rollback and commit."""
+        with self._commit_protocol.lock:
+            self._trainer.reserve_recovered_step(recovered)
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""

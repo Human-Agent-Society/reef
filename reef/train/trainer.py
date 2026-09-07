@@ -26,7 +26,14 @@ from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import DefaultCandidateEvaluationPlugin
 from reef.train.processors.base import DataProcessor
-from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
+from reef.train.types import (
+    PolicyBatch,
+    PreparedCommit,
+    ProcessorContext,
+    RecoveredTrainingStep,
+    TrainingBatch,
+    TrainStepResult,
+)
 
 
 @dataclass
@@ -42,6 +49,9 @@ class _PendingStep:
     prepared_commit: PreparedCommit | None = None
     # Set once the processor has the batch back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
+    # A step the backend settled before a restart: the processor never held
+    # its batch, so its rows are compacted with the commit instead of released.
+    recovered: bool = False
 
     @property
     def batch_id(self) -> str:
@@ -339,6 +349,27 @@ class Trainer:
             self._pending = _PendingStep(batch=batch, result=None)
             return batch
 
+    def reserve_recovered_step(self, recovered: RecoveredTrainingStep) -> None:
+        """Reserve a step the backend settled before a restart, so it commits like any other.
+
+        The batch it trained on is gone with the process, and the processor
+        may hold its rows again after re-ingestion; the reservation carries
+        the rows as consumed so the commit records and compacts them.
+        """
+        result = recovered.result
+        if result.training_job_id is None:
+            raise ValueError("a recovered training step must name its training job")
+        with self._lock:
+            if self._pending is not None:
+                raise RuntimeError("cannot reserve a recovered training step while a batch is reserved")
+            batch = PolicyBatch(f"{self.scenario}:recovered:{result.training_job_id}", ())
+            self._pending = _PendingStep(
+                batch=batch,
+                result=result,
+                consumed_ids=recovered.consumed_agent_record_ids,
+                recovered=True,
+            )
+
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
         """Run the dispatched backend for the currently reserved batch."""
         with self._lock:
@@ -388,6 +419,10 @@ class Trainer:
                 consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            if self._pending.recovered:
+                # Trained before the restart, re-ingested after it: gone with
+                # this commit, whatever the processor makes of them now.
+                compacted = frozenset(compacted) | consumed
             metrics = dict(result.metrics)
             request = self._pending.batch.request
             if request is not None:

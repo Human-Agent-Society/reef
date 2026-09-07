@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from reef.train.evaluation.contracts import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TrainingBatch, TrainStepResult
+from reef.train.types import RecoveredTrainingStep, TrainingBatch, TrainStepResult
 
 
 @dataclass(frozen=True)
@@ -125,9 +125,14 @@ class TrainingBackend(CandidateEvaluator, ABC):
         *,
         committed_training_job_id: str | None,
         committed_training_without_job_id: bool,
-    ) -> None:
-        """Finish or roll back backend work left pending across a restart."""
-        return
+    ) -> RecoveredTrainingStep | None:
+        """Finish or roll back backend work left pending across a restart.
+
+        Returns the step to commit when the backend published a job's weights
+        before Reef committed it; the dispatcher commits it before it reserves
+        another batch. ``None`` when nothing is pending.
+        """
+        return None
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str) -> None:
         """Acknowledge that Reef durably committed a backend training job."""
@@ -169,4 +174,4 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["PreparedStep", "StepExecution", "TrainingBackend"]
+__all__ = ["PreparedStep", "RecoveredTrainingStep", "StepExecution", "TrainingBackend"]

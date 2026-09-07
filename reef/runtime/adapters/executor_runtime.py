@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
@@ -13,7 +14,9 @@ from reef.runtime.inference import InferenceBackend, InferenceBackendFactory, bu
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 from reef.train.evaluation.contracts import SelectionDecision
-from reef.train.types import TrainingBatch, policy_samples
+from reef.train.types import RecoveredTrainingStep, TrainingBatch, TrainStepResult, policy_samples
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorTrainingRuntime(TrainingRuntime):
@@ -176,6 +179,19 @@ class ExecutorTrainingRuntime(TrainingRuntime):
                 raise TrainingRuntimeError("token staleness admission requires a verified serving runtime load ID")
             payload["max_staleness"] = self._max_staleness
             payload["producing_runtime_load_ids"] = list(versions)
+        # Reef's side of the commit, kept by the backend with the job's
+        # durable marker: a restart between the backend publishing the job's
+        # weights and Reef committing it cannot rebuild this batch (see
+        # reconcile_training_job), so the job comes back with what its
+        # commit needs. Record ids only: a processor's own bookkeeping (the
+        # reports paired with these samples, say) is released by retention
+        # once the samples are gone.
+        payload["reef_commit_context"] = {
+            "agent_record_ids": list(dict.fromkeys(sample.source_agent_record_id for sample in samples)),
+            "next_algorithm_state": dict(prepared.next_algorithm_state),
+            "metrics": dict(prepared.metrics),
+            "source_runtime_load_id": self.current_runtime_load_id(),
+        }
         # The scenario step crosses into the backend job as ``rollout_id`` —
         # the training backend's own (wire) name for the same integer.
         payload.update(rollout_id=scenario_step, expected_runtime_load_id=expected_runtime_load_id)
@@ -289,7 +305,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         committed_training_job_id: str | None = None,
         committed_training_without_job_id: bool = False,
         scenario: str | None = None,
-    ) -> None:
+    ) -> RecoveredTrainingStep | None:
         if committed_training_job_id is not None and (
             not isinstance(committed_training_job_id, str) or not committed_training_job_id
         ):
@@ -299,22 +315,22 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         training_job = self._training_job_status()
         status = training_job["status"]
         if self._sync_inference_admission(training_job):
-            return
+            return None
         job_scenario = training_job.get("scenario")
         if scenario is not None and isinstance(job_scenario, str) and job_scenario != scenario:
             # The pending job belongs to another scenario sharing this
             # runtime; admission is engine-global and already synced above,
             # but its commit handshake is that scenario's to finish.
-            return
+            return None
         if status == "REJECTING":
             training_job_id = training_job.get("training_job_id")
             if not isinstance(training_job_id, str) or not training_job_id:
                 raise TrainingRuntimeError("rejecting training job is missing its durable identity")
             self._train_group_handle.reject_training_candidate(training_job_id)
             self._inference_admission.open()
-            return
+            return None
         if status not in {"UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
-            return
+            return None
         rollout_id = training_job.get("rollout_id")
         training_job_id = training_job.get("training_job_id")
         if (
@@ -324,6 +340,10 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             or not training_job_id
         ):
             raise TrainingRuntimeError("training-job status is missing its durable identity")
+        if status == "READY_TO_COMMIT" and scenario_step == rollout_id:
+            # Published and paused, with no commit for it: the restart fell
+            # between the backend's weight update and Reef's commit.
+            return self._recover_uncommitted_job(training_job, training_job_id)
         if status == "UPDATING_WEIGHTS":
             recovered = self._validated_result(self._train_group_handle.update_serving_weights(training_job_id))
             if recovered.outcome != "complete" or recovered.training_job_id != training_job_id:
@@ -340,9 +360,69 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             # next-step training record is the strongest durable migration
             # proof available; rollback/non-training commits are excluded.
             self._finish_committed_training_job(training_job_id)
-            return
+            return None
         if scenario_step > rollout_id and committed_training_job_id == training_job_id:
             self._finish_committed_training_job(training_job_id)
+        return None
+
+    def _recover_uncommitted_job(
+        self, training_job: Mapping[str, Any], training_job_id: str
+    ) -> RecoveredTrainingStep | None:
+        """The step to commit for a job that published before Reef committed it.
+
+        The backend answers the same idempotent weight-update call the
+        settlement path makes with the job's recorded result; the commit
+        context Reef attached at preparation supplies the rest. Requests stay
+        held until the commit is acknowledged. Without a context (a marker an
+        older bridge wrote) the job is left to the operator, as before.
+        """
+        context = training_job.get("commit_context")
+        if not isinstance(context, Mapping):
+            logger.warning(
+                "training job %s published its weights before Reef committed it, and the backend kept no "
+                "commit context for it: Reef can neither commit nor replay it. Stop the stack and start the "
+                "training state over.",
+                training_job_id,
+            )
+            return None
+        state = context.get("next_algorithm_state")
+        record_ids = context.get("agent_record_ids")
+        source = context.get("source_runtime_load_id")
+        metrics = context.get("metrics")
+        if (
+            not isinstance(state, Mapping)
+            or not isinstance(record_ids, list)
+            or any(not isinstance(value, str) or not value for value in record_ids)
+            or (source is not None and (not isinstance(source, str) or not source))
+            or (metrics is not None and not isinstance(metrics, Mapping))
+        ):
+            raise TrainingRuntimeError(f"training job {training_job_id} carries a malformed commit context")
+        published = self._validated_result(self._train_group_handle.update_serving_weights(training_job_id))
+        if (
+            published.outcome != "complete"
+            or published.training_job_id != training_job_id
+            or published.runtime_load_id is None
+            or published.checkpoint_path is None
+        ):
+            raise TrainingRuntimeError("recovered training job returned an invalid completed result")
+        logger.warning(
+            "training job %s published its weights before Reef committed it; committing it now",
+            training_job_id,
+        )
+        result = TrainStepResult(
+            state=dict(state),
+            metrics={
+                **dict(published.metrics or {}),
+                **(dict(metrics) if metrics is not None else {}),
+                "selected": True,
+                "recovered_training_job": True,
+            },
+            runtime_load_id=published.runtime_load_id,
+            checkpoint_path=published.checkpoint_path,
+            training_job_id=training_job_id,
+            source_runtime_load_id=source,
+        )
+        return RecoveredTrainingStep(result, frozenset(record_ids))
 
     def _finish_committed_training_job(self, training_job_id: str) -> None:
         self._train_group_handle.acknowledge_training_commit(training_job_id)
