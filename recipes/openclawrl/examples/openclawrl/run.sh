@@ -41,7 +41,7 @@ echo "==> [1/2] the reef stack at $REEF_URL (a cold boot takes ~6 minutes on B20
 # compose reads these from the environment; the subshell keeps the token out of
 # everything that runs after it.
 (
-    export REEF_IMAGE REEF_CONFIG MODEL_DIR RUN_DIR REEF_ROOT HOST_IP REEF_TOKEN
+    export REEF_IMAGE REEF_CONFIG MODEL_DIR RUN_DIR REEF_ROOT REEF_TOKEN
     docker compose up -d --wait
 ) || { echo "run.sh: the stack never became healthy; docker compose logs" >&2; exit 1; }
 
