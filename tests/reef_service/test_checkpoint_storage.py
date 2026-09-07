@@ -32,6 +32,7 @@ def _storage(
     cap: int = 1000,
     free: int = 1000,
     min_free: int = 0,
+    lora: bool = False,
 ) -> CheckpointStorage:
     root = tmp_path / "checkpoints"
     source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
@@ -46,6 +47,7 @@ def _storage(
         source_megatron=source_megatron,
         measure=_logical_bytes,
         disk_usage=lambda path: Usage(1000, 1000 - free, free),
+        lora=lora,
     )
 
 
@@ -83,6 +85,27 @@ class TestCheckpointStorage:
         storage = _storage(tmp_path)
         _write_bytes(storage._source_megatron_checkpoint, 10)
         assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    def test_lora_estimate_reserves_base_weights_plus_adapter_margin(self, tmp_path: Path) -> None:
+        # LoRA freezes the base model, so one checkpoint pair is the base
+        # weights in distcp form plus a marginal adapter and its optimizer
+        # state — not the 8x full-training footprint of FP32 master weights
+        # and two Adam moments. Without the flag a 480B-class LoRA run
+        # reserves 8x the HF source and blocks forever on any filesystem
+        # smaller than that, while the rollout side keeps serving.
+        full = _storage(tmp_path).validate_capacity()["reservation_bytes"]
+        lora = _storage(tmp_path, lora=True).validate_capacity()["reservation_bytes"]
+        assert lora == int(1.2 * 90)  # 1.2 x max(hf, megatron source)
+        assert lora > 90  # still covers the base weights themselves
+        assert full == 100  # unchanged full-training estimate
+
+    def test_lora_estimate_does_not_double_count_the_base_model(self, tmp_path: Path) -> None:
+        # Slime rewrites an empty --load to the HF source, so source_hf and
+        # source_megatron can point at the same base model; the LoRA estimate
+        # must take the max, not the sum.
+        storage = _storage(tmp_path, lora=True)
+        _write_bytes(storage._source_megatron_checkpoint, 10)
+        assert storage.validate_capacity()["reservation_bytes"] == int(1.2 * 10)
 
     def test_cold_start_estimates_from_the_hf_source_alone(self, tmp_path: Path) -> None:
         # The first boot of a fresh deployment has saved nothing yet, and

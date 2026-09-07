@@ -83,8 +83,10 @@ class CheckpointStorage:
         source_megatron: str | Path | None = None,
         measure: Callable[[Path], int] | None = None,
         disk_usage: Callable[[Path], Any] = shutil.disk_usage,
+        lora: bool = False,
     ) -> None:
         self.config = config
+        self._lora = bool(lora)
         template = Path(hf_template).expanduser()
         if "{rollout_id}" not in template.name:
             raise ValueError("HF checkpoint template must contain {rollout_id} in its basename")
@@ -363,6 +365,14 @@ class CheckpointStorage:
         # HF export + model, FP32 master weights, and two Adam moments; the
         # critic checkpoint (when configured) is a second full model plus
         # optimizer state of roughly the same footprint.
+        if self._lora:
+            # LoRA freezes the base model: one checkpoint pair is the base
+            # weights in distcp form plus a marginal adapter and its optimizer
+            # state. Measured on a Qwen3-8B r32 run: 17G distcp pair for a 16G
+            # HF source (~1.06x); 1.2 leaves margin. Do not sum hf+megatron:
+            # slime rewrites an empty --load to the HF source, so both point
+            # at the same base model and the sum double-counts it.
+            return int(1.2 * max(hf_bytes, megatron_bytes))
         training_state = 8 * hf_bytes * (2 if self.critic_root is not None else 1)
         return max(hf_bytes + megatron_bytes, training_state)
 
