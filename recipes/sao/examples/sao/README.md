@@ -122,6 +122,23 @@ pip install -e .
 hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
 ```
 
+`run.py` also needs `docker`: Harbor runs each task's verifier in its own
+container. The `docker run` line in Evolve your model does not provide that,
+so when the stack itself runs inside the reef image, extend it:
+
+```bash
+docker run --gpus all --network host --ipc host --shm-size 32g -it \
+  -v ~/models:/root/models \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$REPO":"$REPO" -w "$REPO" \
+  reef bash
+# inside: apt-get update && apt-get install -y docker.io
+```
+
+Mount the repo at its host path (`-v "$REPO":"$REPO"`, not `/workspace/Reef`):
+Harbor's sibling containers bind-mount trial directories by path, and those
+paths must mean the same thing to the host docker daemon.
+
 ## Run
 
 ```bash
@@ -135,6 +152,13 @@ rollout engine, serving `Qwen2.5-1.5B-Instruct`. On the first start Reef
 loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
 up; `work/reef.log` has the service log if the wait never ends.
+
+Reef starts and stops the shared Ray runtime automatically; no `ray start`
+or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
+`CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
+To use an existing cluster, set `RAY_ADDRESS`; that cluster's node configuration
+controls GPU visibility, and Reef leaves it running on exit. Slime allocates
+the model GPUs; the local driver does not reserve them a second time.
 
 `run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
 executes one episode: the agent runs its six rollouts, reporting each one as

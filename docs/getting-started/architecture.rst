@@ -58,6 +58,11 @@ The inference runtime is always required. The training runtime exists only for
 recipes that change weights; recipes that change text run their step in Reef's
 own process, with no GPU.
 
+Training runtimes call a backend-neutral group handle. Worker launch and RPC
+sit behind a configurable ``Executor``; the Slime backend uses the same
+interface for its model worker groups. See
+`Worker executors <../developer-guide/executors.rst>`__ for that boundary.
+
 Before publication, the trainer runs artifact evaluation using the plugin
 configured by the recipe: ``evaluate`` measures the candidate artifact, then
 ``decide`` selects or rejects it. A

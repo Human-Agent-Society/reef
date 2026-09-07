@@ -120,6 +120,7 @@ class Dispatcher:
     ``TrainingRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
+    The dispatcher owns its recipe's runtime and closes it after all scenarios.
     """
 
     def __init__(
@@ -777,6 +778,7 @@ class Dispatcher:
     # -- Lifecycle -------------------------------------------------------
 
     def close(self) -> None:
+        """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
         self._lifecycle.closed.set()
@@ -791,15 +793,26 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         for scenario in self._registry.close_all():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
-            scenario.close()
+            try:
+                scenario.close()
+            except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
+                errors.append(exc)
+        if self._recipe.runtime is not None:
+            try:
+                self._recipe.runtime.shutdown()
+            except BaseException as exc:
+                errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        if errors:
+            raise errors[0]
 
 
 def build_default_dispatcher(

@@ -47,6 +47,8 @@ def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     assert args.use_critic is True
     assert args.check_lora_weight_equal is True
     assert args.verify_lora_base_weights is True
+    assert args.reef_executor_backend == "auto"
+    assert args.reef_rollout_executor_backend == "auto"
 
 
 @pytest.mark.unit
