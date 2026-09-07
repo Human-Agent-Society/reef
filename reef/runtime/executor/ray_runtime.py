@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from typing import Any
 
@@ -11,6 +12,33 @@ def _require_ray() -> Any:
     import ray
 
     return ray
+
+
+def _validate_local_ray_temp_path() -> None:
+    """Fail before Ray constructs a local Unix socket whose path is too long."""
+    if sys.platform == "win32":
+        return
+
+    temp_root = os.environ.get("RAY_TMPDIR")
+    source = "RAY_TMPDIR"
+    if temp_root is None and sys.platform.startswith("linux"):
+        temp_root = os.environ.get("TMPDIR")
+        source = "TMPDIR"
+    if temp_root is None:
+        temp_root = "/tmp"
+        source = "Ray's default temp directory"
+
+    # Ray uses a fixed-width timestamp plus the current PID in each session
+    # name. The plasma-store socket is the longer of its two local sockets.
+    session_name = f"session_0000-00-00_00-00-00_000000_{os.getpid()}"
+    socket_path = os.path.join(temp_root, "ray", session_name, "sockets", "plasma_store")
+    max_bytes = 103 if sys.platform.startswith("darwin") else 107
+    path_bytes = len(os.fsencode(socket_path))
+    if path_bytes > max_bytes:
+        raise RuntimeError(
+            f"{source} is too long for Ray's local Unix socket "
+            f"({path_bytes} bytes; limit {max_bytes}). Set RAY_TMPDIR to a shorter directory, such as /tmp."
+        )
 
 
 class RayRuntimeLease:
@@ -47,6 +75,8 @@ class _RayRuntime:
                     # (including 'auto') must connect, never fall back locally.
                     target = os.environ.get("RAY_ADDRESS") or address or "local"
                     try:
+                        if target == "local":
+                            _validate_local_ray_temp_path()
                         ray.init(address=target)
                     except BaseException:
                         ray.shutdown()
