@@ -333,16 +333,19 @@ class HermesStreamAgent(BaseAgent):
         user]`` throughout). Chat mode resumes the position's session
         (``--resume latest``, scoped to ``--in``), prints only the final reply
         on stdout while ``display.show_reasoning`` is off, and reports the
-        session id and the resume notice on stderr. stderr is discarded in
-        the container: the exec transport folds it into stdout, where those
-        lines would reach the student as part of the reply.
+        session id and the resume notice on stderr. stderr goes to a file in
+        the container, because the exec transport folds it into stdout, where
+        those lines would reach the student as part of the reply; a failed
+        turn replays it so the error reaches the trial's record.
 
         ``--in`` is HERMES_HOME, where ``_prepare`` put the homework, so the
         judge's relative ``homework/N.txt`` resolves for the agent.
         """
         resume_flag = " --resume latest" if resume else ""
+        stderr = f"{HERMES_HOME}/.hermes/turn.stderr"
         command = (
             f"HOME={HERMES_HOME} timeout {TURN_TIMEOUT_S} "
-            f"hermes chat -Q -q {shlex.quote(message)} --in {HERMES_HOME}{resume_flag} 2>/dev/null"
+            f"hermes chat -Q -q {shlex.quote(message)} --in {HERMES_HOME}{resume_flag} 2>{stderr} "
+            f"|| {{ rc=$?; cat {stderr} >&2; exit $rc; }}"
         )
         return (await self._exec(environment, command)).strip()

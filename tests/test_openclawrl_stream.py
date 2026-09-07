@@ -317,12 +317,13 @@ class TestHarness:
         # path ignores ``--resume``, so the second turn would forget the first.
         # The working directory is the hermes home, where the homework lands;
         # stderr is dropped because the exec transport folds it into stdout.
+        stderr = "2>/reef_eval/state/hermes/.hermes/turn.stderr || { rc=$?; cat /reef_eval/state/hermes/.hermes/turn.stderr >&2; exit $rc; }"
         assert all(
-            "hermes chat -Q -q " in c and "--in /reef_eval/state/hermes" in c and c.endswith(" 2>/dev/null")
+            "hermes chat -Q -q " in c and "--in /reef_eval/state/hermes" in c and c.endswith(stderr)
             for c in hermes_calls
         )
         assert "--resume" not in hermes_calls[0]  # first turn starts fresh
-        assert "--resume latest 2>/dev/null" in hermes_calls[1]  # later turns continue the session
+        assert f"--resume latest {stderr}" in hermes_calls[1]  # later turns continue the session
         assert "hermes -z" not in " ".join(environment.commands)
         config_writes = [c for c in environment.commands if ".hermes/config.yaml" in c]
         assert config_writes and "enabled: false" in config_writes[0]  # compression off
