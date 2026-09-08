@@ -666,7 +666,16 @@ class Dispatcher:
 
     def _set_training_storage_status(self, value: Mapping[str, Any] | None) -> None:
         with self._training.lock:
+            was_blocked = self._training.storage_status is not None
             self._training.storage_status = value
+        if value is not None and not was_blocked:
+            logger.warning(
+                "training is blocked on checkpoint storage: %s; retrying every %.0f seconds until it clears",
+                "; ".join(str(reason) for reason in value.get("reasons", ())) or "no reason reported",
+                self.storage_retry_seconds,
+            )
+        elif value is None and was_blocked:
+            logger.info("checkpoint storage block cleared; training resumes")
 
     @property
     def storage_status(self) -> Mapping[str, Any] | None:

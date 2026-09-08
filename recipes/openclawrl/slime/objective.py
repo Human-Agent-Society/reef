@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 from argparse import Namespace
 from collections.abc import Callable
 from typing import Any
@@ -29,6 +30,8 @@ from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_re
 from slime.utils.ppo_utils import compute_approx_kl, compute_policy_loss
 
 from reef.train.slime_backend.algorithm import objective
+
+logger = logging.getLogger(__name__)
 
 _NEG_INF = float("-inf")
 # verl-style numerical guard on the log-ratio before exp(). Prevents
@@ -833,25 +836,53 @@ def openclawrl_loss(
 
 @objective("reef_actor_init_hook_path")
 def openclawrl_actor_init(actor: Any) -> None:
-    """Back up the freshly loaded actor weights as the frozen Megatron teacher.
+    """Back up the frozen base weights as the Megatron teacher.
 
     The topk-select objective requires the frozen-base Megatron teacher
-    (upstream forces OPENCLAW_COMBINE_OPD_TEACHER_SOURCE=megatron). Fresh init
-    just bridge-loaded exactly those weights, so the backup IS the frozen PRM.
-    A resumed Megatron checkpoint holds trained weights instead — backing
-    those up would silently swap the teacher for the student, so it is
-    refused outright. Fresh-vs-resumed is the loader's own dispatch (the
-    bridge path reports iteration 0, so the returned rollout id cannot tell).
+    (upstream forces OPENCLAW_COMBINE_OPD_TEACHER_SOURCE=megatron). A fresh
+    init just bridge-loaded exactly those weights, so the backup IS the
+    frozen PRM. A resumed Megatron checkpoint holds trained weights instead —
+    backing those up would silently swap the teacher for the student — so a
+    resume bridge-loads the base HF weights (``--hf-checkpoint``) into the
+    model, backs them up as the teacher, and puts the trained weights back
+    from the actor backup init took. Without this a stack could never be
+    restarted once it had trained. Fresh-vs-resumed is the loader's own
+    dispatch (the bridge path reports iteration 0, so the returned rollout
+    id cannot tell).
     """
     from slime.backends.megatron_utils.checkpoint import _is_megatron_checkpoint
 
-    if actor.args.load and _is_megatron_checkpoint(actor.args.load):
+    if not (actor.args.load and _is_megatron_checkpoint(actor.args.load)):
+        actor.weights_backuper.backup("openclaw_teacher")
+        return
+    base = getattr(actor.args, "hf_checkpoint", None)
+    if not base:
         raise RuntimeError(
-            "openclawrl resumed from a Megatron checkpoint, so the current weights are "
-            "not the frozen base and cannot serve as its teacher. Start from a fresh run "
-            "directory (a base-weight reload on resume is not implemented)."
+            "openclawrl resumed from a Megatron checkpoint, so the current weights are not the "
+            "frozen base; reloading the base as the teacher needs --hf-checkpoint"
         )
-    actor.weights_backuper.backup("openclaw_teacher")
+    # slime's tagged loader: load ``base`` into the model, back it up under
+    # the tag and leave it active. The actor backup init took still holds the
+    # trained weights, so switching back restores them.
+    actor.load_other_checkpoint("openclaw_teacher", base)
+    actor._switch_model("actor")
+    if _same_weights(actor.weights_backuper, "openclaw_teacher", "actor"):
+        logger.warning(
+            "openclawrl: the frozen-base teacher reloaded from %s equals the actor resumed from %s",
+            base,
+            actor.args.load,
+        )
+    else:
+        logger.info("openclawrl: resumed from %s; frozen-base teacher reloaded from %s", actor.args.load, base)
+
+
+def _same_weights(backuper: Any, left: str, right: str) -> bool:
+    """Whether two weight backups hold identical tensors (stops at the first difference)."""
+    left_weights = backuper.get(left)
+    right_weights = backuper.get(right)
+    if set(left_weights) != set(right_weights):
+        return False
+    return all(torch.equal(left_weights[name], right_weights[name]) for name in left_weights)
 
 
 @objective("reef_actor_pre_train_hook_path")

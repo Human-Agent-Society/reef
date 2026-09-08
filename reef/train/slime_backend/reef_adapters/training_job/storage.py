@@ -83,8 +83,10 @@ class CheckpointStorage:
         source_megatron: str | Path | None = None,
         measure: Callable[[Path], int] | None = None,
         disk_usage: Callable[[Path], Any] = shutil.disk_usage,
+        lora: bool = False,
     ) -> None:
         self.config = config
+        self._lora = bool(lora)
         template = Path(hf_template).expanduser()
         if "{rollout_id}" not in template.name:
             raise ValueError("HF checkpoint template must contain {rollout_id} in its basename")
@@ -363,6 +365,8 @@ class CheckpointStorage:
         # HF export + model, FP32 master weights, and two Adam moments; the
         # critic checkpoint (when configured) is a second full model plus
         # optimizer state of roughly the same footprint.
+        if self._lora:
+            return int(1.2 * max(hf_bytes, megatron_bytes))
         training_state = 8 * hf_bytes * (2 if self.critic_root is not None else 1)
         return max(hf_bytes + megatron_bytes, training_state)
 

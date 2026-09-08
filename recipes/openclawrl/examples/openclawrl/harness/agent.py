@@ -9,16 +9,25 @@ reef-eval invokes this once per stream position. It owns the whole session:
 * the **reef scenario id**, minted at position 0 and carried in
   ``$REEF_EVAL_STATE_DIR`` — one stream, one scenario, one weight chain; a
   fresh variant starts fresh;
+* **host ownership of the state mount**: every command in the container,
+  hermes included, runs as the user running reef-eval, and each position
+  first hands the hermes home back to that user. reef-eval resets the live
+  state directory between positions with ``rmtree``; files the container had
+  created as root would fail that on the next run after a kill (Harbor only
+  chowns the mount back when a trial ends normally);
 * **hermes itself**, run inside the task container (the environment image
   installs it) with its home on the state mount, so optional agent memory
-  rides reef-eval's one cross-position channel. The config is written on first
-  use; compression stays off to match the recorded experiment, while the
-  session tag means correlation does not require an extending transcript;
+  rides reef-eval's one cross-position channel. The config is written at the
+  start of every position; compression stays off to match the recorded
+  experiment, and the session tag keeps correlation independent of what
+  hermes resends;
 * the **conversation loop** with the judge sidecar: student message from
-  ``$JUDGE_URL/state`` → one ``hermes -z`` turn (``--resume latest`` after
-  the first) → the reply to ``/reply`` — until the student is done or
-  ``MAX_TURNS``. A failed hermes turn ends the session, not the trial: the
-  verifier scores whatever the judge saw.
+  ``$JUDGE_URL/state`` → one quiet ``hermes chat -q`` turn (``--resume
+  latest`` after the first, so the turn continues the position's session and
+  the model sees its own earlier replies; see ``_hermes_turn`` for why the
+  one-shot ``hermes -z`` cannot do this) → the reply to ``/reply`` — until
+  the student is done or ``MAX_TURNS``. A failed hermes turn ends the
+  session, not the trial: the verifier scores whatever the judge saw.
 
 Agent configuration (``--agent-arg``): ``reef_url`` (required; reef as
 reachable from inside a container, e.g. ``http://172.17.0.1:28900`` — and
@@ -99,6 +108,18 @@ platform_toolsets:
 
 compression:
   enabled: false
+
+# The turn command is quiet single-query chat mode (see _hermes_turn). Its
+# stdout is the final reply alone only while reasoning display is off;
+# otherwise the model's thinking is printed ahead of the reply and would be
+# posted to the student as part of the answer. The tirith command scanner is
+# off for the same reason: the image does not ship the binary, and chat mode
+# prints a warning about that ahead of the reply on every turn.
+display:
+  show_reasoning: false
+
+security:
+  tirith_enabled: false
 """
 
 
@@ -111,6 +132,10 @@ class HermesStreamAgent(BaseAgent):
         if not self._reef_url:
             raise ValueError("the hermes stream harness requires --agent-arg reef_url=http://<host>:<port>")
         self._hermes_memory = str(kwargs.get("hermes_memory", "")).strip().lower() in ("1", "true", "yes")
+        # The container user for every command the harness runs: the host
+        # user, so the state mount never holds root-owned files. None (the
+        # image's default user) where the host has no POSIX ids.
+        self._container_user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else None
         self._capture = CaptureStore()  # replaced per session by _start_shim
 
     @staticmethod
@@ -142,8 +167,15 @@ class HermesStreamAgent(BaseAgent):
 
     # ------------------------------------------------------------- plumbing
 
-    async def _exec(self, environment: BaseEnvironment, command: str, *, ok_codes: tuple[int, ...] = (0,)) -> str:
-        result = await environment.exec(command)
+    async def _exec(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        *,
+        ok_codes: tuple[int, ...] = (0,),
+        as_root: bool = False,
+    ) -> str:
+        result = await environment.exec(command, user=None if as_root else self._container_user)
         if result.return_code not in ok_codes:
             raise RuntimeError(
                 f"exec failed ({result.return_code}): {command[:120]} :: {(result.stderr or '')[-300:]}"
@@ -184,11 +216,11 @@ class HermesStreamAgent(BaseAgent):
         # (dummy) Authorization header, and the stream's scenario id is
         # authoritative — nothing the agent sends may replace either.
         #
-        # The session tag carries cross-turn feedback in this example. The
-        # first request of each resumed Hermes turn starts from ``[system,
-        # user]`` instead of extending the preceding turn's final request, so
-        # reef's header-free correlation can bind tool steps inside a turn but
-        # never the student reply that carries the whole reward signal.
+        # The session tag carries cross-turn feedback in this example: it
+        # names the conversation outright, so binding a turn to the student
+        # reply that follows it never depends on hermes resending an
+        # extending transcript (a resumed turn does today, but hermes owns
+        # that history and may compact or rewrite it).
         headers = {
             "x-reef-scenario": scenario,
             "x-reef-tag-session": session,
@@ -206,12 +238,23 @@ class HermesStreamAgent(BaseAgent):
         return server
 
     async def _prepare(self, environment: BaseEnvironment, problem: dict) -> None:
-        # The homework lands under HERMES_HOME, not /workspace: hermes pins its
-        # working directory to HOME (``--in`` does not survive), so that is
+        # The homework lands under HERMES_HOME, not /workspace: the turn runs
+        # hermes with ``--in HERMES_HOME``, so that is the working directory
         # where the judge's relative ``homework/N.txt`` resolves for the agent.
         # The directory is wiped first because HOME rides the state mount —
         # left alone, every past session's solved homework would stay readable
         # and become a third adaptation channel behind weights and memory.
+        # Root does the wipe and hands the whole home to the host user: a
+        # state directory from an earlier harness, or from a killed run, may
+        # still hold root-owned files the host user could neither delete nor
+        # write into.
+        if self._container_user is not None:
+            await self._exec(
+                environment,
+                f"rm -rf {HERMES_HOME}/homework && mkdir -p {HERMES_HOME} && "
+                f"chown -R {self._container_user} {HERMES_HOME}",
+                as_root=True,
+            )
         homework = f"Problem:\n{problem['question']}\n\nSolution:\n"
         await self._exec(
             environment,
@@ -226,11 +269,13 @@ class HermesStreamAgent(BaseAgent):
             model=MODEL,
             memory="true" if self._hermes_memory else "false",
         )
-        # Position 0 writes the config; later positions keep it (and memory).
+        # Every position writes the config: it is a constant, and a state
+        # directory carried over from an earlier harness must not keep a stale
+        # one. Memory and sessions live elsewhere under HERMES_HOME, untouched.
         await self._exec(
             environment,
-            f"[ -f {HERMES_HOME}/.hermes/config.yaml ] || (mkdir -p {HERMES_HOME}/.hermes && "
-            f"printf %s {shlex.quote(hermes_config)} > {HERMES_HOME}/.hermes/config.yaml)",
+            f"mkdir -p {HERMES_HOME}/.hermes && "
+            f"printf %s {shlex.quote(hermes_config)} > {HERMES_HOME}/.hermes/config.yaml",
         )
 
     async def _session_loop(self, environment: BaseEnvironment) -> tuple[int, str]:
@@ -305,9 +350,30 @@ class HermesStreamAgent(BaseAgent):
         return state
 
     async def _hermes_turn(self, environment: BaseEnvironment, message: str, *, resume: bool) -> str:
+        """Run one hermes turn; its stdout is the reply.
+
+        Quiet single-query chat mode (``hermes chat -Q -q``), not the one-shot
+        ``hermes -z``: one-shot bypasses hermes's session handling and
+        silently accepts ``--resume`` without acting on it, so every turn
+        after the first would be a fresh conversation in which the model
+        never sees the reply the student is reacting to (observed: each turn
+        opened its own session, and the recorded requests were ``[system,
+        user]`` throughout). Chat mode resumes the position's session
+        (``--resume latest``, scoped to ``--in``), prints only the final reply
+        on stdout while ``display.show_reasoning`` is off, and reports the
+        session id and the resume notice on stderr. stderr goes to a file in
+        the container, because the exec transport folds it into stdout, where
+        those lines would reach the student as part of the reply; a failed
+        turn replays it so the error reaches the trial's record.
+
+        ``--in`` is HERMES_HOME, where ``_prepare`` put the homework, so the
+        judge's relative ``homework/N.txt`` resolves for the agent.
+        """
         resume_flag = " --resume latest" if resume else ""
+        stderr = f"{HERMES_HOME}/.hermes/turn.stderr"
         command = (
-            f"cd /workspace && HOME={HERMES_HOME} timeout {TURN_TIMEOUT_S} "
-            f"hermes -z {shlex.quote(message)} --in /workspace{resume_flag}"
+            f"HOME={HERMES_HOME} timeout {TURN_TIMEOUT_S} "
+            f"hermes chat -Q -q {shlex.quote(message)} --in {HERMES_HOME}{resume_flag} 2>{stderr} "
+            f"|| {{ rc=$?; cat {stderr} >&2; exit $rc; }}"
         )
         return (await self._exec(environment, command)).strip()

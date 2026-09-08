@@ -57,8 +57,12 @@ pyproject.toml                   makes harness/ importable
 ## The ordinary agent
 
 The agent is a stock `hermes-agent` install inside each task container. It
-is driven through its command line, one `hermes -z` turn per student
-message, with its home directory on the stream's state mount. Hermes reads
+is driven through its command line, one quiet `hermes chat -q` turn per
+student message (`--resume latest` after the first, so the model keeps its
+own earlier replies in context), with its home directory on the stream's
+state mount. The one-shot `hermes -z` cannot be used for this: it accepts
+`--resume` but ignores it, so every turn would start a fresh conversation.
+Hermes reads
 its model endpoint from its own config and sends OpenAI-compatible chat
 requests; it knows nothing about Reef, scenarios, or training.
 
@@ -105,8 +109,9 @@ position. Around the unmodified agent it makes three changes:
 2. It mints a Reef scenario id at position 0 and writes it to
    `$REEF_EVAL_STATE_DIR`. One stream is one scenario, which is one chain of
    runtime load IDs in Reef.
-3. It writes the hermes config on first use with context compression turned
-   off.
+3. It writes the hermes config at the start of every position, with context
+   compression, reasoning display and the tirith scanner turned off (the
+   reply on stdout must be the answer alone).
 
 The runtime flow is:
 
@@ -196,6 +201,24 @@ stream name, or a fresh run directory, at a stack that has already trained is
 rejected with "training is already bound to scenario ...". Stop the stack
 with `docker compose down` in this directory before switching streams or
 starting a variant.
+
+A stopped stack restarts from `$RUN_DIR`: the actor resumes its Megatron
+checkpoint, the teacher is reloaded from the base HF weights, and the
+committed head is republished. Two cases need a hand:
+
+- A stop while Reef is committing a step (after the bridge has published its
+  weights) leaves the bridge waiting for that commit, and every later batch
+  is refused with "training marker is READY_TO_COMMIT; operator recovery
+  required". The batch cannot be replayed (the judges sample), so start the
+  training state over: stop the stack and move `checkpoints`,
+  `artifacts.git`, `artifact-work`, `artifact-cache`, `agent-record` and
+  `prm-records.jsonl` out of `$RUN_DIR`. The lab and stream state stay, and
+  a re-run continues at the next position.
+- The harness runs every container command, hermes included, as your user
+  and hands the hermes home to you at the start of each position, so a
+  killed run leaves nothing root-owned in `$RUN_DIR/lab/streams/<stream>/state`
+  that reef-eval could not reset. A state directory written by an earlier
+  harness may still need a one-time chown to your user.
 
 ### Reading a run
 
