@@ -516,6 +516,31 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 
 
 @pytest.mark.unit
+def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = _critic_prep_args(critic_lr=5e-6, lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 5e-6
+    assert args.lr == 1e-6  # the actor keeps the policy lr
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = _critic_prep_args(lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 1e-6
+
+
+@pytest.mark.unit
 def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path) -> None:
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 

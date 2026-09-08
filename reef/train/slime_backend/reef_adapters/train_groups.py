@@ -298,6 +298,12 @@ def prepare_critic_args(args: Any) -> Any:
         critic_args.disable_param_buffers_cpu_backup = False
 
     configure_critic_objective(critic_args)
+    # The value model may train faster than the policy (SAO uses 5e-6 against
+    # a 1e-6 policy lr); --critic-lr scopes that to the critic role without
+    # the --megatron-config-path role surgery.
+    critic_lr = getattr(critic_args, "critic_lr", None)
+    if critic_lr is not None:
+        critic_args.lr = float(critic_lr)
     # LoRA is an actor-only serving adapter. Restore a user's provider for the
     # critic instead of sending the critic through Reef's actor LoRA wrapper.
     critic_args.megatron_lora_rank = 0
