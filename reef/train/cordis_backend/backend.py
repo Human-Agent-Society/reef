@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import tarfile
 import tempfile
@@ -46,6 +47,7 @@ from reef.train.cordis_backend.manifest import FailureManifest, FailureObservati
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
+from reef.train.cordis_backend.requests import MAX_REQUIRES, merge_requires, parse_requires
 from reef.train.cordis_backend.strategies import (
     EpisodeScorer,
     Mutation,
@@ -975,10 +977,13 @@ class CordisBackend(TrainingBackend):
                 extra["rejected"] = tuple(rejected)
             if self._propose_accepts_sources:
                 extra["sources"] = tuple(_source_of(sample) for sample in batch.samples)
+            handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:
                     raise ValueError("an instruction step requires a proposer that accepts 'requests'")
-                extra["requests"] = ({"id": batch.request.id, **batch.request.to_dict(), "untrusted": True},)
+                # A fresh dict the method may extend: the requires items it adds join the commit's after the screens.
+                handed = {"id": batch.request.id, **batch.request.to_dict(), "untrusted": True}
+                extra["requests"] = (handed,)
             try:
                 proposal = self._propose(self._nodes(), batch.samples, models, **extra)
             finally:
@@ -986,6 +991,12 @@ class CordisBackend(TrainingBackend):
                 self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
             metrics["proposer_calls"] = len(record)
             metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
+            if batch.request is not None and handed is not None:
+                metrics["training_request"] = {
+                    "id": batch.request.id,
+                    **batch.request.to_dict(),
+                    "requires": _merged_requires(batch.request.requires, handed.get("requires")),
+                }
             mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
@@ -1298,6 +1309,54 @@ class CordisBackend(TrainingBackend):
 
     def _load_error(self, id_: str) -> str | None:
         return _load_error(self._loader, id_, self._descriptor)
+
+
+def _proposer_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
+    """The items a proposer added to its request mapping, each under the shape and text screens admission runs.
+
+    An item is the proposer's when its name is not among the person's
+    ``base`` items, wherever the proposer put it; one that is malformed, or
+    whose name or check is credential or directive shaped, is dropped alone
+    and named once in the log, the rest stand and the mutations stand."""
+    log = logging.getLogger(__name__)
+    if handed is None:
+        return []
+    if not isinstance(handed, Sequence) or isinstance(handed, (str, bytes)):
+        log.warning("propose: the requires it added are dropped: not a list")
+        return []
+    names = {str(item.get("name")) for item in base}
+    added: list[dict[str, Any]] = []
+    for item in handed:
+        # The person's items passed admission and the person's copy wins: an edit of one is not the proposer's.
+        if isinstance(item, Mapping) and str(item.get("name")) in names:
+            continue
+        try:
+            (parsed,) = parse_requires([item])
+        except ValueError as error:
+            log.warning("propose: a requires item it added is dropped: %s", error)
+            continue
+        texts = (parsed["name"], str(parsed.get("check") or ""))
+        if any(secret_shaped(text) for text in texts):
+            log.warning("propose: a requires item it added carries a credential shaped literal; dropped")
+            continue
+        if any(directive_shaped(text) for text in texts):
+            log.warning("propose: a requires item it added carries an instruction override phrasing; dropped")
+            continue
+        added.append(parsed)
+    return added
+
+
+def _merged_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
+    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped."""
+    merged = merge_requires(base, _proposer_requires(base, handed))
+    if len(merged) > MAX_REQUIRES:
+        logging.getLogger(__name__).warning(
+            "propose: requires capped at %d items; dropped: %s",
+            MAX_REQUIRES,
+            ", ".join(str(item["name"]) for item in merged[MAX_REQUIRES:]),
+        )
+        merged = merged[:MAX_REQUIRES]
+    return merged
 
 
 def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:

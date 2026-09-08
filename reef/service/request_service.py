@@ -34,6 +34,7 @@ from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, R
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.cordis_backend.requests import ancestor_requiring_nothing, required_by
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
@@ -481,6 +482,8 @@ class RequestService:
             "content_id": artifact.ref.content_id,
             "files": dict(files),
             "gate": gate,
+            # The union over the chain, not this gate's list: a release whose request named nothing still installs an earlier extension.
+            "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
@@ -587,6 +590,10 @@ class RequestService:
             content_id=manifest["content_id"],
             scenario=scenario.name,
             binding_files=self._install_binding(scenario, manifest, descriptor, headers),
+            requires=manifest["requires"],
+            fallback_release_id=ancestor_requiring_nothing(
+                list(reversed(scenario.releases())), manifest["release_id"]
+            ),
         )
 
     def _install_binding(

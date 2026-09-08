@@ -477,7 +477,8 @@ accept ``requests``. The tutorial's proposer asks the served model for a
 skill, rules entry, command, or extension, using the bundled
 ``reef-pi-extension-api`` skill as its extension reference. The native trainer
 owns request persistence, scheduling, retry and acknowledgement, and records
-``training_request: {id, session, release_id, text}`` in commit metrics.
+``training_request: {id, session, release_id, text, requires}`` in commit
+metrics.
 
 Admission screens the proposed mutations and the gate evaluates them.
 Reef's entries (``reef-version-check``, ``reef-requests``,
@@ -490,6 +491,36 @@ tutorial's ``configs/deployment.yaml`` sets
 promote it as shown below. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
 set none of the three.
+
+A release can need something from you before it runs. A request may carry
+``requires``, a list of ``{name, kind, check}`` items: ``permission`` (an OS
+permission you grant), ``env`` (a variable you set; the extension reads it
+from the environment, and its value never goes to reef) or ``service`` (an
+account or endpoint you connect), each with an optional ``check``: the
+variable name for ``env``, a shell command that exits 0 once satisfied for
+the other two. The proposer adds items of its own when the extension it
+wrote needs them. A releases row carries what its own change named; the
+manifest carries what the release needs over its whole chain, so a later
+change that names nothing still needs what an earlier one added. The
+install script refuses a release with an item you have not checked off: it
+prints the setup list and the newest release in the chain that requires
+nothing, the one that installs on a machine with nothing set up
+(``?release_id=<id>``), and exits 1 before it installs or writes anything.
+``reef-pi setup`` is the one place a check runs: it lists the
+newest release's items with each check as written, asks ``run it? [y/N]``
+before running a command (``--yes`` answers for scripts), reads a variable
+from your environment without asking, records what passed in the
+``.reef-harness-release`` sidecar under ``setup`` with the check it stood
+for, and exits 0 once every item is met; ``reef-pi setup --mark <name>``
+checks an item off by hand, and ``reef-pi setup --release <id>`` reads a
+pending release's items, so you check them off before you promote it. An
+item whose check changed since its check off is asked again. On a fresh
+machine install the release the refusal names first (it requires nothing,
+so ``reef-pi`` exists), run ``reef-pi setup`` for the head's list, then
+install the head. Until every item is met the update
+notice prints the setup list instead of offering the install; a session
+that starts on a tree with an unmet item prints the list once and runs
+anyway. Nothing runs a check at install or at session start.
 
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
