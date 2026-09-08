@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -89,13 +89,22 @@ class _LifecycleState:
     preload_thread: Thread | None = None
 
 
-def training_request_refusal(text: str) -> str | None:
-    """Why admission refuses an instruction's text; the reason names the rule, never the text."""
-    # The text becomes proposer input and a catalog row, so it meets the screens a promoted task prompt meets.
+def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
+    """Why admission refuses an instruction; the reason names the rule, never the text or the item.
+
+    The text becomes proposer input and a catalog row, so it meets the
+    screens a promoted task prompt meets; a ``requires`` name or check is
+    shown to the person and recorded in the commit, so it meets them too."""
     if secret_shaped(text):
         return "the request text carries a credential shaped literal; a request never holds secrets"
     if directive_shaped(text):
         return "the request text carries an instruction override phrasing or a chat template control token"
+    for item in requires:
+        for value in (str(item.get("name", "")), str(item.get("check") or "")):
+            if secret_shaped(value):
+                return "a requires item carries a credential shaped literal; a request never holds secrets"
+            if directive_shaped(value):
+                return "a requires item carries an instruction override phrasing or a chat template control token"
     return None
 
 
@@ -281,7 +290,7 @@ class Dispatcher:
             request = TrainingRequest.from_dict(item.payload)
             if item.references:
                 raise ValueError("training instructions do not reference inference receipts")
-            refusal = training_request_refusal(request.text)
+            refusal = training_request_refusal(request.text, request.requires)
             if refusal is not None:
                 raise ValueError(refusal)
         # Schema enforcement: reject a malformed report before it is durably

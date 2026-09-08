@@ -16,7 +16,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
-from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.core.training_request import TrainingRequest
@@ -30,10 +30,12 @@ from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
+from reef.service.release_page import before_release_id, build_release_page
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.cordis_backend.requests import ancestor_requiring_nothing, required_by
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
@@ -481,6 +483,8 @@ class RequestService:
             "content_id": artifact.ref.content_id,
             "files": dict(files),
             "gate": gate,
+            # The union over the chain, not this gate's list: a release whose request named nothing still installs an earlier extension.
+            "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
@@ -549,6 +553,46 @@ class RequestService:
             "releases": list(reversed(scenario.releases())),
         }
 
+    def harness_release_page(self, headers: Mapping[str, str], step: int) -> str:
+        """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
+
+        The rows are the ones ``harness_releases`` answers, so the step a
+        client counts there is the step this page names. The release the
+        step ran on (the parent of a win, the head a rejected or skipped
+        step ran on) comes through the artifact snapshot when it is
+        restorable, so an extension update shows as a diff, else as its new
+        text. An unknown step raises ArtifactNotFound naming the range.
+        """
+        scenario = self._file_scenario(headers)
+        rows = list(reversed(scenario.releases()))
+        if not 0 <= step < len(rows):
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
+            )
+        before = before_release_id(rows[step])
+        before_entries: Sequence[Mapping[str, Any]] = ()
+        before_files: Mapping[str, str] | None = None
+        if before is not None:
+            info = scenario.surface.harness
+            logged = scenario.entries_for_version(before)
+            if logged is None and info is not None:
+                logged = info.seed_entries
+            before_entries = logged or ()
+            tree = scenario.surface.files
+            try:
+                artifact, _ = scenario.artifact_snapshot(before)
+                before_files = None if tree is None else tree.read_files(artifact)
+            except ArtifactError:
+                before_files = None
+        descriptor = getattr(scenario.trainer.training_backend, "descriptor", None)
+        return build_release_page(
+            step,
+            rows,
+            before_entries=before_entries,
+            before_files=before_files,
+            node_paths=None if descriptor is None else descriptor.node_paths,
+        )
+
     def harness_install_script(
         self,
         headers: Mapping[str, str],
@@ -587,6 +631,10 @@ class RequestService:
             content_id=manifest["content_id"],
             scenario=scenario.name,
             binding_files=self._install_binding(scenario, manifest, descriptor, headers),
+            requires=manifest["requires"],
+            fallback_release_id=ancestor_requiring_nothing(
+                list(reversed(scenario.releases())), manifest["release_id"]
+            ),
         )
 
     def _install_binding(

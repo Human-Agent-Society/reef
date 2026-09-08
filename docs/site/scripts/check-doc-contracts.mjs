@@ -63,8 +63,9 @@ if (!port) {
   throw new Error("Could not derive the Reef port from recipes/basic/local-sglang.yaml");
 }
 
-const routes = [...routeSource.matchAll(/app\.router\.add_(get|post)\("([^"]+)"/g)].map(
-  ([, method, path]) => ({ method: method.toUpperCase(), path }),
+// A raw string route with a matcher, {step:\d{1,9}}, is the docs row's {step}.
+const routes = [...routeSource.matchAll(/app\.router\.add_(get|post)\(r?"([^"]+)"/g)].map(
+  ([, method, path]) => ({ method: method.toUpperCase(), path: path.replace(/\{(\w+):(?:[^{}]|\{[^{}]*\})*\}/g, "{$1}") }),
 );
 if (!routes.length) throw new Error("Could not derive aiohttp routes from reef/service/routes");
 

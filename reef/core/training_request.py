@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,12 +13,17 @@ class TrainingRequest:
 
     ``id`` is filled from the enclosing AgentRecord when it becomes a batch.
     Session and release are provenance; they do not select an inference batch.
+    ``requires`` is what the change needs from the person's machine, at most
+    ``MAX_REQUIRES`` ``{name, kind, check}`` items of the shape
+    ``reef.train.cordis_backend.requests.parse_requires`` admits; default none.
     """
 
     text: str
     session: str
     release_id: str
     id: str = ""
+    # Out of the hash: the items are dicts, and the frozen contract is what the other fields carry.
+    requires: tuple[Mapping[str, Any], ...] = field(default=(), hash=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -27,6 +32,10 @@ class TrainingRequest:
             raise ValueError("text must not exceed 4000 characters")
         if not isinstance(self.session, str) or not isinstance(self.release_id, str):
             raise ValueError("session and release_id must be strings")
+        # Lazy: reef.core loads before the training package can.
+        from reef.train.cordis_backend.requests import parse_requires
+
+        object.__setattr__(self, "requires", tuple(parse_requires(self.requires)))
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> TrainingRequest:
@@ -36,7 +45,13 @@ class TrainingRequest:
             if not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             fields[key] = value
-        return cls(**fields)
+        requires = payload.get("requires")
+        return cls(**fields, requires=() if requires is None else requires)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"text": self.text, "session": self.session, "release_id": self.release_id}
+        return {
+            "text": self.text,
+            "session": self.session,
+            "release_id": self.release_id,
+            "requires": [dict(item) for item in self.requires],
+        }
