@@ -92,15 +92,11 @@ critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
 Results
 -------
 
-The example's README records two runs.
-
-The comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS) control from the
-same checkpoint on the same three problems with 48 scored rollouts per arm.
-The mean rewards order as the paper predicts, SAO at 0.479 above the
-untrained base at 0.458 above GRPO(+DIS) at 0.417.
-
-.. image:: ../../assets/sao/learning-curve.png
-   :alt: Cumulative mean reward over the 48 scored rollouts per arm
+The previous 48-rollout SAO/GRPO figure has been withdrawn pending a
+reproducible rerun. Only the rendered cumulative-mean PNG was retained; the
+per-rollout records and plotting inputs needed to audit it are unavailable.
+See the example README for the evidence requirements that a replacement run
+must satisfy.
 
 Related guides
 --------------

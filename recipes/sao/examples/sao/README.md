@@ -221,88 +221,26 @@ and lists its remaining deviations.
 
 ## Results
 
-### Qwen3-30B-A3B on IMOAnswerBench, 48 scored rollouts per arm
+### Legacy 48-rollout comparison withdrawn pending reproduction
 
-Two arms were trained on the same three problems, from the same checkpoint,
-at the same rollout budget, and only the objective differed: one arm ran the
-`sao` recipe, the other a GRPO control with the same DIS mask
-(`--advantage-estimator=grpo`, groups of four). The runs were made in August 2026 with an earlier version of
-this harness, on the tree before the `recipes/` layout; the drivers and the
-recipe have been ported since, and every number below was read from the run
-records and the version endpoints captured at the time. The per-rollout
-records are in the repository history
-(`examples/sao/bench/deployments/qwen3_30b_a3b_main/results/` at commit
-`375e0036`); the figure below is plotted from them.
+An earlier version of this README reported a 48-rollout SAO/GRPO comparison
+and plotted cumulative mean binary reward. That figure and its numeric claims
+have been removed because the repository retains only the rendered PNG: the
+per-rollout records and plotting input referenced by the text are not present
+in this repository, its reachable history, or the retained run storage, and
+the cited commit is not available from the upstream repository or the fork.
+Without those records the curve cannot be audited, regenerated, or equipped
+with uncertainty.
 
-This is a budget-limited comparison. Every scored rollout became a report
-against the training bridge (SAO commits once per rollout, GRPO once per
-filled group), but 48 rollouts per arm is far short of a training run, so the
-table answers whether the paper's ordering holds at this budget, not where
-the methods converge.
-
-| Setting | Value |
-| --- | --- |
-| Task | IMOAnswerBench `problem_idx` 4, 8, 12; one rollout per task in rotation (SAO), one group of four per task (GRPO) |
-| Model | `Qwen3-30B-A3B-Thinking-2507`, converted to Megatron `torch_dist` |
-| Actor, with the SAO critic | one 8-GPU node, TP4 / PP2 / EP4, sequence parallel, full recompute, CPU-offloaded precision-aware Adam |
-| Rollout | a second 8-GPU node, SGLang TP8, temperature 1.0, top-p 1.0 |
-| Generation window | 61,440 tokens in a 65,536-token sequence |
-| Objective | DIS 0.3 / 5.0, two critic steps per actor step, length-adaptive λ with α 1.5, policy lr `1e-6`, value lr `5e-6` |
-| Budget | 48 scored rollouts per arm; batch 1 (SAO), group 4 (GRPO) |
-| Reward | strict `\boxed{}` equivalence against the gold answer, no LLM judge |
-
-| Arm | Scored rollouts | Training commits | Mean reward | imo-4 | imo-8 | imo-12 | Wall-clock |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| base (untrained; 16 runs per problem, same grader and window) | 48 | 0 | `0.458` | 15/16 | 3/16 | 4/16 | n/a |
-| SAO | 48 | 47 | `0.479` | 15/16 | 4/16 | 4/16 | 22,623 s |
-| GRPO(+DIS) | 48 | 12 | `0.417` | 16/16 | 2/16 | 2/16 | 8,055 s |
-
-The ordering matches the paper at this budget: SAO (0.479) above the base
-rate (0.458) above GRPO (0.417). An earlier summary of these runs listed
-GRPO's imo-12 count as 3/16; the run records give 2/16, which is the count
-the mean of 0.417 (20 of 48) corresponds to. SAO's gain is on imo-8, with imo-12 at the
-base rate and imo-4 close to saturated. GRPO(+DIS) ends below the base rate:
-12 filled groups over 48 rollouts, and most of those groups uniform (all four
-correct or all four wrong), which leaves no gradient. The paper's per-step
-batch is 128 over a full training run.
-
-![Cumulative mean reward over the 48 scored rollouts per arm](results/2026-08-15-imo-answerbench-qwen3-30b-a3b/learning_curve.png)
-
-The curve is the cumulative mean reward against scored rollouts, per arm,
-with the base rate as the dashed line. The runs predate Reef's experiment tracking, so no per-step W&B
-history exists for them. A new run with `observability.wandb.enabled: true`
-records the step metrics that the TTT-Discover and OpenClaw-RL results keep
-(mean reward, response length, KL, step time).
-
-Wall-clock includes a per-step serving-weight export whose cost is the same
-at every step, so it penalizes SAO's four times higher step count; compare
-step times on the reward-versus-rollout records rather than on wall-clock.
-
-Deviations from the paper's protocol:
-
-- **No TIR SFT init.** The paper's math arm starts from an unpublished SFT on
-  GPT-OSS-120B tool-integrated-reasoning data; these runs start from the
-  public Thinking checkpoint. The paper's absolute number (74.0 accuracy
-  after full training) is not reachable from this init at any budget.
-- **Generation window 61,440 tokens** (paper: 128k). Some rollouts truncate at
-  the cap; the cap is the same for both arms.
-- **Budget 48 rollouts per arm, batch 1 (SAO) / group 4 (GRPO)**; the paper
-  trains with batch 128 over a full run.
-- **Trained on the benchmark's own problems**; the paper trains on a separate
-  math corpus and evaluates on the benchmark.
-
-For a base number comparable with the paper's Table 1, the untrained model
-was also run on the full 400-problem IMOAnswerBench, four runs per problem,
-temperature 1.0, top-p 1.0, in a 65,536-token window:
-
-| Grader | Reef base | Paper base (without Python) |
-| --- | ---: | ---: |
-| Strict answer equivalence | `44.69` | 55.3 |
-
-The paper does not specify its grading protocol for IMOAnswerBench. The
-strict rule is a lower bound, an LLM-judge upgrade path measured earlier is
-an upper bound at 63.44, and the paper's 55.3 falls between the two. Compare
-arms against the Reef base column, not against the paper's number.
+The former plot was also easy to misread. A cumulative mean over binary
+outcomes necessarily jumps between values such as 1, 1/2, and 1/3 at the
+start, then mechanically smooths toward the final sample mean. It is not a
+training-loss curve and, at 48 rollouts over three benchmark problems, it does
+not establish a learning trend. A replacement result must retain the raw
+outcome for every rollout, task identity, producing and serving model
+versions, training-step metrics, exact configuration, and plotting script; it
+should display raw outcomes and uncertainty rather than a cumulative mean
+alone.
 
 ### Attempts that produced no result
 
