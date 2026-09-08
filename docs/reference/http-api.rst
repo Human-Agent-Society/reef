@@ -53,6 +53,9 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
 +-------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/page``      | one HTML page per catalog step: why, what         |
+|                                                 | changed, verdict, setup, chain                    |
++-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/harness/proposals``                | an agent's proposed tree change, admitted or not  |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                   | a shell script that installs the tree             |
@@ -559,6 +562,48 @@ the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote`
 with ``{"release_id": "..."}`` serves it by the same republish path as
 rollback, so the promotion is itself a commit record with
 ``operation: promote`` and the promoted tree becomes a new release.
+
+Version page
+~~~~~~~~~~~~
+
+``GET /reef/harness/releases/{step}/page`` answers one self contained HTML
+page (``text/html``, no asset, its data inline) for one catalog row. ``step``
+is the row's position in ``GET /reef/harness/releases`` oldest first, the
+creation row being 0, which is the commit step: a rejected step publishes
+nothing and its row carries the head's release id, so the step is what names
+it. The page has five sections in this order: Why (the request the step read,
+else the claimed proposal's reason, else a failure in the batch), What changed
+(the step's mutations; an extension's file as text for a create, and for an
+update a line diff against the release the candidate ran on when that release
+is restorable, else the new text), Verdict (the verdict with ``selected``,
+``wins``, ``losses``, ``ties``, ``current_score``, ``candidate_score``,
+``episode_failures``, and the step record directory when
+``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
+name, kind and check, then the items the release carries from earlier steps
+in its chain, the same union the install script and ``reef-<adapter> setup``
+read; a rejected or skipped row lists only its own items, since its release
+id is the head's; nothing when both are empty) and Chain (the parent
+release, this release, and its children: the steps gated on it, won, lost or
+pending, and a promote or rollback made on it; a rejected or skipped step
+published nothing, so its Chain names the head it ran on and no children).
+The line under the title marks the served head as ``current``: the newest
+row that is neither pending nor a rejected or skipped step. A pending row
+that a later ``promote`` row names in ``rollback_target_release_id`` reads
+``promoted at step N``, where N is that later row's step. A step outside the
+catalog is HTTP 404 naming the range; a step that is not a number, or longer
+than nine digits, is HTTP 404 too. The row itself rides in a
+``<script type="application/json">`` block at the end of the page, every
+``<`` escaped.
+
+.. code:: bash
+
+   curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
+     "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
+
+On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
+``/reef-versions 3`` prints this URL with the promote command, the trial
+install (which replaces the installed tree) and the head's reinstall beside
+it when the release is pending; a promoted release gets none of them.
 
 Status
 ------
