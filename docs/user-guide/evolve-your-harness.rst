@@ -481,10 +481,15 @@ owns request persistence, scheduling, retry and acknowledgement, and records
 
 Admission screens the proposed mutations and the gate evaluates them.
 Reef's entries (``reef-version-check``, ``reef-requests``,
-``reef-pi-extension-api``) are reserved ids no proposal may change.
-An evolved extension runs in pi's process with your privileges; use
-``evolution.review_kinds: [code_extension]`` to hold such releases for
-``POST /reef/scenarios/{scenario}/promote`` before installation.
+``reef-pi-extension-api``) are reserved ids no proposal may change. An
+evolved extension runs in pi's process with your privileges, so the
+tutorial's ``configs/deployment.yaml`` sets
+``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
+``version_check: true``: a release that touches one waits for
+``POST /reef/scenarios/{scenario}/promote`` before any session installs it;
+promote it as shown below. ``configs/serve.yaml`` and
+``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
+set none of the three.
 
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,
@@ -503,6 +508,36 @@ with the same five settings the script bakes into ``reef-pi``:
 The wrapper points the loop at its capture proxy through a temp copy of
 the tree, keeps the loop's session log under ``native/sessions`` beside
 the installed tree, and ``report`` works as for any adapter.
+
+Promote a pending release
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A win that touches a kind in ``evolution.review_kinds`` (``code_extension``
+in the tutorial's ``deployment.yaml``) or a ``native_loop`` sits in the
+catalog with ``pending: true`` and is served to no session until you promote
+it. The notice never offers it either: it offers the newest release that is
+not pending, so a pending release shows only under a promote or a trial
+install by id. Find its id in ``GET /reef/harness/releases`` (the newest row
+marked ``pending``), read the change (``?release_id=<id>`` on the install
+route installs that tree for a trial session), and name it to ``POST
+/reef/scenarios/{scenario}/promote``. The answer is the new head with a fresh
+release id, because a promote republishes the tree as a commit of its own;
+the next ``reef-pi`` session offers the update through the notice. Both
+calls name the scenario your install used: the ``x-reef-scenario`` header
+you gave the install command or, without one, the generated name the script
+baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
+``grep REEF_HARNESS_SCENARIO ./reef-harness/reef-pi`` prints it. The
+deployment listens on port 8901.
+
+.. code:: bash
+
+   curl -sS -H "Authorization: Bearer reef-local" \
+     -H "x-reef-scenario: <scenario>" \
+     http://127.0.0.1:8901/reef/harness/releases    # the row with "pending": true
+   curl -sS -X POST -H "Authorization: Bearer reef-local" \
+     -H "Content-Type: application/json" \
+     -d '{"release_id": "<the pending release id>"}' \
+     http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
 
 Serve the harness as a resident process
 ---------------------------------------

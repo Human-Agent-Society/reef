@@ -172,3 +172,99 @@ console.log(JSON.stringify(events));
         assert execution["args"][-4:-1] == ["code-repair", "http://reef:8900", ""]
         assert execution["args"][-1].endswith("pi-agent/..") or "/" in execution["args"][-1]
         assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."
+
+
+PINNED_V1 = {"release_id": "v1"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
+    """A release held for review is served to no session, so the head the notice
+    offers is the newest row that is not pending: a pending tail behind the
+    pinned head is silence, a newer row that is not pending is still offered,
+    and a trial install of the pending release gets no offer until its promote."""
+    module = tmp_path / "version_check.mjs"
+    module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
+    agent_dir = tmp_path / "pi-agent"
+    agent_dir.mkdir()
+    runner = tmp_path / "runner.mjs"
+    runner.write_text(
+        """
+import versionCheck from "./version_check.mjs";
+
+let sessionStart;
+const events = [];
+versionCheck({
+  on(name, handler) {
+    if (name === "session_start") sessionStart = handler;
+  },
+  exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
+});
+globalThis.fetch = async () => ({
+  ok: true,
+  json: async () => ({ releases: JSON.parse(process.env.TEST_RELEASES) }),
+});
+await sessionStart(
+  { type: "session_start", reason: "startup" },
+  {
+    hasUI: process.env.TEST_HAS_UI === "1",
+    ui: {
+      select: async (title, options) => {
+        events.push({ kind: "select", title, options });
+        return options[1];
+      },
+      notify: (message, type) => events.push({ kind: "notify", message, type }),
+    },
+  },
+);
+console.log(JSON.stringify(events));
+""".strip(),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PI_CODING_AGENT_DIR": str(agent_dir),
+        "REEF_SERVICE_URL": "http://reef:8900",
+        "REEF_SCENARIO": "code-repair",
+    }
+    env.pop("PI_OFFLINE", None)
+
+    def session(
+        releases: list[dict[str, object] | None], has_ui: bool, sidecar: object = PINNED_V1
+    ) -> tuple[list[dict[str, object]], str]:
+        (tmp_path / ".reef-harness-release").write_text(json.dumps(sidecar), encoding="utf-8")
+        completed = subprocess.run(
+            ["node", str(runner)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env={**env, "TEST_RELEASES": json.dumps(releases), "TEST_HAS_UI": "1" if has_ui else "0"},
+        )
+        return json.loads(completed.stdout), completed.stderr
+
+    pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
+    assert session(pending_tail, has_ui=True) == ([], "")
+    assert session(pending_tail, has_ui=False) == ([], "")
+    # A catalog whose every row is pending has no head to offer.
+    assert session([{"release_id": "v2", "pending": True}], has_ui=True) == ([], "")
+
+    promoted_then_pending = [{"release_id": "v1"}, {"release_id": "v2"}, {"release_id": "v3", "pending": True}]
+    events, stderr = session(promoted_then_pending, has_ui=True)
+    assert [event["kind"] for event in events] == ["select"] and stderr == ""
+    assert "Current: v1" in events[0]["title"] and "Latest:  v2" in events[0]["title"]
+    assert "v3" not in events[0]["title"]
+    events, stderr = session(promoted_then_pending, has_ui=False)
+    assert events == [] and "Latest:  v2" in stderr and "v3" not in stderr
+    # A trial install of the pending release by id (?release_id=v3) is the person's choice: no offer to move back.
+    trial = {"release_id": "v3"}
+    assert session(promoted_then_pending, has_ui=True, sidecar=trial) == ([], "")
+    assert session(promoted_then_pending, has_ui=False, sidecar=trial) == ([], "")
+    # Once a promote republishes the trial tree, the promoted head is offered to it.
+    promoted = [*promoted_then_pending, {"release_id": "v4", "rollback_target_release_id": "v3"}]
+    events, _ = session(promoted, has_ui=True, sidecar=trial)
+    assert [event["kind"] for event in events] == ["select"]
+    assert "Current: v3" in events[0]["title"] and "Latest:  v4" in events[0]["title"]
+    # A null row is skipped, never an error; a sidecar that is not a record is silence.
+    events, stderr = session([{"release_id": "v1"}, None, {"release_id": "v2"}], has_ui=True)
+    assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
+    assert session(promoted_then_pending, has_ui=True, sidecar=None) == ([], "")

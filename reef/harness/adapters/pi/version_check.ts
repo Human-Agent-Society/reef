@@ -21,13 +21,15 @@ export default function versionCheck(pi) {
     // The wrapper relocates the agent into a temp copy and exports the true
     // install root; a directly-run tree falls back to the sidecar beside it.
     const destDir = process.env.REEF_HARNESS_DEST || join(agentDir, "..");
-    let pinned;
+    let sidecar;
     try {
       // harness_pull and the install script write the sidecar at the tree root.
-      pinned = JSON.parse(readFileSync(join(destDir, ".reef-harness-release"), "utf8")).release_id;
+      sidecar = JSON.parse(readFileSync(join(destDir, ".reef-harness-release"), "utf8"));
     } catch {
       return; // no sidecar: this tree did not come through the channel
     }
+    if (!sidecar || typeof sidecar !== "object") return; // a sidecar that is not a record pins nothing
+    const pinned = sidecar.release_id;
     let response;
     const token = process.env.REEF_TOKEN;
     try {
@@ -42,8 +44,12 @@ export default function versionCheck(pi) {
     }
     if (!response.ok) return;
     const { releases } = await response.json();
-    const head = releases[releases.length - 1];
+    // A release held for review is served to no session, so it is never the head this offers.
+    const head = [...releases].reverse().find((row) => row && !row.pending);
     if (!head || head.release_id === pinned) return;
+    const pinnedRow = releases.find((row) => row && row.release_id === pinned);
+    // A trial install of a pending release is the person's choice: no offer until a promote republishes it.
+    if (pinnedRow && pinnedRow.pending && !releases.some((row) => row && row.rollback_target_release_id === pinned)) return;
 
     const instruction =
       `curl -fsS -H 'x-reef-scenario: ${scenario}' ` +

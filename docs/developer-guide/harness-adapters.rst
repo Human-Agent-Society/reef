@@ -547,7 +547,9 @@ wrapper subcommand on every adapter. The ids ``reef-version-check``,
 and a recovered state carry them, and admission refuses a mutation that
 creates, updates or removes one, the way native tool names are reserved. An
 evolved extension runs in pi's process with the person's privileges, and
-admission screens its text for credential shaped literals only, so a pi
-deployment should set ``evolution.review_kinds: [code_extension]`` (the
-tutorial's deployment files gain it with the next stage): review is the
-boundary, and a release that touches an extension then waits for a promote.
+admission screens its text for credential shaped literals only, so the
+tutorial's pi deployment
+(``tutorials/evolve-your-harness/configs/deployment.yaml``) sets
+``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
+``version_check: true``: review is the boundary, and a release that touches
+an extension waits for a promote.

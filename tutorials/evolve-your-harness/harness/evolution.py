@@ -99,9 +99,13 @@ def propose(nodes, samples, models, *, requests=()):
         return _answer_request(nodes, requests[0], samples, models)
     if not samples:
         return None
-    from reef.train.cordis_backend import untrusted_text  # lazy: keeps run.py reef-free
+    from reef.harness.tree.nodes import RESERVED_ENTRY_IDS  # lazy: keeps run.py reef-free
+    from reef.train.cordis_backend import untrusted_text
 
-    skills = [dict(config) for name, config in nodes if name == "skill"]
+    # Reef's own skill is the extension API reference: an update of it is refused, and it would fill the prompt.
+    skills = [
+        dict(config) for name, config in nodes if name == "skill" and config.get("name") not in RESERVED_ENTRY_IDS
+    ]
     # The requests are client text: fenced as data so nothing inside them can speak as this prompt.
     requests_text = untrusted_text(json.dumps([sample.payload for sample in samples], indent=2, default=str))
     prompt = (
@@ -120,8 +124,8 @@ def propose(nodes, samples, models, *, requests=()):
     reply = _ask(models, prompt, max_tokens=2048)
     if reply is None:
         return None
-    proposals = _parse_proposal(reply)
-    if proposals is None:
+    proposals = _without_reefs_own(_parse_proposal(reply) or ())
+    if not proposals:
         return None
     entry_id, kind, config = proposals[0]
     from reef.train.cordis_backend import Mutation  # lazy: keeps run.py reef-free
@@ -160,15 +164,25 @@ def _answer_request(nodes, request, samples, models):
         return None
     named = {(kind, config.get("name")) for kind, config in nodes if isinstance(config, dict)}
     mutations = []
-    for entry_id, kind, config in proposals:
-        if entry_id in RESERVED_ENTRY_IDS:
-            logging.getLogger(__name__).warning("propose: dropped a mutation on reef's own entry %r", entry_id)
-            continue
+    for entry_id, kind, config in _without_reefs_own(proposals):
         # A named kind's id is its name, so a name already in the tree is an update; a rules entry's id is
         # invisible here (nodes carry no ids), so a rules change is always a new entry.
         op = "update" if (kind, entry_id) in named else "create"
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
     return mutations or None
+
+
+def _without_reefs_own(proposals):
+    """The proposals that name none of reef's own entries; admission refuses those, so one would only cost the step."""
+    from reef.harness.tree.nodes import RESERVED_ENTRY_IDS  # lazy: keeps run.py reef-free
+
+    kept = []
+    for entry_id, kind, config in proposals:
+        if entry_id in RESERVED_ENTRY_IDS:
+            logging.getLogger(__name__).warning("propose: dropped a mutation on reef's own entry %r", entry_id)
+            continue
+        kept.append((entry_id, kind, config))
+    return kept
 
 
 def _ask(models, prompt, *, max_tokens, timeout_s=60.0):

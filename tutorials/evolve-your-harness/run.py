@@ -120,6 +120,9 @@ def main():
     print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
     print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
+        # Reef's own API reference skill ships in every tree with requests on, so it is never an evolved file.
+        if f"/skills/{evolution.API_SKILL_NAME}/" in path:
+            continue
         if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/", "/agents/")):
             print(f"--- {path} ---")
             print(text)
