@@ -51,6 +51,12 @@ The DIS ratio compares the current policy against the log-probabilities
 recorded when the rollout was generated. SAO therefore requires an inference
 backend that attaches engine-native tensors.
 
+The value model carries the paper's cold-start mitigations: it trains at its
+own, higher learning rate (``--critic-lr``) and the first
+``--num-critic-only-steps`` rollout steps fit the zero-initialized value head
+before any policy update. Warmup steps still commit one training release per
+rollout; the policy's weights first move after the warmup.
+
 Configuration
 -------------
 
