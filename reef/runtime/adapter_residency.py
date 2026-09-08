@@ -151,6 +151,12 @@ class AdapterResidencyManager:
     - a failed load never occupies a slot; a failed unload keeps occupying
       one as ``leaked`` until a later unload succeeds, so capacity
       degradation is visible rather than hidden.
+
+    Residency bounds what the engine can serve *now*; it says nothing about
+    which recorded evidence a training job may still use. Those are separate
+    by construction — a sample carries its own log probabilities and producing
+    runtime load ID — so evicting a revision never narrows the staleness
+    window, and widening the staleness window never demands more slots.
     """
 
     def __init__(self, capacity: int | None = None) -> None:
