@@ -98,15 +98,42 @@ class CallJournal:
     def record_ids_for_attempt(self, agent_id: str, commit_hash: str) -> list[str]:
         """The captured Reef record ids for an attempt, in call order, deduplicated.
 
+        ``commit_hash`` is the worktree commit the calls were made *from* (the
+        attempt's parent) — the gateway stamps each request with the worktree's
+        HEAD at call time, which is the state the agent was editing, not the
+        commit ``coral eval`` creates afterwards. Prefix comparison in either
+        direction, because CORAL's middleware truncates the hash to 12 chars
+        while attempt records carry the full 40.
+
         A retried provider call produces two journal lines with two distinct
         record ids — both belong to the attempt (both hit the model); dedup
         only collapses the same receipt seen twice.
         """
         seen: dict[str, None] = {}
-        for record in self.for_attempt(agent_id, commit_hash):
-            if record.agent_record_id and record.agent_record_id not in seen:
+        for record in self.records():
+            if (
+                record.agent_id == agent_id
+                and commit_matches(record.commit_hash, commit_hash)
+                and record.agent_record_id
+                and record.agent_record_id not in seen
+            ):
                 seen[record.agent_record_id] = None
         return list(seen)
+
+
+def commit_matches(recorded: str, wanted: str) -> bool:
+    """True when two commit identifiers name the same commit.
+
+    Either side may be truncated (the gateway journals 12 chars, attempt
+    records carry 40), so the shorter must prefix the longer. Guarded to at
+    least 7 chars so placeholder values like ``unknown`` never prefix-match.
+    """
+    if not recorded or not wanted:
+        return False
+    if len(recorded) < 7 or len(wanted) < 7:
+        return recorded == wanted
+    shorter, longer = sorted((recorded, wanted), key=len)
+    return longer.startswith(shorter)
 
 
 def deterministic_report_id(scenario: str, agent_id: str, commit_hash: str) -> str:
