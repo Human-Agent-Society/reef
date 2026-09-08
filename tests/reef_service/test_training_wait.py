@@ -267,10 +267,6 @@ def test_a_freshly_drained_ready_batch_does_not_warn(caplog) -> None:
 
 
 def test_a_storage_block_logs_its_reasons_once_per_stall(caplog) -> None:
-    # The other stall signature: the backend returns retry with a storage
-    # status, and the thread retries forever. Until now the reasons were
-    # visible only on the authenticated status endpoint; a run could sit
-    # for hours with idle GPUs and nothing in the logs saying why.
     dispatcher = _dispatcher()
     blocked = {"blocked": True, "reasons": ["checkpoint reservation would violate the filesystem free-space floor"]}
     with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
