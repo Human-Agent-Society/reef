@@ -1263,6 +1263,36 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
 
 
 @pytest.mark.unit
+def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(tmp_path) -> None:
+    """Behind a gateway the client reached ``https://api.example.test``, not this process: the
+    binding takes the forwarded host and scheme, so reef-pi calls back through the gateway."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/reef/harness/install",
+                params={"adapter": "pi"},
+                headers={
+                    "x-reef-scenario": "delivery",
+                    "x-forwarded-host": "api.example.test",
+                    "x-forwarded-proto": "https",
+                },
+            )
+            assert response.status == 200
+            script = await response.text()
+            assert '"baseUrl": "https://api.example.test/v1"' in script
+            assert f"{client.host}:{client.port}" not in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(TestServer(create_app(_dispatcher(tmp_path, MUTATIONS), inference_backend=_EchoBackend())))
