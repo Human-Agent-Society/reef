@@ -439,9 +439,11 @@ the install works before any step has run:
    reef-pi report --score 0 --feedback "missed the empty-token case"
 
 The script installs the pinned agent, writes the tree, writes the agent's
-model binding pointed at the Reef the script came from (the served tree
-itself carries no endpoint or credential; the binding takes its token from
-``REEF_TOKEN`` in your shell when the script runs), and puts a
+model binding pointed at the address the script came from, which behind a
+gateway is the gateway's (Reef reads ``x-forwarded-host`` and
+``x-forwarded-proto`` when a proxy sets them); the served tree itself carries
+no endpoint or credential, and the binding takes its token from
+``REEF_TOKEN`` in your shell when the script runs. It also puts a
 ``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH. The wrapper keeps
 the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API

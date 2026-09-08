@@ -406,8 +406,10 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary, writes the tree, and writes the adapter's model       |
-|                                | binding at the Reef the request reached, the token filled     |
-|                                | from ``REEF_TOKEN`` when the script runs                      |
+|                                | binding at the address the request reached (a gateway in      |
+|                                | front names it in ``x-forwarded-host`` and                    |
+|                                | ``x-forwarded-proto``), the token filled from ``REEF_TOKEN``  |
+|                                | when the script runs                                          |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |

@@ -653,7 +653,9 @@ class RequestService:
         composition as before.
         """
         normalized = {key.lower(): value.strip() for key, value in headers.items()}
-        host = normalized.get("host")
+        # A gateway in front of Reef names the address the client reached in the forwarded
+        # headers; the binding goes there, so the installed harness calls back through it.
+        host = normalized.get("x-forwarded-host") or normalized.get("host")
         gate = manifest.get("gate") or {}
         model = (gate.get("gated_against") or {}).get("model") if isinstance(gate, Mapping) else None
         info = scenario.surface.harness
