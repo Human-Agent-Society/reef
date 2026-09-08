@@ -99,7 +99,7 @@ when migrating to the new structure. Conflicting resource values are rejected.
 
 ## Keep a deployment running
 
-Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
+Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed. `REEF_PROPOSER_TIMEOUT_S` caps one proposer call in seconds (60 for a failure step and 120 for a request by default) and `REEF_PROPOSER_MAX_TOKENS` its reply (2048 and 4096); raise both for a local thinking model, which answers in minutes and spends the reply budget on its reasoning first.
 [deployment.yaml](configs/deployment.yaml) uses the same variable for serving and
 evaluation. From the repository root, after the source installation and with `pi`
 on PATH, replace the model ID and API key below with your provider's values:

@@ -477,7 +477,8 @@ accept ``requests``. The tutorial's proposer asks the served model for a
 skill, rules entry, command, or extension, using the bundled
 ``reef-pi-extension-api`` skill as its extension reference. The native trainer
 owns request persistence, scheduling, retry and acknowledgement, and records
-``training_request: {id, session, release_id, text}`` in commit metrics.
+``training_request: {id, session, release_id, text, requires}`` in commit
+metrics.
 
 Admission screens the proposed mutations and the gate evaluates them.
 Reef's entries (``reef-version-check``, ``reef-requests``,
@@ -489,7 +490,62 @@ tutorial's ``configs/deployment.yaml`` sets
 ``POST /reef/scenarios/{scenario}/promote`` before any session installs it;
 promote it as shown below. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
-set none of the three.
+set none of the three. ``tutorials/harness-requests/`` runs this path end to
+end on one machine, from the ask to the install and a session on the new
+tree, with a bug fix flow demo, a research loop demo and a measurement of
+which requests won the gate (``./run.sh bugfix``, ``./run.sh research``,
+``./run.sh measure``).
+
+A release can need something from you before it runs. A request may carry
+``requires``, a list of ``{name, kind, check}`` items: ``permission`` (an OS
+permission you grant), ``env`` (a variable you set; the extension reads it
+from the environment, and its value never goes to reef) or ``service`` (an
+account or endpoint you connect), each with an optional ``check``: the
+variable name for ``env``, a shell command that exits 0 once satisfied for
+the other two. The proposer adds items of its own when the extension it
+wrote needs them. A releases row carries what its own change named; the
+manifest carries what the release needs over its whole chain, so a later
+change that names nothing still needs what an earlier one added. The
+install script refuses a release with an item you have not checked off: it
+prints the setup list and the newest release in the chain that requires
+nothing, the one that installs on a machine with nothing set up
+(``?release_id=<id>``), and exits 1 before it installs or writes anything.
+``reef-pi setup`` is the one place a check runs: it lists the
+newest release's items with each check as written, asks ``run it? [y/N]``
+before running a command (``--yes`` answers for scripts), reads a variable
+from your environment without asking, records what passed in the
+``.reef-harness-release`` sidecar under ``setup`` with the check it stood
+for, and exits 0 once every item is met; ``reef-pi setup --mark <name>``
+checks an item off by hand, and ``reef-pi setup --release <id>`` reads a
+pending release's items, so you check them off before you promote it. An
+item whose check changed since its check off is asked again. On a fresh
+machine install the release the refusal names first (it requires nothing,
+so ``reef-pi`` exists), run ``reef-pi setup`` for the head's list, then
+install the head. Until every item is met the update
+notice prints the setup list instead of offering the install; a session
+that starts on a tree with an unmet item prints the list once and runs
+anyway. Nothing runs a check at install or at session start.
+
+See what a version is with ``/reef-versions`` in a ``reef-pi`` session: one
+line per catalog row, oldest first, with the step, the first eight characters
+of the release id, the verdict (``selected``, ``rejected``, ``skipped``,
+``pending``, ``promoted at step N`` once a later promote serves a pending
+release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
+``recovery``), ``current`` on the served head and the request text the step
+answered. ``/reef-versions <step>`` prints the URL of that step's page,
+``GET /reef/harness/releases/<step>/page``, one self contained HTML page with
+five sections: Why (the request, else the proposal's reason, else a failure
+in the batch), What changed (the mutations; an extension update as a line
+diff against the release it ran on), Verdict (the gate's verdict and numbers,
+and the step record directory when ``evolution.step_record_dir`` is set),
+Setup (what the release needs from you: the step's own items, then those
+carried from earlier steps) and Chain (the parent, this release, and its
+children: the steps gated on it and any promote or rollback made on it; for
+a rejected or skipped step, the head it ran on). For a pending release the
+command also prints the promote curl, a trial install with ``?release_id=``
+that replaces the tree at your install root, and the head's reinstall to
+return to it; ``/reef-versions <step> promote`` runs the promote from the
+TUI after you confirm it.
 
 The native adapter's binary is ``reef-native``, which ships with reef, so
 the install route serves no script for it. Pull the tree with the client,

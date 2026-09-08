@@ -17,8 +17,10 @@ grades the recorded traffic with ``grade_text`` from here, so the reef
 import stays lazy (inside ``propose``) and the client needs no reef install.
 """
 
+import hashlib
 import json
 import logging
+import os
 import re
 
 #: Expected final answers, keyed by the stable prefix each task starts with
@@ -47,6 +49,9 @@ API_SKILL_NAME = "reef-pi-extension-api"
 #: How much of each entry's body the request prompt shows: enough to recognize it, never the whole tree.
 _PREVIEW_CHARS = 240
 
+#: What a change may ask of the user's machine: an OS permission, a variable the extension reads, a service.
+REQUIRE_KINDS = ("permission", "env", "service")
+
 #: The prompt that answers a person's request. Braces doubled where the JSON shapes need them literally.
 REQUEST_PROMPT = (
     "You are changing your own coding agent harness because its user asked for a change. "
@@ -67,9 +72,18 @@ REQUEST_PROMPT = (
     "Never touch these reserved entries: {reserved}.\n\n"
     "{api}"
     "Respond with a JSON array of one or more objects and nothing else, each of the form:\n"
-    '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}}\n'
+    '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
-    "The id of a named kind must equal its config name."
+    "The id of a named kind must equal its config name. Give every entry you write an id of its own, "
+    "a lowercase name, a rules entry too: the listing above shows null only for entries that have no "
+    "name, which you cannot update.\n"
+    "When the change needs something only the user can set up on their machine, add one more "
+    'object to the array: {{"requires": [{{"name": "<name>", "kind": "<kind>", "check": "<check>"}}]}}. '
+    "kind is permission (an OS permission the user grants; check is a shell command that exits 0 "
+    "once granted), env (a variable the extension reads from process.env; name and check are the "
+    "variable name; never write its value anywhere) or service (an account or endpoint the user "
+    "connects; check is a shell command that exits 0 once connected). Omit the object when the "
+    "change needs nothing."
 )
 
 #: The prompt section carrying the failures a step in training_mode hybrid hands over beside the request.
@@ -121,7 +135,7 @@ def propose(nodes, samples, models, *, requests=()):
         "Reuse an existing skill's name to update it (prefer improving 'answer-style'); "
         "use a new lowercase name to add one."
     )
-    reply = _ask(models, prompt, max_tokens=2048)
+    reply = _ask(models, prompt, max_tokens=_max_tokens(2048), timeout_s=_timeout_s(60.0))
     if reply is None:
         return None
     proposals = _without_reefs_own(_parse_proposal(reply) or ())
@@ -137,7 +151,11 @@ def propose(nodes, samples, models, *, requests=()):
 
 
 def _answer_request(nodes, request, samples, models):
-    """The mutations the served model writes for one request: any of ``REQUEST_KINDS``, reserved ids dropped."""
+    """The mutations the served model writes for one request: any of ``REQUEST_KINDS``, reserved ids dropped.
+
+    A ``{"requires": [...]}`` object beside the entries is what the change
+    needs from the user's machine; its items are appended to the request
+    mapping's ``requires``, where the backend reads them back."""
     from reef.harness.tree.nodes import RESERVED_ENTRY_IDS  # lazy: keeps run.py reef-free
     from reef.train.cordis_backend import Mutation, untrusted_text
 
@@ -156,20 +174,36 @@ def _answer_request(nodes, request, samples, models):
         api="" if api is None else API_SECTION.format(text=api),
     )
     # An extension is longer than a skill; a request gets twice the failure path's wait.
-    reply = _ask(models, prompt, max_tokens=4096, timeout_s=120.0)
+    reply = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(120.0))
     if reply is None:
         return None
     proposals = _parse_proposal(reply, kinds=tuple(REQUEST_KINDS))
     if proposals is None:
         return None
     named = {(kind, config.get("name")) for kind, config in nodes if isinstance(config, dict)}
+    taken = {name for _, name in named if name}
     mutations = []
     for entry_id, kind, config in _without_reefs_own(proposals):
         # A named kind's id is its name, so a name already in the tree is an update; a rules entry's id is
         # invisible here (nodes carry no ids), so a rules change is always a new entry.
         op = "update" if (kind, entry_id) in named else "create"
+        if op == "create" and entry_id in taken:
+            # The id is another kind's name, which admission refuses: a rules entry takes one from its
+            # text instead, a named kind cannot take another's name.
+            if "name" in REQUEST_KINDS[kind]:
+                logging.getLogger(__name__).warning(
+                    "propose: dropped %s %r: the id names another kind", kind, entry_id
+                )
+                continue
+            entry_id = _rules_id(config["text"])
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
-    return mutations or None
+    if not mutations:
+        return None
+    added = _parse_requires(reply)
+    # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
+    if added and isinstance(request, dict):
+        request["requires"] = [*list(request.get("requires") or ()), *added]
+    return mutations
 
 
 def _without_reefs_own(proposals):
@@ -183,6 +217,31 @@ def _without_reefs_own(proposals):
             continue
         kept.append((entry_id, kind, config))
     return kept
+
+
+def _timeout_s(default):
+    """The budget of one proposer call: ``REEF_PROPOSER_TIMEOUT_S`` when set, else the caller's default."""
+    return _from_environment("REEF_PROPOSER_TIMEOUT_S", float, default)
+
+
+def _max_tokens(default):
+    """The reply budget of one proposer call: ``REEF_PROPOSER_MAX_TOKENS`` when set, else the caller's default.
+
+    A thinking model spends the budget on its reasoning first, and a reply cut
+    there is empty; a local model may need several times the default."""
+    return _from_environment("REEF_PROPOSER_MAX_TOKENS", int, default)
+
+
+def _from_environment(name, parse, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return parse(raw)
+    except ValueError:
+        # A budget that does not parse must not turn every step into an error; the default stands.
+        logging.getLogger(__name__).warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
 
 
 def _ask(models, prompt, *, max_tokens, timeout_s=60.0):
@@ -227,10 +286,34 @@ def grade_text(task: str, text: str | None) -> float:
 def _parse_proposal(reply: str, kinds=("skill",)):
     """The strict proposal objects dug out of the model's text, as (entry id, kind, config) triples in reply
     order; ``None`` when the reply carries no usable proposal of one of ``kinds``."""
-    parsed = _json_in(reply)
-    items = parsed if isinstance(parsed, list) else [parsed]
-    proposals = [triple for triple in (_parse_entry(item, kinds) for item in items) if triple is not None]
+    proposals = [triple for triple in (_parse_entry(item, kinds) for item in _items_in(reply)) if triple is not None]
     return proposals or None
+
+
+def _parse_requires(reply: str):
+    """The ``{name, kind, check?}`` items of every ``{"requires": [...]}`` object in the reply, malformed ones dropped."""
+    items = []
+    for value in _items_in(reply):
+        if not isinstance(value, dict) or not isinstance(value.get("requires"), list):
+            continue
+        for item in value["requires"]:
+            if not isinstance(item, dict) or item.get("kind") not in REQUIRE_KINDS:
+                continue
+            name, check = item.get("name"), item.get("check")
+            if not isinstance(name, str) or not _ENTRY_NAME.fullmatch(name):
+                continue
+            if check is not None and (not isinstance(check, str) or not check.strip()):
+                continue
+            items.append({"name": name, "kind": item["kind"], **({} if check is None else {"check": check})})
+    return items
+
+
+def _items_in(reply: str):
+    """The objects of the reply's JSON array, or the one object it holds; empty when nothing parses."""
+    parsed = _json_in(reply)
+    if parsed is None:
+        return []
+    return parsed if isinstance(parsed, list) else [parsed]
 
 
 def _json_in(reply: str):
@@ -253,21 +336,38 @@ def _decoded_at(decoder, reply, at):
         return None
 
 
+def _rules_id(text):
+    """The id of a rules entry that has none of its own: a stable name from its text."""
+    return f"rules-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
+
+
 def _parse_entry(item, kinds):
     """One proposal object as (entry id, kind, config), or ``None`` when its shape is not one of ``kinds``."""
     if not isinstance(item, dict):
         return None
-    entry_id, kind, config = item.get("id"), item.get("name"), item.get("config")
+    # The prompt calls the field "name" and the value a kind, so a model writes either key; with both
+    # present, "name" is the entry's own name of a flattened config.
+    entry_id, config = item.get("id"), item.get("config")
+    kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
     if kind not in kinds or kind not in REQUEST_KINDS:
         return None
-    if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id) or not isinstance(config, dict):
-        return None
     fields = REQUEST_KINDS[kind]
-    # The entry id names a named kind; a config that repeats the name must agree, one that omits it is fine.
-    if "name" in fields and config.get("name", entry_id) != entry_id:
+    if config is None:
+        # A model also writes the config fields beside the id instead of under "config".
+        config = {field: item[field] for field in fields if field in item}
+    if not isinstance(config, dict):
         return None
     body = config.get(fields[-1])
     if not isinstance(body, str) or not body.strip():
+        return None
+    if entry_id is None and "name" not in fields:
+        # The tree lists a rules entry with a null id, since it has no name of its own, and a model copies
+        # that; the entry still needs an id, so its text gives it one.
+        entry_id = _rules_id(body)
+    if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id):
+        return None
+    # The entry id names a named kind; a config that repeats the name must agree, one that omits it is fine.
+    if "name" in fields and config.get("name", entry_id) != entry_id:
         return None
     return entry_id, kind, {field: (entry_id if field == "name" else body) for field in fields}
 
