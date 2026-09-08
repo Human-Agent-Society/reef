@@ -70,7 +70,8 @@ class EpisodeSleeper:
                     sys.executable,
                     "-c",
                     "import os,time; from pathlib import Path; "
-                    "Path('child.pid').write_text(str(os.getpid())); time.sleep(120)",
+                    "Path('child.pid.tmp').write_text(str(os.getpid())); "
+                    "os.replace('child.pid.tmp', 'child.pid'); time.sleep(120)",
                 ],
                 root=root,
                 workspace=root,
@@ -221,11 +222,14 @@ def test_killed_worker_does_not_leave_running_harness(tmp_path):
         pending = executor.rpc(0, "run", args=(str(tmp_path),), non_block=True)
         marker = tmp_path / "child.pid"
         deadline = time.monotonic() + 10
-        while not marker.exists():
+        while True:
+            content = marker.read_text() if marker.exists() else ""
+            if content:
+                break
             if time.monotonic() > deadline:
                 pytest.fail("harness failed to start")
             time.sleep(0.01)
-        pid = int(marker.read_text())
+        pid = int(content)
         executor._ranks[0].process.kill()
         with pytest.raises(RuntimeError):
             pending.result(timeout=5)
