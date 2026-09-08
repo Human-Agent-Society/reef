@@ -1,0 +1,93 @@
+# Colocated Qwen3-8B LoRA stack for the CORAL test-time-training example.
+# Every value is literal except the two run.sh computes: CORAL_TTT_STATE_DIR
+# (the absolute root all durable state hangs off) and REEF_INFERENCE_HOST
+# (this machine's IP, which Slime binds the training engines' router to).
+
+run_dir: ${CORAL_TTT_STATE_DIR}/stack
+ready_timeout: 3600
+
+execution:
+  training: ray
+  rollout: ray
+
+reef:
+  host: 127.0.0.1
+  model_path: work/model
+  port: 8900
+  recipe: recipes.coral.recipe:CoralRecipe
+  token: reef-local
+  group_size: 2            # two scored siblings release a training group
+  checkpoint_every_n_versions: 1
+  ray_namespace: reef
+  ray_actor_name: reef-train-bridge
+  inference_timeout_s: 7200
+  train_timeout_s: 7200
+  inference_backend_factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  artifact_repository: ${CORAL_TTT_STATE_DIR}/artifacts.git
+  artifact_work_dir: ${CORAL_TTT_STATE_DIR}/artifact-work
+  artifact_cache_dir: ${CORAL_TTT_STATE_DIR}/artifact-cache
+  agent_record_dir: ${CORAL_TTT_STATE_DIR}/agent-record
+
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    directory: ${CORAL_TTT_STATE_DIR}/wandb
+
+training:
+  num_gpus: 2
+  steps: 4
+  max_new_tokens: 8192
+  cuda_visible_devices: "0,1"
+  checkpoint_dir: ${CORAL_TTT_STATE_DIR}/checkpoints
+  checkpoint_retention:
+    max_storage_fraction: 0.8
+    min_free_space_fraction: 0.1
+    policy: latest
+
+services:
+  - name: ray-head
+    command: >-
+      ray start --head --node-ip-address=127.0.0.1 --port=6379
+      --include-dashboard=false --num-cpus=32
+      --num-gpus=${training.num_gpus} --disable-usage-stats --block
+    ready: ray health-check --address=127.0.0.1:6379
+    cuda: ${training.cuda_visible_devices}
+
+  - name: slime-driver
+    command: >-
+      "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
+      --hf-checkpoint=${reef.model_path}
+      --load=${training.checkpoint_dir}/megatron
+      --ref-load=${reef.model_path}
+      --save=${training.checkpoint_dir}/megatron
+      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
+      --save-interval=${reef.checkpoint_every_n_versions}
+      --reef-checkpoint-max-storage-fraction=${training.checkpoint_retention.max_storage_fraction}
+      --reef-checkpoint-min-free-space-fraction=${training.checkpoint_retention.min_free_space_fraction}
+      --reef-checkpoint-policy=${training.checkpoint_retention.policy}
+      --num-rollout=${training.steps}
+      --rollout-batch-size=2
+      --n-samples-per-prompt=${reef.group_size}
+      --global-batch-size=4
+      --actor-num-gpus-per-node=${training.num_gpus}
+      --rollout-num-gpus=${training.num_gpus}
+      --rollout-num-gpus-per-engine=1
+      --num-gpus-per-node=${training.num_gpus}
+      --megatron-lora-rank=32
+      --megatron-lora-alpha=32
+      --megatron-lora-target-modules linear_qkv linear_proj
+      --optimizer=adam --lr=4e-5 --lr-decay-style=constant
+      --loss-type=custom_loss --use-rollout-logprobs
+      --kl-coef=0.1
+      --rollout-temperature=1
+      --rollout-max-response-len=4096
+      --seq-length=16384
+      --max-tokens-per-gpu=16384
+      --log-probs-chunk-size=512
+    ready_file: ${CORAL_TTT_STATE_DIR}/stack/bridge.ready
+    cuda: ${training.cuda_visible_devices}
+
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
