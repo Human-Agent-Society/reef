@@ -2,44 +2,49 @@
 """Run CORAL test-time training against a live Reef stack.
 
 This is the piece that imports CORAL. The adapter modules under
-``recipes/coral/`` stay import-free of it so they test standalone; this entry
-point wires the two systems for a real run:
+``recipes/coral/`` stay import-free of it so they test standalone; this
+entry point drives the real CORAL runtime against Reef:
 
-1. builds CORAL's ``GatewayManager`` (its embedded LiteLLM proxy) with a
-   model entry that routes to the Reef service ``run.sh`` started,
-2. splices the Reef correlation layer under CORAL's middleware
-   (``attach_reef_adapter``),
-3. runs a small demo loop — one or two agents making attempts from git
-   worktrees, graded by a deterministic local grader — reporting every
-   finalized attempt to Reef, which trains on sibling groups and serves the
-   updated weights to the next attempts,
-4. writes the run's result bundle to ``work/<run>/bundle.json``.
+1. loads the real CORAL task in ``task/`` (task.yaml, seed repo, packaged
+   grader) and builds CORAL's ``AgentManager`` from it — the same
+   orchestration ``coral start`` runs: agent worktrees, the embedded
+   LiteLLM gateway (whose only upstream is the Reef service ``run.sh``
+   started), the grader daemon, heartbeats, restarts,
+2. splices the Reef correlation layer under the manager's gateway
+   (``attach_reef_adapter_to_agent_manager``) before any agent spawns,
+3. starts an ``AttemptWatcher`` beside CORAL's monitor loop: every attempt
+   the grader daemon finalizes is reported to Reef with its exact captured
+   inference references — Reef groups siblings, trains, and serves the
+   updated weights to the agents' next calls,
+4. writes the run's result bundle to ``<work>/bundle.json`` when the run
+   auto-stops at its attempt budget.
 
-The demo agent is scripted (its "intelligence" is a fixed prompt); every
-wire interaction — gateway key swap, header stamping, receipt capture,
-grading, reporting, training, serving update — is real. Replace
-``demo_attempt`` with CORAL's real agent runtimes for a full deployment;
-the wiring does not change.
+The agents are CORAL's real runtimes (``opencode`` by default — any
+runtime CLI registered with CORAL works via ``--runtime``), prompted by
+CORAL's own generated task instructions and submitting through
+``coral eval``. Nothing here scripts their behavior.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import logging
+import os
+import threading
 import time
 import urllib.request
 from pathlib import Path
 
-from coral.gateway.server import GatewayManager  # CORAL: pinned commit, see README
+from coral.agent.manager import AgentManager  # CORAL: pinned commit, see README
+from coral.config import CoralConfig
 from recipes.coral.bundle import build_result_bundle
-from recipes.coral.gateway_launcher import attach_reef_adapter
-from recipes.coral.journal import CallJournal
-from recipes.coral.reporter import AttemptReport, report_attempt
+from recipes.coral.gateway_launcher import attach_reef_adapter_to_agent_manager
+from recipes.coral.watcher import AttemptWatcher
 
-REEF_URL = "http://127.0.0.1:8900"
-GATEWAY_PORT = 8091
+DEFAULT_REEF_URL = "http://127.0.0.1:8900"
 SCENARIO = "coral-demo"
+TASK_DIR = Path(__file__).resolve().parent / "task"
 
 
 def _probe(url: str) -> bool:
@@ -59,123 +64,93 @@ def wait_healthy(url: str, deadline_s: int = 600) -> None:
     raise RuntimeError(f"{url} not healthy within {deadline_s}s")
 
 
-def chat(api_key: str, prompt: str, max_tokens: int = 512) -> str:
-    body = json.dumps(
-        {
-            "model": "reef-policy",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.8,
-        }
-    ).encode()
-    request = urllib.request.Request(
-        f"http://127.0.0.1:{GATEWAY_PORT}/v1/chat/completions",
-        data=body,
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
-    )
-    with urllib.request.urlopen(request, timeout=600) as response:
-        return json.loads(response.read())["choices"][0]["message"]["content"]
+def load_config(args: argparse.Namespace, state: Path) -> CoralConfig:
+    """The task config with the run-scoped values resolved for this launch.
 
-
-def grade(text: str) -> float:
-    """Deterministic demo grader: reward proximity to a 12-line answer."""
-    lines = [line for line in text.splitlines() if line.strip()]
-    return max(0.0, 1.0 - abs(len(lines) - 12) / 12.0)
-
-
-def git(worktree: Path, *args: str, capture: bool = False) -> str | None:
-    result = subprocess.run(
-        ["git", "-c", "user.name=coral-demo", "-c", "user.email=demo@localhost", *args],
-        cwd=worktree,
-        check=True,
-        capture_output=capture,
-        text=True,
-    )
-    return result.stdout.strip() if capture else None
+    ``repo_path``/``results_dir`` become absolute (CORAL resolves them
+    against the CWD otherwise) and ``task_dir`` is set the way
+    ``coral start --config`` sets it, so the gateway config reference and
+    the grader install resolve against ``task/``.
+    """
+    config = CoralConfig.from_yaml(TASK_DIR / "task.yaml")
+    config.task_dir = TASK_DIR
+    config.workspace.repo_path = str(TASK_DIR / "seed")
+    config.workspace.results_dir = str(state / "coral-results")
+    config.run.session = "local"
+    config.run.verbose = True
+    config.run.stop.max_real_attempts = args.max_attempts
+    config.agents.count = args.agents
+    if args.runtime:
+        config.agents.runtime = args.runtime
+    if args.model:
+        config.agents.model = args.model
+    config.agents.gateway.enabled = True
+    if args.gateway_port:
+        config.agents.gateway.port = args.gateway_port
+    return config
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, default=Path("work") / "coral-demo")
     parser.add_argument("--agents", type=int, default=2)
-    parser.add_argument("--generations", type=int, default=2)
-    parser.add_argument("--siblings", type=int, default=2, help="attempts per agent per generation")
-    parser.add_argument("--reef-token", default="reef-local")
+    parser.add_argument("--max-attempts", type=int, default=8, help="run budget: real attempts before auto-stop")
+    parser.add_argument("--runtime", default="", help="CORAL runtime (default: task.yaml's, opencode)")
+    parser.add_argument("--model", default="", help="model name the runtime asks the gateway for")
+    parser.add_argument("--gateway-port", type=int, default=0, help="override the gateway port")
+    parser.add_argument("--reef-token", default=os.environ.get("REEF_TOKEN", "reef-local"))
+    parser.add_argument("--reef-url", default=os.environ.get("REEF_URL", DEFAULT_REEF_URL))
     args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     state = args.work.resolve()
     state.mkdir(parents=True, exist_ok=True)
+    os.environ["REEF_TOKEN"] = args.reef_token
+    os.environ["REEF_API_BASE"] = args.reef_url.rstrip("/") + "/v1"
 
-    wait_healthy(f"{REEF_URL}/healthz")
+    wait_healthy(f"{args.reef_url}/healthz")
 
-    config_path = state / "litellm_config.yaml"
-    config_path.write_text(
-        "model_list:\n"
-        "  - model_name: reef-policy\n"
-        "    litellm_params:\n"
-        "      model: openai/reef-policy\n"
-        f"      api_base: {REEF_URL}/v1\n"
-        f"      api_key: {args.reef_token}\n"
-        "litellm_settings:\n"
-        "  drop_params: true\n"
-        "  return_response_headers: true\n"
-    )
-    manager = GatewayManager(port=GATEWAY_PORT, config_path=str(config_path), log_dir=state / "gateway")
-    journal: CallJournal = attach_reef_adapter(
+    config = load_config(args, state)
+    run_id = f"coral-ttt-{time.strftime('%Y%m%d-%H%M%S')}"
+    manager = AgentManager(config, verbose=True, config_dir=TASK_DIR)
+    journal = attach_reef_adapter_to_agent_manager(
         manager,
         scenario=SCENARIO,
         journal_path=state / "reef" / "calls.jsonl",
-        extra_tags={"coral-run": "demo-1"},
+        extra_tags={"coral-run": run_id},
     )
-    manager.start()
 
-    agents = [f"agent-{n + 1}" for n in range(args.agents)]
-    worktrees: dict[str, Path] = {}
-    keys: dict[str, str] = {}
-    bases: dict[str, str] = {}
-    for agent in agents:
-        worktree = state / "worktrees" / agent
-        worktree.mkdir(parents=True, exist_ok=True)
-        git(worktree, "init", "-q")
-        git(worktree, "commit", "-q", "--allow-empty", "-m", "seed")
-        worktrees[agent] = worktree
-        keys[agent] = manager.register_agent(agent, worktree)
-        bases[agent] = git(worktree, "rev-parse", "HEAD", capture=True)[:12]
+    manager.start_all()
+    if manager.paths is None:
+        raise RuntimeError("CORAL manager did not initialize run paths")
+    print(f"CORAL run dir: {manager.paths.run_dir}  (reef run id: {run_id})")
 
-    reports: list[AttemptReport] = []
-    for generation in range(args.generations):
-        for sibling in range(args.siblings):
-            for agent in agents:
-                worktree = worktrees[agent]
-                git(worktree, "checkout", "-q", bases[agent])
-                cursor = journal.size()
-                answer = chat(keys[agent], "Write a Python function (about 12 lines) that merges two sorted lists.")
-                (worktree / "solution.py").write_text(answer)
-                git(worktree, "add", "-A")
-                git(worktree, "commit", "-q", "--allow-empty", "-m", f"{agent} gen{generation} sib{sibling}")
-                commit = git(worktree, "rev-parse", "HEAD", capture=True)[:12]
-                score = grade(answer)
-                report = AttemptReport(
-                    scenario=SCENARIO,
-                    agent_id=agent,
-                    commit_hash=commit,
-                    score=score,
-                    status="improved",
-                    parent_hash=bases[agent],
-                    run_id="demo-1",
-                    references=tuple(journal.record_ids_since(cursor, agent, bases[agent])),
-                )
-                ack = report_attempt(REEF_URL, report, token=args.reef_token)
-                reports.append(report)
-                print(
-                    f"{agent} gen{generation} sib{sibling}: score={score:.2f} refs={len(report.references)} ack={ack.get('agent_record_id')}"
-                )
-        # next generation branches from each agent's best sibling would go
-        # here in a real run; the demo keeps the base fixed per agent and
-        # relies on the trained weights (served after each sibling group
-        # completes) to move the answers.
-        time.sleep(30)
+    watcher = AttemptWatcher(
+        coral_dir=manager.paths.coral_dir,
+        journal=journal,
+        reef_url=args.reef_url,
+        scenario=SCENARIO,
+        run_id=run_id,
+        token=args.reef_token,
+        state_path=state / "reef" / "reported.json",
+    )
+    stop_reporting = threading.Event()
+    reporter_thread = threading.Thread(
+        target=watcher.run, args=(stop_reporting,), name="reef-attempt-watcher", daemon=True
+    )
+    reporter_thread.start()
 
-    bundle = build_result_bundle(journal, reports, run_id="demo-1")
+    try:
+        # Blocks: feedback/restart supervision until the attempt budget
+        # auto-stops the run (or Ctrl+C).
+        manager.monitor_loop()
+    finally:
+        manager.stop_all()
+        stop_reporting.set()
+        reporter_thread.join(timeout=60)
+        watcher.poll_once()  # final drain: anything graded during shutdown
+
+    bundle = build_result_bundle(journal, watcher.reports, run_id=run_id)
     bundle_path = state / "bundle.json"
     bundle_path.write_text(json.dumps(bundle, indent=2))
     print(f"bundle: {bundle_path}")
