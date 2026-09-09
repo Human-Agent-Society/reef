@@ -331,8 +331,9 @@ off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
 ``pre_execute`` hook that answers ``ask`` inside an agent's turn ends the
 turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
 the parent graph is the one that can answer. The gate's verdict carries
-``candidate_agents`` and ``current_agents``, the turns, steps, tool calls and
-tool errors per agent summed over each side's episodes. It also carries
+``candidate_agents`` and ``current_agents``, the turns, steps, tool calls,
+tool errors and, when the endpoint reported usage, the input and output
+tokens per agent summed over each side's episodes. It also carries
 ``candidate_paths`` and ``current_paths``, one entry per episode in pairing
 order (task by task, then repeat by repeat): the root session's
 ``stage/exit`` stage names in order and the ``turn/end`` reason kind, plus

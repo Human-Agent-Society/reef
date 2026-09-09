@@ -25,7 +25,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, usage_of
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
@@ -316,7 +316,8 @@ class _BudgetedBinding(ModelBinding):
     shared counter is a mutable one-element list so every binding in the set
     decrements the same budget; a cap of 0 is no budget. The record is the
     step's list: one entry per call with the model, the request, the reply
-    or the error, and the seconds it took, every text cut at the record cap.
+    or the error, the seconds it took and, when the endpoint reported it, the
+    ``usage`` (input and output tokens), every text cut at the record cap.
     """
 
     _inner: ModelBinding
@@ -348,6 +349,9 @@ class _BudgetedBinding(ModelBinding):
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
         entry: dict[str, Any] = {"model": self.model, "messages": _bounded(messages), "params": _bounded(kwargs)}
+        # ``chat`` returns text only; the binding keeps its latest response's usage for the record to read.
+        if isinstance(self._inner, ModelBinding):
+            object.__setattr__(self._inner, "_last_usage", None)
         started = time.monotonic()
         try:
             reply = self._inner.chat(messages, **kwargs)
@@ -359,6 +363,9 @@ class _BudgetedBinding(ModelBinding):
             raise
         entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
         entry["seconds"] = round(time.monotonic() - started, 3)
+        usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
+        if usage is not None:
+            entry["usage"] = usage
         self._record.append(entry)
         return reply
 
@@ -377,8 +384,20 @@ class _BudgetedBinding(ModelBinding):
             raise
         entry["response"] = _bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
+        usage = usage_of(response)
+        if usage is not None:
+            entry["usage"] = usage
         self._record.append(entry)
         return response
+
+
+def _proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
+    """Input and output tokens summed over the record's calls that reported usage."""
+    usages = [entry["usage"] for entry in record if isinstance(entry.get("usage"), Mapping)]
+    return (
+        sum(int(usage.get("input_tokens", 0) or 0) for usage in usages),
+        sum(int(usage.get("output_tokens", 0) or 0) for usage in usages),
+    )
 
 
 def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, Any]]) -> ModelBindings:
@@ -928,6 +947,7 @@ class CordisBackend(TrainingBackend):
             # A recheck asks the proposer nothing, so its record holds episodes only.
             metrics["proposer_calls"] = 0
             metrics["proposer_seconds"] = 0.0
+            metrics["proposer_input_tokens"] = metrics["proposer_output_tokens"] = 0
             return PreparedStep.with_candidate(
                 HarnessCandidate(
                     candidate_id=f"{batch.batch_id}:recheck",
@@ -962,6 +982,7 @@ class CordisBackend(TrainingBackend):
             self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
             metrics["proposer_calls"] = 0
             metrics["proposer_seconds"] = 0.0
+            metrics["proposer_input_tokens"] = metrics["proposer_output_tokens"] = 0
             try:
                 mutations = _proposal_mutations(claimed)
             except MutationError as error:
@@ -991,6 +1012,8 @@ class CordisBackend(TrainingBackend):
                 self._write_record(step_dir, RECORD_PROPOSER_FILE, record)
             metrics["proposer_calls"] = len(record)
             metrics["proposer_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in record), 3)
+            # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
+            metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
             if batch.request is not None and handed is not None:
                 metrics["training_request"] = {
                     "id": batch.request.id,
@@ -1452,17 +1475,25 @@ def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return path
 
 
+#: The counters a verdict carries per agent; the token pair is what the endpoint reported, zero when it reported none.
+AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
+
+
 def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
-    """Turns, steps, tool calls and tool errors per agent of a native-jsonl trajectory; empty for other formats."""
+    """Turns, steps, tool calls, tool errors and reported tokens per agent of a
+    native-jsonl trajectory; empty for other formats."""
     work: dict[str, dict[str, int]] = {}
     agent: str | None = None
     for event in trajectory:
         type_, data = event.get("type"), event.get("data") or {}
         if type_ == "session":
             agent = str(data.get("agent") or "root")
-            work.setdefault(agent, {"turns": 0, "steps": 0, "tool_calls": 0, "tool_errors": 0})["turns"] += 1
+            work.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))["turns"] += 1
         elif agent is None:
             continue
+        elif type_ in ("assistant/message", "context/compacted") and isinstance(data.get("usage"), Mapping):
+            work[agent]["input_tokens"] += int(data["usage"].get("input_tokens", 0) or 0)
+            work[agent]["output_tokens"] += int(data["usage"].get("output_tokens", 0) or 0)
         elif type_ == "step/start":
             work[agent]["steps"] += 1
         elif type_ == "tool/call":
@@ -1476,9 +1507,9 @@ def _sum_agents(runs: Any) -> dict[str, dict[str, int]]:
     total: dict[str, dict[str, int]] = {}
     for work in runs:
         for agent, counts in work.items():
-            sums = total.setdefault(agent, {"turns": 0, "steps": 0, "tool_calls": 0, "tool_errors": 0})
+            sums = total.setdefault(agent, dict.fromkeys(AGENT_COUNTERS, 0))
             for key, value in counts.items():
-                sums[key] += value
+                sums[key] = sums.get(key, 0) + value
     return {agent: total[agent] for agent in sorted(total)}
 
 

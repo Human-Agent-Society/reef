@@ -19,7 +19,32 @@ from typing import Any
 from reef.train.cordis_backend.requests import required_by
 
 #: The gate numbers the Verdict section lists, in this order, when the row carries them.
-VERDICT_FIELDS = ("selected", "wins", "losses", "ties", "current_score", "candidate_score", "episode_failures")
+VERDICT_FIELDS = (
+    "selected",
+    "wins",
+    "losses",
+    "ties",
+    "current_score",
+    "candidate_score",
+    "episode_failures",
+    "proposer_input_tokens",
+    "proposer_output_tokens",
+)
+
+
+def _gate_tokens(metrics: Mapping[str, Any]) -> tuple[int, int] | None:
+    """Input and output tokens over both sides' agents, or None when no agent reported any."""
+    inputs = outputs = 0
+    for side in ("candidate_agents", "current_agents"):
+        agents = metrics.get(side)
+        if not isinstance(agents, Mapping):
+            continue
+        for counts in agents.values():
+            if isinstance(counts, Mapping):
+                inputs += int(counts.get("input_tokens", 0) or 0)
+                outputs += int(counts.get("output_tokens", 0) or 0)
+    return (inputs, outputs) if inputs or outputs else None
+
 
 #: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
 TEXT_KINDS = ("rules", "skill", "agent_command")
@@ -255,6 +280,9 @@ def _verdict(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[
             value = metrics[field]
             shown = json.dumps(value) if isinstance(value, bool) else str(value)
             lines.append(f"<tr><th>{_esc(field.replace('_', ' '))}</th><td>{_esc(shown)}</td></tr>")
+    gate_tokens = _gate_tokens(metrics)
+    if gate_tokens is not None:
+        lines.append(f"<tr><th>gate tokens</th><td>{gate_tokens[0]} in, {gate_tokens[1]} out</td></tr>")
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
         lines.append(f"<tr><th>reason</th><td>{_esc(selection['reason'])}</td></tr>")

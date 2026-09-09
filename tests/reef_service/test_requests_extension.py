@@ -260,7 +260,15 @@ RELEASES = {
             "operation": "training",
             "pending": False,
             "current": True,
-            "metrics": {"steps": 1, "selected": True, "training_request": {"id": "q-1", "text": LONG_TEXT}},
+            "metrics": {
+                "steps": 1,
+                "selected": True,
+                "training_request": {"id": "q-1", "text": LONG_TEXT},
+                "proposer_input_tokens": 1200,
+                "proposer_output_tokens": 80,
+                "candidate_agents": {"root": {"turns": 1, "steps": 2, "input_tokens": 500, "output_tokens": 40}},
+                "current_agents": {"root": {"turns": 1, "steps": 2, "input_tokens": 450, "output_tokens": 35}},
+            },
         },
         {
             "release_id": "rel-1111-selected",
@@ -313,6 +321,19 @@ def test_versions_lists_the_chain_oldest_first_one_line_per_row(tmp_path: Path) 
     ]
 
 
+def test_versions_with_a_step_prints_the_tokens_its_row_carries(tmp_path: Path) -> None:
+    out = _versions(tmp_path, _install_root(tmp_path), CATALOG, args="1", REEF_TOKEN="tok")
+    (notice,) = _notices(out)
+    lines = notice["message"].splitlines()
+    assert lines[0] == "Harness step 1: rel-1111-selected (selected, current)"
+    assert lines[-1] == "tokens: proposer 1200 in / 80 out, gate 950 in / 75 out"
+    # A row without usage prints no token line.
+    (tmp_path / "other").mkdir()
+    out = _versions(tmp_path / "other", _install_root(tmp_path / "other"), CATALOG, args="4", REEF_TOKEN="tok")
+    (notice,) = _notices(out)
+    assert not any(line.startswith("tokens:") for line in notice["message"].splitlines())
+
+
 def test_versions_with_a_step_prints_the_page_url_and_for_a_pending_release_the_promote_and_the_trial_install(
     tmp_path: Path,
 ) -> None:
@@ -353,7 +374,8 @@ def test_versions_with_a_step_prints_the_page_url_and_for_a_pending_release_the_
         lines[2]
         == "read it: curl -fsS -H 'x-reef-scenario: code-repair' 'http://reef:8900/reef/harness/releases/1/page' > harness-step-1.html"
     )
-    assert len(lines) == 3 and "promote" not in notice["message"]
+    assert lines[3] == "tokens: proposer 1200 in / 80 out, gate 950 in / 75 out"
+    assert len(lines) == 4 and "promote" not in notice["message"]
 
 
 def test_versions_promotes_a_pending_release_after_the_confirm_and_not_without(tmp_path: Path) -> None:

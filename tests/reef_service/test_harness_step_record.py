@@ -155,6 +155,8 @@ def test_record_records_every_proposer_call_through_the_binding_seam(tmp_path: P
 
     assert result.metrics["proposer_calls"] == 2
     assert result.metrics["proposer_seconds"] >= 0.0
+    # A binding whose chat reports no usage counts zero tokens rather than none.
+    assert result.metrics["proposer_input_tokens"] == 0 and result.metrics["proposer_output_tokens"] == 0
     assert result.metrics["step_record"] == str(tmp_path / "record" / "1")
     calls = read_json(tmp_path / "record" / "1" / "proposer.json")
     assert [call["model"] for call in calls] == [MODEL.model, MODEL.model]
@@ -316,6 +318,7 @@ def test_a_recheck_step_writes_episodes_only_and_counts_no_proposer_calls(tmp_pa
     second = run_backend_step(b, batch(), first.state)
     assert second.metrics["recheck"] is True
     assert second.metrics["proposer_calls"] == 0 and second.metrics["proposer_seconds"] == 0.0
+    assert second.metrics["proposer_input_tokens"] == 0 and second.metrics["proposer_output_tokens"] == 0
     step = tmp_path / "record" / "2"
     assert second.metrics["step_record"] == str(step)
     assert sorted(path.name for path in step.iterdir()) == ["episodes"]
@@ -492,7 +495,10 @@ def test_a_methods_complete_call_shares_the_budget_and_the_record(tmp_path: Path
     class Raw(_ChatBinding):
         def complete(self, body, *, timeout_s=None):
             content = "raw " + body["messages"][-1]["content"]
-            return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+            return {
+                "choices": [{"message": {"role": "assistant", "content": content}}],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 6},
+            }
 
     def propose(nodes, samples, models):
         models.served.complete({"messages": [{"role": "user", "content": "one"}]}, timeout_s=3.0)
@@ -513,6 +519,9 @@ def test_a_methods_complete_call_shares_the_budget_and_the_record(tmp_path: Path
     assert calls[0]["body"] == {"messages": [{"role": "user", "content": "one"}]}
     assert calls[0]["params"] == {"timeout_s": 3.0} and "reply" not in calls[0]
     assert calls[0]["response"]["choices"][0]["message"]["content"] == "raw one"
+    # The tokens the call reported land in the record and, summed, in the verdict: recorded, never charged.
+    assert calls[0]["usage"] == {"input_tokens": 40, "output_tokens": 6}
+    assert result.metrics["proposer_input_tokens"] == 40 and result.metrics["proposer_output_tokens"] == 6
 
 
 def test_a_long_reply_is_clipped_with_the_marker(tmp_path: Path) -> None:
@@ -545,3 +554,31 @@ def test_every_episode_leaves_a_record_the_scorer_can_be_replayed_from(tmp_path:
     record = read_json(tmp_path / "broken" / "1" / "episodes" / "candidate-0" / "episode.json")
     assert record["score"] is None and record["failure"]["stage"] == "launch"
     assert record["exit_code"] is None and record["stdout"] is None and record["residue"] is None
+
+
+def test_agent_work_sums_the_tokens_each_agents_steps_reported() -> None:
+    """Per agent, the usage on the assistant messages and compactions of a
+    native trajectory adds up beside the turn and tool counters, and the
+    side's sum keeps every counter."""
+    from reef.train.cordis_backend.backend import _agent_work, _sum_agents
+
+    trajectory = [
+        {"type": "session", "data": {"agent": "root"}},
+        {"type": "step/start", "data": {"step": 1}},
+        {"type": "assistant/message", "data": {"step": 1, "usage": {"input_tokens": 100, "output_tokens": 10}}},
+        {"type": "context/compacted", "data": {"step": 1, "usage": {"input_tokens": 30, "output_tokens": 5}}},
+        {"type": "step/start", "data": {"step": 2}},
+        {"type": "assistant/message", "data": {"step": 2}},
+        {"type": "session", "data": {"agent": "checker"}},
+        {"type": "step/start", "data": {"step": 1}},
+        {"type": "assistant/message", "data": {"step": 1, "usage": {"input_tokens": 7, "output_tokens": 1}}},
+    ]
+    work = _agent_work(trajectory)
+    assert work == {
+        "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 130, "output_tokens": 15},
+        "checker": {"turns": 1, "steps": 1, "tool_calls": 0, "tool_errors": 0, "input_tokens": 7, "output_tokens": 1},
+    }
+    assert _sum_agents([work, {"root": {"turns": 1, "steps": 1, "tool_calls": 2, "tool_errors": 0}}]) == {
+        "checker": work["checker"],
+        "root": {"turns": 2, "steps": 3, "tool_calls": 2, "tool_errors": 0, "input_tokens": 130, "output_tokens": 15},
+    }

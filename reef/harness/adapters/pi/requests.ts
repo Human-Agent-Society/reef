@@ -142,6 +142,19 @@ export default function requests(pi) {
       .filter(Boolean)
       .join("  ");
 
+  // What the step's model calls cost in tokens, when the endpoint reported them: the proposer's and the gate's.
+  const tokenText = (row) => {
+    const metrics = row.metrics || {};
+    const over = (side, key) =>
+      Object.values(side || {}).reduce((total, agent) => total + (Number(agent && agent[key]) || 0), 0);
+    const proposerIn = Number(metrics.proposer_input_tokens) || 0;
+    const proposerOut = Number(metrics.proposer_output_tokens) || 0;
+    const gateIn = over(metrics.candidate_agents, "input_tokens") + over(metrics.current_agents, "input_tokens");
+    const gateOut = over(metrics.candidate_agents, "output_tokens") + over(metrics.current_agents, "output_tokens");
+    if (!proposerIn && !proposerOut && !gateIn && !gateOut) return "";
+    return `tokens: proposer ${proposerIn} in / ${proposerOut} out, gate ${gateIn} in / ${gateOut} out`;
+  };
+
   const pageUrl = (step) => `${serviceUrl}/reef/harness/releases/${step}/page`;
   // The token stays in the environment: the printed command names it as the variable, never its value.
   const curl = () =>
@@ -170,6 +183,8 @@ export default function requests(pi) {
       );
       if (head >= 0) lines.push(`back to the head: ${installLine(rows[head].release_id)}`);
     }
+    const tokens = tokenText(row);
+    if (tokens) lines.push(tokens);
     return lines;
   };
 
