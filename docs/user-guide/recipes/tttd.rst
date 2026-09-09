@@ -221,7 +221,7 @@ values when it starts. Slime's ``--global-batch-size`` in that file must equal
    MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
    enable_thinking | True | Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
    TTTD_SEQ_LENGTH | 30000 | training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
-   num_gpus | 2 | GPUs assigned to Ray, training, and serving, in ``serve.yaml``, with ``cuda_visible_devices`` and ``--tensor-model-parallel-size`` beside it.
+   num_gpus | 2 | GPU count passed to Slime's training and serving topology in ``serve.yaml``; Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
    TTTD_STATE_DIR | work/erdos_min_overlap | the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
 
 The reference grid contains ``8 x 64 = 512`` rollouts per optimizer step.
