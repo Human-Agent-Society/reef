@@ -97,6 +97,8 @@ class HarnessInfo:
 
     seed_entries: tuple[Mapping[str, Any], ...] = ()
     served_model: str | None = None
+    #: Further models the installed client may pick from; the served one stays the default.
+    client_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

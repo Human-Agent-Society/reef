@@ -277,8 +277,16 @@ class ModelBinding:
 
     # -- Episode-side rendering ----------------------------------------------
 
-    def compose_nodes(self, descriptor: AdapterDescriptor) -> tuple[tuple[str, Mapping[str, Any]], ...]:
-        """``config`` nodes that point ``descriptor``'s harness at this binding."""
+    def compose_nodes(
+        self, descriptor: AdapterDescriptor, *, models: Sequence[str] = ()
+    ) -> tuple[tuple[str, Mapping[str, Any]], ...]:
+        """``config`` nodes that point ``descriptor``'s harness at this binding.
+
+        ``models`` are further model names the harness may pick from: every
+        template entry that names ``{model}`` (a mapping key or a list item)
+        is repeated once per model, this binding's first, while a plain
+        ``{model}`` elsewhere, the default, stays this binding's.
+        """
 
         templates = descriptor.model_binding.get(self.api)
         if not templates:
@@ -288,7 +296,11 @@ class ModelBinding:
                 f"(declared: {known}); episodes cannot reach a model"
             )
         values = {"base_url": self.base_url, "api_key": self.api_key or NO_KEY_PLACEHOLDER, "model": self.model}
-        return tuple(("config", _substitute(node, values)) for node in templates)
+        choices = [self.model]
+        for name in models:
+            if isinstance(name, str) and name and name not in choices:
+                choices.append(name)
+        return tuple(("config", _substitute(node, values, choices)) for node in templates)
 
 
 @dataclass(frozen=True)
@@ -325,15 +337,40 @@ class ModelBindings(Mapping[str, ModelBinding]):
         return 1 + len(self.named)
 
 
-def _substitute(value: Any, values: Mapping[str, str]) -> Any:
+def _mentions_model(value: Any) -> bool:
+    if isinstance(value, str):
+        return "{model}" in value
+    if isinstance(value, Mapping):
+        return any(_mentions_model(key) or _mentions_model(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_mentions_model(item) for item in value)
+    return False
+
+
+def _substitute(value: Any, values: Mapping[str, str], models: Sequence[str] = ()) -> Any:
+    """Fill ``{placeholders}``; with ``models``, a mapping key or list item naming ``{model}`` is repeated per model."""
     if isinstance(value, str):
         for key, replacement in values.items():
             value = value.replace("{" + key + "}", replacement)
         return value
     if isinstance(value, Mapping):
-        return {_substitute(key, values): _substitute(item, values) for key, item in value.items()}
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            if len(models) > 1 and isinstance(key, str) and "{model}" in key:
+                for model in models:
+                    each = {**values, "model": model}
+                    out[_substitute(key, each)] = _substitute(item, each)
+            else:
+                out[_substitute(key, values, models)] = _substitute(item, values, models)
+        return out
     if isinstance(value, list):
-        return [_substitute(item, values) for item in value]
+        out_list: list[Any] = []
+        for item in value:
+            if len(models) > 1 and _mentions_model(item):
+                out_list.extend(_substitute(item, {**values, "model": model}) for model in models)
+            else:
+                out_list.append(_substitute(item, values, models))
+        return out_list
     return value
 
 
