@@ -32,7 +32,7 @@ from typing import Any, Literal
 import ray
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.runtime.adapter_residency import AdapterResidencyManager
+from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import resolve
 from reef.runtime.executor.ray import RayExecutor
@@ -803,6 +803,15 @@ class TrainBridgeActorImpl:
                     runtime_load_id=published,
                 )
                 self._phase = "awaiting_commit"
+            except AdapterCapacityExhausted:
+                # Capacity failures are classified in _update_serving, which
+                # terminates the engines only for the eviction one an engine
+                # refused (#61). A plain refusal published nothing and touched
+                # no engine, so escalating here would terminate engines it
+                # never involved and then fail identically on the next
+                # attempt; only more slots resolve it (#65).
+                traceback.print_exc(file=sys.stderr)
+                raise
             except BaseException:
                 self._phase = "weight_sync_failed"
                 with suppress(Exception):
@@ -1073,6 +1082,13 @@ class TrainBridgeActorImpl:
         the publishing scenario's own current revision when nothing else
         fits: generation is paused, so no request observes the gap) and
         records the published revision afterwards.
+
+        Admission runs before any weight leaves the trainer. A capacity
+        rejection therefore means nothing was published and every engine still
+        serves what it served, so it must not terminate them — that took down
+        scenarios which were never part of the publication (#65). An eviction
+        the engine refused is the opposite: its state is uncertain, so the
+        terminate-and-recover path stays (#61).
         """
         residency = self._residency if scenario is not None else None
         try:
@@ -1093,6 +1109,15 @@ class TrainBridgeActorImpl:
                 raise RuntimeError(f"serving engines disagree after update: {observed!r}")
             if residency is not None and scenario is not None:
                 residency.register(scenario, raw_version)
+        except AdapterEvictionFailed:
+            self._phase = "weight_sync_failed"
+            with suppress(Exception):
+                self._manager_call("terminate_updatable_engines")
+            raise
+        except AdapterCapacityExhausted:
+            # Admission was refused before any weight left the trainer.
+            self._phase = "serving"
+            raise
         except BaseException:
             self._phase = "weight_sync_failed"
             with suppress(Exception):

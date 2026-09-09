@@ -10,7 +10,7 @@ pytest.importorskip("ray")
 
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted
+from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
@@ -306,11 +306,30 @@ def test_a_full_engine_refuses_to_evict_another_scenarios_current_revision(tmp_p
     _run(actor, _job("a", 0, "inc:0"))
     result = actor.execute_training_job(_job("b", 0, "inc:1"))
     assert result.outcome == "checkpoint"
+    with pytest.raises(AdapterCapacityExhausted, match="max-loaded-loras") as raised:
+        actor.update_serving_weights(result.training_job_id)
+    # A refusal, not a wedged engine: the eviction never even ran.
+    assert not isinstance(raised.value, AdapterEvictionFailed)
+    assert manager.engine.unloaded == []
+    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+
+
+@pytest.mark.unit
+def test_a_rejected_publication_leaves_every_scenario_serving(tmp_path, _local_ray_get) -> None:
+    # Issue #65: the capacity check runs before update_weights touches an
+    # engine, so a rejection means nothing was published and nothing is
+    # inconsistent. Terminating the engines for it took down the innocent
+    # scenario's serving too, and cost a full stack restart.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    _run(actor, _job("a", 0, "inc:0"))
+    result = actor.execute_training_job(_job("b", 0, "inc:1"))
     with pytest.raises(AdapterCapacityExhausted, match="exhausted"):
         actor.update_serving_weights(result.training_job_id)
-    assert manager.engine.unloaded == []
-    assert actor.health()["phase"] == "weight_sync_failed"
-    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+    health = actor.health()
+    assert health["phase"] != "weight_sync_failed"
+    assert manager.recovered == 0, "engines were terminated for a publication that never started"
+    assert health["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:1"]
 
 
 @pytest.mark.unit

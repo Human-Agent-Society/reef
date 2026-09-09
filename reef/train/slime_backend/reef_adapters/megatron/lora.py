@@ -67,8 +67,14 @@ def lora_engine_slots(args: Namespace) -> int:
     of scenarios plus one. With fewer slots the residency manager evicts the
     publishing scenario's own current revision first (generation is paused,
     so no request observes the gap); with exactly one slot that is the only
-    option, which is fine for one scenario but leaves a second scenario's
-    adapter unloaded whenever the other publishes.
+    option, which is fine for one scenario.
+
+    Sizing below the scenario count does NOT degrade gracefully: a peer's
+    current revision is never evicted, so the second scenario's publication is
+    refused with ``AdapterCapacityExhausted`` naming the slot count to set
+    here. That refusal is deliberate — evicting a serving peer would route its
+    next request to an adapter the engine no longer holds, and nothing reloads
+    it on demand.
     """
 
     value = getattr(args, "max_loaded_loras", None)
