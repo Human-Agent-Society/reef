@@ -877,6 +877,8 @@ esac
 # Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.
 python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for python3" python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
 python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
+command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
+command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
 # The checksum stream, as baked into CHECKSUM: each sorted relative path,
 # its byte length, then its bytes, newline separated. The unquoted wc
@@ -1279,7 +1281,10 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
             manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
             assert manifest.status == 200
             files = (await manifest.json())["files"]
-            assert files["pi-agent/skills/answer-style/SKILL.md"] == "# seed skill\n"
+            # The seed skill's text plus the frontmatter pi requires, synthesized from its first line.
+            assert files["pi-agent/skills/answer-style/SKILL.md"] == (
+                "---\nname: answer-style\ndescription: seed skill\n---\n# seed skill\n"
+            )
             assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
             response = await client.get(
                 "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}

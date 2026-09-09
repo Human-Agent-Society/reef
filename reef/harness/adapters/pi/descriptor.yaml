@@ -20,6 +20,17 @@ env:
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
   PI_OFFLINE: "1"
   PI_SKIP_VERSION_CHECK: "1"
+# An interactive run through reef-pi: online (it talks to reef), but reef pins
+# pi's version, so pi's own update notice would only mislead.
+client_env:
+  PI_SKIP_VERSION_CHECK: "1"
+# pi wants these on PATH at first start and otherwise downloads them from
+# GitHub releases, which rate-limits unauthenticated clients.
+client_tools:
+  - command: rg
+    package: ripgrep
+  - command: fd
+    package: fd
 files:
   config:
     primary:

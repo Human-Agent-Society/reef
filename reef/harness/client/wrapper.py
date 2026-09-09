@@ -572,6 +572,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
     env = os.environ.copy()
     env[env_var] = temp_dir
+    # What an interactive run needs beyond the episode env; the person's own setting wins.
+    for key, value in get_adapter(adapter).client_env.items():
+        env.setdefault(key, value)
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
     env["REEF_SERVICE_URL"] = upstream
