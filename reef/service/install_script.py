@@ -220,6 +220,9 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     return [
         f"# Ensure the pinned binary ({pin}) via the vendor's channel.",
         *prelude,
+        "vendor_install() {",
+        *[line.replace("        ", "    ", 1) for line in steps],
+        "}",
         'installed=""',
         f'if [ -x "$BINARY" ]{gate}; then',
         f'    installed="$({probe} --version 2>/dev/null || true)"',
@@ -229,10 +232,8 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         f'        echo "reef: {descriptor.binary} {install.version} already installed"',
         "        ;;",
         "    *)",
-        # The vendor install is the slow step, a minute on a fresh machine; say so before it starts.
-        f'        echo "reef: installing {descriptor.binary} {install.version} ({pin}) into $PREFIX; this takes a minute"',
         '        mkdir -p "$PREFIX"',
-        *steps,
+        f'        spin "installing {descriptor.binary} {install.version} ({pin}) into $PREFIX, about a minute" vendor_install',
         f'        echo "reef: {descriptor.binary} {install.version} installed"',
         "        ;;",
         "esac",
@@ -246,7 +247,8 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         # surfacing later as a bare ModuleNotFoundError from the launcher.
         (
             "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
-            'python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true'
+            'spin "installing reef-client and reef-infra for python3" '
+            'python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true'
         ),
         (
             "python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
@@ -291,6 +293,46 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
 #: The literal the model binding overlay carries where the client's own token goes; the script swaps in
 #: ``$REEF_TOKEN`` at install time, so the served script itself never holds a credential.
 TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
+
+
+def _spinner_lines() -> list[str]:
+    """``spin LABEL CMD...``: run a slow step with a spinner on a terminal, or one static line elsewhere.
+
+    The step's output goes to a temporary log that is printed only on
+    failure, so npm and pip cannot smear the spinner; on a terminal the line
+    is erased once the step ends, so a successful install leaves the
+    announcements alone. ``set -e`` does not see the background job's exit
+    status, so it is read explicitly and returned.
+    """
+    return [
+        "# Run a slow step behind a spinner on a terminal (a static line elsewhere); its output shows only on failure.",
+        "spin() {",
+        '    label="$1"; shift',
+        '    log="$(mktemp)"',
+        "    if [ -t 1 ]; then",
+        '        "$@" >"$log" 2>&1 &',
+        "        pid=$!",
+        "        i=0",
+        '        while kill -0 "$pid" 2>/dev/null; do',
+        "            case $i in 0) c='|' ;; 1) c='/' ;; 2) c='-' ;; *) c='\\' ;; esac",
+        "            i=$(( (i + 1) % 4 ))",
+        '            printf \'\\r%s reef: %s\' "$c" "$label"',
+        "            sleep 0.2",
+        "        done",
+        '        wait "$pid" && status=0 || status=$?',
+        "        printf '\\r\\033[K'",
+        "    else",
+        '        echo "reef: $label"',
+        '        "$@" >"$log" 2>&1 && status=0 || status=$?',
+        "    fi",
+        '    if [ "$status" -ne 0 ]; then',
+        '        cat "$log" >&2',
+        '        rm -f "$log"',
+        '        return "$status"',
+        "    fi",
+        '    rm -f "$log"',
+        "}",
+    ]
 
 
 def _sidecar_tool_lines(wrapper_name: str) -> list[str]:
@@ -445,6 +487,8 @@ def render_install_script(
         "fi",
         "",
         *_sidecar_tool_lines(wrapper_name),
+        "",
+        *_spinner_lines(),
         "",
         f'echo "reef: harness release {release_id} for {descriptor.name}"',
         f"# The gate runs first of all: nothing is installed or written while an item is not checked off ({wrapper_name} setup).",
