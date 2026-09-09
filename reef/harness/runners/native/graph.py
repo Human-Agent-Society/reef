@@ -327,7 +327,7 @@ class Run:
         body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.MAX_COMPLETION_TOKENS}
         if self.declarations:
             body["tools"] = self.declarations
-        message = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
+        message, usage = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
         if message is None:
             raise _Stop(1)
         calls = list(message.get("tool_calls") or [])
@@ -340,6 +340,8 @@ class Run:
                 "content": message.get("content"),
                 "tool_calls": calls,
                 "finish": "tool-calls" if calls else "stop",
+                # The tokens the endpoint counted for this step, when it reported them; the verdict sums them per agent.
+                **({"usage": usage} if usage else {}),
             },
         )
         return "tool_calls" if calls else "text"
@@ -466,8 +468,10 @@ class Run:
             ],
             "max_tokens": loop.MAX_COMPLETION_TOKENS,
         }
-        message, failure = loop._complete(self.binding, body)
+        message, failure, usage = loop._complete(self.binding, body)
         record: dict[str, Any] = {"step": self.step, "stage": name, "policy": policy, "tokens_before": before}
+        if usage:
+            record["usage"] = usage
         if message is None:
             # The span stays as it was: a summary that did not arrive drops nothing the model saw.
             self.session.write("context/compacted", {**record, "fired": False, "error": failure})

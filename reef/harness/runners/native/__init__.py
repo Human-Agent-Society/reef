@@ -31,7 +31,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol
 
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, SandboxFailed, ToolFailed, select_enforcer
 from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
@@ -546,26 +546,29 @@ def _texts(value: Any) -> list[str]:
     return [item for item in value if isinstance(item, str) and item] if isinstance(value, list) else []
 
 
-def _complete(binding: ModelBinding, body: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """One provider attempt: the assistant message, or the closed MODEL_ERROR failure."""
+def _complete(
+    binding: ModelBinding, body: Mapping[str, Any]
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, int] | None]:
+    """One provider attempt: the assistant message and the usage it reported, or the closed MODEL_ERROR failure."""
     try:
         response = binding.complete(dict(body))
-        return dict(response["choices"][0]["message"]), None
+        return dict(response["choices"][0]["message"]), None, usage_of(response)
     except (ModelBindingError, KeyError, IndexError, TypeError) as exc:
         failure: dict[str, Any] = {"code": "MODEL_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600]}
         if isinstance(exc, ModelBindingError) and exc.status is not None:
             failure["status"] = exc.status
-        return None, failure
+        return None, failure, None
 
 
 def _request(
     session: Session, binding: ModelBinding, hooks: Sequence[HookModule], body: Mapping[str, Any], step: int
-) -> dict[str, Any] | None:
-    """The step's model call, retried while a request_error hook says so; None once the turn ended in error."""
+) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
+    """The step's model call and the usage it reported, retried while a request_error hook says so;
+    ``(None, None)`` once the turn ended in error."""
     for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
-        message, failure = _complete(binding, body)
+        message, failure, usage = _complete(binding, body)
         if failure is None:
-            return message
+            return message, usage
         session.write("request/error", {"step": step, "attempt": attempt, "error": failure})
         action = _decide(session, hooks, "request_error", step, {"step": step, "attempt": attempt, "error": failure})
         if action.get("kind") == "retry" and attempt < MAX_REQUEST_ATTEMPTS:
@@ -575,8 +578,8 @@ def _request(
             )
             continue
         _abort(session, failure, attempts=attempt)
-        return None
-    return None
+        return None, None
+    return None, None
 
 
 def _abort(session: Session, failure: Mapping[str, Any], turn: int = 1, **detail: Any) -> int:

@@ -127,6 +127,69 @@ def test_streams_fold_to_one_reply_in_all_dialects(monkeypatch) -> None:
     )
 
 
+def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monkeypatch) -> None:
+    """``usage`` rides the response object and ``last_usage`` keeps it for a
+    wrapper of ``chat``, normalised to input/output tokens; a stream folds its
+    usage in from the chunk or event that carried it."""
+    from reef.harness.episodes.model_binding import usage_of
+
+    binding = ModelBinding("http://up", "m")
+    assert binding.last_usage() is None
+    _capture(
+        monkeypatch,
+        {
+            "choices": [{"message": {"role": "assistant", "content": "a"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+        },
+    )
+    assert binding.chat([{"role": "user", "content": "u"}]) == "a"
+    assert binding.last_usage() == {"input_tokens": 12, "output_tokens": 3}
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "b"}}]})
+    binding.chat([{"role": "user", "content": "u"}])
+    assert binding.last_usage() is None
+    openai = (
+        b'data: {"choices":[{"delta":{"role":"assistant","content":"a"}}]}\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1}}\ndata: [DONE]\n'
+    )
+    _capture(monkeypatch, openai)
+    response = binding.complete({"messages": [], "stream": True})
+    assert response["choices"][0]["message"]["content"] == "a" and usage_of(response) == {
+        "input_tokens": 7,
+        "output_tokens": 1,
+    }
+    anthropic = (
+        b'data: {"type":"message_start","message":{"model":"claude","usage":{"input_tokens":20,"output_tokens":1}}}\n'
+        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"a"}}\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n'
+    )
+    _capture(monkeypatch, anthropic)
+    claude = ModelBinding("http://up", "claude", api="anthropic")
+    assert claude.chat([{"role": "user", "content": "u"}], stream=True) == "a"
+    assert claude.last_usage() == {"input_tokens": 20, "output_tokens": 5}
+    assert usage_of({"usage": {"input_tokens": True}}) is None and usage_of({"usage": {"output_tokens": 4}}) == {
+        "input_tokens": 0,
+        "output_tokens": 4,
+    }
+
+
+def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
+    from reef.train.cordis_backend.backend import _BudgetedBinding
+
+    record: list[dict[str, Any]] = []
+    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record)
+    _capture(
+        monkeypatch,
+        {
+            "choices": [{"message": {"role": "assistant", "content": "a"}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 2},
+        },
+    )
+    assert budgeted.chat([{"role": "user", "content": "u"}]) == "a"
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "b"}}]})
+    budgeted.chat([{"role": "user", "content": "u"}])
+    assert record[0]["usage"] == {"input_tokens": 9, "output_tokens": 2} and "usage" not in record[1]
+
+
 def test_unknown_api_is_refused() -> None:
     with pytest.raises(ValueError, match="api must be one of"):
         ModelBinding("http://up", "m", api="cohere")

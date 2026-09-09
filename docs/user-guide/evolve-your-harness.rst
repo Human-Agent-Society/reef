@@ -282,8 +282,10 @@ cannot run) counts as one that could not run, whatever its text. When the
 verdict is a rejection, Reef restores the snapshot it took before the
 mutation. Every verdict is recorded in the scenario's commit log together
 with its mutation (op, id and the full options, so a rejected rewrite is
-readable too), both score vectors, how many model calls the proposer made
-and the seconds they took (``proposer_calls``, ``proposer_seconds``), and per
+readable too), both score vectors, how many model calls the proposer made,
+the seconds they took and the tokens the endpoint counted for them
+(``proposer_calls``, ``proposer_seconds``, ``proposer_input_tokens``,
+``proposer_output_tokens``; the tokens are recorded, never charged), and per
 side and task the path each episode took: on the native harness the stage
 names the loop exited in order and the reason its turn ended
 (``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per

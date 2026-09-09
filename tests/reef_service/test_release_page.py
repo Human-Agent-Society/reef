@@ -340,6 +340,28 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "current_score": 1.0,
             "candidate_score": 3.0,
             "episode_failures": 1,
+            "proposer_input_tokens": 1200,
+            "proposer_output_tokens": 80,
+            "candidate_agents": {
+                "root": {
+                    "turns": 3,
+                    "steps": 5,
+                    "tool_calls": 2,
+                    "tool_errors": 0,
+                    "input_tokens": 500,
+                    "output_tokens": 40,
+                }
+            },
+            "current_agents": {
+                "root": {
+                    "turns": 3,
+                    "steps": 4,
+                    "tool_calls": 1,
+                    "tool_errors": 0,
+                    "input_tokens": 450,
+                    "output_tokens": 35,
+                }
+            },
             "step_record": "/srv/reef/steps/agents/1",
             "selection": {"reason": "candidate won 2 of 3"},
             "mutation": {"op": "create", "id": "n1", "options": {"name": "rules", "config": {"text": "<b>bold</b>"}}},
@@ -363,6 +385,11 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
     verdict = _section(page, "Verdict")
     assert "<th>ties</th><td>1</td>" in verdict and "<th>episode failures</th><td>1</td>" in verdict
+    assert (
+        "<th>proposer input tokens</th><td>1200</td>" in verdict
+        and "<th>proposer output tokens</th><td>80</td>" in verdict
+    )
+    assert "<th>gate tokens</th><td>950 in, 75 out</td>" in verdict
     assert '<td class="id">/srv/reef/steps/agents/1</td>' in verdict and "candidate won 2 of 3" in verdict
     setup = _section(page, "Setup")
     assert '<tr><td>SLACK_WEBHOOK</td><td>env</td><td class="id">SLACK_WEBHOOK</td></tr>' in setup

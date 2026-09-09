@@ -1657,8 +1657,15 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         from reef.train.cordis_backend.backend import _agent_work
 
         assert _agent_work(result.trajectory) == {
-            "checker": {"turns": 1, "steps": 1, "tool_calls": 0, "tool_errors": 0},
-            "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0},
+            "checker": {
+                "turns": 1,
+                "steps": 1,
+                "tool_calls": 0,
+                "tool_errors": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+            "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 0, "output_tokens": 0},
         }
         session_files = sorted(p.name for p in (tmp_path).rglob("*.jsonl"))
         assert session_files == []  # the episode root is gone; the files were read into the trajectory

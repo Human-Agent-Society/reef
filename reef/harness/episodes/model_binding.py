@@ -54,6 +54,31 @@ class ModelBindingError(ReefError):
         self.detail = detail
 
 
+def usage_of(response: Any) -> dict[str, int] | None:
+    """The tokens a response reports, as ``{"input_tokens", "output_tokens"}``
+    whatever the dialect (Chat Completions counts ``prompt_tokens`` /
+    ``completion_tokens``; Messages and Responses count ``input_tokens`` /
+    ``output_tokens``); None when the response carries no usage.
+    """
+
+    usage = response.get("usage") if isinstance(response, Mapping) else None
+    if not isinstance(usage, Mapping):
+        return None
+
+    def count(*keys: str) -> int | None:
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return int(value)
+        return None
+
+    inputs = count("input_tokens", "prompt_tokens")
+    outputs = count("output_tokens", "completion_tokens")
+    if inputs is None and outputs is None:
+        return None
+    return {"input_tokens": inputs or 0, "output_tokens": outputs or 0}
+
+
 @dataclass(frozen=True)
 class ModelBinding:
     """One model endpoint plus the model name to request from it.
@@ -194,6 +219,10 @@ class ModelBinding:
             raise ModelBindingError("model endpoint returned non-text content")
         return content
 
+    def last_usage(self) -> dict[str, int] | None:
+        """The tokens the latest ``complete`` reported (``usage_of`` of its response), or None."""
+        return getattr(self, "_last_usage", None)
+
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
@@ -222,13 +251,17 @@ class ModelBinding:
         )
         try:
             with urllib.request.urlopen(request, timeout=timeout_s or self.timeout_s) as response:
-                if request_body.get("stream"):
-                    if self.api == "anthropic":
-                        return _fold_anthropic_stream(response)
-                    if self.api == "responses":
-                        return _fold_responses_stream(response)
-                    return _fold_stream(response)
-                return json.load(response)
+                if not request_body.get("stream"):
+                    result = json.load(response)
+                elif self.api == "anthropic":
+                    result = _fold_anthropic_stream(response)
+                elif self.api == "responses":
+                    result = _fold_responses_stream(response)
+                else:
+                    result = _fold_stream(response)
+            # The tokens this call reported, for a wrapper of ``chat`` that never sees the response body.
+            object.__setattr__(self, "_last_usage", usage_of(result))
+            return result
         except urllib.error.HTTPError as exc:
             try:
                 detail = exc.read().decode(errors="replace")
@@ -325,8 +358,11 @@ def _fold_stream(response: Any) -> dict[str, Any]:
     role = "assistant"
     finish_reason = None
     model = None
+    usage: dict[str, Any] | None = None
     for chunk in _sse_payloads(response):
         model = chunk.get("model", model)
+        if isinstance(chunk.get("usage"), Mapping):
+            usage = dict(chunk["usage"])
         for choice in chunk.get("choices", ()):
             delta = choice.get("delta", {})
             role = delta.get("role", role)
@@ -334,7 +370,7 @@ def _fold_stream(response: Any) -> dict[str, Any]:
             if isinstance(content, str):
                 pieces.append(content)
             finish_reason = choice.get("finish_reason", finish_reason)
-    return {
+    folded: dict[str, Any] = {
         "object": "chat.completion",
         "model": model,
         "choices": [
@@ -345,6 +381,9 @@ def _fold_stream(response: Any) -> dict[str, Any]:
             }
         ],
     }
+    if usage is not None:
+        folded["usage"] = usage
+    return folded
 
 
 def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
@@ -353,23 +392,31 @@ def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
     pieces: list[str] = []
     model = None
     stop_reason = None
+    usage: dict[str, Any] = {}
     for event in _sse_payloads(response):
         kind = event.get("type")
         if kind == "message_start":
             model = event.get("message", {}).get("model", model)
+            if isinstance(event.get("message", {}).get("usage"), Mapping):
+                usage.update(event["message"]["usage"])
         elif kind == "content_block_delta":
             delta = event.get("delta", {})
             if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
                 pieces.append(delta["text"])
         elif kind == "message_delta":
             stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
-    return {
+            if isinstance(event.get("usage"), Mapping):
+                usage.update(event["usage"])
+    folded: dict[str, Any] = {
         "type": "message",
         "role": "assistant",
         "model": model,
         "content": [{"type": "text", "text": "".join(pieces)}],
         "stop_reason": stop_reason,
     }
+    if usage:
+        folded["usage"] = usage
+    return folded
 
 
 def _fold_responses_stream(response: Any) -> dict[str, Any]:
@@ -397,4 +444,4 @@ def _fold_responses_stream(response: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings"]
+__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings", "usage_of"]
