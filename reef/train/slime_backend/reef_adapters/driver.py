@@ -273,6 +273,28 @@ def _healthcheck(ready_file: Path) -> int:
             ray.shutdown()
 
 
+def _job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any] | None:
+    """Ray job ``runtime_env`` carrying the driver's ``PYTHONPATH`` to its actors.
+
+    The deploy layer appends the recipe source root to every *service*
+    process's ``PYTHONPATH``, but Ray actors are forked from the raylet,
+    whose environment predates the stack: with ``execution: training: ray``
+    the shared local cluster starts inside ``reef serve``, before any
+    service environment exists. Cookbook loss families
+    (``recipes.<method>.slime:...``) resolve inside the Megatron workers, so
+    without the driver's ``PYTHONPATH`` the first train actor dies with
+    ``No module named 'recipes'``. Setting the job-level ``runtime_env``
+    here covers every actor this driver creates — the bridge and the train
+    workers — on local and external clusters alike; Slime's per-actor
+    ``env_vars`` merge over the job-level mapping rather than replacing it.
+    """
+    source = os.environ if environ is None else environ
+    pythonpath = source.get("PYTHONPATH", "").strip()
+    if not pythonpath:
+        return None
+    return {"env_vars": {"PYTHONPATH": pythonpath}}
+
+
 def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     # Remove a stale marker before parsing or connecting. This also makes a
     # configuration error fail closed instead of advertising the previous job.
@@ -309,7 +331,7 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
 
     bridge = None
     try:
-        ray.init(address=ray_address, namespace=namespace)
+        ray.init(address=ray_address, namespace=namespace, runtime_env=_job_runtime_env())
         # Importing the bridge initializes the Slime serving/training modules;
         # keep that work out of the lightweight healthcheck path.
         from reef.train.slime_backend.reef_adapters.bridge import start_bridge

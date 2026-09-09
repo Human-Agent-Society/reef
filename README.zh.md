@@ -226,6 +226,8 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
 [教程](tutorials/evolve-your-harness/README.md)。
 
+要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [harness requests 教程](tutorials/harness-requests/README.md)。
+
 
 ## Recipes 与示例
 

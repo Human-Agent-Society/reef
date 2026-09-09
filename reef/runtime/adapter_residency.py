@@ -38,7 +38,22 @@ class AdapterResidencyError(ReefError):
 
 
 class AdapterCapacityExhausted(AdapterResidencyError):
-    """Every loaded adapter is protected, so nothing can be evicted for a new one."""
+    """Every loaded adapter is protected, so nothing can be evicted for a new one.
+
+    Raised before anything is unloaded, so the engine still holds exactly what
+    it held and every scenario keeps serving: the publication was refused, not
+    half-applied.
+    """
+
+
+class AdapterEvictionFailed(AdapterCapacityExhausted):
+    """The engine refused to release the slot chosen for eviction.
+
+    Still a capacity failure for the caller, but a different one: a plain
+    :class:`AdapterCapacityExhausted` proves the engine is fine, while this
+    says it would not let go and may be wedged. Callers that recover engines
+    must branch on this subclass *before* the base class.
+    """
 
 
 class AdapterNotActive(AdapterResidencyError):
@@ -136,6 +151,12 @@ class AdapterResidencyManager:
     - a failed load never occupies a slot; a failed unload keeps occupying
       one as ``leaked`` until a later unload succeeds, so capacity
       degradation is visible rather than hidden.
+
+    Residency bounds what the engine can serve *now*; it says nothing about
+    which recorded evidence a training job may still use. Those are separate
+    by construction — a sample carries its own log probabilities and producing
+    runtime load ID — so evicting a revision never narrows the staleness
+    window, and widening the staleness window never demands more slots.
     """
 
     def __init__(self, capacity: int | None = None) -> None:
@@ -381,9 +402,16 @@ class AdapterResidencyManager:
             if victim is None:
                 self._counters["capacity_rejections"] += 1
                 protected = sorted(slot.name for slot in self._slots.values())
+                # Name the remedy: the usual cause is a capacity sized for one
+                # scenario on an engine that several now share, and the
+                # operator cannot infer the needed slot count from the names.
+                sharing = {slot.scenario for slot in self._slots.values()} | {scenario}
                 raise AdapterCapacityExhausted(
                     f"engine adapter capacity {self._capacity} is exhausted and every resident adapter is "
-                    f"protected (current, pinned, or in flight): {protected}; scenario {scenario!r} cannot activate"
+                    f"protected (current, pinned, or in flight): {protected}; scenario {scenario!r} cannot "
+                    f"activate. {len(sharing)} scenarios share this engine and each keeps its current "
+                    f"revision resident, so it needs at least {len(sharing) + 1} slots: raise "
+                    f"--max-loaded-loras. Nothing was unloaded; every scenario keeps serving."
                 )
             if (unload_error := self._unload(victim, engine)) is not None:
                 # The engine refused to let go; the slot stays occupied and
@@ -391,7 +419,7 @@ class AdapterResidencyManager:
                 # The unload failure rides along: "capacity exhausted" alone
                 # would hide that the real event may be a dead engine.
                 self._counters["capacity_rejections"] += 1
-                raise AdapterCapacityExhausted(
+                raise AdapterEvictionFailed(
                     f"engine adapter capacity {self._capacity} is exhausted and evicting {victim.name!r} "
                     f"failed ({unload_error}); scenario {scenario!r} cannot activate until the leaked slot "
                     f"is reclaimed"
@@ -528,6 +556,7 @@ def _require_runtime_load_id(runtime_load_id: str) -> None:
 __all__ = [
     "AdapterCapacityExhausted",
     "AdapterEngine",
+    "AdapterEvictionFailed",
     "AdapterLease",
     "AdapterNotActive",
     "AdapterResidencyError",

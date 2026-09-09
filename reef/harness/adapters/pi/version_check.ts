@@ -5,8 +5,35 @@
 // Interactive sessions offer to run the update or skip before accepting input.
 // Headless sessions print the instructions instead. Hermetic episodes
 // set PI_OFFLINE and this extension then makes no network calls at all.
+// While the head requires setup not checked off, the setup list replaces the update: the install would refuse.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+// The manifest's rule (reef.train.cordis_backend.requests.required_by): the union over the chain, newest name wins.
+function requiredBy(releases, releaseId) {
+  const published = new Map();
+  for (const row of releases) {
+    if (row && typeof row.release_id === "string" && !published.has(row.release_id)) published.set(row.release_id, row);
+  }
+  const chain = [];
+  const seen = new Set();
+  let current = releaseId;
+  while (typeof current === "string" && published.has(current) && !seen.has(current)) {
+    seen.add(current);
+    const row = published.get(current);
+    chain.push(row);
+    current = row.rollback_target_release_id || row.parent_release_id;
+  }
+  const merged = new Map();
+  for (const row of chain.reverse()) {
+    const requires = ((row.metrics || {}).training_request || {}).requires;
+    if (!Array.isArray(requires)) continue;
+    for (const item of requires) {
+      if (item && typeof item.name === "string") merged.set(item.name, item);
+    }
+  }
+  return [...merged.values()];
+}
 
 export default function versionCheck(pi) {
   let checked = false;
@@ -44,12 +71,33 @@ export default function versionCheck(pi) {
     }
     if (!response.ok) return;
     const { releases } = await response.json();
+    if (!Array.isArray(releases)) return;
     // A release held for review is served to no session, so it is never the head this offers.
     const head = [...releases].reverse().find((row) => row && !row.pending);
     if (!head || head.release_id === pinned) return;
     const pinnedRow = releases.find((row) => row && row.release_id === pinned);
     // A trial install of a pending release is the person's choice: no offer until a promote republishes it.
     if (pinnedRow && pinnedRow.pending && !releases.some((row) => row && row.rollback_target_release_id === pinned)) return;
+
+    const checkedOff = new Map();
+    for (const item of Array.isArray(sidecar.setup) ? sidecar.setup : []) {
+      if (item && typeof item.name === "string") checkedOff.set(item.name, item);
+    }
+    // A check off records the check it stood for; one without it (an older sidecar) counts by name.
+    const met = (item) => {
+      const record = checkedOff.get(item.name);
+      return record !== undefined && (!("check" in record) || (record.check ?? null) === (item.check ?? null));
+    };
+    const unmet = requiredBy(releases, head.release_id).filter((item) => !met(item));
+    if (unmet.length > 0) {
+      const list = unmet.map((item) => `  ${item.name} (${item.kind})${item.check ? `: ${item.check}` : ""}`).join("\n");
+      const message =
+        `Reef harness update available (${head.release_id}), but it requires setup first:\n${list}\n` +
+        "Run reef-pi setup, then start reef-pi again.";
+      if (ctx.hasUI) ctx.ui.notify(message, "warning");
+      else console.error(message);
+      return;
+    }
 
     const instruction =
       `curl -fsS -H 'x-reef-scenario: ${scenario}' ` +

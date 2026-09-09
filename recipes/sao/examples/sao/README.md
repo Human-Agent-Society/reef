@@ -202,7 +202,10 @@ The integration reproduces:
 - one rollout per training step, with no comparison group and no
   slowest-sample barrier (`batch_size: 1`, `--global-batch-size=1`);
 - a value model colocated with the actor and two critic steps per actor step
-  (`--critic-steps-per-actor=2`);
+  (`--critic-steps-per-actor=2`), trained at the paper's value learning rate
+  of `5e-6` (`--critic-lr=5e-6`) with the paper's 10-step value warmup
+  (`--num-critic-only-steps=10`: the first ten rollout steps fit the
+  zero-initialized value head before any policy update);
 - value targets from Monte-Carlo returns (λ = 1) and policy advantages from
   the length-adaptive λ with α = 1.5, built by skip-observation GAE in the
   training backend, so the Reef payload carries no advantages;

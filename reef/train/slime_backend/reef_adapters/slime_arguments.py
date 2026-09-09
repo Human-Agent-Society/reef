@@ -51,6 +51,12 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     )
     parser.add_argument("--critic-save", type=str, default=None)
     parser.add_argument(
+        "--critic-lr",
+        type=float,
+        default=None,
+        help="Learning rate for the critic role; unset inherits --lr.",
+    )
+    parser.add_argument(
         "--custom-pg-loss-function-path",
         type=str,
         default=None,

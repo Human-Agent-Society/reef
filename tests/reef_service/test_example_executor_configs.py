@@ -16,6 +16,7 @@ SERVICE_CONFIGS = (
     "recipes/basic/external-provider.yaml",
     "recipes/openclawrl/examples/openclawrl/serve.yaml",
     "recipes/sao/examples/sao/serve.yaml",
+    "recipes/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",
@@ -31,6 +32,7 @@ EVOLUTION_CONFIGS = (
 
 TRAINING_CONFIGS = (
     "recipes/sao/examples/sao/serve.yaml",
+    "recipes/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
 )
@@ -52,12 +54,13 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert service_executor_selection(config, service).settings.backend == "uni"
     assert not services[0].get("depends_on")
     assert services[1]["depends_on"] == ["slime-driver"]
-    assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in path.with_name("run.sh").read_text()
+    if "coral" not in relative:
+        assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in path.with_name("run.sh").read_text()
     if "tttd" in relative:
         assert config["training"]["num_gpus"] == 2
         assert "--actor-num-gpus-per-node=${training.num_gpus}" in services[0]["command"]
         assert "--colocate" in services[0]["command"]
-    else:
+    elif "sao" in relative:
         assert "--actor-num-gpus-per-node=1 --rollout-num-gpus=1" in config["training"]["slime_flags"]
 
 

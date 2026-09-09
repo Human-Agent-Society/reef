@@ -22,6 +22,7 @@ reef:
   agent_record_dir: .reef/agent-record
 
 sglang:
+  # This standalone server is not scheduled by Ray; select its GPU here.
   cuda_visible_devices: "0"
   port: "30000"
 
