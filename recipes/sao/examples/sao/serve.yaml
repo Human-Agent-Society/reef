@@ -78,6 +78,14 @@ training:
   # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)
   # automatically. --eps-clip / --eps-clip-high are the mask's bounds.
   # Reef derives architecture flags from the HF config.
+  #
+  # Value-model settings are the paper's (Section 4.1): the critic trains at
+  # 5e-6 against the 1e-6 policy lr, and the first 10 rollout steps train the
+  # critic only. The value head starts from zero, so without the warmup the
+  # first actor steps train on advantages built from an unfitted critic —
+  # the cold-start problem the paper's value-training designs exist to avoid.
+  # Warmup steps still commit one training release per rollout; the actor's
+  # weights first move on step 11.
   slime_flags: >-
     --padded-vocab-size=151936
     --position-embedding-type=rope
@@ -92,6 +100,8 @@ training:
     --use-critic
     --eps-clip=0.3 --eps-clip-high=5.0
     --critic-steps-per-actor=2
+    --critic-lr=5e-6
+    --num-critic-only-steps=10
     --sao-length-adaptive-lambda --sao-lambda-alpha=1.5
     --gamma=1.0 --lambd=1.0
     --entropy-coef=0.0 --n-samples-per-prompt=1
