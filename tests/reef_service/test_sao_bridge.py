@@ -449,6 +449,7 @@ def _install_slime_parser_stubs() -> None:
     ``test_sao_configs._install_slime_parser_stubs``); inside the full Slime
     image the real modules win.
     """
+    import importlib.machinery
     import sys
     import types
 
@@ -467,6 +468,11 @@ def _install_slime_parser_stubs() -> None:
             __import__(name)
         except ImportError:
             module = types.ModuleType(name)
+            # A bare ModuleType has __spec__ None, and these stubs outlive the
+            # test that installed them. Anything later asking the import system
+            # about the name -- accelerate probes wandb this way on its way in
+            # from peft -- then raises instead of answering.
+            module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
             for attr, value in attrs.items():
                 setattr(module, attr, value)
             sys.modules[name] = module

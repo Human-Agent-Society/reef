@@ -181,6 +181,46 @@ is admitted the same way. It enters the release chain only if
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
 
+What a published adapter contains
+---------------------------------
+
+Every accepted update publishes an adapter-only directory, never a merged or
+full-model checkpoint. That is what makes durable-by-default affordable: a
+rank-32 adapter is megabytes where the base is gigabytes, so
+``checkpoint_every_n_versions`` stays at 1 and the release chain keeps every
+revision instead of sampling them.
+
+.. code:: text
+
+   adapter_config.json          standard PEFT config: peft_type, r, lora_alpha,
+                                target_modules, lora_dropout, base_model_name_or_path
+   adapter_model.safetensors    the adapter tensors, and only those
+   reef-adapter.json            Reef's provenance sidecar
+
+The first two files are a plain Hugging Face PEFT adapter, so a published
+revision loads outside Reef with nothing but ``transformers`` and ``peft``:
+
+.. code:: python
+
+   from peft import PeftModel
+   from transformers import AutoModelForCausalLM
+
+   base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
+   model = PeftModel.from_pretrained(base, "/path/to/checkpoint-4")
+
+``reef-adapter.json`` is what makes a revision auditable rather than merely
+loadable. It records the base model and the digests of its tokenizer and
+chat-template files, the PEFT settings the export claims to have written, the
+dtype of the tensors actually written, the scenario and step that produced it,
+and a SHA-256 for each PEFT file. PEFT loaders ignore files they do not
+recognize, so carrying it costs no portability.
+
+Reef checks the sidecar whenever one is present: a digest that no longer
+matches its file, a config the sidecar contradicts, or a covered file that is
+missing all refuse the artifact rather than serving weights nobody can account
+for. Adapters from elsewhere carry no sidecar and are admitted without one — a
+deployment that should serve only its own exports can require it.
+
 Connect your agent
 ------------------
 

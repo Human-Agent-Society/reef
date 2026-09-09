@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sys
@@ -65,6 +66,79 @@ def test_lora_checkpoint_is_readable_by_peft_without_base_weights(tmp_path) -> N
     from peft.utils.save_and_load import load_peft_weights
 
     assert set(load_peft_weights(output, device="cpu")) == set(saved)
+
+
+def test_lora_checkpoint_records_auditable_provenance(tmp_path) -> None:
+    peft = pytest.importorskip("peft")
+    base = tmp_path / "Qwen3-8B"
+    base.mkdir()
+    (base / "tokenizer_config.json").write_text('{"chat_template": "x"}', encoding="utf-8")
+    output = tmp_path / "checkpoint-4"
+    tensors = [
+        ("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4, dtype=torch.bfloat16)),
+        ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
+    ]
+
+    save_lora_adapter_to_path(
+        _args(megatron_lora_alpha=32, hf_checkpoint=str(base)),
+        output,
+        tensors,
+        scenario="math",
+        scenario_step=4,
+    )
+
+    document = json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))
+    assert document["schema"] == 1
+    assert document["source"] == {"scenario": "math", "scenario_step": 4}
+    assert document["dtype"] == "bfloat16"
+    assert document["peft"]["r"] == 32
+    assert document["base_model"]["name_or_path"] == str(base)
+    # The base checkpoint owns the tokenizer; the adapter records which one it
+    # was fit against so a later base swap is visible.
+    assert set(document["base_model"]["tokenizer"]) == {"tokenizer_config.json"}
+
+    config_bytes = (output / "adapter_config.json").read_bytes()
+    assert document["files"]["adapter_config.json"] == hashlib.sha256(config_bytes).hexdigest()
+    weight_bytes = (output / "adapter_model.safetensors").read_bytes()
+    assert document["files"]["adapter_model.safetensors"] == hashlib.sha256(weight_bytes).hexdigest()
+
+    # The sidecar must not cost portability: PEFT ignores files it does not know.
+    assert peft.PeftConfig.from_pretrained(output).r == 32
+
+
+def test_lora_checkpoint_provenance_passes_reefs_own_validator(tmp_path) -> None:
+    """Export and admission are one contract, so the writer must satisfy the reader."""
+    pytest.importorskip("safetensors.torch")
+    from reef.artifact import Artifact, PEFTValidator
+
+    base = tmp_path / "Qwen3-8B"
+    base.mkdir()
+    output = tmp_path / "checkpoint-0"
+    save_lora_adapter_to_path(
+        _args(megatron_lora_alpha=32, hf_checkpoint=str(base)),
+        output,
+        [("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4))],
+        scenario="math",
+        scenario_step=0,
+    )
+
+    PEFTValidator(str(base), require_provenance=True).validate(Artifact.local(output))
+
+
+def test_lora_checkpoint_records_no_dtype_for_a_mixed_export(tmp_path) -> None:
+    """One recorded dtype would be a claim an auditor could not rely on."""
+    pytest.importorskip("safetensors.torch")
+    output = tmp_path / "checkpoint-0"
+    save_lora_adapter_to_path(
+        _args(megatron_lora_alpha=32),
+        output,
+        [
+            ("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4, dtype=torch.float32)),
+            ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
+        ],
+    )
+
+    assert json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))["dtype"] is None
 
 
 def test_lora_checkpoint_rejects_base_tensors(tmp_path) -> None:
