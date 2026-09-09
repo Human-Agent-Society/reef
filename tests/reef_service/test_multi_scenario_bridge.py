@@ -217,6 +217,34 @@ def test_staleness_counts_only_the_scenarios_own_publications(tmp_path, _local_r
 
 
 @pytest.mark.unit
+def test_evidence_outlives_the_eviction_of_the_adapter_that_produced_it(tmp_path, _local_ray_get) -> None:
+    # Issue #26's last open item asked whether the residency window has to be
+    # sized against the staleness bound, the way AReaL ties lora_keep_versions
+    # to max_head_offpolicyness. It does not: a Reef sample carries its own
+    # rollout_log_probs and producing runtime load ID, so admission is sequence
+    # arithmetic over recorded data and never reaches for the producing engine.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # engine inc:1
+    assert _run(actor, _job("a", 1, "inc:1")).outcome == "complete"  # engine inc:2
+
+    # One slot, so publishing inc:2 unloaded the adapter that served inc:1.
+    assert manager.engine.unloaded == [scenario_adapter_name("a", "inc:1")]
+    assert actor.health()["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:2"]
+
+    # A rollout that inc:1 produced is one publication behind and its adapter
+    # is gone. The staleness bound alone decides: refused at zero lag,
+    # admitted at one, with nothing reloaded either way.
+    assert _run(actor, _job("a", 2, "inc:1")).outcome == "stale"
+    admitted = _run(actor, _job("a", 2, "inc:1", max_staleness=1))
+    assert admitted.outcome == "complete"
+    assert manager.engine.unloaded == [
+        scenario_adapter_name("a", "inc:1"),
+        scenario_adapter_name("a", "inc:2"),
+    ]
+
+
+@pytest.mark.unit
 def test_per_scenario_jobs_must_name_their_scenario(tmp_path, _local_ray_get) -> None:
     actor, _, _, _ = _actor(tmp_path, _EngineVersion(0))
     payload = _job("a", 0, "inc:0")

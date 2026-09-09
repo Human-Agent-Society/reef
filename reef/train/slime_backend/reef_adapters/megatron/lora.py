@@ -75,6 +75,16 @@ def lora_engine_slots(args: Namespace) -> int:
     here. That refusal is deliberate — evicting a serving peer would route its
     next request to an adapter the engine no longer holds, and nothing reloads
     it on demand.
+
+    Do not size this against ``max_staleness``. AReaL ties
+    ``lora_keep_versions`` to its staleness bound because its off-policy
+    correction scores samples through the producing adapter, which must
+    therefore stay loaded. Reef records ``rollout_log_probs`` and the
+    producing runtime load ID on the sample itself, so admission is sequence
+    arithmetic over recorded data: evidence stays admissible for exactly as
+    long as the bound says, whether or not the adapter that produced it is
+    still resident. The scenario count sizes this; the staleness bound does
+    not.
     """
 
     value = getattr(args, "max_loaded_loras", None)
