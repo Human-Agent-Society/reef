@@ -533,13 +533,20 @@ adapter's schema.
 after the notice: the ``code_extension`` ``reef-requests``
 (`reef/harness/adapters/pi/requests.ts <../../reef/harness/adapters/pi/requests.ts>`__:
 the ``/reef-harness <request>`` command, which files the request with
-``POST /reef/train`` in manual mode, leaves captured receipts available for
-feedback, and registers nothing under ``PI_OFFLINE``) and the
+``POST /reef/train`` (the scenario runs in ``manual`` or ``hybrid``), leaves
+captured receipts available for feedback, and registers nothing under
+``PI_OFFLINE``) and the
 ``skill`` ``reef-pi-extension-api`` (`reef/harness/adapters/pi/pi_extension_api.md
 <../../reef/harness/adapters/pi/pi_extension_api.md>`__, the pi extension
 API reference the service proposer reads before it writes an extension). The
+same extension's second command, ``/reef-versions [step]``, lists the release
+chain with each step's verdict and request, prints a step's page (``GET
+/reef/harness/releases/{step}/page``) and, for a pending release, the promote
+action and a trial install command, and ``/reef-versions <step> promote`` runs
+the promote after a confirmation. The
 agent only asks; the writing happens on the service, where the evolve step
-hands the request to the recipe's ``propose`` and settles it with the step.
+hands the request to the recipe's ``propose`` and the commit records it
+under ``training_request``, the merged ``requires`` list included.
 Asking needs no extension: ``reef-<adapter> harness "<request>"`` is a
 wrapper subcommand on every adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in
@@ -553,3 +560,14 @@ tutorial's pi deployment
 ``evolution.review_kinds: [code_extension]`` beside ``requests: true`` and
 ``version_check: true``: review is the boundary, and a release that touches
 an extension waits for a promote.
+
+A request handed to ``propose`` under ``requests`` carries ``requires``
+beside its text, what the person said the change needs from their machine
+as ``{name, kind, check}`` items, and the method may add items of the same
+shape to the mapping when the change it wrote needs something of its own
+(the tutorial's proposer asks the served model for a ``{"requires": [...]}``
+object beside the entries); the backend merges them by name into the
+commit's ``training_request.requires`` after the shape and text screens
+admission runs (a bad item of the method's is dropped alone), and the list
+reaches the releases row, the manifest, the install script's refusal and
+``reef-<adapter> setup``, never a check on the service.

@@ -1,6 +1,6 @@
 # Harness evolution quickstart
 
-This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a composition tree of nodes, a proposal is one gated tree mutation, and a winning mutation publishes as a versioned artifact any client can pull. The proposer is the served model itself: it reads the current skill nodes and its own failing requests and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
+This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a composition tree of nodes, a proposal is one gated tree mutation, and a winning mutation publishes as a versioned artifact any client can pull. The proposer is the served model itself: it reads the current skill nodes and its own failing requests, each with the score and feedback its report carried, and proposes one skill mutation as a strict JSON object. `evaluate` grades real headless episodes on a small fixed task set by exact final answer, so a proposal only publishes when it makes previously failing tasks pass their episodes.
 
 The pinned paper reproduction built on this mechanism lives at `recipes/skillclaw/`.
 ## Directory layout
@@ -99,7 +99,7 @@ when migrating to the new structure. Conflicting resource values are rejected.
 
 ## Keep a deployment running
 
-Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
+Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed. `REEF_PROPOSER_TIMEOUT_S` caps one proposer call in seconds (60 for a failure step and 120 for a request by default) and `REEF_PROPOSER_MAX_TOKENS` its reply (2048 and 4096); raise both for a local thinking model, which answers in minutes and spends the reply budget on its reasoning first.
 [deployment.yaml](configs/deployment.yaml) uses the same variable for serving and
 evaluation. From the repository root, after the source installation and with `pi`
 on PATH, replace the model ID and API key below with your provider's values:
@@ -150,7 +150,7 @@ Pick a model that fails at least one task and still writes the strict JSON mutat
 
 1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint lives only on serve.yaml's `reef` section (`upstream_url`, `upstream_api_key`, `upstream_model`) and the recipe names its model as `model.path`; Reef hands the endpoint and that name to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
 2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evolve gate grades episodes, and the score is reported against the receipt.
-3. Only failures batch (`max_score: 0.0`, the SkillClaw window), and `batch_size: 1` makes every failing report one evolve step: `propose` sends the failing requests and current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
+3. Only failures batch (`max_score: 0.0`, the SkillClaw window), and `batch_size: 1` makes every failing report one evolve step: `propose` sends the failing requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
 4. `run.py` pulls `GET /reef/harness` and prints the gate metrics and the evolved `SKILL.md` files. Point any pi at the pulled tree, with its model set to Reef, and it carries the learned skill.
 
 ## Native variant

@@ -235,6 +235,8 @@ current harness on the tutorial's three coding tasks and publishes it only if
 it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
 tasks and evaluation.
 
+To ask for a harness change in plain words and see the whole path from the ask to the install, run the [harness requests tutorial](tutorials/harness-requests/README.md).
+
 
 ## Recipes and examples
 

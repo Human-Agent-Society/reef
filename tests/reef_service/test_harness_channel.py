@@ -748,8 +748,13 @@ def test_install_script_golden_structure() -> None:
     script re-checks after writing.
     """
     files = {"pi-agent/AGENTS.md": "hello\n"}
+    # The static record the script writes and hashes; ``setup`` is merged in at install time, outside the hash.
     sidecar = (
-        json.dumps({"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}, indent=2) + "\n"
+        json.dumps(
+            {"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"], "requires": []},
+            indent=2,
+        )
+        + "\n"
     )
     golden = (
         r"""#!/bin/sh
@@ -765,6 +770,8 @@ PREFIX="${2:-${REEF_HARNESS_PREFIX:-$HOME/.local/share/reef-harness}/pi}"
 BINARY="$PREFIX/node_modules/.bin/pi"
 CHECKSUM="@CHECKSUM@"
 SIDECAR_CHECKSUM="@SIDECAR_CHECKSUM@"
+REQUIRES='[]'
+FALLBACK=''
 
 if command -v sha256sum >/dev/null 2>&1; then
     sha256() { sha256sum | cut -d' ' -f1; }
@@ -774,6 +781,50 @@ else
     echo 'reef: neither sha256sum nor shasum found' >&2
     exit 1
 fi
+
+# The sidecar's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
+sidecar_tool() {
+    python3 - "$@" <<'REEF_SIDECAR_TOOL_EOF'
+import hashlib, json, sys
+mode, path = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as handle:
+        record = json.load(handle)
+except (OSError, ValueError):
+    record = {}
+if not isinstance(record, dict):
+    record = {}
+setup = [item for item in record.get("setup") or [] if isinstance(item, dict) and item.get("name")]
+if mode == "static":
+    # The record without the check offs is what SIDECAR_CHECKSUM was baked from.
+    record.pop("setup", None)
+    print(hashlib.sha256((json.dumps(record, indent=2) + "\n").encode("utf-8")).hexdigest())
+elif mode == "gate":
+    checked = {item["name"]: item for item in setup}
+    def met(item):
+        # A check off records the check it stood for; one without it (an older sidecar) counts by name.
+        record = checked.get(item["name"])
+        return record is not None and ("check" not in record or record.get("check") == item.get("check"))
+    unmet = [item for item in json.loads(sys.argv[3]) if not met(item)]
+    if unmet:
+        print("reef: this release requires:", file=sys.stderr)
+        for item in unmet:
+            check = item.get("check")
+            print("    " + item["name"] + " (" + item["kind"] + ")" + (": " + check if check else ""), file=sys.stderr)
+        fallback = "; with nothing set up yet, install ?release_id=" + sys.argv[4] + " first: it requires nothing" if sys.argv[4] else ""
+        print("reef: run reef-pi setup, then install again" + fallback, file=sys.stderr)
+        sys.exit(1)
+elif mode == "carry":
+    print(json.dumps(setup))
+elif mode == "merge":
+    record["setup"] = json.loads(sys.argv[3])
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, indent=2) + "\n")
+REEF_SIDECAR_TOOL_EOF
+}
+
+# The gate runs first of all: nothing is installed or written while an item is not checked off (reef-pi setup).
+[ "$REQUIRES" = "[]" ] || sidecar_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
 
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
 installed=""
@@ -812,11 +863,13 @@ current=""
 sidecar=""
 if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
     current="$(compose_stream | sha256)"
-    sidecar="$(sha256 < "$DEST/.reef-harness-release")"
+    sidecar="$(sidecar_tool static "$DEST/.reef-harness-release")"
 fi
 if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then
     echo "reef: composition already current"
 else
+    # The check offs the sidecar on disk holds, carried into the new sidecar below.
+    SETUP="$(sidecar_tool carry "$DEST/.reef-harness-release")"
     # Prune the files a previous install's sidecar recorded that this
     # composition lacks, exactly like the stdlib client pull. The sidecar
     # is json.dumps at indent 2, so every file entry is one four-space
@@ -848,6 +901,7 @@ hello
 # Usage: reef-pi -p "fix the bug"     # run the agent (receipts captured)
 #        reef-pi report --score 0 --feedback "..."  # report last run's receipts
 #        reef-pi harness "what the harness should do"  # ask reef for a change
+#        reef-pi setup  # check off what the newest release requires of you
 export REEF_HARNESS_BINARY="$BINARY_ABS"
 export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
 export REEF_HARNESS_SCENARIO="code-repair"
@@ -867,9 +921,10 @@ REEF_WRAPPER_EOF
         *":$HOME/.local/bin:"*) ;;
         *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
     esac
-    # The same sidecar the stdlib client pull writes: pulled version and file list.
+    # The same sidecar the stdlib client pull writes, plus requires and the check offs carried over.
 cat > "$DEST/.reef-harness-release" <<'@SIDECAR_EOF@'
 @SIDECAR_JSON@@SIDECAR_EOF@
+    sidecar_tool merge "$DEST/.reef-harness-release" "$SETUP"
 fi
 
 echo "run:     $DEST/reef-pi"
@@ -910,7 +965,14 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
     for relative, text in HOSTILE_FILES.items():
         assert (dest / relative).read_bytes() == text.encode("utf-8")
     sidecar = dest / HARNESS_RELEASE_SIDECAR
-    record = {"release_id": "v-test", "content_id": "content-test", "files": sorted(HOSTILE_FILES)}
+    # The client pull's record plus what the release requires (nothing here) and the check offs carried over (none).
+    record = {
+        "release_id": "v-test",
+        "content_id": "content-test",
+        "files": sorted(HOSTILE_FILES),
+        "requires": [],
+        "setup": [],
+    }
     assert sidecar.read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
     # Rerun on a current machine: still exit 0, writes nothing at all (the
     # read-only bits make any write attempt, sidecar included, a hard fail).
@@ -1094,7 +1156,14 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
     }
     assert on_disk == {"pi-agent/AGENTS.md", "reef-pi"}
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n"
-    record = {"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"]}
+    # Neither release requires anything, so the record carries the two empty lists beside the client pull's fields.
+    record = {
+        "release_id": "v1",
+        "content_id": "content-v1",
+        "files": ["pi-agent/AGENTS.md"],
+        "requires": [],
+        "setup": [],
+    }
     assert (dest / HARNESS_RELEASE_SIDECAR).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
 
 
@@ -1187,6 +1256,36 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
             assert f'"baseUrl": "http://{host}/v1"' in script
             assert '"id": "demo-model"' in script  # the recipe's runtime model, since no gate ran yet
             assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_install_script_binds_to_the_forwarded_host_when_a_gateway_fronts_reef(tmp_path) -> None:
+    """Behind a gateway the client reached ``https://api.example.test``, not this process: the
+    binding takes the forwarded host and scheme, so reef-pi calls back through the gateway."""
+    seed = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed)
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_backend=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/reef/harness/install",
+                params={"adapter": "pi"},
+                headers={
+                    "x-reef-scenario": "delivery",
+                    "x-forwarded-host": "api.example.test",
+                    "x-forwarded-proto": "https",
+                },
+            )
+            assert response.status == 200
+            script = await response.text()
+            assert '"baseUrl": "https://api.example.test/v1"' in script
+            assert f"{client.host}:{client.port}" not in script
         finally:
             await client.close()
 
@@ -1665,3 +1764,163 @@ def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_
             await client.close()
 
     asyncio.run(run())
+
+
+def _checked(*names: str) -> list[dict]:
+    """Check offs as reef-pi setup records them, one per name."""
+    return [{"name": name, "checked_at": float(index)} for index, name in enumerate(names, start=1)]
+
+
+def _files_under(dest: Path) -> set[str]:
+    return {str(path.relative_to(dest)) for path in dest.rglob("*") if path.is_file()}
+
+
+@pytest.mark.unit
+def test_install_script_refuses_a_release_whose_requires_are_not_checked_off_and_writes_nothing(tmp_path) -> None:
+    """The setup list is the message and no check runs (with no fallback release given the message ends there);
+    the release that requires nothing installs; once the sidecar checks every item off the release installs with
+    ``requires`` and the check offs carried over, and a rerun is current."""
+    prefix, env = _pinned_env(tmp_path)
+    dest = tmp_path / "dest"
+    ran = tmp_path / "ran"
+    requires = [
+        {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
+        {"name": "notify", "kind": "permission", "check": f"touch {ran}"},
+    ]
+    v2 = tmp_path / "install-v2.sh"
+    v2.write_text(
+        render_install_script(
+            descriptor=get_adapter("pi"),
+            files={"pi-agent/AGENTS.md": "new rules\n"},
+            release_id="v2",
+            content_id="content-v2",
+            requires=requires,
+        )
+    )
+    result = _run_install(v2, dest, prefix, env)
+    assert result.returncode == 1
+    assert result.stderr.splitlines()[-4:] == [
+        "reef: this release requires:",
+        "    TWILIO_SID (env): TWILIO_SID",
+        f"    notify (permission): touch {ran}",
+        "reef: run reef-pi setup, then install again",
+    ]
+    assert _files_under(dest) == set() and not ran.exists()
+    # The refusal runs before the first mkdir: a refused run creates no directory at all.
+    assert not dest.exists()
+    # The parent requires nothing and installs; its sidecar carries the two empty lists.
+    v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "old rules\n"}, "v1")
+    assert _run_install(v1, dest, prefix, env).returncode == 0
+    sidecar = dest / HARNESS_RELEASE_SIDECAR
+    assert json.loads(sidecar.read_text())["requires"] == [] and json.loads(sidecar.read_text())["setup"] == []
+    # One item checked off: the refusal names only the other, and the parent's tree stays.
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar.write_text(json.dumps({**record, "setup": _checked("TWILIO_SID")}, indent=2) + "\n", encoding="utf-8")
+    result = _run_install(v2, dest, prefix, env)
+    assert result.returncode == 1
+    assert "TWILIO_SID" not in result.stderr and f"    notify (permission): touch {ran}" in result.stderr
+    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n" and not ran.exists()
+    # Every item checked off (plus one no release named): the install writes the tree and carries them all over.
+    sidecar.write_text(
+        json.dumps({**record, "setup": _checked("TWILIO_SID", "notify", "old")}, indent=2) + "\n", encoding="utf-8"
+    )
+    result = _run_install(v2, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"new rules\n" and not ran.exists()
+    written = {
+        "release_id": "v2",
+        "content_id": "content-v2",
+        "files": ["pi-agent/AGENTS.md"],
+        "requires": requires,
+        "setup": _checked("TWILIO_SID", "notify", "old"),
+    }
+    assert sidecar.read_bytes() == (json.dumps(written, indent=2) + "\n").encode("utf-8")
+    # A rerun sees the check offs outside the hash and writes nothing.
+    sidecar.chmod(0o444)
+    again = _run_install(v2, dest, prefix, env)
+    assert again.returncode == 0, again.stderr
+    assert "already current" in again.stdout
+    sidecar.chmod(0o644)
+    # Back to the parent: the check offs survive a release that requires nothing.
+    assert _run_install(v1, dest, prefix, env).returncode == 0
+    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert record["release_id"] == "v1" and record["requires"] == []
+    assert record["setup"] == _checked("TWILIO_SID", "notify", "old")
+
+
+@pytest.mark.unit
+def test_install_script_embeds_requires_with_hostile_text_and_refuses_a_bad_list() -> None:
+    """The list rides single quoted, so a check with quotes and expansion syntax lands verbatim; the renderer
+    admits only the shape the training route admits."""
+    check = "osascript -e 'display notification \"$HOME\"' && echo `done`"
+    script = render_install_script(
+        descriptor=get_adapter("pi"),
+        files={"pi-agent/AGENTS.md": "hello\n"},
+        release_id="v1",
+        content_id="content-v1",
+        requires=[{"name": "notify", "kind": "permission", "check": check, "extra": "dropped"}],
+    )
+    expected = json.dumps([{"name": "notify", "kind": "permission", "check": check}])
+    assert f"REQUIRES='{expected.replace(chr(39), chr(39) + chr(92) + chr(39) * 2)}'" in script
+    assert '"requires": [' in script and '"extra"' not in script
+    assert "reef-pi setup  # check off what the newest release requires of you" in script
+    with pytest.raises(ValueError, match=r"requires\[0\]\.kind must be one of"):
+        render_install_script(
+            descriptor=get_adapter("pi"),
+            files={"pi-agent/AGENTS.md": "hello\n"},
+            release_id="v1",
+            content_id="content-v1",
+            requires=[{"name": "x", "kind": "secret"}],
+        )
+
+
+@pytest.mark.unit
+def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_and_a_changed_check(tmp_path) -> None:
+    """The gate runs first of all: with the binary absent a refused run calls no vendor install and makes no
+    directory, and the refusal's last line names the release that installs with nothing set up. A check off
+    whose recorded check is not the item's counts as unmet; the same check, or none recorded, counts by name."""
+    prefix = tmp_path / "prefix"
+    shim = tmp_path / "shim"
+    npm_log = tmp_path / "npm.log"
+    _write_executable(shim / "npm", f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\nexit 0\n')
+    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    dest = tmp_path / "dest"
+    v2 = tmp_path / "install-v2.sh"
+    v2.write_text(
+        render_install_script(
+            descriptor=get_adapter("pi"),
+            files={"pi-agent/AGENTS.md": "new rules\n"},
+            release_id="v2",
+            content_id="content-v2",
+            requires=[{"name": "notify", "kind": "permission", "check": "true"}],
+            fallback_release_id="v1",
+        )
+    )
+    assert "FALLBACK='v1'" in v2.read_text()
+    result = _run_install(v2, dest, prefix, env)
+    assert result.returncode == 1
+    assert result.stderr.splitlines()[-3:] == [
+        "reef: this release requires:",
+        "    notify (permission): true",
+        "reef: run reef-pi setup, then install again; with nothing set up yet, install ?release_id=v1 first: "
+        "it requires nothing",
+    ]
+    assert not dest.exists() and not prefix.exists() and not npm_log.exists()
+    # The binary in place, the check off decides: another recorded check is unmet, the same or none is met.
+    _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
+    dest.mkdir()
+    sidecar = dest / HARNESS_RELEASE_SIDECAR
+    for record, installs in (
+        ({"name": "notify", "checked_at": 1.0, "check": "false"}, False),
+        ({"name": "notify", "checked_at": 1.0, "check": "true"}, True),
+        ({"name": "notify", "checked_at": 1.0}, True),
+    ):
+        sidecar.write_text(json.dumps({"release_id": "v1", "setup": [record]}, indent=2) + "\n", encoding="utf-8")
+        result = _run_install(v2, dest, prefix, env)
+        assert (result.returncode == 0) is installs, result.stderr
+        if installs:
+            assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"new rules\n"
+            assert json.loads(sidecar.read_text(encoding="utf-8"))["setup"] == [record]
+        else:
+            assert "    notify (permission): true" in result.stderr and _files_under(dest) == {sidecar.name}
+    assert not npm_log.exists()

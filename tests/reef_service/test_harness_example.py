@@ -4,6 +4,7 @@ same serve.yaml materialization run.sh performs."""
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import sys
@@ -68,11 +69,13 @@ class Model:
     def __init__(self, reply: str | None = None, failure: Exception | None = None) -> None:
         self.reply, self.failure, self.calls = reply, failure, 0
         self.prompt: str | None = None
+        self.params: dict[str, object] = {}
         self.served = self
 
     def chat(self, messages, **params):
         self.calls += 1
         self.prompt = messages[-1]["content"]
+        self.params = dict(params)
         if self.failure is not None:
             raise self.failure
         return self.reply
@@ -149,6 +152,49 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
+#: A report's feedback beside its request: what the reporter said was wrong, which the payload alone cannot show.
+REPORTED = (
+    TraceSample(
+        "a2",
+        {"messages": [{"role": "user", "content": "fix the failing test in auth.py"}]},
+        0.0,
+        feedback="missed the empty-token case",
+    ),
+)
+
+
+def test_propose_shows_each_failure_with_its_report_score_and_feedback(evolution) -> None:
+    """The step hands the proposer TraceSamples whose ``feedback`` is the report's text verbatim; a proposer that
+    serialized the payload alone would learn what the model answered but never why it was scored down."""
+    model = canned(proposal("answer-style"))
+    evolution.propose(NODES, REPORTED + SAMPLES, model)
+    prompt = model.prompt
+    assert "fix the failing test in auth.py" in prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+    assert '"feedback": null' in prompt  # SAMPLES' report carried none: the key stays, so the shape is one
+    assert prompt.index("[BEGIN") < prompt.index("missed the empty-token case") < prompt.index("[END")
+    assert "addressing what the feedback names" in prompt
+
+
+def test_propose_shows_the_feedback_beside_the_failures_a_request_carries(evolution) -> None:
+    model = canned(proposal("run-tests"))
+    evolution.propose(NODES, REPORTED, model, requests=(REQUEST,))
+    prompt = model.prompt
+    assert "Recent failing requests, for context (each with its report's score and feedback" in prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+
+
+def test_native_propose_shows_each_failure_with_its_report_score_and_feedback(native_evolution) -> None:
+    model = canned(
+        json.dumps({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "x"}})
+    )
+    native_evolution.propose(NODES, REPORTED, model)
+    prompt = model.prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+    assert prompt.index("[BEGIN") < prompt.index("missed the empty-token case") < prompt.index("[END")
+    assert "addressing what the feedback names" in prompt
+
+
 API_SKILL = (
     "skill",
     {"name": "reef-pi-extension-api", "text": "---\nname: reef-pi-extension-api\n---\n# pi API\npi.registerTool"},
@@ -218,6 +264,70 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
     tree = (*NODES, ("code_extension", {"name": "notify", "code": "old"}))
     (mutation,) = evolution.propose(tree, (), canned(fenced), requests=(REQUEST,))
     assert (mutation.op, mutation.id) == ("update", "notify")
+    # The prompt calls the value a kind, and a served model wrote it under that key; both keys read.
+    by_kind = request_reply({"id": "bug-fix-workflow", "kind": "rules", "config": {"text": "Reproduce first."}})
+    (mutation,) = evolution.propose(NODES, (), canned(by_kind), requests=(REQUEST,))
+    assert (mutation.op, mutation.id, mutation.options) == (
+        "create",
+        "bug-fix-workflow",
+        {"name": "rules", "config": {"text": "Reproduce first."}},
+    )
+    # The config fields written beside the id instead of under "config" read the same; a config that is
+    # present but not an object still fails.
+    flat = request_reply({"id": "arithmetic-questions", "kind": "rules", "text": "Answer in one sentence."})
+    (mutation,) = evolution.propose(NODES, (), canned(flat), requests=(REQUEST,))
+    assert (mutation.id, mutation.options) == (
+        "arithmetic-questions",
+        {"name": "rules", "config": {"text": "Answer in one sentence."}},
+    )
+    broken = request_reply({"id": "x", "name": "rules", "config": "Answer in one sentence."})
+    assert evolution.propose(NODES, (), canned(broken), requests=(REQUEST,)) is None
+    # A flattened named kind carries both keys: "kind" is the kind and "name" the entry's own name.
+    flat_skill = request_reply({"id": "plan-first", "kind": "skill", "name": "plan-first", "text": "# plan-first\n"})
+    (mutation,) = evolution.propose(NODES, (), canned(flat_skill), requests=(REQUEST,))
+    assert (mutation.id, mutation.options) == (
+        "plan-first",
+        {"name": "skill", "config": {"name": "plan-first", "text": "# plan-first\n"}},
+    )
+    # The tree lists a rules entry with a null id and a model copies that: the text gives the entry its id.
+    # A named kind with a null id stays refused.
+    null_rules = request_reply({"id": None, "name": "rules", "config": {"text": "Show the command first."}})
+    (mutation,) = evolution.propose(NODES, (), canned(null_rules), requests=(REQUEST,))
+    assert mutation.id == "rules-" + hashlib.sha256(b"Show the command first.").hexdigest()[:8]
+    assert mutation.op == "create"
+    assert mutation.options == {"name": "rules", "config": {"text": "Show the command first."}}
+    null_skill = request_reply({"id": None, "name": "skill", "config": {"text": "# x\n"}})
+    assert evolution.propose(NODES, (), canned(null_skill), requests=(REQUEST,)) is None
+    # An id that is another kind's name would be refused at admission as an existing entry: a rules entry
+    # takes its text's id instead, a named kind is dropped.
+    reused = request_reply({"id": "answer-style", "kind": "rules", "config": {"text": "One sentence."}})
+    (mutation,) = evolution.propose(NODES, (), canned(reused), requests=(REQUEST,))
+    assert (mutation.op, mutation.id) == ("create", "rules-" + hashlib.sha256(b"One sentence.").hexdigest()[:8])
+    reused_named = request_reply({"id": "answer-style", "kind": "agent_command", "config": {"text": "Review."}})
+    assert evolution.propose(NODES, (), canned(reused_named), requests=(REQUEST,)) is None
+
+
+def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
+    """The request path asks with 120 s and 4096 tokens, the failure path with 60 s and 2048, unless
+    REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is
+    ignored rather than turning the step into an error."""
+    monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
+    model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert model.params == {"timeout_s": 120.0, "max_tokens": 4096}
+    model = canned("no json here")
+    evolution.propose(NODES, SAMPLES, model)
+    assert model.params == {"timeout_s": 60.0, "max_tokens": 2048}
+    monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16384")
+    model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert model.params == {"timeout_s": 900.0, "max_tokens": 16384}
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
+    model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert model.params == {"timeout_s": 900.0, "max_tokens": 4096}
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:

@@ -328,7 +328,7 @@ string commands retain their current ``shlex`` parsing.
    services[].ready | a shell command that succeeds once the service is up
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
-   services[].cuda | the value of ``CUDA_VISIBLE_DEVICES`` for this process
+   services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
    services[].env | extra environment variables
 
 The ``training`` section
@@ -339,8 +339,7 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.num_gpus | GPUs handed to the Ray head
-   training.cuda_visible_devices | the devices Ray and Slime may use
+   training.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
    training.checkpoint_dir | where Megatron and HF checkpoints are written
    training.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
