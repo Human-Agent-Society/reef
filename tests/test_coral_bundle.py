@@ -28,18 +28,30 @@ def _record(agent, commit, record_id, *, release=None, prompt=0, completion=0, r
     )
 
 
-def _report(agent, commit, score, *, status="improved", parent=None):
+def _report(agent, commit, score, *, status="improved", parent=None, references=()):
     return AttemptReport(
-        scenario="s", agent_id=agent, commit_hash=commit, score=score, status=status, parent_hash=parent
+        scenario="s",
+        agent_id=agent,
+        commit_hash=commit,
+        score=score,
+        status=status,
+        parent_hash=parent,
+        references=tuple(references),
     )
 
 
 def test_bundle_scores_best_revisions_and_tokens(tmp_path):
+    # The gateway journals each call under the worktree commit it was made
+    # from — the attempt's parent. Reports carry the exact record ids the
+    # watcher resolved; the bundle correlates on those.
     journal = CallJournal(tmp_path / "journal.jsonl")
-    journal.append(_record("a1", "c1", "r1", release="rel-0", prompt=100, completion=50))
-    journal.append(_record("a1", "c1", "r2", release="rel-0", prompt=10, completion=5))
-    journal.append(_record("a1", "c2", "r3", release="rel-1", prompt=20, completion=9))
-    reports = [_report("a1", "c1", 0.4), _report("a1", "c2", 0.9, parent="c1")]
+    journal.append(_record("a1", "seed0000000c", "r1", release="rel-0", prompt=100, completion=50))
+    journal.append(_record("a1", "seed0000000c", "r2", release="rel-0", prompt=10, completion=5))
+    journal.append(_record("a1", "c1", "r3", release="rel-1", prompt=20, completion=9))
+    reports = [
+        _report("a1", "c1", 0.4, parent="seed0000000c", references=("r1", "r2")),
+        _report("a1", "c2", 0.9, parent="c1", references=("r3",)),
+    ]
 
     bundle = build_result_bundle(journal, reports, run_id="run-1")
 
@@ -61,11 +73,26 @@ def test_bundle_scores_best_revisions_and_tokens(tmp_path):
     ]
 
 
+def test_bundle_without_references_falls_back_to_the_parent_coordinate(tmp_path):
+    # A report rebuilt without references (e.g. partial recovery) still
+    # correlates: the journal coordinate is (agent, parent), with the
+    # gateway's 12-char truncation prefix-matching the full parent hash.
+    parent = "f" * 40
+    journal = CallJournal(tmp_path / "journal.jsonl")
+    journal.append(_record("a1", parent[:12], "r1", release="rel-0", prompt=3, completion=1))
+    journal.append(_record("a2", parent[:12], "r-other-agent"))
+    bundle = build_result_bundle(journal, [_report("a1", "c" * 40, 0.5, parent=parent)], run_id="run-1")
+
+    (attempt,) = bundle["attempts"]
+    assert attempt["inference_calls"] == 1
+    assert attempt["inference_record_ids"] == ["r1"]
+
+
 def test_bundle_filters_by_run_and_tolerates_unscored(tmp_path):
     journal = CallJournal(tmp_path / "journal.jsonl")
-    journal.append(_record("a1", "c1", "r1", run="run-1"))
-    journal.append(_record("a1", "c1", "r9", run="run-OTHER"))
-    reports = [_report("a1", "c1", None, status="crashed")]
+    journal.append(_record("a1", "p1", "r1", run="run-1"))
+    journal.append(_record("a1", "p1", "r9", run="run-OTHER"))
+    reports = [_report("a1", "c1", None, status="crashed", parent="p1", references=("r1", "r9"))]
 
     bundle = build_result_bundle(journal, reports, run_id="run-1")
     assert bundle["best_attempt"] is None

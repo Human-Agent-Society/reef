@@ -76,9 +76,16 @@ services:
       --seq-length=16384
       --max-tokens-per-gpu=16384
       --log-probs-chunk-size=512
-    ready_file: ${CORAL_TTT_STATE_DIR}/stack/bridge.ready
+    ready: test -f "$REEF_BRIDGE_READY_FILE"
+    ready_timeout: 3600
+    env:
+      REEF_RAY_NAMESPACE: reef
+      REEF_RAY_ACTOR_NAME: reef-train-bridge
+      CUDA_DEVICE_MAX_CONNECTIONS: "1"
+      NCCL_NVLS_ENABLE: "0"
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready_timeout: 120
     depends_on: [slime-driver]

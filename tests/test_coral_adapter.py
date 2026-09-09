@@ -335,3 +335,26 @@ def test_cursor_separates_sibling_attempts_at_the_same_base(tmp_path):
     assert refs_1 == ["rec-sib1"]
     # cursor 0 gives the coordinate-wide view
     assert journal.record_ids_since(0, "a", "base") == ["rec-sib0", "rec-sib1"]
+
+
+def test_record_ids_for_attempt_matches_truncated_hashes(tmp_path):
+    """The coordinate query: 12-char journal hashes match the full 40-char
+    parent, and the placeholder coordinate never matches anything."""
+    parent = "d" * 40
+    journal = CallJournal(tmp_path / "j.jsonl")
+    for record_id, commit in (("rec-1", parent[:12]), ("rec-2", parent[:12]), ("rec-x", "unknown")):
+        journal.append(
+            CallRecord(
+                request_id=record_id,
+                timestamp="t",
+                scenario="s",
+                agent_id="a",
+                commit_hash=commit,
+                path="/v1/chat/completions",
+                status_code=200,
+                agent_record_id=record_id,
+            )
+        )
+    assert journal.record_ids_for_attempt("a", parent) == ["rec-1", "rec-2"]
+    assert journal.record_ids_for_attempt("a", "unknown") == ["rec-x"]  # exact only
+    assert journal.record_ids_for_attempt("b", parent) == []
