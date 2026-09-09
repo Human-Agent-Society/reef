@@ -298,6 +298,20 @@ class ScenarioFactory:
     def _scenario_key(self, scenario: str) -> str:
         return hashlib.sha256(scenario.encode("utf-8")).hexdigest()
 
+    def state_paths(self, scenario: str) -> tuple[Path, ...]:
+        """The files under ``agent_record_dir`` that are this scenario's alone: its record store and its commit log."""
+        if self._agent_record_dir is None:
+            return ()
+        key = self._scenario_key(scenario)
+        return tuple(
+            self._agent_record_dir / name
+            for name in (f"{key}.sqlite3", f"{key}.sqlite3-wal", f"{key}.sqlite3-shm", f"{key}.commits.jsonl")
+        )
+
+    @property
+    def agent_record_dir(self) -> Path | None:
+        return self._agent_record_dir
+
     def _commit_log_for(self, scenario: str) -> CommitLog | None:
         if self._agent_record_dir is None:
             return None

@@ -475,6 +475,13 @@ class CordisRecipe(Recipe):
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
         return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
 
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""
+        dirs = [self.proposals_path(scenario)]
+        if self.step_record_dir is not None:
+            dirs.append(Path(self.step_record_dir).expanduser().resolve() / scenario)
+        return tuple(dirs)
+
     def proposals_path(self, scenario: str) -> Path:
         """The scenario's proposal inbox: ``proposals_dir`` made absolute, one directory per scenario under it."""
         return Path(self.proposals_dir).expanduser().resolve() / scenario

@@ -8,7 +8,9 @@ handling lives in ``reef.service``; the dispatcher is transport-free.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import shutil
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
@@ -59,6 +61,10 @@ class _PublicationState:
     def record(self, scenario: str, value: Any) -> None:
         with self.lock:
             self.values[scenario] = value
+
+    def forget(self, scenario: str) -> None:
+        with self.lock:
+            self.values.pop(scenario, None)
 
 
 class _ScenarioTrainingError(Exception):
@@ -204,6 +210,55 @@ class Dispatcher:
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
+
+    def delete_scenario(self, scenario: str) -> dict[str, Any]:
+        """Remove a scenario from this deployment and move its own state aside.
+
+        Under the scenario's lock, so no accept or commit interleaves: the
+        training thread and the local worker lose the name, the loaded
+        instance closes, the records and commit log move under
+        ``agent_record_dir/archived``, the recipe's own directories move
+        beside themselves, and the repository registration is archived so
+        the name is free. Artifacts other scenarios share stay.
+        """
+        if "/" in scenario or scenario in ("", ".", ".."):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        with self._registry.lock_for(scenario):
+            if not self._registry.has(scenario):
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            dropped = self._registry.remove(scenario)
+            self._stop_local_backend_worker(scenario)
+            self._publication.forget(scenario)
+            self._record_training_error(scenario, None)
+            if dropped is not None:
+                dropped.close()
+                runtime = dropped.runtime
+                release = getattr(getattr(runtime, "residency", None), "release_scenario", None)
+                if callable(release):
+                    release(scenario)
+            archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
+        self._registry.forget_lock(scenario)
+        return {"scenario": scenario, "archived": archived}
+
+    def _archive_scenario_state(self, scenario: str) -> list[str]:
+        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        moved: list[str] = []
+        record_dir = self._registry.agent_record_dir
+        if record_dir is not None:
+            destination = record_dir / "archived" / f"{hashlib.sha256(scenario.encode('utf-8')).hexdigest()}-{stamp}"
+            for path in self._registry.state_paths(scenario):
+                if path.exists():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(destination / path.name))
+                    moved.append(str(destination / path.name))
+        for directory in self._recipe.scenario_state_dirs(scenario):
+            if directory.exists():
+                destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(directory), str(destination))
+                moved.append(str(destination))
+        return moved
 
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
@@ -423,12 +478,23 @@ class Dispatcher:
                 thread.start()
         worker.ready.set()
 
+    def _stop_local_backend_worker(self, scenario: str) -> None:
+        """Let the scenario's worker thread run out: it re-checks its registration after every wake."""
+        with self._training.lock:
+            worker = self._training.local_workers.pop(scenario, None)
+        if worker is not None:
+            worker.ready.set()
+
+    def _local_backend_worker_registered(self, scenario: str) -> bool:
+        with self._training.lock:
+            return scenario in self._training.local_workers
+
     def _run_local_backend_worker(self, scenario: str, ready: Event) -> None:
         try:
             while True:
                 ready.wait()
                 ready.clear()
-                if self._lifecycle.closed.is_set():
+                if self._lifecycle.closed.is_set() or not self._local_backend_worker_registered(scenario):
                     return
                 self._drain_local_backend(scenario)
         except Exception as exc:
@@ -472,6 +538,9 @@ class Dispatcher:
     def _reload_after_training_failure(self, scenario: str, cause: Exception) -> None:
         current = self._registry.get_optional(scenario)
         if current is None:
+            if not self._registry.has(scenario):
+                # Deleted while its step was in flight: nothing durable to reload.
+                return
             self._registry.reload(scenario)
             return
         self._fail_instruction(current, cause)

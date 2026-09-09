@@ -7,6 +7,8 @@ backend updates model weights.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -43,6 +45,11 @@ class Recipe:
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
+
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """Directories that belong to one scenario alone, archived when the scenario is deleted; none by default."""
+        return ()
+
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
     training_mode: str = config_field("auto")
 

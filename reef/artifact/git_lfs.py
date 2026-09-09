@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import time
 import tempfile
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -578,6 +579,35 @@ class _GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory):
             source_error=True,
         )
         return bool(output)
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        """Rename the scenario's ref into ``refs/reef/archived/<scenario>/<time>`` and drop its work clone.
+
+        The commits stay reachable under the archived ref, so nothing the
+        scenario published is lost; ``refs/reef/base``, ``refs/reef/head`` and
+        the pending releases are shared with other scenarios and stay. Only a
+        local bare repository can be renamed in place.
+        """
+        if not isinstance(self._repository, Path):
+            raise NotImplementedError("archiving a scenario needs a local artifact repository")
+        encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+        archived: list[str] = []
+        ref_name = f"refs/reef/scenarios/{encoded}"
+        if self._repository.exists():
+            client = GitClient(self._work_dir / ".registration-check")
+            git_dir = ("git", "--git-dir", str(self._repository))
+            sha = client.run((*git_dir, "rev-parse", "--verify", "--quiet", ref_name), source_error=True)
+            if sha:
+                stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+                archived_ref = f"refs/reef/archived/{encoded}/{stamp}"
+                client.run((*git_dir, "update-ref", archived_ref, sha), source_error=True)
+                client.run((*git_dir, "update-ref", "-d", ref_name, sha), source_error=True)
+                archived.append(archived_ref)
+        work_dir = self._work_dir / encoded
+        if work_dir.exists():
+            shutil.rmtree(work_dir, ignore_errors=True)
+            archived.append(str(work_dir))
+        return tuple(archived)
 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         if isinstance(self._repository, Path) and not self._repository.exists():

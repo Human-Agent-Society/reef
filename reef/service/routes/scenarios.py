@@ -54,6 +54,10 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         )
         return web.json_response(result)
 
+    async def delete_scenario(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
+        return web.json_response(result)
+
     async def list_releases(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         releases = request_service.dispatcher.list_releases(scenario)
@@ -101,6 +105,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
     app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
+    app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)

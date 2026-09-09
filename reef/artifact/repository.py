@@ -124,6 +124,19 @@ class CachedRepositoryBackendFactory(ABC):
             loaded = {name for name, backend in self._backends.items() if backend.metadata() is not None}
         return tuple(sorted(loaded | set(self._list_persisted_registrations())))
 
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Forget the scenario's backend and move its durable registration aside; what was archived, by name.
+
+        After this the factory answers ``has_registration`` false and
+        ``list_registrations`` without the name, so a later create under the
+        same name starts from the base artifact. Content-addressed storage
+        the scenario shared with others stays.
+        """
+        with self._lock:
+            self._backends.pop(scenario, None)
+            self._registration_misses.pop(scenario, None)
+        return self._archive_persisted_registration(scenario)
+
     @abstractmethod
     def _build_backend(self, scenario: str) -> RepositoryBackend: ...
 
@@ -131,6 +144,10 @@ class CachedRepositoryBackendFactory(ABC):
         return False
 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
+        return ()
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the durable registration aside; nothing to do for a backend that registers in memory only."""
         return ()
 
 
