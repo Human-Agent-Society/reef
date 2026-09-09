@@ -38,7 +38,6 @@ training:
   num_gpus: 2
   steps: 4
   max_new_tokens: 8192
-  cuda_visible_devices: "0,1"
   checkpoint_dir: ${CORAL_TTT_STATE_DIR}/checkpoints
   checkpoint_retention:
     max_storage_fraction: 0.8
@@ -46,14 +45,6 @@ training:
     policy: latest
 
 services:
-  - name: ray-head
-    command: >-
-      ray start --head --node-ip-address=127.0.0.1 --port=6379
-      --include-dashboard=false --num-cpus=32
-      --num-gpus=${training.num_gpus} --disable-usage-stats --block
-    ready: ray health-check --address=127.0.0.1:6379
-    cuda: ${training.cuda_visible_devices}
-
   - name: slime-driver
     command: >-
       "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
@@ -86,8 +77,8 @@ services:
       --max-tokens-per-gpu=16384
       --log-probs-chunk-size=512
     ready_file: ${CORAL_TTT_STATE_DIR}/stack/bridge.ready
-    cuda: ${training.cuda_visible_devices}
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    depends_on: [slime-driver]

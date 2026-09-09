@@ -44,16 +44,17 @@ localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
 shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
 invocation non-interactively.
 
-The cookbook ``recipes/sao/examples/sao/serve.yaml`` declares
-``training.num_gpus: 2`` and ``cuda_visible_devices: "0,1"``.
-``training.num_gpus`` must match the devices you actually expose, and the
-model at ``reef.model_path`` must be present or downloadable.
+The cookbook ``recipes/sao/examples/sao/serve.yaml`` requests one actor GPU
+and one rollout GPU through Slime flags. Reef manages the shared Ray runtime,
+and Slime schedules its model workers there. Its ``run.sh`` defaults the local
+Ray pool to two visible devices; an external cluster controls its own pool.
+The model at ``reef.model_path`` must be present or downloadable.
 
 Start from a config
 -------------------
 
 Each weight-training example ships a complete ``serve.yaml`` that starts the
-three processes in the required order. Copy the closest one and edit it.
+services in the required order and manages the shared Ray runtime. Copy the closest one and edit it.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
   ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
@@ -75,7 +76,7 @@ What to review
    reef.model_path | a local HF model directory or a repo id, downloaded on start
    reef.recipe | the recipe this deployment serves. Recipe fields such as ``batch_size`` sit beside it
    reef.token | the bearer token the service accepts
-   training.num_gpus | GPUs handed to Ray and Slime, with ``training.cuda_visible_devices``
+   training.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
    training.global_batch_size | samples in one optimizer step
    training.checkpoint_dir | where checkpoints land, with the ``reef.artifact_*`` paths
    training.slime_flags | GPU layout, optimizer, sequence length, loss settings
