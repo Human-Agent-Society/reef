@@ -255,6 +255,12 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
             'echo "reef: warning: reef-client and reef-infra are not importable by python3; '
             'install them into the environment that runs the wrapper" >&2'
         ),
+        *(
+            f'command -v {command} >/dev/null 2>&1 || echo "reef: warning: {descriptor.binary} wants {package} '
+            f"({command}) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; "
+            f'install {package} with your package manager" >&2'
+            for command, package in descriptor.client_tools
+        ),
     ]
 
 

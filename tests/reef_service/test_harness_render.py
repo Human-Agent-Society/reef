@@ -387,3 +387,23 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
 
 def test_bundled_adapters_are_discoverable() -> None:
     assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
+
+
+def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
+    """The wrapper adds ``client_env`` to a person's run; the install script names ``client_tools`` missing from PATH."""
+    descriptor = get_adapter("pi")
+    assert descriptor.client_env == {"PI_SKIP_VERSION_CHECK": "1"}
+    assert "PI_OFFLINE" not in descriptor.client_env  # an interactive run talks to reef
+    assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
+
+
+def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
+    files = render_composition(
+        [("skill", {"name": "notes", "text": "# Notes skill\n\nKeep short notes.\n"})], get_adapter("pi")
+    )
+    assert (
+        files["pi-agent/skills/notes/SKILL.md"]
+        == "---\nname: notes\ndescription: Notes skill\n---\n# Notes skill\n\nKeep short notes.\n"
+    )
+    own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
+    assert render_composition([own], get_adapter("pi"))["pi-agent/skills/own/SKILL.md"] == own[1]["text"]
