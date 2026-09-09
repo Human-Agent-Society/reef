@@ -12,11 +12,10 @@ from a crashed run.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
-from recipes.coral.journal import CallJournal
+from recipes.coral.journal import CallJournal, commit_matches
 from recipes.coral.reporter import AttemptReport
 
 
@@ -53,13 +52,25 @@ def build_result_bundle(
     best = max(scored, key=lambda r: r.score) if scored else None
 
     # --- correlated calls + serving revisions per attempt -----------------------
-    by_attempt: dict[tuple[str, str], list] = defaultdict(list)
-    for record in records:
-        by_attempt[(record.agent_id, record.commit_hash)].append(record)
+    # An attempt's exact calls are the record ids its report references
+    # (resolved by the watcher when the attempt finalized). Reports without
+    # references — e.g. rebuilt from a partial recovery — fall back to the
+    # journal coordinate: the gateway journals each call under the worktree
+    # commit it was made from, which is the attempt's *parent*.
+    by_record_id = {r.agent_record_id: r for r in records if r.agent_record_id}
+
+    def _calls_for(report: AttemptReport) -> list:
+        if report.references:
+            return [by_record_id[rid] for rid in report.references if rid in by_record_id]
+        if not report.parent_hash:
+            return []
+        return [
+            r for r in records if r.agent_id == report.agent_id and commit_matches(r.commit_hash, report.parent_hash)
+        ]
 
     attempts: list[dict[str, Any]] = []
     for report in reports:
-        calls = by_attempt.get((report.agent_id, report.commit_hash), [])
+        calls = _calls_for(report)
         attempts.append(
             {
                 "agent_id": report.agent_id,

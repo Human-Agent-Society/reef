@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.coral.gateway_launcher import attach_reef_adapter, insert_reef_layer
+from recipes.coral.gateway_launcher import attach_reef_adapter, attach_reef_adapter_to_agent_manager, insert_reef_layer
 from recipes.coral.middleware import ReefGatewayMiddleware
 
 
@@ -68,3 +68,40 @@ def test_insert_requires_a_started_middleware(tmp_path):
     journal = CallJournal(tmp_path / "j.jsonl")
     with pytest.raises(TypeError, match="started CoralGatewayMiddleware"):
         insert_reef_layer(None, scenario="s", journal=journal)
+
+
+class FakeAgentManager:
+    """Shape-compatible stand-in for CORAL's AgentManager gateway-start step."""
+
+    def __init__(self, gateway_enabled=True):
+        self._gateway = None
+        self._gateway_enabled = gateway_enabled
+        self.agents_started = False
+
+    def _start_gateway_if_enabled(self):
+        if self._gateway_enabled:
+            self._gateway = FakeManager()
+            self._gateway.start()
+
+    def start_all(self):
+        self._start_gateway_if_enabled()
+        # agents spawn after the gateway; the splice must already be in place
+        self.agents_started = True
+
+
+def test_attach_to_agent_manager_splices_before_agents_spawn(tmp_path):
+    manager = FakeAgentManager()
+    journal = attach_reef_adapter_to_agent_manager(manager, scenario="s", journal_path=tmp_path / "j.jsonl")
+    manager.start_all()
+
+    assert manager.agents_started
+    assert isinstance(manager._gateway._middleware, FakeCoralMiddleware)
+    assert isinstance(manager._gateway._middleware.app, ReefGatewayMiddleware)
+    assert manager._gateway._middleware.app.journal is journal
+
+
+def test_attach_to_agent_manager_fails_loudly_when_gateway_disabled(tmp_path):
+    manager = FakeAgentManager(gateway_enabled=False)
+    attach_reef_adapter_to_agent_manager(manager, scenario="s", journal_path=tmp_path / "j.jsonl")
+    with pytest.raises(RuntimeError, match=r"agents\.gateway\.enabled"):
+        manager.start_all()
