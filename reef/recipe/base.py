@@ -7,11 +7,10 @@ backend updates model weights.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from reef.core.reports import ReportBase

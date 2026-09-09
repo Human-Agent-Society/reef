@@ -7,10 +7,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import UnknownScenario
-from reef.dispatcher import Dispatcher
+from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.service.app import create_app
-from reef.dispatcher import build_default_dispatcher
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:
