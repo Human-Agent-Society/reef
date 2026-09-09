@@ -152,6 +152,49 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
+#: A report's feedback beside its request: what the reporter said was wrong, which the payload alone cannot show.
+REPORTED = (
+    TraceSample(
+        "a2",
+        {"messages": [{"role": "user", "content": "fix the failing test in auth.py"}]},
+        0.0,
+        feedback="missed the empty-token case",
+    ),
+)
+
+
+def test_propose_shows_each_failure_with_its_report_score_and_feedback(evolution) -> None:
+    """The step hands the proposer TraceSamples whose ``feedback`` is the report's text verbatim; a proposer that
+    serialized the payload alone would learn what the model answered but never why it was scored down."""
+    model = canned(proposal("answer-style"))
+    evolution.propose(NODES, REPORTED + SAMPLES, model)
+    prompt = model.prompt
+    assert "fix the failing test in auth.py" in prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+    assert '"feedback": null' in prompt  # SAMPLES' report carried none: the key stays, so the shape is one
+    assert prompt.index("[BEGIN") < prompt.index("missed the empty-token case") < prompt.index("[END")
+    assert "addressing what the feedback names" in prompt
+
+
+def test_propose_shows_the_feedback_beside_the_failures_a_request_carries(evolution) -> None:
+    model = canned(proposal("run-tests"))
+    evolution.propose(NODES, REPORTED, model, requests=(REQUEST,))
+    prompt = model.prompt
+    assert "Recent failing requests, for context (each with its report's score and feedback" in prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+
+
+def test_native_propose_shows_each_failure_with_its_report_score_and_feedback(native_evolution) -> None:
+    model = canned(
+        json.dumps({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "x"}})
+    )
+    native_evolution.propose(NODES, REPORTED, model)
+    prompt = model.prompt
+    assert '"feedback": "missed the empty-token case"' in prompt and '"score": 0.0' in prompt
+    assert prompt.index("[BEGIN") < prompt.index("missed the empty-token case") < prompt.index("[END")
+    assert "addressing what the feedback names" in prompt
+
+
 API_SKILL = (
     "skill",
     {"name": "reef-pi-extension-api", "text": "---\nname: reef-pi-extension-api\n---\n# pi API\npi.registerTool"},

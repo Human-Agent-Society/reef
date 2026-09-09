@@ -8,6 +8,7 @@ import pytest
 
 from reef.runtime.adapter_residency import (
     AdapterCapacityExhausted,
+    AdapterEvictionFailed,
     AdapterNotActive,
     AdapterResidencyError,
     AdapterResidencyManager,
@@ -377,3 +378,36 @@ def test_recent_actions_are_bounded(engine: FakeEngine) -> None:
         manager.activate("a", f"v{index}", engine)
     actions = manager.status()["recent_actions"]
     assert len(actions) == 32 and all(entry["action"] == "evicted" for entry in actions)
+
+
+def test_capacity_rejection_names_the_slot_count_the_engine_needs(engine: FakeEngine) -> None:
+    """#65: the operator cannot infer the fix from a list of adapter names."""
+    manager = AdapterResidencyManager(capacity=1)
+    manager.activate("a", "a1", engine)
+    with pytest.raises(AdapterCapacityExhausted) as raised:
+        manager.activate("b", "b1", engine)
+    message = str(raised.value)
+    assert "2 scenarios share this engine" in message
+    assert "at least 3 slots" in message
+    assert "--max-loaded-loras" in message
+    # Nothing was touched, so the claim the message makes is true.
+    assert engine.unloaded == []
+    assert manager.current("a").runtime_load_id == "a1"
+
+
+def test_a_refused_eviction_is_distinguishable_from_a_plain_rejection(engine: FakeEngine) -> None:
+    """Only one of the two means the engine may be wedged; callers branch on it."""
+    manager = AdapterResidencyManager(capacity=2)
+    manager.activate("a", "a1", engine)
+    manager.activate("a", "a2", engine)
+    engine.fail_unload.add(adapter_name("a", "a1"))
+    with pytest.raises(AdapterEvictionFailed, match="engine keeps"):
+        manager.activate("b", "b1", engine)
+
+    # A plain rejection is the base class only, so `except AdapterEvictionFailed`
+    # cannot swallow it and `except AdapterCapacityExhausted` still catches both.
+    full = AdapterResidencyManager(capacity=1)
+    full.activate("a", "a1", FakeEngine())
+    with pytest.raises(AdapterCapacityExhausted) as raised:
+        full.activate("b", "b1", FakeEngine())
+    assert not isinstance(raised.value, AdapterEvictionFailed)
