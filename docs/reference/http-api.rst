@@ -240,6 +240,12 @@ base artifact, the shared head and releases other scenarios may fork from
 stay where they are. A step in flight for the scenario ends without a commit.
 Only a local artifact repository can be archived; a remote one answers 501.
 
+For a scenario that trains weights the deletion is Reef-side: the training
+backend is told to retire the scenario, and the Slime backend does not yet
+act on it, so the scenario's adapter stays resident in the serving engine
+until it is evicted or the training group restarts, and the training job's
+per-scenario ledger keeps its entry until then.
+
 Scenario updates
 ~~~~~~~~~~~~~~~~
 

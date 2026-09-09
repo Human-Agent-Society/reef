@@ -231,11 +231,10 @@ class Dispatcher:
             self._publication.forget(scenario)
             self._record_training_error(scenario, None)
             if dropped is not None:
+                backend = dropped.trainer.training_backend
+                if backend is not None:
+                    backend.retire_scenario(scenario)
                 dropped.close()
-                runtime = dropped.runtime
-                release = getattr(getattr(runtime, "residency", None), "release_scenario", None)
-                if callable(release):
-                    release(scenario)
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
