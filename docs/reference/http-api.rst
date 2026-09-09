@@ -49,6 +49,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/promote``     | serve a release held for review                   |
 +-------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/scenarios/{scenario}``           | remove a scenario; its state is archived          |
++-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                           | the served harness tree                           |
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
@@ -222,6 +224,27 @@ unknown scenario returns HTTP 404 and you create it first:
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types}``                   |
 +---------------------------------------------+---------------------------------------------+
+| ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
++---------------------------------------------+---------------------------------------------+
+
+Deleting a scenario
+-------------------
+
+``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
+service and frees its name. Nothing is destroyed: the record store and commit
+log move under ``<agent_record_dir>/archived/``, the recipe's own directories
+(a proposal inbox, step records) move under an ``archived/`` sibling, and the
+scenario's ref in the artifact repository is renamed into
+``refs/reef/archived/``, so every release it published stays reachable. The
+base artifact, the shared head and releases other scenarios may fork from
+stay where they are. A step in flight for the scenario ends without a commit.
+Only a local artifact repository can be archived; a remote one answers 501.
+
+For a scenario that trains weights the deletion is Reef-side: the training
+backend is told to retire the scenario, and the Slime backend does not yet
+act on it, so the scenario's adapter stays resident in the serving engine
+until it is evicted or the training group restarts, and the training job's
+per-scenario ledger keeps its entry until then.
 
 Scenario updates
 ~~~~~~~~~~~~~~~~

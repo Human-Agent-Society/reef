@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -314,3 +315,29 @@ def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
         assert (hooks / name).read_text() == hook_contents
         if hook_source == "template":
             assert (tmp_path / "fresh-work" / "repository" / ".git" / "hooks" / name).read_text() == hook_contents
+
+
+@pytest.mark.integration
+def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(tmp_path: Path, fake_git_lfs: None) -> None:
+    """The factory's archive moves ``refs/reef/scenarios/<name>`` under ``refs/reef/archived`` and removes
+    the scenario's work clone; the base ref and other scenarios stay, and the name is free again."""
+    remote = tmp_path / "artifacts.git"
+    factory = GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    factory("kept").fork()
+    doomed_ref = factory("doomed").fork()
+    assert set(factory.list_registrations()) == {"doomed", "kept"}
+    encoded = base64.urlsafe_b64encode(b"doomed").decode().rstrip("=")
+    assert (tmp_path / "work" / encoded).is_dir()
+
+    archived = factory.archive_registration("doomed")
+
+    assert factory.list_registrations() == ("kept",)
+    assert not factory.has_registration("doomed")
+    assert len(archived) == 2 and archived[0].startswith("refs/reef/archived/")
+    assert run_git("--git-dir", str(remote), "rev-parse", archived[0]) == doomed_ref.release_id
+    assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base")
+    assert not (tmp_path / "work" / encoded).exists()
+    # The name creates fresh: a new backend forks the base again rather than continuing the archived chain.
+    fresh = factory("doomed")
+    assert fresh.metadata() is None
+    assert fresh.fork().parent_release_id == run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base")

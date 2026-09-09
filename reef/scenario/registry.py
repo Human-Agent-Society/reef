@@ -14,7 +14,11 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
 
-from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
+    EnumerableRepositoryBackendFactory,
+    RepositoryBackendFactory,
+)
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
@@ -210,6 +214,41 @@ class ScenarioRegistry:
                 # so nothing observes the dropped instance mid-close.
                 dropped.close()
             return recovered
+
+    def remove(self, scenario: str) -> Scenario | None:
+        """Drop every in-memory hold on the scenario; the instance, for the caller to close outside the state lock.
+
+        The training thread's list loses the name first, so a step already
+        in flight finds no scenario to commit to and no durable state to
+        reload; the mode a person selected and any preload error go with it.
+        Call under ``lock_for(scenario)``.
+        """
+        with self._lock:
+            dropped = self._scenarios.pop(scenario, None)
+            self._training_scenarios = [name for name in self._training_scenarios if name != scenario]
+            if self._training_scenario == scenario:
+                self._training_scenario = self._training_scenarios[0] if self._training_scenarios else None
+            self._training_modes.pop(scenario, None)
+            self._preload_errors.pop(scenario, None)
+        return dropped
+
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the scenario's durable registration aside and forget its cached backend; what was archived."""
+        if not isinstance(self._backend_factory, CachedRepositoryBackendFactory):
+            raise NotImplementedError("this repository backend cannot archive a scenario")
+        return self._backend_factory.archive_registration(scenario)
+
+    def forget_lock(self, scenario: str) -> None:
+        """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""
+        with self._lock:
+            self._scenario_locks.pop(scenario, None)
+
+    def state_paths(self, scenario: str) -> tuple[Path, ...]:
+        return self._scenario_factory.state_paths(scenario)
+
+    @property
+    def agent_record_dir(self) -> Path | None:
+        return self._scenario_factory.agent_record_dir
 
     def close_all(self) -> tuple[Scenario, ...]:
         with self._lock:
