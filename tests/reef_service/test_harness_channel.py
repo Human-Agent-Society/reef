@@ -823,6 +823,7 @@ elif mode == "merge":
 REEF_SIDECAR_TOOL_EOF
 }
 
+echo "reef: harness release v1 for pi"
 # The gate runs first of all: nothing is installed or written while an item is not checked off (reef-pi setup).
 [ "$REQUIRES" = "[]" ] || sidecar_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
 
@@ -836,8 +837,10 @@ case " $installed " in
         echo "reef: pi 0.84.2 already installed"
         ;;
     *)
+        echo "reef: installing pi 0.84.2 (@earendil-works/pi-coding-agent@0.84.2) into $PREFIX; this takes a minute"
         mkdir -p "$PREFIX"
         npm install --prefix "$PREFIX" '@earendil-works/pi-coding-agent@0.84.2'
+        echo "reef: pi 0.84.2 installed"
         ;;
 esac
 
@@ -868,6 +871,7 @@ fi
 if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then
     echo "reef: composition already current"
 else
+    echo "reef: writing the harness tree (1 file) to $DEST"
     # The check offs the sidecar on disk holds, carried into the new sidecar below.
     SETUP="$(sidecar_tool carry "$DEST/.reef-harness-release")"
     # Prune the files a previous install's sidecar recorded that this
@@ -927,6 +931,7 @@ cat > "$DEST/.reef-harness-release" <<'@SIDECAR_EOF@'
     sidecar_tool merge "$DEST/.reef-harness-release" "$SETUP"
 fi
 
+echo "reef: done"
 echo "run:     $DEST/reef-pi"
 echo "binary:  $BINARY"
 echo "harness: $DEST"
