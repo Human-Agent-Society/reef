@@ -6,11 +6,12 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-# The runnable entry (run.py) drives a real CORAL gateway; the adapter
-# modules themselves have no CORAL dependency. Pinned to the commit the
-# example was developed and smoke-tested against.
+# The runnable entry (run.py) drives the real CORAL runtime (AgentManager,
+# gateway, grader daemon, agent runtime CLIs); the adapter modules themselves
+# have no CORAL dependency. Pinned to the commit the example was developed
+# and smoke-tested against.
 coral = [
-    "coral @ git+https://github.com/Human-Agent-Society/CORAL.git@a69cbc22f4c160f211573bc6a4fb5b9f46068a98",
+    "coral @ git+https://github.com/Human-Agent-Society/CORAL.git@0123dfb939b35228cf2c1fde224cd0561e727408",
 ]
 
 [build-system]
