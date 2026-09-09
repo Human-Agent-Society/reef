@@ -190,6 +190,51 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
     assert record[0]["usage"] == {"input_tokens": 9, "output_tokens": 2} and "usage" not in record[1]
 
 
+def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> None:
+    """With client models, the provider block lists them all, the served one first
+    and still the default; a template with no such list is unchanged."""
+    binding = ModelBinding("http://up", "served", api_key="k")
+    pi = binding.compose_nodes(get_adapter("pi"), models=("other/big", "served", "other/small"))
+    providers = next(data for _, data in pi if "providers" in data["data"])["data"]["providers"]["reef"]
+    assert [m["id"] for m in providers["models"]] == ["served", "other/big", "other/small"]
+    primary = next(data for _, data in pi if "defaultModel" in data["data"])["data"]
+    assert primary["defaultModel"] == "reef/served"
+    opencode = binding.compose_nodes(get_adapter("opencode"), models=("other/big",))
+    data = opencode[0][1]["data"]
+    assert list(data["provider"]["reef"]["models"]) == ["served", "other/big"] and data["model"] == "reef/served"
+    assert binding.compose_nodes(get_adapter("opencode")) == binding.compose_nodes(
+        get_adapter("opencode"), models=("served",)
+    )
+
+
+def test_recipe_reads_client_models_into_the_harness_surface(tmp_path) -> None:
+    module = tmp_path / "demo_client_models.py"
+    module.write_text(
+        "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    import sys
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        config = {
+            "model": {"path": "small"},
+            "evolution": {
+                "propose": "demo_client_models:propose",
+                "evaluate": "demo_client_models:evaluate",
+                "tasks": ["t"],
+                "client_models": ["big/one", "big/two"],
+            },
+        }
+        runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
+        built = CordisRecipe.from_environment({}, config=config, runtime=runtime)
+        assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
+        bad = {**config, "evolution": {**config["evolution"], "client_models": "big/one"}}
+        with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
+            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
 def test_unknown_api_is_refused() -> None:
     with pytest.raises(ValueError, match="api must be one of"):
         ModelBinding("http://up", "m", api="cohere")

@@ -123,6 +123,9 @@ class CordisRecipe(Recipe):
     steps write the proposer's model calls, the parsed proposal and each gate
     episode's trajectory files, so the decision is reconstructible; off by
     default),
+    optional ``client_models`` (further model names the installed client
+    may switch to; the install script renders them into its config beside
+    the served model, which stays the default),
     and optional ``version_check``
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
@@ -193,6 +196,8 @@ class CordisRecipe(Recipe):
     min_win_margin: int = 0
     publish: str = "auto"
     review_kinds: tuple[str, ...] = ()
+    #: Models an installed client may switch to besides the served one, rendered into its config.
+    client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
@@ -334,6 +339,11 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
         if not all(isinstance(kind, str) and kind for kind in review_kinds):
             raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        client_models = evolution.get("client_models", ())
+        if isinstance(client_models, str) or not isinstance(client_models, Sequence):
+            raise RecipeConfigError("evolution.client_models must be a list of model names")
+        if not all(isinstance(name, str) and name for name in client_models):
+            raise RecipeConfigError("evolution.client_models must be a list of model names")
         adapter = str(evolution.get("adapter", "pi"))
         version_check = evolution.get("version_check", False)
         if not isinstance(version_check, bool):
@@ -436,6 +446,7 @@ class CordisRecipe(Recipe):
             "max_promoted_per_client": per_client,
             "publish": publish,
             "review_kinds": tuple(review_kinds),
+            "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
@@ -465,6 +476,7 @@ class CordisRecipe(Recipe):
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
+            client_models=self.client_models,
         )
 
     def base_artifact_files(self) -> Mapping[str, str] | None:

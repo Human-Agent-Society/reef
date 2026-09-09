@@ -523,6 +523,12 @@ To connect an agent that has no adapter yet:
 descriptor at load, and the bundled adapters under `reef/harness/adapters/
 <../../reef/harness/adapters>`__ are complete references. A third-party adapter
 registers on the ``reef.harness_adapters`` entry-point group.
+``evolution.client_models`` lists further model names the installed client
+may switch to: the install script repeats every ``model_binding`` template
+entry that names ``{model}`` (a mapping key, a list item) once per model,
+the served model first and still the default, so pi and opencode show them
+in their model pickers. Each call names the model it wants and the service
+proxies it as is.
 ``evolution.version_check: true`` in the recipe config writes an update
 prompt into the tree and ships for ``pi`` only. The
 prompt offers to run the update or skip in interactive mode and prints the

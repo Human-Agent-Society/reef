@@ -670,7 +670,7 @@ class RequestService:
         binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)
         nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
         try:
-            bound = binding.compose_nodes(descriptor)
+            bound = binding.compose_nodes(descriptor, models=() if info is None else info.client_models)
             files = render_composition((*nodes, *bound), descriptor)
         except (ModelBindingError, RenderError, KeyError, TypeError):
             return {}
