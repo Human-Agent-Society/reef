@@ -21,6 +21,7 @@ never-trained rollouts.
 
 import asyncio
 import json
+import os
 import time
 import urllib.error
 import urllib.request
@@ -36,7 +37,7 @@ MODEL = "reef"  # model name the agent sends; Reef's SGLang serves it
 SERVICE_URL = "http://127.0.0.1:8900"
 TOKEN = "reef-local"
 SCENARIO = "sao-smoke"
-ROLLOUTS = 6
+ROLLOUTS = int(os.environ.get("SAO_ROLLOUTS", "6"))
 
 HERE = Path(__file__).resolve().parent
 TASKS = ["imo-4", "imo-8", "imo-12"]

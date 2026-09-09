@@ -218,3 +218,4 @@ recipes/basic/work/
 
 # The GEPA AIME example writes its run state here.
 recipes/gepa/examples/aime/work*/
+work/

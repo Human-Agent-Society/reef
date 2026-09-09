@@ -98,15 +98,12 @@ critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
 Results
 -------
 
-The example's README records two runs.
-
-The comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS) control from the
-same checkpoint on the same three problems with 48 scored rollouts per arm.
-The mean rewards order as the paper predicts, SAO at 0.479 above the
-untrained base at 0.458 above GRPO(+DIS) at 0.417.
-
-.. image:: ../../assets/sao/learning-curve.png
-   :alt: Cumulative mean reward over the 48 scored rollouts per arm
+The example's `README <../../../recipes/sao/examples/sao/README.md#results>`__
+carries a 90-rollout run of SAO on Qwen2.5-1.5B-Instruct with retained
+per-rollout records, a bootstrap-CI plot, and the plotting script that
+regenerates the figure from the records. Paper-scale reproduction on
+Qwen3-30B-A3B-Thinking is blocked on a runtime weight-export bug, documented
+in the same README's Known limitations section.
 
 Related guides
 --------------

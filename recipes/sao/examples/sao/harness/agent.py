@@ -12,10 +12,12 @@ watcher thread posts the verifier's own reward to Reef once Harbor ends the tria
 import asyncio
 import atexit
 import json
+import os
 import re
 import shlex
 import threading
 import time
+import urllib.request
 
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
@@ -31,10 +33,17 @@ TOKEN = "reef-local"
 SCENARIO = "sao-smoke"
 RECIPE = "sao"
 #: Scored rollouts per task, and the generation window each one gets.
-ROLLOUTS = 6
+ROLLOUTS = int(os.environ.get("SAO_ROLLOUTS", "6"))
 MAX_TOKENS = 2048
 #: Where the agent writes the last completion for the Harbor verifier.
 ANSWER_PATH = "/workspace/answer.txt"
+
+#: Per-rollout raw records land here so the learning curve is auditable.
+#: Override for a multi-arm study; the driver picks the file.
+RECORDS_PATH = os.environ.get("SAO_RECORDS_PATH", "work/records/rollouts.jsonl")
+#: Run and arm identity so records from different runs concatenate cleanly.
+RUN_ID = os.environ.get("SAO_RUN_ID", "sao-smoke")
+ARM = os.environ.get("SAO_ARM", "sao")
 
 #: Gold answers, keyed by a prefix that identifies one of the three IMO
 #: problems, exactly as they appear in the IMOAnswerBench dump.
@@ -130,13 +139,28 @@ class HarborAgent(BaseAgent):
         gold = next(answer for prefix, answer in GOLD_ANSWERS.items() if instruction.startswith(prefix))
 
         agent_record_ids = []
+        task_name = getattr(getattr(context, "task", None), "name", "unknown")
         for index in range(ROLLOUTS):
+            serving_before = _current_serving_release()
             response, agent_record_id = await asyncio.to_thread(self._ask_reef, instruction)
             completion = response["choices"][0]["message"]["content"]
             predicted = extract_answer(completion)
             score = 1.0 if answers_equal(gold, predicted) else 0.0
             self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]})
             agent_record_ids.append(agent_record_id)
+            _append_rollout_record(
+                run_id=RUN_ID,
+                arm=ARM,
+                task_name=task_name,
+                rollout_in_task=index,
+                serving_release_id=serving_before,
+                agent_record_id=agent_record_id,
+                prompt_tokens=(response.get("usage") or {}).get("prompt_tokens"),
+                completion_tokens=(response.get("usage") or {}).get("completion_tokens"),
+                score=score,
+                predicted=predicted,
+                gold=gold,
+            )
             print(f"[{RECIPE} {index}] score={score:.1f} predicted={predicted!r}", flush=True)
 
         # The last completion is the one the Harbor verifier scores.
@@ -169,3 +193,41 @@ class HarborAgent(BaseAgent):
         result = json.loads(result_path.read_text(encoding="utf-8"))
         post_report(result, client=self._client, scenario=SCENARIO)
         self.logger.info("reported verifier reward %s to reef", result["verifier_result"]["rewards"]["reward"])
+
+
+def _current_serving_release() -> str | None:
+    """Best-effort read of the scenario's current release id; None on error.
+
+    The learning curve records which weight version served each rollout so a
+    plot can mark the transitions instead of averaging across them.
+    """
+    request = urllib.request.Request(
+        f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read())
+    except (OSError, TimeoutError, json.JSONDecodeError):
+        return None
+    for row in payload.get("releases", []):
+        if row.get("current"):
+            return row.get("release_id")
+    return None
+
+
+_RECORDS_LOCK = threading.Lock()
+
+
+def _append_rollout_record(**fields) -> None:
+    """Append one rollout's raw record to the retained JSONL.
+
+    The plot's inputs are these lines, one per scored rollout, so a reviewer
+    can audit the figure without trusting a summary.
+    """
+    fields["recorded_at"] = time.time()
+    path = os.path.abspath(RECORDS_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    line = json.dumps(fields, ensure_ascii=False) + "\n"
+    with _RECORDS_LOCK, open(path, "a", encoding="utf-8") as f:
+        f.write(line)

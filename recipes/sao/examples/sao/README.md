@@ -224,88 +224,86 @@ and lists its remaining deviations.
 
 ## Results
 
-### Qwen3-30B-A3B on IMOAnswerBench, 48 scored rollouts per arm
+### Qwen2.5-1.5B-Instruct on IMOAnswerBench, 90 scored rollouts
 
-Two arms were trained on the same three problems, from the same checkpoint,
-at the same rollout budget, and only the objective differed: one arm ran the
-`sao` recipe, the other a GRPO control with the same DIS mask
-(`--advantage-estimator=grpo`, groups of four). The runs were made in August 2026 with an earlier version of
-this harness, on the tree before the `recipes/` layout; the drivers and the
-recipe have been ported since, and every number below was read from the run
-records and the version endpoints captured at the time. The per-rollout
-records are in the repository history
-(`examples/sao/bench/deployments/qwen3_30b_a3b_main/results/` at commit
-`375e0036`); the figure below is plotted from them.
+`results/2026-09-09-imo-answerbench-qwen2.5-1.5b-instruct/` records one line
+per scored rollout — task, serving weight-release, receipt, tokens, 0/1
+reward, predicted vs. gold, timestamp — and the plotting script
+(`plot_learning_curve.py`) regenerates the figure below from those records
+without touching the training stack.
 
-This is a budget-limited comparison. Every scored rollout became a report
-against the training bridge (SAO commits once per rollout, GRPO once per
-filled group), but 48 rollouts per arm is far short of a training run, so the
-table answers whether the paper's ordering holds at this budget, not where
-the methods converge.
+![90 scored rollouts, raw outcomes with 95% bootstrap CI](results/2026-09-09-imo-answerbench-qwen2.5-1.5b-instruct/learning_curve.png)
 
-| Setting | Value |
-| --- | --- |
-| Task | IMOAnswerBench `problem_idx` 4, 8, 12; one rollout per task in rotation (SAO), one group of four per task (GRPO) |
-| Model | `Qwen3-30B-A3B-Thinking-2507`, converted to Megatron `torch_dist` |
-| Actor, with the SAO critic | one 8-GPU node, TP4 / PP2 / EP4, sequence parallel, full recompute, CPU-offloaded precision-aware Adam |
-| Rollout | a second 8-GPU node, SGLang TP8, temperature 1.0, top-p 1.0 |
-| Generation window | 61,440 tokens in a 65,536-token sequence |
-| Objective | DIS 0.3 / 5.0, two critic steps per actor step, length-adaptive λ with α 1.5, policy lr `1e-6`, value lr `5e-6` |
-| Budget | 48 scored rollouts per arm; batch 1 (SAO), group 4 (GRPO) |
-| Reward | strict `\boxed{}` equivalence against the gold answer, no LLM judge |
+The plot shows every rollout, coloured by task (gold answer), the running
+mean of the reward sequence, a 95% bootstrap confidence interval, and a
+vertical line at each new serving release. The wide CI early in the run
+narrows as the sample count grows; the running mean stays near the sample
+rate rather than tracking a training trend.
 
-| Arm | Scored rollouts | Training commits | Mean reward | imo-4 | imo-8 | imo-12 | Wall-clock |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| base (untrained; 16 runs per problem, same grader and window) | 48 | 0 | `0.458` | 15/16 | 3/16 | 4/16 | n/a |
-| SAO | 48 | 47 | `0.479` | 15/16 | 4/16 | 4/16 | 22,623 s |
-| GRPO(+DIS) | 48 | 12 | `0.417` | 16/16 | 2/16 | 2/16 | 8,055 s |
+Headline numbers from `rollouts.jsonl` (90 rollouts, 30 per problem, three
+IMOAnswerBench problems, strict `oxed{}` equivalence grader):
 
-The ordering matches the paper at this budget: SAO (0.479) above the base
-rate (0.458) above GRPO (0.417). An earlier summary of these runs listed
-GRPO's imo-12 count as 3/16; the run records give 2/16, which is the count
-the mean of 0.417 (20 of 48) corresponds to. SAO's gain is on imo-8, with imo-12 at the
-base rate and imo-4 close to saturated. GRPO(+DIS) ends below the base rate:
-12 filled groups over 48 rollouts, and most of those groups uniform (all four
-correct or all four wrong), which leaves no gradient. The paper's per-step
-batch is 128 over a full training run.
+| Slice | n | correct | mean reward |
+| --- | ---: | ---: | ---: |
+| all rollouts | 90 | 5 | `0.0556` |
+| `problem_idx` 4 (gold `2^{u-2}`) | 30 | 1 | `0.033` |
+| `problem_idx` 8 (gold `-2023/2024²`) | 30 | 0 | `0.000` |
+| `problem_idx` 12 (gold `1/2`) | 30 | 4 | `0.133` |
 
-![Cumulative mean reward over the 48 scored rollouts per arm](results/2026-08-15-imo-answerbench-qwen3-30b-a3b/learning_curve.png)
+Reading the plot honestly:
 
-The curve is the cumulative mean reward against scored rollouts, per arm,
-with the base rate as the dashed line. The runs predate Reef's experiment tracking, so no per-step W&B
-history exists for them. A new run with `observability.wandb.enabled: true`
-records the step metrics that the TTT-Discover and OpenClaw-RL results keep
-(mean reward, response length, KL, step time).
+- On this base model at this scale, IMO problems are near the noise floor. The
+  running mean moves at the pace of the four `problem_idx=12` hits — a task
+  whose gold answer (`1/2`) is a common guess — rather than tracking a
+  learning trend.
+- Three substantive serving releases produced most rollouts (30 / 29 / 29
+  per release); the release chain shows training landing between tasks
+  rather than after every rollout, because the value model's warmup
+  (`--num-critic-only-steps=10`) delays the first policy update by ten
+  rollouts.
+- Nothing on the plot supports a claim that SAO learned to solve harder IMO
+  problems in 90 rollouts on this backbone. The plot supports the claim
+  that the training stack is wired end to end and the records make the
+  outcome auditable.
 
-Wall-clock includes a per-step serving-weight export whose cost is the same
-at every step, so it penalizes SAO's four times higher step count; compare
-step times on the reward-versus-rollout records rather than on wall-clock.
+The paper's own scale — Qwen3-30B-A3B-Thinking, IMOAnswerBench, and a full
+training run — is where SAO's ordering is expected to appear. That
+reproduction is blocked on the runtime bug documented in
+[Known limitations](#known-limitations) below and is not attempted here.
 
-Deviations from the paper's protocol:
+Reproducing this figure from the retained records:
 
-- **No TIR SFT init.** The paper's math arm starts from an unpublished SFT on
-  GPT-OSS-120B tool-integrated-reasoning data; these runs start from the
-  public Thinking checkpoint. The paper's absolute number (74.0 accuracy
-  after full training) is not reachable from this init at any budget.
-- **Generation window 61,440 tokens** (paper: 128k). Some rollouts truncate at
-  the cap; the cap is the same for both arms.
-- **Budget 48 rollouts per arm, batch 1 (SAO) / group 4 (GRPO)**; the paper
-  trains with batch 128 over a full run.
-- **Trained on the benchmark's own problems**; the paper trains on a separate
-  math corpus and evaluates on the benchmark.
+```bash
+python plot_learning_curve.py   results/2026-09-09-imo-answerbench-qwen2.5-1.5b-instruct/rollouts.jsonl   --output learning_curve.png
+```
 
-For a base number comparable with the paper's Table 1, the untrained model
-was also run on the full 400-problem IMOAnswerBench, four runs per problem,
-temperature 1.0, top-p 1.0, in a 65,536-token window:
+Producing a fresh run at the same scale on two GPUs:
 
-| Grader | Reef base | Paper base (without Python) |
-| --- | ---: | ---: |
-| Strict answer equivalence | `44.69` | 55.3 |
+```bash
+SAO_ROLLOUTS=30 ./run.sh   # 30 rollouts per task, 90 total (~1.5–2h)
+```
 
-The paper does not specify its grading protocol for IMOAnswerBench. The
-strict rule is a lower bound, an LLM-judge upgrade path measured earlier is
-an upper bound at 63.44, and the paper's 55.3 falls between the two. Compare
-arms against the Reef base column, not against the paper's number.
+### Known limitations
+
+- Paper-scale reproduction (Qwen3-30B-A3B-Thinking on a single 8-GPU node,
+  TP4/PP2/EP4 or TP8/PP1/EP8 with colocated critic and rollout) fails during
+  weight export inside
+  `reef/train/slime_backend/reef_adapters/megatron/hf_export.py` with
+  `KeyError: "HF export weight 'vp_stages.0.decoder.final_layernorm.weight'
+  is missing from the actor backup"`. Reproduced across both pipeline
+  layouts and both `--megatron-to-hf-mode` values (`bridge`, `raw`), on an
+  image built from `docker/Dockerfile.reef` at the runtime pin. Attempted on
+  2026-09-09; a separate bug fix is required before a 30B rerun can replace
+  the 1.5B figure above. Once fixed, the paper-scale settings only differ
+  from the shipped `serve.yaml` in `reef.model_path`
+  (`Qwen3-30B-A3B-Thinking-2507`), the MoE knobs slime's own
+  `scripts/models/qwen3-30B-A3B.sh` prescribes
+  (`--moe-token-dispatcher-type=alltoall`, `--moe-router-topk=8`,
+  `--moe-grouped-gemm`, `--moe-router-dtype=fp32`, `--moe-permute-fusion`,
+  `--moe-aux-loss-coeff=0`), the parallelism (`TP4/PP2/EP4` or
+  `TP8/PP1/EP8`), the sequence budget (`--seq-length=65536
+  --rollout-max-response-len=61440`), and 8 GPUs (`--num-gpus-per-node=8`,
+  `--colocate`).
 
 ### Attempts that produced no result
 
