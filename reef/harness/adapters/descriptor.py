@@ -158,6 +158,14 @@ class AdapterDescriptor:
     #: Optional quirk that validates the executor against the rendered tree,
     #: replacing the blanket self_isolating restriction before launch.
     validate_execution: ExecutionValidator | None = None
+    #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
+    #: binary: what an interactive run needs that an episode's ``env`` (offline,
+    #: hermetic) must not carry, such as silencing the binary's self-updater
+    #: while reef pins its version.
+    client_env: Mapping[str, str] = field(default_factory=dict)
+    #: Commands the binary expects on PATH at first start and otherwise fetches
+    #: itself, as ``(command, package)``; the install script names the missing ones.
+    client_tools: tuple[tuple[str, str], ...] = ()
 
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
@@ -228,6 +236,12 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
+    client_env = data.get("client_env", {})
+    if not isinstance(client_env, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
+    ):
+        raise DescriptorError(f"{where} 'client_env' must map strings to strings")
+    client_tools = _parse_client_tools(data.get("client_tools"), where)
     finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     return AdapterDescriptor(
         name=name,
@@ -246,6 +260,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,
+        client_env=dict(client_env),
+        client_tools=client_tools,
     )
 
 
@@ -353,6 +369,23 @@ def _parse_node_paths(files: Mapping[str, Any], where: str) -> dict[str, str]:
             raise DescriptorError(f"{where} files.{kind} template must contain {{name}}")
         node_paths[kind] = template
     return node_paths
+
+
+def _parse_client_tools(value: Any, where: str) -> tuple[tuple[str, str], ...]:
+    """``client_tools``: a list of ``{command, package}`` the binary wants on PATH."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise DescriptorError(f"{where} 'client_tools' must be a list")
+    tools: list[tuple[str, str]] = []
+    for entry in value:
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("command"), str) or not entry["command"]:
+            raise DescriptorError(f"{where} 'client_tools' entries need a non-empty 'command'")
+        package = entry.get("package", entry["command"])
+        if not isinstance(package, str) or not package:
+            raise DescriptorError(f"{where} 'client_tools' 'package' must be a non-empty string")
+        tools.append((entry["command"], package))
+    return tuple(tools)
 
 
 def _load_quirks(

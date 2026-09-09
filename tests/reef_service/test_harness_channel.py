@@ -823,11 +823,42 @@ elif mode == "merge":
 REEF_SIDECAR_TOOL_EOF
 }
 
+# Run a slow step behind a spinner on a terminal (a static line elsewhere); its output shows only on failure.
+spin() {
+    label="$1"; shift
+    log="$(mktemp)"
+    if [ -t 1 ]; then
+        "$@" >"$log" 2>&1 &
+        pid=$!
+        i=0
+        while kill -0 "$pid" 2>/dev/null; do
+            case $i in 0) c='|' ;; 1) c='/' ;; 2) c='-' ;; *) c='\' ;; esac
+            i=$(( (i + 1) % 4 ))
+            printf '\r%s reef: %s' "$c" "$label"
+            sleep 0.2
+        done
+        wait "$pid" && status=0 || status=$?
+        printf '\r\033[K'
+    else
+        echo "reef: $label"
+        "$@" >"$log" 2>&1 && status=0 || status=$?
+    fi
+    if [ "$status" -ne 0 ]; then
+        cat "$log" >&2
+        rm -f "$log"
+        return "$status"
+    fi
+    rm -f "$log"
+}
+
 echo "reef: harness release v1 for pi"
 # The gate runs first of all: nothing is installed or written while an item is not checked off (reef-pi setup).
 [ "$REQUIRES" = "[]" ] || sidecar_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
 
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
+vendor_install() {
+    npm install --prefix "$PREFIX" '@earendil-works/pi-coding-agent@0.84.2'
+}
 installed=""
 if [ -x "$BINARY" ]; then
     installed="$(PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
@@ -837,16 +868,17 @@ case " $installed " in
         echo "reef: pi 0.84.2 already installed"
         ;;
     *)
-        echo "reef: installing pi 0.84.2 (@earendil-works/pi-coding-agent@0.84.2) into $PREFIX; this takes a minute"
         mkdir -p "$PREFIX"
-        npm install --prefix "$PREFIX" '@earendil-works/pi-coding-agent@0.84.2'
+        spin "installing pi 0.84.2 (@earendil-works/pi-coding-agent@0.84.2) into $PREFIX, about a minute" vendor_install
         echo "reef: pi 0.84.2 installed"
         ;;
 esac
 
 # Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.
-python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" 2>/dev/null || true
+python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for python3" python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
 python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
+command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
+command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
 # The checksum stream, as baked into CHECKSUM: each sorted relative path,
 # its byte length, then its bytes, newline separated. The unquoted wc
@@ -1249,7 +1281,10 @@ def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tm
             manifest = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
             assert manifest.status == 200
             files = (await manifest.json())["files"]
-            assert files["pi-agent/skills/answer-style/SKILL.md"] == "# seed skill\n"
+            # The seed skill's text plus the frontmatter pi requires, synthesized from its first line.
+            assert files["pi-agent/skills/answer-style/SKILL.md"] == (
+                "---\nname: answer-style\ndescription: seed skill\n---\n# seed skill\n"
+            )
             assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
             response = await client.get(
                 "/reef/harness/install", params={"adapter": "pi"}, headers={"x-reef-scenario": "delivery"}
