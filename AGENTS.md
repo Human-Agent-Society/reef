@@ -183,7 +183,3 @@ keep unrelated working-tree changes intact.
   updated `README.i18n.yaml` with the change.
 - Update affected API, configuration, and user documentation alongside code.
   Keep this guide concise and link detailed rules to their owning documents.
-
-This guide's workflow structure was informed by
-[vLLM's agent instructions](https://github.com/vllm-project/vllm/blob/main/AGENTS.md);
-commands and project rules above are specific to Reef.
