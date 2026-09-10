@@ -315,7 +315,6 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
     served: ModelBinding
     named: Mapping[str, ModelBinding] = field(default_factory=dict)
-    byok: bool = False
 
     def __post_init__(self) -> None:
         if "served" in self.named:

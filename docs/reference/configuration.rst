@@ -31,10 +31,10 @@ can be overridden in the environment. Use it when a service must share Reef's
 Python environment. A literal ``python`` keeps its normal meaning and is
 resolved from that service's ``PATH``; Reef never rewrites command names.
 
-For scenario-specific harness evolve providers, set ``REEF_BYOK_RESOLVER_URL``
-and ``REEF_BYOK_RESOLVER_TOKEN`` in the service environment. See
-`Harness BYOK <../user-guide/harness-byok.rst>`__ for the platform contract and
-rollout. Leaving them unset preserves deployment-wide model configuration.
+Scenario-specific model settings are supplied through the existing scenario
+create/update API. See `Scenario model configuration <../user-guide/scenario-models.rst>`__
+for model selection, persistence and platform upgrades. Omitting the model
+setting preserves deployment-wide configuration.
 
 Start from a cookbook stack
 ---------------------------

@@ -421,7 +421,6 @@ def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, A
     return ModelBindings(
         served=wrap(models.served),
         named={name: wrap(models[name]) for name in models if name != "served"},
-        byok=models.byok,
     )
 
 

@@ -16,6 +16,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_metadata_for
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
@@ -35,6 +36,7 @@ class Scenario:
         checkpoint_strategy: CheckpointStrategy,
         records: RecordStore,
         trainer: Trainer,
+        model_config: ScenarioModelConfig | None = None,
         scenario_step: int = 0,
         process_id: str | None = None,
         commit_log: CommitLog | None = None,
@@ -42,6 +44,7 @@ class Scenario:
     ) -> None:
         self._name = name
         self._binding = binding
+        self.model_config = model_config or ScenarioModelConfig()
         self._surface = binding.surface
         self._records = records
         self._trainer = trainer
@@ -64,7 +67,7 @@ class Scenario:
     @property
     def runtime(self) -> InferenceRuntime | None:
         """Inference or training runtime bound to this scenario."""
-        return self._binding.runtime
+        return self.model_config.runtime or self._binding.runtime
 
     @property
     def report_type(self) -> type[ReportBase] | None:
@@ -73,7 +76,8 @@ class Scenario:
 
     @property
     def inference_backend(self) -> InferenceBackend | None:
-        return self._binding.inference_backend
+        runtime = self.model_config.runtime
+        return runtime.inference_backend if runtime is not None else self._binding.inference_backend
 
     @property
     def repository(self) -> Repository:

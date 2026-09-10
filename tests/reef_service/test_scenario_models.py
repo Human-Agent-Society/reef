@@ -1,4 +1,4 @@
-"""A real HTTP provider, proposer, judge and subprocess episode share a BYOK binding."""
+"""A real HTTP provider, proposer, judge and subprocess episode share a scenario model setting."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
-from reef.runtime.scenario_provider import ProviderResolutionError, ScenarioProviderResolver, ScenarioProviderRuntime
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonSelector
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
@@ -25,7 +25,7 @@ from reef.train.types import TraceBatch, TraceSample
 
 @pytest.fixture
 def platform():
-    state = {"calls": [], "configs": {}, "fail": False, "fail_models": False}
+    state = {"calls": [], "fail_models": False}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -33,30 +33,20 @@ def platform():
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
-            if self.path == "/resolve":
-                if state["fail"] or self.headers.get("authorization") != "Bearer deployment-secret":
-                    self.send_error(503)
-                    return
-                config = state["configs"][body["scenario"]]
-                if "version" in body and body["version"] != config["version"]:
-                    self.send_error(409)
-                    return
-                answer = config
+            state["calls"].append((self.path, dict(self.headers), body))
+            if state["fail_models"]:
+                self.send_error(401)
+                return
+            if self.path.endswith("/messages") or self.path.endswith("/count_tokens"):
+                answer = {
+                    "content": [{"type": "text", "text": "OK"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
             else:
-                state["calls"].append((self.path, dict(self.headers), body))
-                if state["fail_models"]:
-                    self.send_error(401)
-                    return
-                if self.path.endswith("/messages") or self.path.endswith("/count_tokens"):
-                    answer = {
-                        "content": [{"type": "text", "text": "OK"}],
-                        "usage": {"input_tokens": 1, "output_tokens": 1},
-                    }
-                else:
-                    answer = {
-                        "choices": [{"message": {"content": "OK"}}],
-                        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
-                    }
+                answer = {
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.end_headers()
@@ -75,10 +65,8 @@ def platform():
 
 
 def configure(platform, name, api, version="1"):
-    platform["configs"][name] = {
-        "mode": "byok",
-        "version": version,
-        "base_url": f"{platform['url']}/{name}/{version}",
+    return {
+        "url": f"{platform['url']}/{name}/{version}",
         "api_key": f"scoped-{name}-{version}",
         "model": f"custom-{name}",
         "api": api,
@@ -118,7 +106,6 @@ def make_recipe(platform, tmp_path):
     binary.chmod(0o755)
 
     def propose(nodes, samples, models):
-        assert models.byok
         assert models["teacher"].chat([{"role": "user", "content": "proposer"}]) == "OK"
         return Mutation("create", "improvement", {"name": "rules", "config": {"text": "marker"}})
 
@@ -131,7 +118,6 @@ def make_recipe(platform, tmp_path):
         models={"teacher": managed, "judge": managed},
         binary=str(binary),
         client_models=("managed-alternative",),
-        provider_resolver=ScenarioProviderResolver(f"{platform['url']}/resolve", "deployment-secret"),
         seed=({"id": "initial", "name": "skill", "config": {"name": "notes", "text": "notes"}},),
         proposals_dir=str(tmp_path / "proposals"),
     )
@@ -142,13 +128,12 @@ def make_recipe(platform, tmp_path):
 def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch, api, executor):
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-episodes")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-episodes")
-    configure(platform, "alpha", api)
     recipe = replace(make_recipe(platform, tmp_path), worker_executor=ExecutorSettings(backend=executor))
     initial = tmp_path / "initial"
     initial.mkdir()
     dispatcher = Dispatcher(recipe, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"))
     try:
-        scenario = dispatcher.get_or_create_scenario("alpha")
+        scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
         artifact = Artifact(scenario.repository.require_current_artifact(), scenario.repository)
         path = "/v1/messages" if api == "anthropic" else "/v1/chat/completions"
         asyncio.run(scenario.inference_backend.inference(artifact, path, {"model": "custom-alpha", "messages": []}))
@@ -163,6 +148,8 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             TraceBatch("batch", (TraceSample("record", {"messages": []}, 0.0),)), backend.initial_state(), 0
         )
         assert prepared.candidate is not None
+        # Updates between proposal and evaluation must not mix providers within the step.
+        dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api, "2"))
         plugin = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
         evaluation = plugin.evaluate(prepared.candidate)
         result = backend.settle_step(prepared, plugin.decide(prepared.candidate, evaluation))
@@ -184,16 +171,26 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         assert "scoped-alpha" not in json.dumps(prepared.candidate.candidate_files)
         assert "scoped-alpha" not in json.dumps(result.state)
         result.publication.artifact.discard()
+        asyncio.run(
+            scenario.inference_backend.inference(
+                artifact,
+                "/v1/messages" if api == "anthropic" else "/v1/chat/completions",
+                {"model": "custom-alpha", "messages": []},
+            )
+        )
+        assert platform["calls"][-1][0].startswith("/alpha/2/")
     finally:
         dispatcher.close()
 
 
 def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
-    configure(platform, "alpha", "openai")
-    configure(platform, "beta", "anthropic")
+    alpha_config = ScenarioModelConfig(tmp_path / "alpha.json")
+    beta_config = ScenarioModelConfig(tmp_path / "beta.json")
+    alpha_config.save(configure(platform, "alpha", "openai"))
+    beta_config.save(configure(platform, "beta", "anthropic"))
     recipe = make_recipe(platform, tmp_path)
-    alpha = recipe.for_scenario("alpha")
-    beta = recipe.for_scenario("beta")
+    alpha = recipe.with_model_config(alpha_config)
+    beta = recipe.with_model_config(beta_config)
     with ThreadPoolExecutor(2) as executor:
         list(
             executor.map(
@@ -202,24 +199,40 @@ def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
         )
     assert {path.split("/")[1] for path, _, _ in platform["calls"]} == {"alpha", "beta"}
     first = alpha.model_bindings()
-    configure(platform, "alpha", "anthropic", "2")
+    alpha_config.save(configure(platform, "alpha", "anthropic", "2"))
     second = alpha.model_bindings()
     assert first.served.api_key == "scoped-alpha-1"
     assert second.served.api_key == "scoped-alpha-2"
     assert all(binding.api == "anthropic" for binding in second.values())
-    assert isinstance(alpha.runtime, ScenarioProviderRuntime)
-    with pytest.raises(ProviderResolutionError):
-        alpha.runtime.request_backend("1")
-    platform["fail"] = True
-    for bound in (alpha, beta):
-        with pytest.raises(ProviderResolutionError):
-            bound.model_bindings()
+    assert beta.model_bindings().served.api_key == "scoped-beta-1"
+    with pytest.raises(ValueError):
+        alpha_config.save({"url": "bad", "model": "bad"})
+    assert alpha.model_bindings().served.api_key == "scoped-alpha-2"
     assert not any("/managed/" in path for path, _, _ in platform["calls"])
 
 
+def test_model_settings_persist_privately_and_corruption_fails_recovery(platform, tmp_path):
+    path = tmp_path / "model.json"
+    config = ScenarioModelConfig(path)
+    config.save(configure(platform, "alpha", "openai"))
+    assert path.stat().st_mode & 0o777 == 0o600
+    recovered = ScenarioModelConfig(path)
+    assert recovered.runtime.api_key == "scoped-alpha-1"
+    assert "scoped-alpha-1" not in json.dumps(recovered.view())
+    with pytest.raises(ValueError):
+        config.save({"url": "http://user:secret@host", "model": "bad"})
+    assert ScenarioModelConfig(path).runtime.api_key == "scoped-alpha-1"
+    config.save(None)
+    assert ScenarioModelConfig(path).runtime is None
+    path.write_text("{broken")
+    with pytest.raises(ValueError):
+        ScenarioModelConfig(path)
+
+
 def test_model_auth_failure_never_falls_back(platform, tmp_path):
-    configure(platform, "alpha", "openai")
-    recipe = make_recipe(platform, tmp_path).for_scenario("alpha")
+    config = ScenarioModelConfig()
+    config.save(configure(platform, "alpha", "openai"))
+    recipe = make_recipe(platform, tmp_path).with_model_config(config)
     bindings = recipe.model_bindings()
     platform["fail_models"] = True
     with pytest.raises(Exception, match="401"):
@@ -228,14 +241,13 @@ def test_model_auth_failure_never_falls_back(platform, tmp_path):
     assert platform["calls"][0][0].startswith("/alpha/")
 
 
-def test_http_contract_checks_version_and_installs_selected_protocol(platform, tmp_path):
+def test_http_contract_updates_model_and_installs_selected_protocol(platform, tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
     from reef.harness.adapters import get_adapter
     from reef.service.app import create_app
     from reef.service.request_service import RequestService
 
-    configure(platform, "alpha", "openai")
     recipe = make_recipe(platform, tmp_path)
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -251,24 +263,41 @@ def test_http_contract_checks_version_and_installs_selected_protocol(platform, t
         headers = {
             "authorization": "Bearer deployment-secret",
             "x-reef-scenario": "alpha",
-            "x-reef-provider-version": "1",
         }
         try:
-            capabilities = await client.get("/reef/providers/capabilities", headers=headers)
-            assert (await capabilities.json())["harness_evolve_byok_v1"] is True
+            payload = {"name": "alpha", "model": configure(platform, "alpha", "openai")}
+            unauthorized = await client.post("/reef/scenarios", json=payload)
+            assert unauthorized.status == 401
+            created = await client.post("/reef/scenarios", headers=headers, json=payload)
+            assert created.status == 201, await created.text()
+            view = await created.json()
+            assert view["model"]["model"] == "custom-alpha"
+            assert view["model"]["has_api_key"] is True
+            assert "scoped-alpha" not in json.dumps(view)
+            # Repeated creation must never overwrite a configuration changed elsewhere.
+            existing = await client.post("/reef/scenarios", headers=headers, json={"name": "alpha", "model": None})
+            assert existing.status == 200
+            assert (await existing.json())["model"] == view["model"]
+            missing = await client.post(
+                "/reef/scenarios/missing/update", headers=headers, json={"model": payload["model"]}
+            )
+            assert missing.status == 404
             response = await client.post(
                 "/v1/chat/completions", headers=headers, json={"model": "custom-alpha", "messages": []}
             )
             assert response.status == 200, await response.text()
             assert response.headers["x-reef-agent-record-id"]
-            before = len(platform["calls"])
-            configure(platform, "alpha", "anthropic", "2")
-            stale = await client.post(
-                "/v1/chat/completions", headers=headers, json={"model": "custom-alpha", "messages": []}
+            invalid = await client.post(
+                "/reef/scenarios/alpha/update", headers=headers, json={"model": {"url": "bad"}}
             )
-            assert stale.status == 400
-            assert len(platform["calls"]) == before
-            headers["x-reef-provider-version"] = "2"
+            assert invalid.status == 400
+            updated = await client.post(
+                "/reef/scenarios/alpha/update",
+                headers=headers,
+                json={"model": configure(platform, "alpha", "anthropic", "2")},
+            )
+            assert updated.status == 200, await updated.text()
+            assert (await updated.json())["model"]["api"] == "anthropic"
             fresh = await client.post("/v1/messages", headers=headers, json={"model": "custom-alpha", "messages": []})
             assert fresh.status == 200, await fresh.text()
             service = RequestService(dispatcher)
@@ -285,6 +314,10 @@ def test_http_contract_checks_version_and_installs_selected_protocol(platform, t
             assert "https://platform.example" in rendered
             assert "scoped-alpha" not in rendered
             assert "managed-alternative" not in rendered
+            reset = await client.post("/reef/scenarios/alpha/update", headers=headers, json={"model": None})
+            assert reset.status == 200
+            assert (await reset.json())["model"] is None
+            assert scenario.runtime.api_key == "platform-key"
         finally:
             await client.close()
 
@@ -292,3 +325,28 @@ def test_http_contract_checks_version_and_installs_selected_protocol(platform, t
         asyncio.run(run())
     finally:
         dispatcher.close()
+
+
+def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path):
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    records = tmp_path / "records"
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    recipe = make_recipe(platform, tmp_path)
+    first = Dispatcher(recipe, factory, agent_record_dir=records)
+    first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
+    first.close()
+    recovered = Dispatcher(recipe, factory, agent_record_dir=records)
+    try:
+        scenario = recovered.get_or_create_scenario("alpha")
+        assert scenario.runtime.api_key == "scoped-alpha-1"
+        assert scenario.trainer.training_backend._models["judge"].api_key == "scoped-alpha-1"
+        model_file = next(records.glob("*-model.json"))
+        assert model_file.stat().st_mode & 0o777 == 0o600
+        recovered.delete_scenario("alpha")
+        assert not model_file.exists()
+        assert list((records / "archived").glob("*/*-model.json"))
+        recreated = recovered.get_or_create_scenario("alpha")
+        assert recreated.runtime.api_key == "platform-key"
+    finally:
+        recovered.close()
