@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import math
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -112,13 +114,20 @@ class RecordStore:
                     created_at REAL NOT NULL,
                     references_json TEXT NOT NULL,
                     artifact_json TEXT,
-                    compacted_at REAL
+                    compacted_at REAL,
+                    body_bytes INTEGER NOT NULL DEFAULT 0
                 )
             """
             )
             columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(agent_record)")}
             if "compacted_at" not in columns:
                 self._connection.execute("ALTER TABLE agent_record ADD COLUMN compacted_at REAL")
+            if "body_bytes" not in columns:
+                self._connection.execute("ALTER TABLE agent_record ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute(
+                    "UPDATE agent_record SET body_bytes = length(CAST(payload_json AS BLOB)) "
+                    "+ length(CAST(references_json AS BLOB)) + COALESCE(length(CAST(artifact_json AS BLOB)), 0)"
+                )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS consumed_agent_record (
@@ -145,6 +154,10 @@ class RecordStore:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS agent_record_compacted_at "
                 "ON agent_record (scenario, compacted_at, sequence) WHERE compacted_at IS NOT NULL"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS agent_record_retention "
+                "ON agent_record (compacted_at, sequence, body_bytes) WHERE compacted_at IS NOT NULL"
             )
             self._connection.execute(
                 """
@@ -282,10 +295,10 @@ class RecordStore:
                 """
                 INSERT OR IGNORE INTO agent_record (
                     agent_record_id, scenario, request_type, created_at,
-                    payload_json, references_json, artifact_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    payload_json, references_json, artifact_json, body_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                encoded,
+                (*encoded, sum(len(value.encode("utf-8")) for value in encoded[4:] if value is not None)),
             )
             if cursor.rowcount == 1:
                 self._live_records[item.agent_record_id] = item
@@ -484,7 +497,7 @@ class RecordStore:
         """Delete at most ``limit`` bodies retired before a finite Unix timestamp.
 
         This explicit operation is irreversible. Active records, retry hashes,
-        and compaction receipts are retained. No automatic purge is scheduled.
+        and compaction receipts are retained. This call schedules no further maintenance.
         """
         if not math.isfinite(before):
             raise ValueError("before must be a finite Unix timestamp")
@@ -534,3 +547,108 @@ class RecordStore:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
+
+
+@dataclass(frozen=True)
+class RecordRetention:
+    """Deployment-wide limits on compacted JSON bodies, applied by service maintenance.
+
+    The byte budget excludes active records, indexes, tombstones, and WAL pages.
+    Cleanup reuses SQLite pages; it does not impose a physical file-size limit.
+    """
+
+    days: float = 7.0
+    max_bytes: int = 20 * 1024**3
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.days, bool)
+            or not isinstance(self.days, (int, float))
+            or not math.isfinite(self.days)
+            or self.days <= 0
+        ):
+            raise ValueError("agent_record_retention_days must be positive and finite")
+        if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes <= 0:
+            raise ValueError("agent_record_retention_max_bytes must be a positive integer")
+
+    def prune(self, directory: Path) -> int:
+        """Purge expired bodies, then the oldest bodies across this directory to meet the budget.
+
+        The caller must serialize this sweep with scenario file moves. Deletes
+        commit in batches of 256 and never touch active records or retry metadata.
+        Concurrent compaction may exceed the budget until the next sweep.
+        """
+        cutoff = time.time() - self.days * 86400
+        paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
+        purged = 0
+        total = 0
+        retained_paths: list[str] = []
+        for database_path in paths:
+            with closing(self._connect(str(database_path))) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_record)")}
+                if not {"compacted_at", "body_bytes"} <= columns:
+                    # Old stores have no retained compacted bodies; migration belongs to RecordStore.
+                    continue
+                retained_paths.append(str(database_path))
+                while True:
+                    with connection:
+                        count = connection.execute(
+                            "DELETE FROM agent_record WHERE sequence IN ("
+                            "SELECT sequence FROM agent_record WHERE compacted_at < ? "
+                            "ORDER BY compacted_at, sequence LIMIT 256)",
+                            (cutoff,),
+                        ).rowcount
+                    purged += count
+                    if count < 256:
+                        break
+
+                total += connection.execute(
+                    "SELECT COALESCE(SUM(body_bytes), 0) FROM agent_record WHERE compacted_at IS NOT NULL"
+                ).fetchone()[0]
+        if total <= self.max_bytes:
+            return purged
+        pending: dict[str, list[int]] = {path: [] for path in retained_paths}
+        rows = heapq.merge(*(self._rows(path) for path in retained_paths))
+        for _, path, sequence, size in rows:
+            pending[path].append(sequence)
+            total -= size
+            if len(pending[path]) == 256:
+                purged += self._delete(path, pending[path])
+                pending[path].clear()
+            if total <= self.max_bytes:
+                break
+        for path, sequences in pending.items():
+            if sequences:
+                purged += self._delete(path, sequences)
+        return purged
+
+    @staticmethod
+    def _connect(path: str) -> sqlite3.Connection:
+        return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=rw", uri=True, timeout=30)
+
+    @classmethod
+    def _rows(cls, path: str) -> Iterator[tuple[float, str, int, int]]:
+        after_time: float = -math.inf
+        after_sequence = 0
+        while True:
+            with closing(cls._connect(path)) as connection:
+                rows = connection.execute(
+                    "SELECT compacted_at, sequence, body_bytes FROM agent_record "
+                    "WHERE compacted_at IS NOT NULL AND (compacted_at, sequence) > (?, ?) "
+                    "ORDER BY compacted_at, sequence LIMIT 256",
+                    (after_time, after_sequence),
+                ).fetchall()
+            if not rows:
+                return
+            for compacted_at, sequence, size in rows:
+                yield compacted_at, path, sequence, size
+            after_time, after_sequence = rows[-1][:2]
+
+    @classmethod
+    def _delete(cls, path: str, sequences: list[int]) -> int:
+        placeholders = ",".join("?" for _ in sequences)
+        with closing(cls._connect(path)) as connection, connection:
+            return connection.execute(
+                f"DELETE FROM agent_record WHERE compacted_at IS NOT NULL AND sequence IN ({placeholders})",
+                sequences,
+            ).rowcount

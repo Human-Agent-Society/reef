@@ -261,12 +261,26 @@ For example, inspect one trace without making it available to training again:
        references = entry.item.references
        retired_at = entry.compacted_at
 
-No purge runs automatically. Operators choose retention and invoke purge
-separately; it preserves active records, retry hashes, and compaction receipts.
+The HTTP service runs background retention at startup and every 60 seconds.
+It removes bodies older than 7 days, then the oldest remaining bodies to meet
+a shared 20 GiB budget across scenario databases in ``agent_record_dir``,
+including ``archived/``. The budget measures UTF-8 JSON payloads, references,
+and artifact references. Limits are configurable in :doc:`configuration`.
+
+For embedded Python deployments, use
+``dispatcher.prune_record_archives(RecordRetention(days=7, max_bytes=20 * 1024**3))``
+with ``RecordRetention`` imported from ``reef.records``. This runs one sweep
+and serializes it with scenario file moves. Standalone ``RecordStore`` and
+``Dispatcher`` construction do not start a maintenance task. ``create_app``
+accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
+
+Retention preserves active records, retry hashes, and compaction receipts.
 An identical retry after purge still deduplicates, and conflicting content
-still fails. SQLite may reuse freed pages, but purging does not shrink the
-database file. HTTP audit routes and scheduled retention are separate
-integrations. See :doc:`configuration` for migration and rollback constraints.
+still fails. Deletes commit in batches of 256. Concurrent compaction can exceed
+the budget until the next sweep. SQLite may reuse freed pages, but purging does
+not shrink the database file; active records, indexes, and other metadata also
+use disk space. HTTP audit routes remain a separate integration. See
+:doc:`configuration` for migration and rollback constraints.
 
 Processor
 ---------

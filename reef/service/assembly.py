@@ -21,6 +21,7 @@ from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
+from reef.records import RecordRetention
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackendFactory
@@ -237,6 +238,7 @@ def build_dispatcher(
 
 
 def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
+    record_retention = RecordRetention(settings.agent_record_retention_days, settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,
         max_s=settings.inference_retry_max_s,
@@ -251,6 +253,7 @@ def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = 
             tokens=settings.tokens,
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
+            record_retention=record_retention,
         )
     except BaseException:
         with suppress(Exception):

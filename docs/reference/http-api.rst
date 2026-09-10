@@ -419,9 +419,10 @@ counted twice.
 Training compaction retires records without deleting their original payloads.
 Reef's explicit Python audit reads can inspect retained requests, responses,
 references, and compaction timestamps; ordinary training reads exclude retired
-records. There is no new HTTP record-query endpoint. Physical deletion is a
-separate, explicit purge operation; see :doc:`python-api` for the audit and
-purge methods. A compaction timestamp alone does not prove that a record was
+records. There is no new HTTP record-query endpoint. Separate background
+retention limits compacted bodies to 7 days and a shared 20 GiB by default;
+see :doc:`configuration` for scope and :doc:`python-api` for audit and purge
+methods. A compaction timestamp alone does not prove that a record was
 used for learning: per-step ``consumed_ids`` in the commit log identifies that
 relationship.
 

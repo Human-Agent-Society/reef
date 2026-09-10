@@ -8,7 +8,7 @@ import pytest
 
 from reef.artifact import ArtifactRef, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
-from reef.records import RecordConflict, RecordStore
+from reef.records import RecordConflict, RecordRetention, RecordStore
 
 
 def item(
@@ -432,6 +432,9 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
     with RecordStore(database) as records:
         assert records.get("math", "live") is None
         assert records.get_for_audit("math", "live").item == item("live", "math")
+        assert RecordRetention(max_bytes=1).prune(tmp_path) == 1
+        assert records.get_for_audit("math", "live") is None
+        assert records.get("math", "next") is not None
 
 
 @pytest.mark.unit

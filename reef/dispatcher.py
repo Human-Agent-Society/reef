@@ -34,6 +34,7 @@ from reef.observability import (
     TrainingExperimentEvent,
 )
 from reef.recipe.base import Recipe
+from reef.records import RecordRetention
 from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
@@ -149,6 +150,7 @@ class Dispatcher:
         experiment_tracker: ExperimentTracker | None = None,
     ) -> None:
         self._recipe = recipe
+        self._record_retention_lock = Lock()
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self._registry = ScenarioRegistry(
             recipe,
@@ -216,6 +218,12 @@ class Dispatcher:
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
 
+    def prune_record_archives(self, retention: RecordRetention) -> int:
+        """Apply deployment-wide retention without racing scenario file moves."""
+        with self._record_retention_lock:
+            directory = self._registry.agent_record_dir
+            return 0 if directory is None else retention.prune(directory)
+
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.
 
@@ -228,7 +236,7 @@ class Dispatcher:
         """
         if "/" in scenario or scenario in ("", ".", ".."):
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        with self._registry.lock_for(scenario):
+        with self._record_retention_lock, self._registry.lock_for(scenario):
             if not self._registry.has(scenario):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             dropped = self._registry.remove(scenario)

@@ -11,8 +11,8 @@ or artifact identifier used for serving).
 
 Compaction retires records from training while retaining their bodies for audit.
 It retires only rows the processor marks releasable, and Reef recomputes that
-set from current state on every read. Physical deletion requires a separate,
-explicit purge of compacted bodies.
+set from current state on every read. Separate retention maintenance physically
+purges old compacted bodies while keeping retry hashes and commit metadata.
 
 With a database path configured, the SQLite store uses WAL journalling and
 synchronous = FULL. The default in-memory database is for tests and does not
