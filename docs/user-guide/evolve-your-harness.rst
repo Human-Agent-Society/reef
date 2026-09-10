@@ -747,3 +747,8 @@ the model calls. The bundled descriptors cover these agents:
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.
+
+.. seealso::
+
+   `Harness BYOK <harness-byok.rst>`__ explains scenario-specific custom providers for the entire
+   harness evolve model pipeline through Reef API Platform.

@@ -191,6 +191,14 @@ const preservedModelPrompts = new Map([
 ]);
 
 function terminologySource(path, source) {
+  // The naming policy must list the words it restricts; keep the rest of the
+  // instructions checked, including wording outside this explicit example list.
+  if (path === "AGENTS.md" || path === "CLAUDE.md") {
+    source = source.replace(
+      /(^In particular, avoid terms such as:\n\n)((?:- [^\n]+\n)+)/gm,
+      (_, prefix, examples) => prefix + examples.replace(/[^\n]/g, " "),
+    );
+  }
   const prompt = preservedModelPrompts.get(path);
   if (!prompt) return source;
   // Keep newlines so failures below still point to the original source lines.

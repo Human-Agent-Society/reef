@@ -50,6 +50,9 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         value = await asyncio.to_thread(lambda: request_service.dispatcher.build_training_status())
         return web.json_response(value)
 
+    async def providers(request: web.Request) -> web.Response:
+        return web.json_response(request_service.dispatcher.provider_capabilities())
+
     async def adapters(request: web.Request) -> web.Response:
         names = await asyncio.to_thread(available_adapters)
         entries = []
@@ -82,6 +85,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)
+    app.router.add_get("/reef/providers/capabilities", providers)
 
 
 __all__ = ["register_system_routes"]

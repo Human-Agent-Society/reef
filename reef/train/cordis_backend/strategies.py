@@ -149,6 +149,10 @@ class EpisodeScorer(ABC):
         """
         return ExecutionRequirements()
 
+    def score_with_models(self, task: str, result: EpisodeResult, models: ModelBindings) -> float:
+        """Model-based judges override this method and use the supplied bindings."""
+        return self(task, result)
+
 
 def accepts_keyword(fn: Callable[..., Any], name: str) -> bool:
     """Whether ``fn`` names ``name`` or takes ``**kwargs``; a keyword is only passed to code that declared it."""
@@ -229,11 +233,16 @@ class _CallableProposer(Proposer):
 class _CallableEpisodeScorer(EpisodeScorer):
     """Adapter wrapping a plain callable as an episode scorer."""
 
-    def __init__(self, fn: Callable[[str, EpisodeResult], float]) -> None:
+    def __init__(self, fn: Callable[..., float]) -> None:
         self._fn = fn
 
     def __call__(self, task: str, result: EpisodeResult) -> float:
         return self._fn(task, result)
+
+    def score_with_models(self, task: str, result: EpisodeResult, models: ModelBindings) -> float:
+        if accepts_keyword(self._fn, "models"):
+            return self._fn(task, result, models=models)
+        return self(task, result)
 
 
 def resolve_proposer(value: object) -> Proposer:
