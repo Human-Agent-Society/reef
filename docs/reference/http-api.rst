@@ -764,3 +764,32 @@ an origin in Reef does not override browser policy.
 A connected console acts with the service token's existing permissions. Its
 requests operate directly on this runtime's scenarios, without creating a
 cloud deployment or uploading history as part of the CORS connection.
+
+Learning inspection
+-------------------
+
+``GET /reef/scenarios/{scenario}/learning`` reads retained record summaries,
+including compacted records. ``after_sequence`` defaults to 0 and ``limit``
+defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
+null at the end. This is a page of retained bodies, not a complete historical
+count. The policy object names the live processor, required request types,
+training mode, and processor status. Historical eligibility decisions and
+evaluation thresholds are not exposed.
+
+Each summary includes ``agent_record_id``, ``sequence``, ``request_type``,
+``created_at``, ``compacted_at``, ``references``, ``score``, ``served_by``,
+``learning_state``, ``reason``, and ``learning_steps``. Only commit-log
+``consumed_ids`` establish consumption. Active unconsumed records are
+``awaiting``; compacted unconsumed records have an ``unknown`` decision.
+Consumption does not mean an update was selected or promoted. Candidate
+identifiers are returned only when recorded in selection metrics. A link's
+``release_id`` is the committed artifact, which can be the unchanged current
+release after rejection.
+
+``GET /reef/scenarios/{scenario}/records/{record_id}`` returns the same summary
+and its stored ``payload``. The payload can contain sensitive request and
+response content. Both routes use service authentication and return
+``Cache-Control: no-store``. The platform console must bind the scenario to
+the authenticated workspace. Missing bodies return 404: a body may have
+expired or never been retained. Reading never reactivates a record, changes
+retention, or duplicates its payload into another store.

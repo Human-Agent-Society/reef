@@ -88,6 +88,29 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             }
         )
 
+    async def learning_data(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.inspect_learning,
+            request.match_info["scenario"],
+            after_sequence=int(request.query.get("after_sequence", "0")),
+            limit=int(request.query.get("limit", "50")),
+        )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def record_detail(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.inspect_record,
+            request.match_info["scenario"],
+            request.match_info["record_id"],
+        )
+        if result is None:
+            return web.json_response(
+                {"error": "Trace body is unavailable. It may have expired or never been retained."},
+                status=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def scenario_contract(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         return web.json_response(request_service.dispatcher.scenario_contract(scenario))
@@ -127,6 +150,8 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
+    app.router.add_get("/reef/scenarios/{scenario}/learning", learning_data)
+    app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/promote", promote_scenario)
