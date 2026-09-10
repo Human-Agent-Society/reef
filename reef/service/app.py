@@ -8,6 +8,7 @@ from aiohttp import web
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.auth import create_authentication_middleware
+from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
 from reef.service.request_service import InferenceRetryPolicy, RequestService
 from reef.service.routes import register_routes
@@ -17,6 +18,7 @@ def create_app(
     dispatcher: Dispatcher | None = None,
     *,
     tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
     inference_backend: InferenceBackend | None = None,
     inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
@@ -27,6 +29,7 @@ def create_app(
     )
     request_service_key = web.AppKey("reef_request_service", RequestService)
     app = web.Application(middlewares=[create_authentication_middleware(tokens), translate_errors])
+    configure_browser_access(app, console_origins)
     app[request_service_key] = request_service
     register_routes(
         app,

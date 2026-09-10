@@ -723,3 +723,34 @@ Status codes
 Reef relays upstream 4xx failures with the provider's original message; the
 common client statuses (400, 401, 403, 404, 408, 409, 422, 429) keep their
 status code, and any other upstream 4xx comes back as 400.
+
+Browser consoles
+----------------
+
+The service can opt in to direct browser access with ``reef.console_origins``
+in the serve YAML. List each trusted console origin explicitly, with no path,
+trailing slash, credentials, or wildcard:
+
+.. code-block:: yaml
+
+   reef:
+     console_origins:
+       - "https://api.reefinfra.ai"
+       - "http://localhost:3000"
+
+Restart the service after changing the configuration. Without this option, Reef
+does not add CORS headers. With it, unlisted browser origins are rejected before
+a route runs. CORS preflight requests from listed origins do not need a service
+token; actual requests retain the configured Bearer authentication. Browser
+requests may use GET, POST or DELETE with Authorization, Content-Type and
+x-reef-scenario headers. Cookies are not enabled through CORS.
+
+CORS headers also cover errors and streamed responses, exposing
+``x-reef-agent-record-id``, ``x-reef-release-id`` and ``x-reef-artifact-version``
+to the browser. Clients without an Origin header keep their existing behavior.
+A browser may additionally require local network permission or HTTPS; allowing
+an origin in Reef does not override browser policy.
+
+A connected console acts with the service token's existing permissions. Its
+requests operate directly on this runtime's scenarios, without creating a
+cloud deployment or uploading history as part of the CORS connection.

@@ -2,8 +2,9 @@
 
 ``reef serve`` configs are YAML with two interpolation passes: ``${VAR}``
 against the process environment at load time (with ``REEF_PYTHON`` defaulting
-to the current interpreter), and ``${dotted.path}`` against the config itself
-when a service command or setting is materialized.
+to the current interpreter and ``${VAR:?}`` requiring a non-empty value), and
+``${dotted.path}`` against the config itself when a service command or setting
+is materialized.
 """
 
 from __future__ import annotations
@@ -28,22 +29,46 @@ except ImportError as exc:  # pragma: no cover - environment-dependent
     raise DeployConfigError("PyYAML is required: pip install pyyaml") from exc
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_ENV_VAR_RE = re.compile(r"\$\{(\w+)\}")
+_ENV_VAR_RE = re.compile(r"\$\{(\w+)(:\?)?\}")
 _CFG_VAR_RE = re.compile(r"\$\{([\w.-]+)\}")
 
 
-def _interp_env(value: str, environ: Mapping[str, str]) -> str:
-    return _ENV_VAR_RE.sub(lambda m: environ.get(m.group(1), ""), value)
-
-
-def _deep_interp_env(obj: Any, environ: Mapping[str, str]) -> Any:
+def _deep_interp_env(obj: Any, environ: Mapping[str, str], missing: dict[str, list[str]], location: str = "") -> Any:
     if isinstance(obj, dict):
-        return {key: _deep_interp_env(item, environ) for key, item in obj.items()}
+        return {
+            key: _deep_interp_env(item, environ, missing, f"{location}.{key}" if location else str(key))
+            for key, item in obj.items()
+        }
     if isinstance(obj, list):
-        return [_deep_interp_env(item, environ) for item in obj]
+        return [_deep_interp_env(item, environ, missing, f"{location}[{index}]") for index, item in enumerate(obj)]
     if isinstance(obj, str):
-        return _interp_env(obj, environ)
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            value = environ.get(name, "")
+            if match.group(2) and not value.strip():
+                locations = missing.setdefault(name, [])
+                if location not in locations:
+                    locations.append(location)
+            return value
+
+        return _ENV_VAR_RE.sub(replace, obj)
     return obj
+
+
+def interpolate_environment(config: Mapping[str, Any], config_path: str | Path) -> dict[str, Any]:
+    """Expand environment references, reporting every missing required variable."""
+    environ = dict(os.environ)
+    environ.setdefault("REEF_PYTHON", sys.executable)
+    missing: dict[str, list[str]] = {}
+    resolved = _deep_interp_env(dict(config), environ, missing)
+    if missing:
+        details = "\n".join(f"  {name} ({', '.join(locations)})" for name, locations in missing.items())
+        raise DeployConfigError(
+            f"config {config_path}: missing or empty required environment variables:\n{details}\n"
+            "Set these variables before running reef serve, or override the corresponding config fields."
+        )
+    return resolved
 
 
 def config_value(
@@ -86,7 +111,8 @@ def interpolate_config(config: Mapping[str, Any], value: str) -> str:
     raise DeployConfigError("config interpolation exceeded 64 levels")
 
 
-def load_config(config_path: str | Path) -> dict[str, Any]:
+def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dict[str, Any]:
+    """Read a deployment config; defer interpolation when applying CLI overrides."""
     path = Path(config_path)
     if not path.is_absolute():
         path = PROJECT_ROOT / path
@@ -101,9 +127,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         config = {}
     if not isinstance(config, dict):
         raise DeployConfigError(f"config {path} must be a YAML object at the root, not {type(config).__name__}")
-    environ = dict(os.environ)
-    environ.setdefault("REEF_PYTHON", sys.executable)
-    return _deep_interp_env(config, environ)
+    return interpolate_environment(config, path) if interpolate_env else config
 
 
 def recipe_source_root(config: Mapping[str, Any], config_path: str | Path) -> Path | None:
