@@ -215,6 +215,59 @@ The same type serves both sides: a producer constructs it and calls
 ``to_dict()``; a processor receives the parsed instance as
 ``context.parsed_report``.
 
+Record storage and audit
+------------------------
+
+``reef.records.RecordStore`` separates the training record set from retained
+trace history. ``compact(scenario, ids)`` sets ``compacted_at`` and keeps the
+original payload, response, references, and artifact reference. Hash tombstones
+and optional compaction receipts are committed atomically with that transition.
+Repeated compaction preserves the first timestamp.
+
+``get``, ``replay``, ``replay_page``, and ``count`` expose only records whose
+``compacted_at`` is ``None``. Training and restart recovery continue to use
+those methods. Use these explicit methods for audit and retention work:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Method
+     - Result
+   * - ``get_for_audit(scenario, agent_record_id)``
+     - A ``StoredRecord``, or ``None`` if no body is retained in that scenario.
+   * - ``audit_page(scenario, after_sequence=0, limit=256)``
+     - A bounded tuple of ``StoredRecord`` entries, in append order, including
+       compacted bodies. Advance the cursor using the last entry's ``sequence``.
+   * - ``purge_compacted(scenario, before=timestamp, limit=256)``
+     - The number of bodies physically deleted, at most ``limit``. Only records
+       with ``compacted_at < before`` are eligible. The cutoff must be a finite
+       Unix timestamp and the limit a positive integer.
+
+``StoredRecord`` contains ``sequence``, ``item`` (the original ``AgentRecord``),
+and ``compacted_at`` (a Unix timestamp or ``None``). Audit reads never restore a
+record to the training set. A missing body may have been purged or never stored;
+the read API does not guess which. Compaction includes terminal or excluded
+records as well as trained records. Use the commit log's per-step
+``consumed_ids`` to determine learning participation.
+
+For example, inspect one trace without making it available to training again:
+
+.. code:: python
+
+   entry = scenario.records.get_for_audit(scenario.name, record_id)
+   if entry is not None:
+       payload = entry.item.payload
+       references = entry.item.references
+       retired_at = entry.compacted_at
+
+No purge runs automatically. Operators choose retention and invoke purge
+separately; it preserves active records, retry hashes, and compaction receipts.
+An identical retry after purge still deduplicates, and conflicting content
+still fails. SQLite may reuse freed pages, but purging does not shrink the
+database file. HTTP audit routes and scheduled retention are separate
+integrations. See :doc:`configuration` for migration and rollback constraints.
+
 Processor
 ---------
 

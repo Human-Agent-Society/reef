@@ -9,9 +9,10 @@ It includes a record id, a scenario, an inference payload (for inference
 exchange) or feedback (for report), and necessary metadata (e.g. request type
 or artifact identifier used for serving).
 
-Compaction is the only operation that deletes records. It deletes only rows
-the processor marks releasable, and Reef recomputes that set from current state
-on every read.
+Compaction retires records from training while retaining their bodies for audit.
+It retires only rows the processor marks releasable, and Reef recomputes that
+set from current state on every read. Physical deletion requires a separate,
+explicit purge of compacted bodies.
 
 With a database path configured, the SQLite store uses WAL journalling and
 synchronous = FULL. The default in-memory database is for tests and does not
@@ -68,7 +69,7 @@ Commit ordering
 
 Each scenario has an append-only JSONL commit log, and the fsynced append is the
 commit point. A committed step records its step number, artifact ref, checkpoint
-flag, algorithm state, record high-water mark, compaction deletions, and
+flag, algorithm state, record high-water mark, compaction retirements, and
 metrics. Every other store is derived from that log, and the ordering around the
 append is fixed per step kind, so a crash in any gap replays cleanly.
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+
 import pytest
 
 from reef.artifact import ArtifactRef, LiveWeightArtifactRef
@@ -155,12 +159,19 @@ def test_compact_hides_records_but_retains_retry_tombstones(tmp_path) -> None:
         assert [record.agent_record_id for record in records.replay("math")] == ["retained"]
         assert records.get("math", "inference") is None
         assert records.get("math", "retained") is not None
+        archived = records.get_for_audit("math", "inference")
+        assert archived is not None and archived.item == inference
+        assert archived.compacted_at is not None
+        assert records.get_for_audit("code", "inference") is None
 
     with RecordStore(database) as recovered:
         assert recovered.append_result(inference).inserted is False
         late = item("late", "math", RequestType.REPORT, references=("inference",))
         assert recovered.append_result(late).inserted is False
         assert recovered.count("math") == 1
+        assert recovered.get_for_audit("math", "inference") == archived
+        assert recovered.get_for_audit("math", "report").item == report
+        assert recovered.existing_receipt(inference).agent_record_id == inference.agent_record_id
 
 
 @pytest.mark.unit
@@ -238,10 +249,13 @@ def test_compact_fingerprints_large_id_sets_in_bounded_queries() -> None:
 
     assert records.count("math") == 0
     assert records.append_result(items[-1]).inserted is False
+    archived = records.audit_page("math", limit=1001)
+    assert len(archived) == 1001
+    assert all(record.compacted_at is not None for record in archived)
 
 
 @pytest.mark.unit
-def test_compaction_receipt_is_atomic_with_payload_deletion_and_persists(tmp_path) -> None:
+def test_compaction_receipt_is_atomic_with_retirement_and_persists(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
     with RecordStore(database) as records:
         records.append(item("inference", "math"))
@@ -274,6 +288,7 @@ def test_compaction_receipt_is_atomic_with_payload_deletion_and_persists(tmp_pat
             },
         }
         assert isinstance(receipts[0]["recorded_at"], float)
+        assert all(record.compacted_at is not None for record in recovered.audit_page("math"))
 
 
 @pytest.mark.unit
@@ -300,3 +315,198 @@ def test_compaction_receipt_is_idempotent_and_conflicting_content_fails() -> Non
         receipt_metadata=metadata,
     )
     assert len(records.compaction_receipts("math")) == 2
+
+
+@pytest.mark.unit
+def test_audit_reads_preserve_trace_content_without_reactivating_it() -> None:
+    trace = AgentRecord.create(
+        agent_record_id="trace",
+        scenario="code",
+        request_type=RequestType.INFERENCE,
+        created_at=10.0,
+        payload={
+            "messages": [{"role": "user", "content": "修复登录重试"}],
+            "response": {"choices": [{"message": {"role": "assistant", "content": "先复现失败。"}}]},
+        },
+        artifact_ref=ArtifactRef("artifact", "release", "initial"),
+    )
+    report = replace(item("feedback", "code", RequestType.REPORT, references=("trace",)), payload={"score": 0.2})
+    with RecordStore() as records:
+        records.append(trace)
+        records.append(report)
+        records.compact("code", frozenset({"trace", "feedback"}))
+
+        page = records.audit_page("code")
+        assert [entry.item for entry in page] == [trace, report]
+        assert all(entry.compacted_at is not None for entry in page)
+        assert records.get_for_audit("code", "feedback").item.references == ("trace",)
+        assert records.count("code") == 0
+        assert records.replay("code") == ()
+        assert records.replay_page("code") == ()
+        assert records.get("code", "trace") is None
+        assert records.append_result(trace).inserted is False
+        assert records.append_result(item("late", "code", RequestType.REPORT, references=("trace",))).inserted is False
+        assert records.count("code") == 0
+
+
+@pytest.mark.unit
+def test_training_pages_skip_compacted_gaps_and_audit_pages_include_them() -> None:
+    with RecordStore() as records:
+        for record in (
+            item("a", "code"),
+            item("other", "math"),
+            item("b", "code", RequestType.REPORT),
+            item("c", "code"),
+            item("d", "code"),
+            item("e", "code", RequestType.REPORT),
+        ):
+            records.append(record)
+        records.compact("code", frozenset({"a", "c", "other"}))
+        assert records.get("math", "other") is not None
+        first = records.replay_page("code", limit=1)
+        second = records.replay_page("code", after_sequence=first[0][0], limit=1)
+        assert [row.agent_record_id for _, row in first] == ["b"]
+        assert [row.agent_record_id for _, row in second] == ["d"]
+        assert [row.agent_record_id for row in records.replay("code", offset=1, limit=1)] == ["d"]
+        assert records.count("code") == 3
+        assert records.count("code", request_type=RequestType.INFERENCE) == 1
+        assert records.count("code", request_type=RequestType.REPORT, after_sequence=first[0][0]) == 1
+        audit_first = records.audit_page("code", limit=2)
+        audit_second = records.audit_page("code", after_sequence=audit_first[-1].sequence, limit=2)
+        assert [row.item.agent_record_id for row in audit_first] == ["a", "b"]
+        assert [row.item.agent_record_id for row in audit_second] == ["c", "d"]
+        assert audit_first[0].compacted_at is not None
+        assert audit_first[1].compacted_at is None
+        assert records.audit_page("missing") == ()
+
+
+@pytest.mark.unit
+def test_repeated_compaction_preserves_the_first_retirement_time(monkeypatch) -> None:
+    with RecordStore() as records:
+        records.append(item("a", "math"))
+        monkeypatch.setattr("reef.records.time.time", lambda: 100.0)
+        records.compact("math", frozenset({"a"}))
+        first = records.get_for_audit("math", "a")
+        monkeypatch.setattr("reef.records.time.time", lambda: 200.0)
+        records.compact("math", frozenset({"a"}))
+        assert records.get_for_audit("math", "a") == first
+        assert first.compacted_at == 100.0
+
+
+@pytest.mark.unit
+def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bodies(tmp_path) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE agent_record (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_record_id TEXT NOT NULL UNIQUE, scenario TEXT NOT NULL,
+                request_type TEXT NOT NULL, payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL, references_json TEXT NOT NULL, artifact_json TEXT
+            );
+            CREATE TABLE consumed_agent_record (
+                agent_record_id TEXT PRIMARY KEY, content_sha256 TEXT NOT NULL
+            );
+            INSERT INTO agent_record VALUES (7, 'live', 'math', 'inference', '{"value":"live"}', 4, '[]', NULL);
+            INSERT INTO consumed_agent_record VALUES ('deleted', 'legacy-fingerprint');
+            """
+        )
+
+    def open_store(_: int) -> None:
+        with RecordStore(database) as records:
+            assert records.get("math", "live") == item("live", "math")
+            entry = records.get_for_audit("math", "live")
+            assert entry.sequence == 7 and entry.compacted_at is None
+            assert records.get_for_audit("math", "deleted") is None
+
+    # Concurrent openers must see one atomic, idempotent schema upgrade.
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        tuple(executor.map(open_store, range(3)))
+    with RecordStore(database) as records:
+        late = item("late", "math", RequestType.REPORT, references=("deleted",))
+        assert records.append_result(late).inserted is False
+        records.append(item("next", "math"))
+        assert records.get_for_audit("math", "next").sequence > 7
+        records.compact("math", frozenset({"live"}))
+    with RecordStore(database) as records:
+        assert records.get("math", "live") is None
+        assert records.get_for_audit("math", "live").item == item("live", "math")
+
+
+@pytest.mark.unit
+def test_compaction_failure_rolls_back_body_state_hashes_and_receipt(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    with RecordStore(database) as records:
+        records.append(item("a", "math"))
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TRIGGER reject_compaction BEFORE UPDATE OF compacted_at ON agent_record "
+                "BEGIN SELECT RAISE(ABORT, 'injected compaction failure'); END"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="injected compaction failure"):
+            records.compact("math", frozenset({"a"}), receipt_id="batch", receipt_metadata={"outcome": "stale"})
+        assert records.get("math", "a") is not None
+        assert records.get_for_audit("math", "a").compacted_at is None
+        assert records.compaction_receipts("math") == ()
+        assert records.append_result(item("report", "math", RequestType.REPORT, references=("a",))).inserted is True
+
+
+@pytest.mark.unit
+def test_purge_is_bounded_scoped_and_preserves_retry_and_receipt_contracts(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "records.sqlite3"
+    original = item("a", "math")
+    with RecordStore(database) as records:
+        for record in (
+            original,
+            item("b", "math"),
+            item("newer", "math"),
+            item("active", "math"),
+            item("other", "code"),
+        ):
+            records.append(record)
+        monkeypatch.setattr("reef.records.time.time", lambda: 100.0)
+        records.compact("math", frozenset({"a", "b"}), receipt_id="batch", receipt_metadata={"outcome": "stale"})
+        records.compact("code", frozenset({"other"}))
+        monkeypatch.setattr("reef.records.time.time", lambda: 200.0)
+        records.compact("math", frozenset({"newer"}))
+        assert records.purge_compacted("math", before=100.0) == 0
+        assert records.purge_compacted("math", before=150.0, limit=1) == 1
+        assert records.get_for_audit("math", "a") is None
+        assert records.get_for_audit("math", "b") is not None
+        assert records.purge_compacted("math", before=150.0) == 1
+        assert records.purge_compacted("math", before=150.0) == 0
+        assert records.get_for_audit("math", "newer") is not None
+        assert records.get("math", "active") is not None
+        assert records.get_for_audit("code", "other") is not None
+
+    with RecordStore(database) as records:
+        assert records.append_result(original).inserted is False
+        assert records.existing_receipt(original).agent_record_id == "a"
+        with pytest.raises(RecordConflict):
+            records.append(replace(original, payload={"value": "changed"}))
+        assert records.append_result(item("late", "math", RequestType.REPORT, references=("a",))).inserted is False
+        assert records.get_for_audit("math", "a") is None
+        assert records.compaction_receipts("math")[0]["receipt_id"] == "batch"
+        assert records.count("math") == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("before", [float("nan"), float("inf"), float("-inf")])
+def test_purge_rejects_non_finite_cutoffs(before: float) -> None:
+    with RecordStore() as records, pytest.raises(ValueError, match="finite"):
+        records.purge_compacted("math", before=before)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
+def test_purge_rejects_invalid_limits(limit) -> None:
+    with RecordStore() as records, pytest.raises(ValueError, match="positive integer"):
+        records.purge_compacted("math", before=100.0, limit=limit)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("options", [{"after_sequence": -1}, {"limit": 0}, {"limit": -1}])
+def test_audit_page_rejects_invalid_bounds(options) -> None:
+    with RecordStore() as records, pytest.raises(ValueError):
+        records.audit_page("math", **options)

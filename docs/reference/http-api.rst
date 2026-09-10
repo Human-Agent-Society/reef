@@ -416,6 +416,15 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
+Training compaction retires records without deleting their original payloads.
+Reef's explicit Python audit reads can inspect retained requests, responses,
+references, and compaction timestamps; ordinary training reads exclude retired
+records. There is no new HTTP record-query endpoint. Physical deletion is a
+separate, explicit purge operation; see :doc:`python-api` for the audit and
+purge methods. A compaction timestamp alone does not prove that a record was
+used for learning: per-step ``consumed_ids`` in the commit log identifies that
+relationship.
+
 Receiving an update
 -------------------
 

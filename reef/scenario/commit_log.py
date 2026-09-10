@@ -55,7 +55,7 @@ class CommitRecord:
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
     consumed, the rows its batch consumed, and the rows its compaction
-    deleted, so the record store and processor memory can be re-derived after
+    retired, so the record store and processor memory can be re-derived after
     a crash.
     """
 

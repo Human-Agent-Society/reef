@@ -689,7 +689,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
     # Simulate restart: a fresh trainer is built with the algorithm_state
     # recovered from artifact metadata. the record store on disk retains only the
-    # untrained prefix (compaction removed i1/r1).
+    # untrained prefix (compaction retired i1/r1 from training reads).
     recovered_state = first.algorithm_state_dict()
     second = Trainer.build(
         "math",
@@ -712,7 +712,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
 
 @pytest.mark.unit
-def test_commit_compacts_consumed_payloads_physically(tmp_path) -> None:
+def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
     first_inference = positioned_inference(1)
     first_report = positioned_report(2, first_inference.agent_record_id, 1.0)
@@ -738,6 +738,8 @@ def test_commit_compacts_consumed_payloads_physically(tmp_path) -> None:
 
         assert first_store.get("math", first_inference.agent_record_id) is None
         assert first_store.get("math", first_report.agent_record_id) is None
+        assert first_store.get_for_audit("math", first_inference.agent_record_id).item == first_inference
+        assert first_store.get_for_audit("math", first_report.agent_record_id).item == first_report
         assert [item.agent_record_id for item in first_store.replay("math")] == [
             second_inference.agent_record_id,
             second_report.agent_record_id,
@@ -761,6 +763,10 @@ def test_commit_compacts_consumed_payloads_physically(tmp_path) -> None:
         second.commit(prepared)
         second.apply_compaction(prepared.compacted_ids)
         assert second_store.count("math") == 0
+        archived = second_store.audit_page("math")
+        assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
+        assert all(entry.compacted_at is not None for entry in archived)
+        assert second.reserve_training_batch() is None
 
 
 @pytest.mark.integration

@@ -100,6 +100,18 @@ persistent.
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
 
+The record store keeps trace bodies after training compaction. Compaction marks
+records as retired from training; it does not remove their requests, responses,
+or feedback from SQLite. No automatic expiry is enabled. Operators can apply a
+retention period with the explicit, bounded ``RecordStore.purge_compacted``
+method described in :doc:`python-api`. Allow disk space for retained traces.
+
+Existing stores gain a nullable ``compacted_at`` column when opened. Already
+deleted bodies cannot be recovered by this migration. Older Reef versions do
+not filter that column: stop the service and restore a pre-upgrade backup for
+rollback, or purge all compacted bodies with the new version before downgrading.
+Do not share a migrated store between old and new writers.
+
 Recipe settings such as ``batch_size`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When
 ``reef.recipe`` is a dotted weight-training class, keys the service does not
