@@ -215,6 +215,73 @@ The same type serves both sides: a producer constructs it and calls
 ``to_dict()``; a processor receives the parsed instance as
 ``context.parsed_report``.
 
+Record storage and audit
+------------------------
+
+``reef.records.RecordStore`` separates the training record set from retained
+trace history. ``compact(scenario, ids)`` sets ``compacted_at`` and keeps the
+original payload, response, references, and artifact reference. Hash tombstones
+and optional compaction receipts are committed atomically with that transition.
+Repeated compaction preserves the first timestamp.
+
+``get``, ``replay``, ``replay_page``, and ``count`` expose only records whose
+``compacted_at`` is ``None``. Training and restart recovery continue to use
+those methods. Use these explicit methods for audit and retention work:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Method
+     - Result
+   * - ``get_for_audit(scenario, agent_record_id)``
+     - A ``StoredRecord``, or ``None`` if no body is retained in that scenario.
+   * - ``audit_page(scenario, after_sequence=0, limit=256)``
+     - A bounded tuple of ``StoredRecord`` entries, in append order, including
+       compacted bodies. Advance the cursor using the last entry's ``sequence``.
+   * - ``purge_compacted(scenario, before=timestamp, limit=256)``
+     - The number of bodies physically deleted, at most ``limit``. Only records
+       with ``compacted_at < before`` are eligible. The cutoff must be a finite
+       Unix timestamp and the limit a positive integer.
+
+``StoredRecord`` contains ``sequence``, ``item`` (the original ``AgentRecord``),
+and ``compacted_at`` (a Unix timestamp or ``None``). Audit reads never restore a
+record to the training set. A missing body may have been purged or never stored;
+the read API does not guess which. Compaction includes terminal or excluded
+records as well as trained records. Use the commit log's per-step
+``consumed_ids`` to determine learning participation.
+
+For example, inspect one trace without making it available to training again:
+
+.. code:: python
+
+   entry = scenario.records.get_for_audit(scenario.name, record_id)
+   if entry is not None:
+       payload = entry.item.payload
+       references = entry.item.references
+       retired_at = entry.compacted_at
+
+The HTTP service runs background retention at startup and every 60 seconds.
+It removes bodies older than 7 days, then the oldest remaining bodies to meet
+a shared 20 GiB budget across scenario databases in ``agent_record_dir``,
+including ``archived/``. The budget measures UTF-8 JSON payloads, references,
+and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
+
+For embedded Python deployments, use
+``dispatcher.prune_record_archives(RecordRetention(days=7, max_bytes=20 * 1024**3))``
+with ``RecordRetention`` imported from ``reef.records``. This runs one sweep
+and serializes it with scenario file moves. Standalone ``RecordStore`` and
+``Dispatcher`` construction do not start a maintenance task. ``create_app``
+accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
+
+Retention preserves active records, retry hashes, and compaction receipts.
+An identical retry after purge still deduplicates, and conflicting content
+still fails. Deletes commit in batches of 256. Concurrent compaction can exceed
+the budget until the next sweep. SQLite may reuse freed pages, but purging does
+not shrink the database file; active records, indexes, and other metadata also
+use disk space. HTTP audit routes remain a separate integration. See
+`Configuration <configuration.rst>`__ for migration and rollback constraints.
+
 Processor
 ---------
 

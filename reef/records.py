@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
+import math
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
@@ -45,6 +48,19 @@ class AppendResult:
     inserted: bool
 
 
+@dataclass(frozen=True)
+class StoredRecord:
+    """A retained record and its storage state, for audit reads only.
+
+    ``compacted_at`` marks retirement from training, not proof of learning.
+    The commit log's ``consumed_ids`` identifies which records a step consumed.
+    """
+
+    sequence: int
+    item: AgentRecord
+    compacted_at: float | None
+
+
 class RecordStore:
     """Store scenario records in append order.
 
@@ -55,6 +71,9 @@ class RecordStore:
     Passing a filesystem path makes the store durable. The default in-memory
     database keeps standalone/test construction lightweight; production callers
     should always pass a path.
+
+    Training reads hide compacted rows. Explicit audit reads retain access to
+    their bodies until :meth:`purge_compacted` physically removes them.
     """
 
     _SQLITE_ID_CHUNK_SIZE = 900
@@ -82,6 +101,8 @@ class RecordStore:
             if self._database != ":memory:":
                 self._connection.execute("PRAGMA journal_mode = WAL")
                 self._connection.execute("PRAGMA synchronous = FULL")
+            # Serialize schema inspection and upgrade across store openers.
+            self._connection.execute("BEGIN IMMEDIATE")
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS agent_record (
@@ -92,10 +113,21 @@ class RecordStore:
                     payload_json TEXT NOT NULL,
                     created_at REAL NOT NULL,
                     references_json TEXT NOT NULL,
-                    artifact_json TEXT
+                    artifact_json TEXT,
+                    compacted_at REAL,
+                    body_bytes INTEGER NOT NULL DEFAULT 0
                 )
             """
             )
+            columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(agent_record)")}
+            if "compacted_at" not in columns:
+                self._connection.execute("ALTER TABLE agent_record ADD COLUMN compacted_at REAL")
+            if "body_bytes" not in columns:
+                self._connection.execute("ALTER TABLE agent_record ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0")
+                self._connection.execute(
+                    "UPDATE agent_record SET body_bytes = length(CAST(payload_json AS BLOB)) "
+                    "+ length(CAST(references_json AS BLOB)) + COALESCE(length(CAST(artifact_json AS BLOB)), 0)"
+                )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS consumed_agent_record (
@@ -110,6 +142,22 @@ class RecordStore:
             self._connection.execute(
                 "CREATE INDEX IF NOT EXISTS agent_record_scenario_type_sequence "
                 "ON agent_record (scenario, request_type, sequence)"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS agent_record_active_sequence "
+                "ON agent_record (scenario, sequence) WHERE compacted_at IS NULL"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS agent_record_active_type_sequence "
+                "ON agent_record (scenario, request_type, sequence) WHERE compacted_at IS NULL"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS agent_record_compacted_at "
+                "ON agent_record (scenario, compacted_at, sequence) WHERE compacted_at IS NOT NULL"
+            )
+            self._connection.execute(
+                "CREATE INDEX IF NOT EXISTS agent_record_retention "
+                "ON agent_record (compacted_at, sequence, body_bytes) WHERE compacted_at IS NOT NULL"
             )
             self._connection.execute(
                 """
@@ -247,10 +295,10 @@ class RecordStore:
                 """
                 INSERT OR IGNORE INTO agent_record (
                     agent_record_id, scenario, request_type, created_at,
-                    payload_json, references_json, artifact_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    payload_json, references_json, artifact_json, body_bytes
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                encoded,
+                (*encoded, sum(len(value.encode("utf-8")) for value in encoded[4:] if value is not None)),
             )
             if cursor.rowcount == 1:
                 self._live_records[item.agent_record_id] = item
@@ -270,9 +318,10 @@ class RecordStore:
             return AppendResult(stored, False)
 
     def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+        """Read a record still visible to training, scoped to its scenario."""
         with self._lock:
             row = self._connection.execute(
-                "SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id = ?",
+                "SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id = ? AND compacted_at IS NULL",
                 (scenario, agent_record_id),
             ).fetchone()
         return None if row is None else self._decode(row)
@@ -290,7 +339,10 @@ class RecordStore:
             raise ValueError("limit must be non-negative")
         if limit == 0:
             return ()
-        sql = "SELECT * FROM agent_record WHERE scenario = ? ORDER BY sequence LIMIT ? OFFSET ?"
+        sql = (
+            "SELECT * FROM agent_record WHERE scenario = ? AND compacted_at IS NULL "
+            "ORDER BY sequence LIMIT ? OFFSET ?"
+        )
         size = -1 if limit is None else limit
         with self._lock:
             rows = self._connection.execute(sql, (scenario, size, offset)).fetchall()
@@ -312,7 +364,7 @@ class RecordStore:
             rows = self._connection.execute(
                 """
                 SELECT * FROM agent_record
-                WHERE scenario = ? AND sequence > ?
+                WHERE scenario = ? AND sequence > ? AND compacted_at IS NULL
                 ORDER BY sequence
                 LIMIT ?
                 """,
@@ -321,10 +373,10 @@ class RecordStore:
         return tuple((int(row["sequence"]), self._decode(row)) for row in rows)
 
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
-        """How many records the scenario holds, of one type when given, past ``after_sequence`` only."""
+        """Count training-visible records, optionally by type and after an append sequence."""
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
-        sql = "SELECT COUNT(*) AS count FROM agent_record WHERE scenario = ? AND sequence > ?"
+        sql = "SELECT COUNT(*) AS count FROM agent_record WHERE scenario = ? AND sequence > ? AND compacted_at IS NULL"
         parameters: list[object] = [scenario, after_sequence]
         if request_type is not None:
             sql += " AND request_type = ?"
@@ -335,6 +387,38 @@ class RecordStore:
             raise RuntimeError("record count query returned no row")
         return int(row["count"])
 
+    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+        """Read a retained record including its compaction state; never reactivate it."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id = ?",
+                (scenario, agent_record_id),
+            ).fetchone()
+        return None if row is None else self._audit_record(row)
+
+    def audit_page(
+        self,
+        scenario: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 256,
+    ) -> tuple[StoredRecord, ...]:
+        """Read a bounded append-order page including compacted bodies, scoped to one scenario."""
+        if after_sequence < 0:
+            raise ValueError("after_sequence must be non-negative")
+        if limit <= 0:
+            raise ValueError("limit must be positive")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM agent_record WHERE scenario = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+                (scenario, after_sequence, limit),
+            ).fetchall()
+        return tuple(self._audit_record(row) for row in rows)
+
+    @classmethod
+    def _audit_record(cls, row: sqlite3.Row) -> StoredRecord:
+        return StoredRecord(sequence=int(row["sequence"]), item=cls._decode(row), compacted_at=row["compacted_at"])
+
     def compact(
         self,
         scenario: str,
@@ -343,12 +427,12 @@ class RecordStore:
         receipt_id: str | None = None,
         receipt_metadata: Mapping[str, object] | None = None,
     ) -> None:
-        """Delete payloads while retaining retry-safe idempotency receipts.
+        """Retire records from training while retaining their bodies for audit.
 
-        Compaction is irreversible: deleted rows no longer participate in
-        replay, lookup, or reference availability. Durable receipts preserve
-        append deduplication and reject reports that reference consumed data.
-        Callers must ensure the payloads are no longer needed.
+        Compacted rows no longer participate in training replay, lookup, or
+        reference availability. Durable receipts preserve append deduplication
+        and refuse reports that reference retired data. Repeated compaction
+        preserves the first retirement time. Physical deletion is separate.
         """
         if (receipt_id is None) != (receipt_metadata is None):
             raise ValueError("compaction receipt_id and receipt_metadata must be provided together")
@@ -358,6 +442,7 @@ class RecordStore:
             return
         compacted_ids_json = self._json(sorted(agent_record_ids))
         metadata_json = self._json(dict(receipt_metadata or {}))
+        compacted_at = time.time()
         with self._lock, self._connection:
             if receipt_id is not None:
                 # A receipt is identified by (scenario, receipt_id, compacted ids), the
@@ -389,7 +474,8 @@ class RecordStore:
                     chunk = sorted_ids[start : start + self._SQLITE_ID_CHUNK_SIZE]
                     placeholders = ",".join("?" for _ in chunk)
                     rows = self._connection.execute(
-                        f"SELECT * FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
+                        "SELECT * FROM agent_record WHERE scenario = ? AND compacted_at IS NULL "
+                        f"AND agent_record_id IN ({placeholders})",
                         (scenario, *chunk),
                     ).fetchall()
                     self._connection.executemany(
@@ -400,11 +486,35 @@ class RecordStore:
                         ((row["agent_record_id"], self._content_sha256(self._row_content(row))) for row in rows),
                     )
                     self._connection.execute(
-                        f"DELETE FROM agent_record WHERE scenario = ? AND agent_record_id IN ({placeholders})",
-                        (scenario, *chunk),
+                        "UPDATE agent_record SET compacted_at = ? WHERE scenario = ? AND compacted_at IS NULL "
+                        f"AND agent_record_id IN ({placeholders})",
+                        (compacted_at, scenario, *chunk),
                     )
         for agent_record_id in agent_record_ids:
             self._live_records.pop(agent_record_id, None)
+
+    def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:
+        """Delete at most ``limit`` bodies retired before a finite Unix timestamp.
+
+        This explicit operation is irreversible. Active records, retry hashes,
+        and compaction receipts are retained. This call schedules no further maintenance.
+        """
+        if not math.isfinite(before):
+            raise ValueError("before must be a finite Unix timestamp")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                DELETE FROM agent_record WHERE sequence IN (
+                    SELECT sequence FROM agent_record
+                    WHERE scenario = ? AND compacted_at < ?
+                    ORDER BY compacted_at, sequence LIMIT ?
+                )
+                """,
+                (scenario, before, limit),
+            )
+            return cursor.rowcount
 
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         """Return durable, ordered metadata for explicitly recorded compactions."""
@@ -437,3 +547,108 @@ class RecordStore:
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
+
+
+@dataclass(frozen=True)
+class RecordRetention:
+    """Deployment-wide limits on compacted JSON bodies, applied by service maintenance.
+
+    The byte budget excludes active records, indexes, tombstones, and WAL pages.
+    Cleanup reuses SQLite pages; it does not impose a physical file-size limit.
+    """
+
+    days: float = 7.0
+    max_bytes: int = 20 * 1024**3
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.days, bool)
+            or not isinstance(self.days, (int, float))
+            or not math.isfinite(self.days)
+            or self.days <= 0
+        ):
+            raise ValueError("agent_record_retention_days must be positive and finite")
+        if isinstance(self.max_bytes, bool) or not isinstance(self.max_bytes, int) or self.max_bytes <= 0:
+            raise ValueError("agent_record_retention_max_bytes must be a positive integer")
+
+    def prune(self, directory: Path) -> int:
+        """Purge expired bodies, then the oldest bodies across this directory to meet the budget.
+
+        The caller must serialize this sweep with scenario file moves. Deletes
+        commit in batches of 256 and never touch active records or retry metadata.
+        Concurrent compaction may exceed the budget until the next sweep.
+        """
+        cutoff = time.time() - self.days * 86400
+        paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
+        purged = 0
+        total = 0
+        retained_paths: list[str] = []
+        for database_path in paths:
+            with closing(self._connect(str(database_path))) as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(agent_record)")}
+                if not {"compacted_at", "body_bytes"} <= columns:
+                    # Old stores have no retained compacted bodies; migration belongs to RecordStore.
+                    continue
+                retained_paths.append(str(database_path))
+                while True:
+                    with connection:
+                        count = connection.execute(
+                            "DELETE FROM agent_record WHERE sequence IN ("
+                            "SELECT sequence FROM agent_record WHERE compacted_at < ? "
+                            "ORDER BY compacted_at, sequence LIMIT 256)",
+                            (cutoff,),
+                        ).rowcount
+                    purged += count
+                    if count < 256:
+                        break
+
+                total += connection.execute(
+                    "SELECT COALESCE(SUM(body_bytes), 0) FROM agent_record WHERE compacted_at IS NOT NULL"
+                ).fetchone()[0]
+        if total <= self.max_bytes:
+            return purged
+        pending: dict[str, list[int]] = {path: [] for path in retained_paths}
+        rows = heapq.merge(*(self._rows(path) for path in retained_paths))
+        for _, path, sequence, size in rows:
+            pending[path].append(sequence)
+            total -= size
+            if len(pending[path]) == 256:
+                purged += self._delete(path, pending[path])
+                pending[path].clear()
+            if total <= self.max_bytes:
+                break
+        for path, sequences in pending.items():
+            if sequences:
+                purged += self._delete(path, sequences)
+        return purged
+
+    @staticmethod
+    def _connect(path: str) -> sqlite3.Connection:
+        return sqlite3.connect(Path(path).resolve().as_uri() + "?mode=rw", uri=True, timeout=30)
+
+    @classmethod
+    def _rows(cls, path: str) -> Iterator[tuple[float, str, int, int]]:
+        after_time: float = -math.inf
+        after_sequence = 0
+        while True:
+            with closing(cls._connect(path)) as connection:
+                rows = connection.execute(
+                    "SELECT compacted_at, sequence, body_bytes FROM agent_record "
+                    "WHERE compacted_at IS NOT NULL AND (compacted_at, sequence) > (?, ?) "
+                    "ORDER BY compacted_at, sequence LIMIT 256",
+                    (after_time, after_sequence),
+                ).fetchall()
+            if not rows:
+                return
+            for compacted_at, sequence, size in rows:
+                yield compacted_at, path, sequence, size
+            after_time, after_sequence = rows[-1][:2]
+
+    @classmethod
+    def _delete(cls, path: str, sequences: list[int]) -> int:
+        placeholders = ",".join("?" for _ in sequences)
+        with closing(cls._connect(path)) as connection, connection:
+            return connection.execute(
+                f"DELETE FROM agent_record WHERE compacted_at IS NOT NULL AND sequence IN ({placeholders})",
+                sequences,
+            ).rowcount

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from reef.records import RecordRetention
 from reef.service.cors import console_origins
 from reef.service.deploy.config import config_value, interpolate_config, load_config
 
@@ -101,6 +102,8 @@ class ServiceSettings:
     artifact_work_dir: str = ".reef/artifact-work"
     artifact_cache_dir: str = ".reef/artifact-cache"
     agent_record_dir: str = ".reef/agent-record"
+    agent_record_retention_days: float = 7.0
+    agent_record_retention_max_bytes: int = 20 * 1024**3
     allow_implicit_scenario_creation: bool = True
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
@@ -111,6 +114,9 @@ class ServiceSettings:
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        RecordRetention(self.agent_record_retention_days, self.agent_record_retention_max_bytes)
 
 
 def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:
@@ -270,6 +276,12 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
             "reef",
             "agent_record_dir",
             default=".reef/agent-record",
+        ),
+        agent_record_retention_days=float(
+            _config_service_value(config, "reef", "agent_record_retention_days", default=7.0)
+        ),
+        agent_record_retention_max_bytes=int(
+            _config_service_value(config, "reef", "agent_record_retention_max_bytes", default=20 * 1024**3)
         ),
         allow_implicit_scenario_creation=bool(
             _config_service_value(config, "reef", "allow_implicit_scenario_creation", default=True)

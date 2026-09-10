@@ -451,7 +451,7 @@ class Trainer:
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
-        """Physically delete the rows a prepared commit marked disposable."""
+        """Retire disposable rows from training while preserving their audit bodies."""
         if not compacted_ids:
             return
         with self._lock:

@@ -103,11 +103,41 @@ persistent.
    reef.artifact_work_dir | .reef/artifact-work | materialization scratch
    reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
    reef.agent_record_dir | .reef/agent-record | the record store
+   reef.agent_record_retention_days | 7.0 | compacted trace bodies expire this many days after compaction
+   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across compacted trace bodies in the record directory
 
 .. warning::
 
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
+
+The record store keeps trace bodies after training compaction. Compaction marks
+records as retired from training; it does not remove their requests, responses,
+or feedback from SQLite immediately. The HTTP service starts retention cleanup
+at startup and repeats it every 60 seconds, outside the inference and training
+request paths. It first removes bodies older than 7 days, then the oldest
+remaining bodies until their total fits within 20 GiB. Both limits are
+configurable above and must be positive; the time limit must also be finite.
+
+The byte budget counts UTF-8 JSON payloads, references, and artifact references
+across all scenario databases, including databases under ``archived/``. It is
+shared across the directory, not allocated separately to each scenario. Deletes
+commit in batches of 256. Active records, retry hashes, and commit/receipt
+metadata are retained. Cleanup failures are logged and retried on the next sweep.
+
+This is a retained-body budget, not a hard disk quota. Incoming compaction can
+exceed the budget between sweeps; active records, indexes, hashes, commit logs,
+and WAL files take additional space. SQLite reuses pages freed by cleanup but
+does not automatically shrink the database file. Allow additional disk headroom.
+Standalone Python stores do not start a maintenance task; see `Python API <python-api.rst>`__
+for explicit retention and purge methods.
+
+Existing stores gain ``compacted_at`` and ``body_bytes`` columns when opened.
+The migration measures retained JSON byte sizes once. Already
+deleted bodies cannot be recovered by this migration. Older Reef versions do
+not filter that column: stop the service and restore a pre-upgrade backup for
+rollback, or purge all compacted bodies with the new version before downgrading.
+Do not share a migrated store between old and new writers.
 
 Recipe settings such as ``batch_size`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When
