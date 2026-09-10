@@ -32,7 +32,7 @@ harbor-tasks/
     instruction.md               what the agent is told
     environment/
       Dockerfile                 hermes-agent, pinned to a commit
-      Dockerfile.judge           FROM the shared sidecar image, plus this session's problem.json
+      Dockerfile.judge           FROM the shared student service image, plus this session's problem.json
       docker-compose.yaml        main container + judge service
       problem.json               this session's question and gold answer
     tests/test.sh                copies the judge's /final verdict into the verifier output
@@ -40,16 +40,16 @@ harness/
   agent.py                       HermesStreamAgent: the reef-eval agent that runs one session
 user_sim/
   personas.py                    the student persona and the strict acceptance criterion
-  student_server.py              the judge sidecar (HTTP), scripted or LLM-backed
+  student_server.py              the judge service (HTTP), scripted or LLM-backed
   pyproject.toml                 packaged as openclawrl-user-sim
-  Dockerfile                     the shared sidecar image, built by run.sh
+  Dockerfile                     the shared student service image, built by run.sh
 results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
 serve.yaml                       the paper's training stack: Reef, Slime, the PRM, the student model
 docker-compose.yaml              the reef container: GPUs, mounts, host networking, the health check
-run.sh                           builds the sidecar image, starts the stack, runs the stream
+run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
 pyproject.toml                   makes harness/ importable
 ```
@@ -66,7 +66,7 @@ Hermes reads
 its model endpoint from its own config and sends OpenAI-compatible chat
 requests; it knows nothing about Reef, scenarios, or training.
 
-The judge sidecar plays the student. `student_server.py` runs the persona
+The judge service plays the student. `student_server.py` runs the persona
 from `personas.py`, reacts to each reply, and records the session. The
 reactions come from the Qwen3-32B persona served by the stack, named by
 `OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL`; the task
@@ -85,10 +85,10 @@ independent trials.
 
 The committed stream has the original OpenClaw-RL paper's 72 GSM8K problems
 as 72 tasks. Each task is a stock Harbor task whose environment carries only
-its own `problem.json`; the judge sidecar is a compose service built from one
+its own `problem.json`; the judge runs as a compose service built from one
 shared image.
 
-The sidecar scores each session on the agent's first solution reply, under
+The student service scores each session on the agent's first solution reply, under
 the strict criterion in `personas.py`: no AI-style markers (bold, headers,
 bullet or numbered lists, horizontal rules, tables, `\boxed`, "final
 answer:"), at least two visible calculation steps, and the gold answer
@@ -116,11 +116,11 @@ position. Around the unmodified agent it makes three changes:
 The runtime flow is:
 
 ```text
-reef-eval starts the task container and the judge sidecar for the next session
-  -> the harness reads the student's message from the sidecar
+reef-eval starts the task container and the judge service for the next session
+  -> the harness reads the student's message from the student service
   -> hermes runs one turn; its model calls go through the shim to Reef
   -> the SGLang backend records the sampled tokens, loss mask, log-probabilities, and top-K capture
-  -> the harness posts hermes's reply to the sidecar, and the student reacts
+  -> the harness posts hermes's reply to the student service, and the student reacts
   -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
   -> the PRM judges that next state and may propose a hindsight hint
   -> batch_size judged turns form one batch; the top-K select loss trains the policy
@@ -175,7 +175,7 @@ OPENCLAWRL_USER_LLM_MODEL=qwen3-32b-user-llm \
 bash recipes/openclawrl/examples/openclawrl/run.sh
 ```
 
-This builds the sidecar image, boots the training stack in Docker (about six
+This builds the student service image, boots the training stack in Docker (about six
 minutes on B200s), waits for it to become healthy, then runs the 72-session
 stream through reef-eval. The stack keeps running after the stream ends.
 Re-running the same command resumes the stream where the lab left off and
@@ -189,7 +189,7 @@ environments and other processes read them:
 - `OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL` name the student
   model the stack serves on port 30001. The task environments require both,
   and reef-eval rejects every task when either is unset. Use the host's
-  address, not localhost, because the sidecar calls it from inside a
+  address, not localhost, because the student service calls it from inside a
   container.
 - `WANDB_API_KEY=...` is forwarded into the stack for live training curves
   (also set `observability.wandb.enabled: true` in `serve.yaml`) and starts

@@ -3,7 +3,7 @@
 ``ReleaseClient`` is the Python form of ``version_check.ts``: it reads the
 release catalog and one manifest by id. ``HeadWatch`` learns the head from
 the periodic poll and from the ``x-reef-release-id`` header the capture proxy
-reads on every inference answer, and tells its sink once per new head; a
+reads on every inference answer, and notifies its listener once per new head; a
 failure is logged and retried with backoff, and the process keeps serving.
 """
 
@@ -38,7 +38,7 @@ def _timed_out(exc: BaseException) -> bool:
     return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
 
 
-class HeadSink(Protocol):
+class ReleaseUpdateListener(Protocol):
     """What learns of a new head: the serve process, which mounts it or announces it."""
 
     def new_head(self, release_id: str, source: str) -> None: ...
@@ -114,17 +114,22 @@ class ReleaseClient:
 
 
 class HeadWatch:
-    """Compares every release id it hears of with the mounted one and tells the sink of a new head once.
+    """Compares every release id it hears of with the mounted one and notifies the listener of a new head once.
 
     The poll runs on its own thread every ``interval_s``; a response header
     is considered on the proxy's thread at once, before the answer reaches
     the agent, so the mount is queued by the time the next step starts."""
 
     def __init__(
-        self, client: ReleaseClient, sink: HeadSink, log: EventWriter, interval_s: float, mounted: str | None
+        self,
+        client: ReleaseClient,
+        listener: ReleaseUpdateListener,
+        log: EventWriter,
+        interval_s: float,
+        mounted: str | None,
     ) -> None:
         self._client = client
-        self._sink = sink
+        self._listener = listener
         self._log = log
         self._interval_s = interval_s
         self._mounted = mounted
@@ -157,8 +162,8 @@ class HeadWatch:
             if release_id == self._mounted:
                 return
         try:
-            # Outside the lock: the sink may mount at once, and a mount reports back through ``mounted``.
-            self._sink.new_head(release_id, source)
+            # Outside the lock: the listener may mount at once, and a mount reports back through ``mounted``.
+            self._listener.new_head(release_id, source)
         except BaseException:
             with self._lock:
                 if self._announced == release_id:
@@ -209,4 +214,4 @@ class HeadWatch:
             self._thread = None
 
 
-__all__ = ["MAX_BACKOFF_S", "EventWriter", "HeadSink", "HeadWatch", "ReleaseClient", "ReleaseClientError"]
+__all__ = ["MAX_BACKOFF_S", "EventWriter", "HeadWatch", "ReleaseClient", "ReleaseClientError", "ReleaseUpdateListener"]

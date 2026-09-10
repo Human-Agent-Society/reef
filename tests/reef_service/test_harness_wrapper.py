@@ -351,7 +351,7 @@ def test_per_receipt_report_posts_one_report_for_each_capture(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_report_carries_the_installed_release_as_metadata(tmp_path) -> None:
-    """report reads the sidecar beside the compose dir and stamps the report
+    """report reads the release file beside the compose dir and stamps the report
     with the release the client is running."""
     compose = tmp_path / "reef-harness" / "pi-agent"
     compose.mkdir(parents=True)
@@ -381,7 +381,7 @@ def test_report_carries_the_installed_release_as_metadata(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_run_agent_tags_records_with_the_installed_release(tmp_path) -> None:
-    """run_agent reads the sidecar and sends x-reef-tag-release, so the record
+    """run_agent reads the release file and sends x-reef-tag-release, so the record
     keeps which release answered."""
     from reef.harness.client import wrapper as harness_wrapper
 
@@ -922,10 +922,10 @@ class _FakeReef:
         self._server.shutdown()
 
 
-def _ask_tree(tmp_path: Path, port: int, *, sidecar: bool = True) -> tuple[str, Path]:
-    """A pi composition bound to the reef at ``port``, the release sidecar beside it, and an empty spool directory."""
+def _ask_tree(tmp_path: Path, port: int, *, with_release_file: bool = True) -> tuple[str, Path]:
+    """A pi composition bound to the reef at ``port``, the release file beside it, and an empty spool directory."""
     compose = _make_compose(tmp_path, port)
-    if sidecar:
+    if with_release_file:
         (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-3"}), encoding="utf-8")
     captures = tmp_path / "captures"
     captures.mkdir()
@@ -941,7 +941,7 @@ def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
 
 @pytest.mark.unit
 def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_path, capsys) -> None:
-    """Manual training carries session provenance without fabricating feedback."""
+    """Manual training carries the session id without fabricating feedback."""
     reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
     compose, captures = _ask_tree(tmp_path, reef.port)
     binary = _make_fake_pi(tmp_path, reef.port)
@@ -990,7 +990,7 @@ def test_harness_without_spooled_receipts_submits_training(tmp_path, capsys) -> 
 
 @pytest.mark.unit
 def test_harness_names_the_session_the_spool_recorded(tmp_path) -> None:
-    """A spool entry supplies provenance and remains available for a later report."""
+    """A saved capture supplies the session id and remains available for a later report."""
     reef = _FakeReef({"agent_record_id": "q-3", "scenario": "ask-scenario", "request_type": "train"})
     compose, captures = _ask_tree(tmp_path, reef.port)
     key = hashlib.sha256(b"ask-scenario").hexdigest()
@@ -1075,12 +1075,12 @@ def test_harness_unreachable_exits_and_keeps_the_spool(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_harness_without_the_sidecar_sends_nothing(tmp_path) -> None:
+def test_harness_without_the_release_file_sends_nothing(tmp_path) -> None:
     reef = _FakeReef({"agent_record_id": "q-0", "scenario": "ask-scenario", "request_type": "train"})
-    compose, captures = _ask_tree(tmp_path, reef.port, sidecar=False)
+    compose, captures = _ask_tree(tmp_path, reef.port, with_release_file=False)
     pending = _write_spool_entry(captures, "ask-scenario", "pending")
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
-        with pytest.raises(SystemExit, match=r"no \.reef-harness-release sidecar at .*nothing was sent"):
+        with pytest.raises(SystemExit, match=r"no \.reef-harness-release release file at .*nothing was sent"):
             harness("ask-scenario", "pi", compose, "text me")
         with pytest.raises(SystemExit, match="the request is empty"):
             harness("ask-scenario", "pi", compose, "   ")
@@ -1170,18 +1170,18 @@ def _row(release_id: str, requires: list[dict] | None = None, *, pending: bool =
     return row
 
 
-def _setup_tree(tmp_path: Path, port: int, sidecar: dict) -> tuple[str, Path]:
-    """A pi composition bound to the reef at ``port`` with the given sidecar beside it."""
+def _setup_tree(tmp_path: Path, port: int, release_info: dict) -> tuple[str, Path]:
+    """A pi composition bound to the reef at ``port`` with the given release file beside it."""
     compose = _make_compose(tmp_path, port)
     path = tmp_path / ".reef-harness-release"
-    path.write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(release_info, indent=2) + "\n", encoding="utf-8")
     return compose, path
 
 
 @pytest.mark.unit
 def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_check_offs(tmp_path, capsys) -> None:
     """The newest row that is not pending is the head; ``--yes`` runs each unmet check; a passing one is checked
-    off in the sidecar, a failing one is not; a later run does not run a checked off item again."""
+    off in the release file, a failing one is not; a later run does not run a checked off item again."""
     ran = tmp_path / "ran"
     rows = [
         _row("v1"),
@@ -1196,7 +1196,7 @@ def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_c
         _row("v3", [{"name": "later", "kind": "env"}], pending=True),
     ]
     reef = _ReleasesReef(rows)
-    compose, sidecar = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "requires": [], "setup": []})
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "requires": [], "setup": []})
     env = _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok", TWILIO_SID="AC123")
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True) == 1
@@ -1214,16 +1214,16 @@ def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_c
     (call,) = reef.seen
     assert call["path"] == "/reef/harness/releases"
     assert call["headers"]["x-reef-scenario"] == "setup-scenario" and call["headers"]["authorization"] == "Bearer tok"
-    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    record = json.loads(release_file.read_text(encoding="utf-8"))
     assert [item["name"] for item in record["setup"]] == ["TWILIO_SID", "notify"]
     assert all(isinstance(item["checked_at"], float) for item in record["setup"])
     assert record["release_id"] == "v1" and record["requires"] == [] and not list(tmp_path.glob(".*.part"))
-    # Checked off items are not run again; the failing one fails again and the sidecar is left alone.
+    # Checked off items are not run again; the failing one fails again and the release file is left alone.
     ran.unlink()
-    before = sidecar.read_bytes()
+    before = release_file.read_bytes()
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True) == 1
-    assert not ran.exists() and sidecar.read_bytes() == before
+    assert not ran.exists() and release_file.read_bytes() == before
     out = capsys.readouterr().out
     assert out.count("    met (checked off)") == 2 and "    not met (exit 3)" in out
     # A check off by hand runs nothing, and with every item met the status is 0.
@@ -1231,14 +1231,18 @@ def test_setup_lists_the_head_rows_items_runs_checks_after_yes_and_records_the_c
         assert setup("setup-scenario", "pi", compose, marks=("twilio",)) == 0
     out = capsys.readouterr().out
     assert "    met (marked by hand)" in out and out.splitlines()[-1].startswith("reef-pi setup: every item is met")
-    assert [item["name"] for item in json.loads(sidecar.read_text())["setup"]] == ["TWILIO_SID", "notify", "twilio"]
+    assert [item["name"] for item in json.loads(release_file.read_text())["setup"]] == [
+        "TWILIO_SID",
+        "notify",
+        "twilio",
+    ]
     # An unknown name is refused with the list, and nothing changes.
-    before = sidecar.read_bytes()
+    before = release_file.read_bytes()
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, marks=("nope",)) == 2
     err = capsys.readouterr().err
     assert "no item named nope; release v2 requires TWILIO_SID, notify, twilio" in err
-    assert sidecar.read_bytes() == before
+    assert release_file.read_bytes() == before
     reef.close()
 
 
@@ -1252,12 +1256,12 @@ def test_setup_asks_before_running_a_check_and_reads_an_unset_variable_without_a
         ),
     ]
     reef = _ReleasesReef(rows)
-    compose, sidecar = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     env = _ask_env(tmp_path / "captures", compose)
     env.pop("SMTP", None)
     with patch.dict(os.environ, env, clear=True), patch("sys.stdin", io.StringIO("n\n")):
         assert setup("setup-scenario", "pi", compose) == 1
-    assert not ran.exists() and "setup" not in json.loads(sidecar.read_text())
+    assert not ran.exists() and "setup" not in json.loads(release_file.read_text())
     out = capsys.readouterr().out
     assert "    run it? [y/N] " in out and "    skipped" in out and "    not set" in out
     assert out.splitlines()[-1] == "reef-pi setup: 2 item(s) not met: notify, SMTP"
@@ -1265,12 +1269,12 @@ def test_setup_asks_before_running_a_check_and_reads_an_unset_variable_without_a
     with patch.dict(os.environ, {**env, "SMTP": "smtp.example"}, clear=True), patch("sys.stdin", io.StringIO("y\n")):
         assert setup("setup-scenario", "pi", compose) == 0
     assert ran.exists()
-    assert [item["name"] for item in json.loads(sidecar.read_text())["setup"]] == ["notify", "SMTP"]
+    assert [item["name"] for item in json.loads(release_file.read_text())["setup"]] == ["notify", "SMTP"]
     reef.close()
 
 
 @pytest.mark.unit
-def test_setup_without_a_sidecar_a_reef_or_any_item_says_so(tmp_path, capsys) -> None:
+def test_setup_without_a_release_file_a_reef_or_any_item_says_so(tmp_path, capsys) -> None:
     import socket
 
     reef = _ReleasesReef([_row("v1"), _row("v2", []), _row("v3", [{"name": "later", "kind": "env"}], pending=True)])
@@ -1282,7 +1286,7 @@ def test_setup_without_a_sidecar_a_reef_or_any_item_says_so(tmp_path, capsys) ->
     (tmp_path / ".reef-harness-release").unlink()
     with (
         patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True),
-        pytest.raises(SystemExit, match=r"no \.reef-harness-release sidecar at .*nowhere to record a check off"),
+        pytest.raises(SystemExit, match=r"no \.reef-harness-release release file at .*nowhere to record a check off"),
     ):
         setup("setup-scenario", "pi", compose)
     with socket.socket() as probe:
@@ -1301,7 +1305,7 @@ def test_setup_without_a_sidecar_a_reef_or_any_item_says_so(tmp_path, capsys) ->
 def test_run_agent_prints_the_unmet_list_once_and_runs_the_session_without_a_check(tmp_path, capsys) -> None:
     reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
     ran = tmp_path / "ran"
-    sidecar = {
+    release_info = {
         "release_id": "v2",
         "requires": [
             {"name": "notify", "kind": "permission", "check": f"touch {ran}"},
@@ -1309,7 +1313,7 @@ def test_run_agent_prints_the_unmet_list_once_and_runs_the_session_without_a_che
         ],
         "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}],
     }
-    compose, _ = _setup_tree(tmp_path, reef.port, sidecar)
+    compose, _ = _setup_tree(tmp_path, reef.port, release_info)
     binary = _make_fake_pi(tmp_path, reef.port)
     captures = tmp_path / "captures"
     captures.mkdir()
@@ -1364,7 +1368,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
         _chain_row("v4", "v3", [{"name": "later", "kind": "env", "check": "LATER"}], pending=True),
     ]
     reef = _ReleasesReef(rows)
-    compose, sidecar = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     env = _ask_env(tmp_path / "captures", compose, TWILIO_SID="AC1", LATER="x")
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True) == 0
@@ -1385,7 +1389,7 @@ def test_setup_reads_the_chains_union_and_release_names_a_pending_row(tmp_path, 
         "  later (env): LATER",
         "    met",
     ]
-    assert [item["name"] for item in json.loads(sidecar.read_text())["setup"]] == ["TWILIO_SID", "later"]
+    assert [item["name"] for item in json.loads(release_file.read_text())["setup"]] == ["TWILIO_SID", "later"]
     with patch.dict(os.environ, env, clear=True):
         assert setup("setup-scenario", "pi", compose, release="nope") == 2
     assert capsys.readouterr().err == "reef-pi setup: no release nope in the catalog\n"
@@ -1423,7 +1427,7 @@ def test_setup_runs_an_item_again_when_its_check_changed_since_the_check_off(tmp
     assert _unmet([item], [stale]) == [item]
     assert _unmet([item], [{**stale, "check": item["check"]}]) == [] and _unmet([item], [{"name": "notify"}]) == []
     reef = _ReleasesReef([_row("v1"), _row("v2", [item])])
-    compose, sidecar = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "setup": [stale]})
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1", "setup": [stale]})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
         assert setup("setup-scenario", "pi", compose, yes=True) == 0
     assert ran.exists()
@@ -1433,16 +1437,16 @@ def test_setup_runs_an_item_again_when_its_check_changed_since_the_check_off(tmp
         "    the check changed since it was checked off",
         "    met",
     ]
-    (record,) = json.loads(sidecar.read_text())["setup"]
+    (record,) = json.loads(release_file.read_text())["setup"]
     assert record["name"] == "notify" and record["check"] == item["check"] and record["checked_at"] != 1.0
     # Marked by hand, the record carries the item's check too.
     reef.close()
     reef = _ReleasesReef([_row("v1"), _row("v2", [{**item, "check": "exit 1"}])])
     (tmp_path / "marked").mkdir()
-    compose, sidecar = _setup_tree(tmp_path / "marked", reef.port, {"release_id": "v1", "setup": [record]})
+    compose, release_file = _setup_tree(tmp_path / "marked", reef.port, {"release_id": "v1", "setup": [record]})
     with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
         assert setup("setup-scenario", "pi", compose, marks=("notify",)) == 0
-    (record,) = json.loads(sidecar.read_text())["setup"]
+    (record,) = json.loads(release_file.read_text())["setup"]
     assert record["check"] == "exit 1"
     reef.close()
 

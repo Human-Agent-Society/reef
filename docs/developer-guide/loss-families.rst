@@ -86,7 +86,7 @@ rest has defaults. The overrides, in the order the pipeline reaches them:
 - ``prepare_rollout``: driver-side work before a step.
 - ``bind``: a per-run instance carrying state such as a critic schedule.
 - ``train``: critic and actor orchestration; the default is one actor step.
-- ``provenance_metrics``: telemetry after the step.
+- ``rollout_metrics``: rollout version and timing metrics after the step.
 
 Two loss lanes
 --------------

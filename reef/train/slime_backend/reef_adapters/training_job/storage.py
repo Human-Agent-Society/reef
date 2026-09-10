@@ -16,7 +16,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, LATEST_JOB_MARKER_FILENAME, SCENARIO_LEDGER_FILENAME
+from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import fsync_dir as _fsync_dir
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import mkdir_durable as _mkdir_durable
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json as _read_json
@@ -315,10 +315,10 @@ class CheckpointStorage:
     def _unknown_assets(self, known: set[Path]) -> list[str]:
         unknown: list[str] = []
         # Control files Reef itself keeps in the managed roots: the job marker
-        # and the LoRA scenario ledger beside the HF exports, and the
+        # and the LoRA scenario history beside the HF exports, and the
         # adapter-slot snapshots beside the Megatron checkpoints.
         roots = [
-            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_LEDGER_FILENAME}),
+            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME}),
             (self.megatron_root, "latest_checkpointed_iteration.txt", {ADAPTER_SLOTS_DIRNAME}),
         ]
         if self.critic_root is not None:

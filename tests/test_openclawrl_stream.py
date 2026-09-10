@@ -1,4 +1,4 @@
-"""OpenClaw-RL reef-eval stream example: student sidecar, tasks, harness."""
+"""OpenClaw-RL reef-eval stream example: student service, tasks, harness."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def harbor_runtime(monkeypatch):
 
 @pytest.fixture(scope="module")
 def student_server():
-    """Import the sidecar the way the judge image does: personas beside it."""
+    """Import the student service the way the judge image does: personas beside it."""
     sys.path.insert(0, str(EXAMPLE / "user_sim"))
     try:
         module = importlib.import_module("student_server")
@@ -178,11 +178,11 @@ class TestStreamTasks:
         assert len(tasks) == 72, "the committed stream is the paper's Exp. 1 length"
 
     def test_judge_images_build_from_the_shared_user_sim_image(self):
-        """The sidecar is one image built from user_sim/, not a copy per task.
+        """The student service is one image built from user_sim/, not a copy per task.
 
         Every task's Dockerfile.judge names openclawrl-user-sim at the tag
         run.sh derives from user_sim/'s content, so a change there without a
-        re-stamp fails here instead of running a stale sidecar. The task
+        re-stamp fails here instead of running a stale student service. The task
         environments carry only their own problem.json besides the build files.
         """
         import hashlib
@@ -220,8 +220,8 @@ class TestStreamTasks:
             assert "hermes-agent" in (task / "environment" / "Dockerfile").read_text()
 
     def test_container_scripts_are_stdlib_only(self):
-        """The judge sidecar runs on python:3.12-slim: no third-party imports."""
-        allowed_prefixes = ("personas",)  # baked beside the sidecar
+        """The judge service runs on python:3.12-slim: no third-party imports."""
+        allowed_prefixes = ("personas",)  # baked beside the student service
         for path in (EXAMPLE / "user_sim" / "student_server.py",):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -346,7 +346,7 @@ class TestHarness:
 def test_reply_returns_before_the_reaction_exists(student_server):
     """The HTTP response must not wait on a persona-LLM generation.
 
-    An egress proxy between the agent and this sidecar gives up on a response
+    An egress proxy between the agent and this student service gives up on a response
     head long before a 32B finishes — harbor's gost defaults to 15s — and the
     agent then sees an empty reply it cannot tell from a crash. So /reply
     records the turn and returns; /state reports when the reaction landed.

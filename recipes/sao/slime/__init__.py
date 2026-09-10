@@ -53,7 +53,7 @@ class SaoAlgorithm(SlimeAlgorithm):
     # advantages, ``get_batch`` carries it to the critic microbatch, and the
     # critic's explained-variance metric restricts itself to it.
     # Skip-observation GAE reads it from ``rollout_data`` directly.
-    # ``rollout_created_ats`` is consumed driver-side by ``provenance_metrics``
+    # ``rollout_created_ats`` is consumed driver-side by ``rollout_metrics``
     # and dropped before the workers see it; the skip key keeps the numeric
     # rollout logger safe if that ever changes.
     rollout_data_keys = ("action_masks",)
@@ -223,7 +223,7 @@ class SaoAlgorithm(SlimeAlgorithm):
             actor_results, {"sao/critic_updates": plan.critic_updates, "sao/actor_trained": int(plan.train_actor)}
         )
 
-    def provenance_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
+    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
         head, sep, tail = serving_version.rpartition(":")
         serving_step = int(tail) if sep and tail.isdigit() else None
         metrics: dict[str, Any] = {}

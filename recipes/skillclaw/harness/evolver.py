@@ -424,8 +424,8 @@ def _parse_judge(raw: str) -> dict[str, Any] | None:
     return {**dimensions, "overall_score": overall, "rationale": str(payload.get("rationale") or "")}
 
 
-def _evidence(sessions: list[dict[str, Any]]) -> str:
-    """Their session evidence: header, trajectory, analysis per session."""
+def _format_session_details(sessions: list[dict[str, Any]]) -> str:
+    """Format each session's header, tool calls, outcomes, and analysis."""
     blocks = []
     for session in sessions[:MAX_SESSIONS_PER_GROUP]:
         header = f"### Session {session.get('session_id', '?')}"
@@ -483,7 +483,7 @@ def decide(
     user = (
         f"{skill_block}"
         f"## Session evidence ({len(sessions)} sessions)\n\n"
-        f"{_evidence(sessions)}\n\n"
+        f"{_format_session_details(sessions)}\n\n"
         f"## Existing skill names in the library\n\n"
         f"{', '.join(existing_names) or '(none)'}\n"
     )
@@ -494,7 +494,7 @@ def create(*, sessions: list[dict[str, Any]], existing_names: list[str], llm: Ch
     """Their create call for the bucket of sessions referencing no skill."""
     user = (
         f"## Session evidence ({len(sessions)} sessions)\n\n"
-        f"{_evidence(sessions)}\n\n"
+        f"{_format_session_details(sessions)}\n\n"
         f"## Existing skill names in the library\n\n"
         f"{', '.join(existing_names) or '(none)'}\n"
     )

@@ -60,7 +60,7 @@ from reef.train.slime_backend.reef_adapters.training_job.marker import (
     transition_marker,
     write_marker,
 )
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
+from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 DEFAULT_BRIDGE_ACTOR_NAME = DEFAULT_ACTOR_NAME
@@ -248,7 +248,7 @@ def _scenario_staleness_admission(
     payload: Mapping[str, Any],
     *,
     scenario: str,
-    ledger: ScenarioLedger,
+    history: ScenarioHistory,
     serving_runtime_load_id: str,
     max_staleness: int,
 ) -> _StalenessDecision:
@@ -288,7 +288,7 @@ def _scenario_staleness_admission(
                 producing = RuntimeLoadId.parse(value)
             except (TypeError, ValueError):
                 return drop("malformed_producing_runtime_load_id")
-            lag = ledger.lag(scenario, producing)
+            lag = history.lag(scenario, producing)
             if lag is None:
                 return drop("cross_incarnation")
             lags.append(lag)
@@ -414,12 +414,14 @@ class TrainBridgeActorImpl:
         self._colocate = colocate
         # A LoRA deployment serves one adapter per scenario: the scenarios
         # time-slice the group's one adapter slot, each publishes under its
-        # own scenario-qualified versioned name, and the ledger keeps the
-        # per-scenario history the engine-global runtime load ID cannot
-        # express. Reporting it in health is what lets the serving side
+        # own scenario-qualified versioned name, and ScenarioHistory records
+        # the per-scenario publications the engine-global runtime load ID
+        # cannot express. Reporting it in health is what lets the serving side
         # address each scenario's adapter.
         self._lora = lora
-        self._ledger = ScenarioLedger(ledger_path(save_hf_template)) if lora and save_hf_template is not None else None
+        self._history = (
+            ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None
+        )
         # One engine, one accounting point for the adapters it holds:
         # publication makes room through it, restart recovery reloads through
         # it, and its status is what the serving side reports.
@@ -489,7 +491,7 @@ class TrainBridgeActorImpl:
             # recreates the same serving identity and the durable Reef head
             # remains tied to the correct serving version.
             self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
-        if self._ledger is not None:
+        if self._history is not None:
             self._recover_scenario_adapters(marker)
         if marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED"}:
             try:
@@ -508,7 +510,7 @@ class TrainBridgeActorImpl:
             # so the first Reef inference uses the actual training version. A
             # LoRA bridge that never trained has nothing to publish: the frozen
             # base SGLang booted from is exactly what every fresh adapter
-            # computes, and the ledger replay above restored trained ones.
+            # computes, and the history replay above restored trained ones.
             self._runtime_load_id = self._update_serving(
                 force_full=marker is not None,
                 scenario=self._marker_scenario(marker),
@@ -565,13 +567,13 @@ class TrainBridgeActorImpl:
         activated last: the regular startup republication then publishes it
         under the recovered runtime load ID.
         """
-        ledger = self._require_ledger()
+        history = self._require_history()
         residency = self._require_residency()
         active = marker.get("scenario") if marker is not None else None
         pending = [
             (scenario, adapter)
-            for scenario in ledger.scenarios
-            if (adapter := ledger.adapter(scenario)) is not None and scenario != active
+            for scenario in history.scenarios
+            if (adapter := history.adapter(scenario)) is not None and scenario != active
         ]
         if not pending and active is None:
             return
@@ -587,11 +589,11 @@ class TrainBridgeActorImpl:
         if active is not None:
             self._group.activate_scenario(active)
 
-    def _require_ledger(self) -> ScenarioLedger:
-        """The per-scenario ledger; only LoRA runs with a checkpoint save path keep one."""
-        if self._ledger is None:
+    def _require_history(self) -> ScenarioHistory:
+        """The per-scenario history; only LoRA runs with a checkpoint save path keep one."""
+        if self._history is None:
             raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")
-        return self._ledger
+        return self._history
 
     def _require_residency(self) -> AdapterResidencyManager:
         if self._residency is None:
@@ -600,14 +602,14 @@ class TrainBridgeActorImpl:
 
     def _marker_scenario(self, marker: Mapping[str, Any] | None) -> str | None:
         """The scenario a marker's publication belongs to, when the bridge trains per scenario."""
-        if self._ledger is None or marker is None:
+        if self._history is None or marker is None:
             return None
         scenario = marker.get("scenario")
         return str(scenario) if isinstance(scenario, str) and scenario else None
 
     def _job_scenario(self, payload: Mapping[str, Any]) -> str | None:
         scenario = payload.get("scenario")
-        if self._ledger is None:
+        if self._history is None:
             return None
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("per-scenario LoRA training jobs must name their scenario")
@@ -673,7 +675,7 @@ class TrainBridgeActorImpl:
             "inference_url": self._inference_url,
             "lora_adapter": None,
             "lora_mode": "scenario" if self._lora else None,
-            "lora_adapters": {} if self._ledger is None else self._ledger.status(),
+            "lora_adapters": {} if self._history is None else self._history.status(),
             "adapter_residency": None if self._residency is None else self._residency.status(),
             "completed_train_steps": self._completed_train_steps,
             "last_train_rollout_id": self._last_train_rollout_id,
@@ -770,7 +772,7 @@ class TrainBridgeActorImpl:
             try:
                 if recovering:
                     self._manager_call("recover_updatable_engines")
-                    if self._ledger is not None:
+                    if self._history is not None:
                         # The failed publication terminated every updatable
                         # engine, so recovery restarted them from the frozen
                         # base with no adapters resident. Align residency with
@@ -781,7 +783,7 @@ class TrainBridgeActorImpl:
                         self._require_residency().reconcile((), self._adapter_engine)
                         self._recover_scenario_adapters(marker)
                 self._pause_generation()
-                if self._ledger is not None:
+                if self._history is not None:
                     # A restart between checkpoint and publication may have
                     # left another scenario in the slot.
                     self._group.activate_scenario(str(marker["scenario"]))
@@ -791,11 +793,11 @@ class TrainBridgeActorImpl:
                     # weights and remains safely replayable from CHECKPOINT.
                     transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
                 published = self._update_serving(force_full=recovering, scenario=self._marker_scenario(marker))
-                if self._ledger is not None:
+                if self._history is not None:
                     from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 
                     scenario = str(marker["scenario"])
-                    self._ledger.record_publication(scenario, published, scenario_adapter_name(scenario, published))
+                    self._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
                 transition_marker(
                     self._marker_path(),
                     marker,
@@ -917,7 +919,7 @@ class TrainBridgeActorImpl:
             admission = _scenario_staleness_admission(
                 payload,
                 scenario=scenario,
-                ledger=self._require_ledger(),
+                history=self._require_history(),
                 serving_runtime_load_id=self._runtime_load_id,
                 max_staleness=max_staleness,
             )
@@ -962,14 +964,14 @@ class TrainBridgeActorImpl:
             and rollout_versions is not None
             and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
         ):
-            raise ValueError("loss-family row provenance does not match the shared training payload")
+            raise ValueError("loss-family row producing versions do not match the shared training payload")
         self._algo.validate_payload(rollout_data)
         context: Any = nullcontext(None)
         if self._storage is not None:
             protected = marker_rollouts(prior_marker)
-            if self._ledger is not None:
+            if self._history is not None:
                 # Every scenario's latest checkpoint is its restart source.
-                protected |= self._ledger.protected_rollouts()
+                protected |= self._history.protected_rollouts()
             context = self._storage.admit(
                 rollout_id=rollout_id,
                 active_rollouts=protected,
@@ -1019,7 +1021,7 @@ class TrainBridgeActorImpl:
                 )
                 train_results = training.worker_results
                 durable_metrics.update(training.durable_metrics)
-                durable_metrics.update(self._algo.provenance_metrics(rollout_data, self.serving_runtime_load_id()))
+                durable_metrics.update(self._algo.rollout_metrics(rollout_data, self.serving_runtime_load_id()))
                 worker_metrics = dict(self._get(self._group.async_pop_rank0_metrics()))
                 train_metrics = next(
                     (dict(result) for result in train_results if isinstance(result, Mapping) and result),
@@ -1046,7 +1048,7 @@ class TrainBridgeActorImpl:
                         reward=math.fsum(rewards) / len(rewards),
                     )
                 if scenario is not None:
-                    self._require_ledger().record_checkpoint(scenario, rollout_id)
+                    self._require_history().record_checkpoint(scenario, rollout_id)
                 if durable_metrics:
                     marker["metrics"] = dict(durable_metrics)
                 transition_marker(

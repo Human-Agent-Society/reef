@@ -89,7 +89,7 @@ maintainers correct non-standard or multiple prefixes and keep the remaining
 title concise and outcome-oriented. `[Roadmap]` is reserved for a time-bounded
 coordination index; its linked outcomes retain their actual work type.
 
-Use `type: experiment` for work whose primary deliverable is empirical evidence
+Use `type: experiment` for work whose primary deliverable is experimental results
 and `type: example` for a maintained, runnable user-facing reference. Use
 `type: task` for maintainer-approved internal work. Feature, bug, performance,
 question, RFC, and roadmap forms apply their corresponding existing labels.
@@ -139,7 +139,7 @@ Priority describes maintainer intent rather than intrinsic value:
 - `priority: p3` — useful backlog work without a delivery commitment.
 
 Do not apply a public priority to an undisclosed vulnerability. Use
-`ci: gpu-required` when acceptance needs evidence from a supported accelerator
+`ci: gpu-required` when acceptance needs test results from a supported accelerator
 environment that hosted CI cannot provide. The pull request records the exact
 environment, command, revision, and result.
 

@@ -272,7 +272,7 @@ def _source_of(sample: TraceSample) -> dict[str, Any]:
 
 
 def _screened(prompt: str) -> bool:
-    """Whether a trace prompt fails the ledger's tripwires: a credential, or an instruction override."""
+    """Whether a trace prompt contains a credential or instruction override barred from task records."""
     return secret_shaped(prompt) or directive_shaped(prompt)
 
 

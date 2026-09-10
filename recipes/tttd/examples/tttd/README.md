@@ -353,7 +353,7 @@ packing runs and are not present in their stored W&B history.
 
 The [circle-packing overview](results/formal-8x64-v3-packing/README.md) contains
 the combined W&B history, verified configurations, generated programs,
-milestone summaries, and provenance records.
+milestone summaries, and records of how the results were produced.
 
 ## Attribution and license
 

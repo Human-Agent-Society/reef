@@ -98,9 +98,10 @@ Manual training
 ``POST /reef/train`` queues one training instruction for a scenario in
 ``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
 proposer that accepts ``requests``). It takes the user's ``text``,
-originating ``session`` and ``release_id``. The latter two are provenance,
-not a request to restore an old release. The backend operates on the
-current committed state. The API requires no inference receipts or score.
+originating ``session`` and ``release_id``. These fields identify the session
+and release the request came from. The backend operates on the current
+committed state; it does not restore the originating release. The API
+requires no inference receipts or score.
 
 A request may also carry ``requires``: what the change needs from the
 person's machine, at most 8 ``{name, kind, check}`` items, default none.
@@ -244,7 +245,7 @@ For a scenario that trains weights the deletion is Reef-side: the training
 backend is told to retire the scenario, and the Slime backend does not yet
 act on it, so the scenario's adapter stays resident in the serving engine
 until it is evicted or the training group restarts, and the training job's
-per-scenario ledger keeps its entry until then.
+per-scenario history keeps its entry until then.
 
 Scenario updates
 ~~~~~~~~~~~~~~~~
@@ -469,14 +470,14 @@ copied; a releases row carries its own step's list alone. The install
 script embeds the list (the union of a chain is not bounded by one
 request's cap of 8) and refuses, before it installs the binary or makes a
 directory, while an item is not checked off in the ``.reef-harness-release``
-sidecar on disk: it prints the setup list and the newest release in the
+release metadata file on disk: it prints the setup list and the newest release in the
 chain that requires nothing, the one that installs on a machine with
 nothing set up (``?release_id=<id>``), and exits 1. ``reef-<adapter> setup``
 records the check offs; ``--release <id>`` names a pending release so its
-items are checked off before its promote. The sidecar the script writes
+items are checked off before its promote. The release metadata file the script writes
 carries ``requires`` (the list) and ``setup`` (the check offs, ``{name,
-checked_at, check}``, carried over from the previous sidecar by name; an
-item whose check is not the recorded one counts as unmet); a sidecar the
+checked_at, check}``, carried over from the previous release metadata file by name; an
+item whose check is not the recorded one counts as unmet); a release metadata file the
 stdlib client pull wrote carries neither, which reads as nothing required.
 
 Use ``?release_id=`` on the manifest or install route to request a specific

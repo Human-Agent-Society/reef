@@ -168,7 +168,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     assert sample.reward == pytest.approx(0.75)
     # No explicit action mask -> the whole response is one action.
     assert sample.action_mask == sample.loss_mask
-    # Provenance rides through for policy-lag / queue-age reporting.
+    # The producing version and timestamp support policy-lag / queue-age reporting.
     assert sample.runtime_load_id == "slime-v3"
     assert sample.rollout_created_at is not None
 
@@ -397,7 +397,7 @@ class _StubTrainingRuntime(TrainingRuntime):
             checkpoint_path=str(checkpoint),
             current_runtime_load_id=self._served_version,
             # A real SAO backend reports its schedule cadence and async
-            # provenance here; the shapes are asserted in test_sao_bridge.
+            # rollout metrics here; the shapes are asserted in test_sao_bridge.
             training_metrics={"sao/critic_updates": 2, "sao/actor_trained": 1},
         )
         self.completed[rollout_id] = result

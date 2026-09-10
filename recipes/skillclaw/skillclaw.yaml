@@ -27,8 +27,8 @@ evolution:
   propose: harness.skillclaw:propose
   evaluate: harness.skillclaw:evaluate
   # The SkillClaw regime: every non-skip night publishes; the probe episode
-  # scores are recorded in the ledger, never gating. The next day's traffic
-  # judges the pool.
+  # scores are saved with the evaluation results. They do not decide which
+  # changes are published; the next day's traffic judges the pool.
   selection: always
   # The harness binary the probe episodes run headless, from the environment.
   binary: ${REEF_PI_BINARY}

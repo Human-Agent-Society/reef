@@ -1,7 +1,7 @@
 """The harness requests extension: reef-pi's /reef-harness and /reef-versions commands, run under node with stubs.
 
 The asset registers nothing under ``PI_OFFLINE`` and no tools at all; the
-ask command posts the request with the session id and the sidecar's release,
+ask command posts the request with the session id and the release file's release,
 leaves inference receipts available for feedback, and reports durable
 acceptance; the versions command lists the chain, prints a step's page and
 promotes a pending release after a confirmation.
@@ -72,11 +72,11 @@ console.log(JSON.stringify(out));
 """.strip()
 
 
-def _install_root(tmp_path: Path, *, sidecar: bool = True) -> Path:
-    """A pulled pi tree: the sidecar at the root and the models.json that points at the proxy in pi-agent."""
+def _install_root(tmp_path: Path, *, with_release_file: bool = True) -> Path:
+    """A pulled pi tree: the release file at the root and the models.json that points at the proxy in pi-agent."""
     agent_dir = tmp_path / "pi-agent"
     agent_dir.mkdir()
-    if sidecar:
+    if with_release_file:
         (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "v1"}), encoding="utf-8")
     models = {"providers": {"reef": {"api": "openai-completions", "baseUrl": "http://127.0.0.1:4567/v1"}}}
     (agent_dir / "models.json").write_text(json.dumps(models), encoding="utf-8")
@@ -230,10 +230,10 @@ def test_the_command_reports_an_unreachable_reef_as_a_notice(tmp_path: Path) -> 
     assert notice["type"] == "error"
 
 
-def test_the_command_without_the_sidecar_sends_nothing(tmp_path: Path) -> None:
+def test_the_command_without_the_release_file_sends_nothing(tmp_path: Path) -> None:
     out = _ask(
         tmp_path,
-        _install_root(tmp_path, sidecar=False),
+        _install_root(tmp_path, with_release_file=False),
         {"POST /reef/train": {"status": 200, "body": ACCEPTED}},
     )
     (notice,) = out["events"]
@@ -241,7 +241,7 @@ def test_the_command_without_the_sidecar_sends_nothing(tmp_path: Path) -> None:
     assert ".reef-harness-release" in notice["message"] and "nothing was sent" in notice["message"]
 
 
-def test_the_command_falls_back_to_the_sidecar_beside_the_agent_dir(tmp_path: Path) -> None:
+def test_the_command_falls_back_to_the_release_file_beside_the_agent_dir(tmp_path: Path) -> None:
     answers = {"POST /reef/train": {"status": 200, "body": ACCEPTED}}
     out = _ask(tmp_path, _install_root(tmp_path), answers, REEF_HARNESS_DEST="")
     assert _fetches(out)[0]["body"]["release_id"] == "v1"

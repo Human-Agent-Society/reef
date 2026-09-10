@@ -21,7 +21,7 @@ reef-eval invokes this once per stream position. It owns the whole session:
   start of every position; compression stays off to match the recorded
   experiment, and the session tag keeps correlation independent of what
   hermes resends;
-* the **conversation loop** with the judge sidecar: student message from
+* the **conversation loop** with the judge service: student message from
   ``$JUDGE_URL/state`` → one quiet ``hermes chat -q`` turn (``--resume
   latest`` after the first, so the turn continues the position's session and
   the model sees its own earlier replies; see ``_hermes_turn`` for why the
@@ -124,7 +124,7 @@ security:
 
 
 class HermesStreamAgent(BaseAgent):
-    """Drive one hermes homework session against the judge sidecar."""
+    """Drive one hermes homework session against the judge service."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)

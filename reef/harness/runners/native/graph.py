@@ -361,9 +361,11 @@ class Run:
                 self.end_turn({"kind": "max-tool-calls", "tool_calls": self.max_tool_calls}, "budget")
             self.tool_calls += 1
             self.session.write("tool/call", {"step": step, "call_id": call_id, "name": name, "arguments": raw})
-            # An agent turn's spill carries its turn number, so two turns' step 1 do not share a file.
+            # An agent turn's output path carries its turn number, so two turns' step 1 do not share a file.
             prefix = f"{step}" if self.parent is None else f"t{self.turn}-{step}"
-            spill = self.workdir / loop.SPILL_DIR / f"{prefix}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
+            full_output_path = (
+                self.workdir / loop.TOOL_OUTPUT_DIR / f"{prefix}-{re.sub(r'[^A-Za-z0-9_-]', '_', call_id)}.txt"
+            )
 
             def gate(tool: Any, arguments: dict[str, Any], call_id: str = call_id) -> dict[str, Any]:
                 payload = {
@@ -379,7 +381,9 @@ class Run:
                     raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
                 return decision
 
-            result = loop._invoke(tools, name, raw, self.workdir, spill=spill, gate=gate, enforcer=loop.enforcer)
+            result = loop._invoke(
+                tools, name, raw, self.workdir, full_output_path=full_output_path, gate=gate, enforcer=loop.enforcer
+            )
             payload = {
                 "step": step,
                 "call_id": call_id,
@@ -394,7 +398,7 @@ class Run:
                 self.tool_errors += 1
             # The log says what was enforced on this tool, whether or not the call reached its run.
             called = tools.get(name)
-            # A host plane tool ran in process whatever the enforcer; the log says so.
+            # A built-in tool ran in process whatever the enforcer; the log says so.
             enforcer = loop.enforcer if called is None else loop.enforcer_for(called, loop.enforcer)
             enforcement = enforcer.describe(called)
             self.session.write(

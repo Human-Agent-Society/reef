@@ -23,7 +23,7 @@ def _parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="reef-native", description="Reef's native coding agent, the serve form.")
     commands = parser.add_subparsers(dest="command", required=True)
-    tree_help = "the pulled tree: the directory that holds native/ and the release sidecar"
+    tree_help = "the pulled tree: the directory that holds native/ and the release file"
 
     serve = commands.add_parser("serve", help="serve an installed tree as a resident process")
     serve.add_argument("--tree", type=Path, required=True, help=tree_help)

@@ -135,8 +135,8 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         source_rows = payload.pop("source_rows", None)
         if source_rows is not None:
             # Wire rows follow the step schedule (epochs repeat rows, shuffle
-            # reorders rollouts); provenance must line up with them, not with
-            # the batch's own order.
+            # reorders rollouts); producing versions and timestamps must follow
+            # that same order.
             try:
                 samples = tuple(samples[row] for row in source_rows)
             except (IndexError, TypeError) as exc:

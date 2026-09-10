@@ -120,9 +120,9 @@ def make_policy_sample(
 
     ``response.training`` attached by an inference backend is authoritative
     for policy tensors. A top-level ``runtime_load_id`` stamped after response
-    validation is authoritative for provenance; if both locations provide a
-    version, they must agree. Top-level tensors remain supported for harnesses
-    that already ship exact policy data. Missing tensors stay empty and are
+    validation identifies the producing model version; if both locations
+    provide a version, they must agree. Top-level tensors remain supported
+    for harnesses that already ship exact policy data. Missing tensors stay empty and are
     rejected by policy processors; Reef never reconstructs sampled ids from
     decoded text.
     """
@@ -200,7 +200,7 @@ def make_multi_turn_policy_sample(
     This follows slime's trajectory builder: exact prompt extension appends
     masked context, while short drift confined to the latest response is
     realigned as masked context. A genuine fork returns ``None`` rather than
-    reconstructing policy evidence from decoded text.
+    reconstructing training tokens and log probabilities from decoded text.
 
     ``scaffold_tolerance`` lets the drift reach a bounded number of tokens
     *before* the latest response span. Thinking chat templates need it: the
@@ -209,7 +209,8 @@ def make_multi_turn_policy_sample(
     diverges a couple of tokens ahead of the previous response. That span is
     always masked prompt context (the previous turn's trained tokens start at
     the response boundary), so the realignment replaces only masked scaffold,
-    never policy evidence. Default 0 keeps the strict boundary.
+    never tokens or log probabilities used for training. Default 0 keeps the
+    strict boundary.
     """
     if not items or not math.isfinite(reward) or realign_threshold < 0 or scaffold_tolerance < 0:
         return None

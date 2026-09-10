@@ -2,7 +2,7 @@ from harbor.agents.terminus_2 import Terminus2
 
 
 class Agent(Terminus2):
-    """Terminus2 with an evidence-driven completion checkpoint."""
+    """Terminus2 with a completion checkpoint based on observed results."""
 
     _REVIEW_GATE = """
 

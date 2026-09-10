@@ -55,10 +55,11 @@ POLL_S = 5.0
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORK = HERE / "work"
-INSTALL_ROOT = WORK / "harness"  # the install script writes the tree, the reef-pi wrapper and the sidecar here
+# The install script writes the tree, reef-pi wrapper, and release metadata here.
+INSTALL_ROOT = WORK / "harness"
 CAPTURES = WORK / "captures"  # the wrapper's spool, beside the run so a show session's receipts can be read back
 DEMOS = HERE / "demos"
-SIDECAR = ".reef-harness-release"
+RELEASE_FILE = ".reef-harness-release"
 
 SHOW_PROMPTS = {
     "bugfix": "fix the bug in adder.py",
@@ -245,16 +246,19 @@ def reef_pi(args, cwd=None):
 
 
 def _installed_release():
-    """The release id of the tree under work/harness, from the sidecar the install script wrote."""
+    """The release id of the tree under work/harness, from the release metadata file the install script wrote."""
     try:
-        return json.loads((INSTALL_ROOT / SIDECAR).read_text(encoding="utf-8")).get("release_id")
+        return json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8")).get("release_id")
     except (OSError, ValueError):
         return None
 
 
 def install(release_id=None):
-    """Install the head (or ``release_id``) through the install route into work/harness; the sidecar's release id,
-    or None when the script refused (an unmet requires item prints the setup list)."""
+    """Install the head (or ``release_id``) through the install route into work/harness.
+
+    Return the release id from its metadata file, or None when the script
+    refused (an unmet requires item prints the setup list).
+    """
     client = _client()
     _ensure_scenario(client)
     query = "?adapter=pi" + (f"&release_id={release_id}" if release_id else "")
@@ -278,8 +282,8 @@ def ask(text):
     """The request through the installed wrapper; the id of the training record the service accepted.
 
     Nothing runs before the ask: the wrapper posts the instruction with the
-    installed release id and, as provenance, the id of a spooled session or a
-    fresh one, and the deployment's manual mode runs one step for it. A
+    installed release id and the originating session id (a spooled session or
+    a fresh one), and the deployment's manual mode runs one step for it. A
     refusal (admission's screens, a mode that takes no instructions) is a
     stop, with the wrapper's line saying why."""
     say(f"ask: reef-pi harness {text!r}")
@@ -393,8 +397,8 @@ def _take_show_spool(started_ns, run_dir):
     """The spool entry the show session wrote at exit, moved into the run directory; its turns.
 
     The wrapper spools every session's receipts for ``report`` to claim, and
-    ``harness`` names the oldest spooled session as a request's provenance;
-    the show session is shown, never reported, so its entry leaves the spool
+    ``harness`` records the oldest spooled session as the session the request
+    came from; the show session is shown, never reported, so its entry leaves the spool
     for the run directory, where it is the record this driver reads."""
     if not CAPTURES.is_dir():
         return []
