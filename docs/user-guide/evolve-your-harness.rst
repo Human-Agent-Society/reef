@@ -750,5 +750,5 @@ how to connect an agent that has no adapter yet.
 
 .. seealso::
 
-   `Harness BYOK <harness-byok.rst>`__ explains scenario-specific custom providers for the entire
+   `Scenario model configuration <scenario-models.rst>`__ explains scenario-specific custom providers for the entire
    harness evolve model pipeline through Reef API Platform.

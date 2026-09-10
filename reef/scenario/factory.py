@@ -30,6 +30,7 @@ from reef.records import RecordStore
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot import (
     SCENARIO_SNAPSHOT_METADATA_KEY,
@@ -119,12 +120,32 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
     ) -> None:
         self._recipe = recipe
+        self._model_configs: dict[str, ScenarioModelConfig] = {}
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
         self._experiment_tracker = experiment_tracker
         if self._agent_record_dir is not None:
             self._agent_record_dir.mkdir(parents=True, exist_ok=True)
+
+    def model_config(self, scenario: str) -> ScenarioModelConfig:
+        if scenario not in self._model_configs:
+            path = (
+                None
+                if self._agent_record_dir is None
+                else self._agent_record_dir / f"{self._scenario_key(scenario)}-model.json"
+            )
+            self._model_configs[scenario] = ScenarioModelConfig(path)
+        return self._model_configs[scenario]
+
+    def forget_model_config(self, scenario: str) -> None:
+        self._model_configs.pop(scenario, None)
+
+    def configure_model(self, scenario: str, value: object) -> None:
+        config = ScenarioModelConfig()
+        config.save(value)
+        self._recipe.with_model_config(config)
+        self.model_config(scenario).save(value)
 
     def has_registration(self, scenario: str) -> bool:
         """True when the scenario is durably registered with the backend."""
@@ -215,7 +236,7 @@ class ScenarioFactory:
             backend,
             release_id,
         )
-        recipe_definition = self._recipe.for_scenario(scenario)
+        recipe_definition = self._recipe.with_model_config(self.model_config(scenario))
         surface = recipe_definition.build_surface(scenario)
         runtime = recipe_definition.runtime
         checkpoint_head = backend.current()
@@ -305,7 +326,13 @@ class ScenarioFactory:
         key = self._scenario_key(scenario)
         return tuple(
             self._agent_record_dir / name
-            for name in (f"{key}.sqlite3", f"{key}.sqlite3-wal", f"{key}.sqlite3-shm", f"{key}.commits.jsonl")
+            for name in (
+                f"{key}.sqlite3",
+                f"{key}.sqlite3-wal",
+                f"{key}.sqlite3-shm",
+                f"{key}.commits.jsonl",
+                f"{key}-model.json",
+            )
         )
 
     @property
@@ -355,6 +382,7 @@ class ScenarioFactory:
         )
         return Scenario(
             name=scenario,
+            model_config=self.model_config(scenario),
             binding=ScenarioBinding(
                 surface=surface,
                 runtime=recipe_definition.runtime,

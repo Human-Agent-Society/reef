@@ -196,6 +196,11 @@ class Dispatcher:
             allow_implicit_creation=allow_implicit_creation,
         )
 
+    def configure_scenario_model(
+        self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
+    ) -> Scenario:
+        return self._registry.configure_model(scenario, model, create=create, release_id=release_id)
+
     def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
             current = self._registry.set_training_mode(scenario, training_mode)
@@ -261,9 +266,6 @@ class Dispatcher:
 
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
-
-    def provider_capabilities(self) -> Mapping[str, Any]:
-        return self._recipe.provider_capabilities()
 
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
