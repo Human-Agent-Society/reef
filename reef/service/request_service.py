@@ -28,6 +28,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import AgentRecord
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
+from reef.runtime.scenario_provider import ScenarioProviderRuntime
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page
@@ -366,6 +367,11 @@ class RequestService:
         )
         if initial is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        if isinstance(initial.runtime, ScenarioProviderRuntime):
+            normalized = {name.lower(): value for name, value in headers.items()}
+            backend = await asyncio.to_thread(
+                initial.runtime.request_backend, normalized.get("x-reef-provider-version")
+            )
         admission = await initial.runtime.acquire_inference() if initial.runtime is not None else None
         try:
             # Re-resolve after admission: a queued request must freeze the head
@@ -667,10 +673,18 @@ class RequestService:
         if not host or not model or not entries:
             return {}
         scheme = normalized.get("x-forwarded-proto") or "http"
-        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)
+        api = "openai"
+        client_models = () if info is None else info.client_models
+        if isinstance(scenario.runtime, ScenarioProviderRuntime):
+            snapshot = scenario.runtime.snapshot()
+            selected = ModelBinding.from_runtime(snapshot.runtime)
+            model, api = selected.model, selected.api
+            if snapshot.mode == "byok":
+                client_models = ()
+        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER, api=api)
         nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
         try:
-            bound = binding.compose_nodes(descriptor, models=() if info is None else info.client_models)
+            bound = binding.compose_nodes(descriptor, models=client_models)
             files = render_composition((*nodes, *bound), descriptor)
         except (ModelBindingError, RenderError, KeyError, TypeError):
             return {}

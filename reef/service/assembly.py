@@ -204,6 +204,19 @@ def build_dispatcher(
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
     try:
+        resolver_url = env.get("REEF_BYOK_RESOLVER_URL", "").strip()
+        if resolver_url:
+            from dataclasses import replace
+
+            from reef.runtime.scenario_provider import ScenarioProviderResolver
+            from reef.train.cordis_backend.recipe import CordisRecipe
+
+            if not isinstance(recipe, CordisRecipe) or recipe.name != "harness_evolve":
+                raise ValueError("BYOK is available only for harness_evolve")
+            recipe = replace(
+                recipe,
+                provider_resolver=ScenarioProviderResolver(resolver_url, env.get("REEF_BYOK_RESOLVER_TOKEN", "")),
+            )
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
         backend_factory = GitLFSRepositoryBackend.factory(
             _repository_location(settings.artifact_repository),

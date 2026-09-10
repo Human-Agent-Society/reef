@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,7 @@ from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
+from reef.runtime.scenario_provider import ScenarioProviderResolver, ScenarioProviderRuntime
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector, tree_files
@@ -54,6 +55,22 @@ _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
     "score_comparison": ScoreComparisonSelector(),
     "always": AlwaysSelect(),
 }
+
+
+@dataclass(frozen=True)
+class _ScenarioModels:
+    runtime: ScenarioProviderRuntime
+    model_name: str | None
+    named: Mapping[str, ModelBinding]
+
+    def resolve(self) -> ModelBindings:
+        snapshot = self.runtime.snapshot()
+        served = ModelBinding.from_runtime(
+            snapshot.runtime, model=None if snapshot.mode == "byok" else self.model_name
+        )
+        # Every auxiliary role uses the same user-selected endpoint, credential and default model.
+        named = dict.fromkeys(self.named, served) if snapshot.mode == "byok" else dict(self.named)
+        return ModelBindings(served=served, named=named, byok=snapshot.mode == "byok")
 
 
 def _resolve_callable(value: Any, what: str) -> Any:
@@ -213,6 +230,17 @@ class CordisRecipe(Recipe):
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
+    provider_resolver: ScenarioProviderResolver | None = field(default=None, repr=False, kw_only=True)
+
+    def for_scenario(self, scenario: str) -> CordisRecipe:
+        if self.provider_resolver is None:
+            return self
+        return replace(self, runtime=ScenarioProviderRuntime(self.provider_resolver, scenario, self.runtime))
+
+    def provider_capabilities(self) -> Mapping[str, Any]:
+        if self.provider_resolver is None:
+            return {}
+        return {"harness_evolve_byok_v1": True, "resolver_url": self.provider_resolver.url}
 
     @property
     def report_type(self) -> type[ScoredRolloutReport]:
@@ -457,6 +485,11 @@ class CordisRecipe(Recipe):
 
     def model_binding(self) -> ModelBinding:
         """The served model's endpoint, derived from the recipe's runtime."""
+        if isinstance(self.runtime, ScenarioProviderRuntime):
+            snapshot = self.runtime.snapshot()
+            return ModelBinding.from_runtime(
+                snapshot.runtime, model=None if snapshot.mode == "byok" else self.model_name
+            )
         if self.runtime is None:
             raise RecipeConfigError(
                 "harness evolution requires an inference runtime: set reef.upstream_url (and reef.upstream_model) "
@@ -469,14 +502,22 @@ class CordisRecipe(Recipe):
 
     def model_bindings(self) -> ModelBindings:
         """What ``propose`` receives: the served model plus ``evolution.models``."""
+        if isinstance(self.runtime, ScenarioProviderRuntime):
+            return _ScenarioModels(self.runtime, self.model_name, self.models).resolve()
         return ModelBindings(served=self.model_binding(), named=dict(self.models))
 
     def build_surface(self, scenario: str) -> Surface:
         model = self.model_name or getattr(self.runtime, "model_path", None)
+        client_models = self.client_models
+        if isinstance(self.runtime, ScenarioProviderRuntime):
+            models = self.model_bindings()
+            model = models.served.model
+            if models.byok:
+                client_models = ()
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
-            client_models=self.client_models,
+            client_models=client_models,
         )
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
@@ -507,6 +548,8 @@ class CordisRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs()
+        if isinstance(self.runtime, ScenarioProviderRuntime):
+            kwargs["model_resolver"] = _ScenarioModels(self.runtime, self.model_name, self.models)
         # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:

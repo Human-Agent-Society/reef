@@ -25,7 +25,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, usage_of
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
@@ -80,20 +80,24 @@ class EpisodeEvaluationWorker:
     def __post_init__(self) -> None:
         self.executor.preflight()
 
-    def run(self, files: Mapping[str, str], task: str, keep_dir: Path | None = None) -> _ScoredEpisode:
+    def run(
+        self, files: Mapping[str, str], task: str, keep_dir: Path | None = None, models: ModelBindings | None = None
+    ) -> _ScoredEpisode:
         if keep_dir is None or not self.transfer_records:
-            return self._run_and_score(files, task, keep_dir)
+            return self._run_and_score(files, task, keep_dir, models)
         # Remote workers must not interpret the driver's path as a local path.
         # Keep the trajectory on the worker, then return it with the scored result.
         with tempfile.TemporaryDirectory(prefix="reef-worker-record-") as temporary:
             record_dir = Path(temporary) / "episode"
-            scored = self._run_and_score(files, task, record_dir)
+            scored = self._run_and_score(files, task, record_dir, models)
             buffer = BytesIO()
             with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
                 archive.add(record_dir, arcname=".")
             return replace(scored, record_archive=buffer.getvalue())
 
-    def _run_and_score(self, files: Mapping[str, str], task: str, keep_dir: Path | None) -> _ScoredEpisode:
+    def _run_and_score(
+        self, files: Mapping[str, str], task: str, keep_dir: Path | None, models: ModelBindings | None
+    ) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
         could not run. The observation keeps what the exception handling
         would otherwise discard: the failure's stage and cause. A native turn
@@ -126,11 +130,11 @@ class EpisodeEvaluationWorker:
             return scored
         finally:
             EPISODE_OWNER_LEASE.reset(token)
-        scored = self._score_result(result, task)
+        scored = self._score_result(result, task, models)
         _write_episode_record(keep_dir, task, result, scored)
         return scored
 
-    def _score_result(self, result: EpisodeResult, task: str) -> _ScoredEpisode:
+    def _score_result(self, result: EpisodeResult, task: str, models: ModelBindings | None = None) -> _ScoredEpisode:
         """The score and the observations of an episode that ran."""
         residue = len(result.residue)
         agents = _agent_work(result.trajectory)
@@ -151,7 +155,9 @@ class EpisodeEvaluationWorker:
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
             return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
-        score = float(self.scorer(task, result))
+        score = float(
+            self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
+        )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         if result.exit_code != 0:
@@ -413,7 +419,9 @@ def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, A
         return _BudgetedBinding(binding, spent, cap, record)
 
     return ModelBindings(
-        served=wrap(models.served), named={name: wrap(models[name]) for name in models if name != "served"}
+        served=wrap(models.served),
+        named={name: wrap(models[name]) for name in models if name != "served"},
+        byok=models.byok,
     )
 
 
@@ -653,6 +661,7 @@ class CordisBackend(TrainingBackend):
         score_episode: EpisodeScorer,
         tasks: tuple[str, ...],
         models: ModelBindings | ModelBinding,
+        model_resolver: ModelBindingsResolver | None = None,
         binary: str | None = None,
         episode_timeout_s: float = 600.0,
         episode_repeats: int = 1,
@@ -692,6 +701,7 @@ class CordisBackend(TrainingBackend):
         self._score_episode = score_episode
         self._tasks = tasks
         self._models = models
+        self._model_resolver = model_resolver
         # The served binding renders into episodes only. It is resolved once
         # here so an adapter without a matching model_binding refuses boot,
         # not the first step.
@@ -842,6 +852,9 @@ class CordisBackend(TrainingBackend):
     ) -> PreparedStep:
         if not isinstance(batch, TraceBatch):
             raise TypeError(f"harness evolution requires TraceBatch, got {type(batch).__name__}")
+        if self._model_resolver is not None:
+            self._models = self._model_resolver.resolve()
+            self._binding_nodes = self._models.served.compose_nodes(self._descriptor)
         steps = int(state.get("steps", 0)) + 1
         entries = state.get("entries")
         if entries is not None:
@@ -1276,7 +1289,7 @@ class CordisBackend(TrainingBackend):
         return _agent_work(trajectory)
 
     def _evaluate_pairings(self, pairings):
-        scored = self._evaluation_pool.evaluate(pairings)
+        scored = self._evaluation_pool.evaluate(pairings, models=self._models)
         for pairing, result in zip(pairings, scored, strict=True):
             if result.record_archive is not None:
                 keep_dir = pairing[2]

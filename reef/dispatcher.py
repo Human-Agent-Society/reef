@@ -262,6 +262,9 @@ class Dispatcher:
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
 
+    def provider_capabilities(self) -> Mapping[str, Any]:
+        return self._recipe.provider_capabilities()
+
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()

@@ -66,6 +66,8 @@ Routes
 +-------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/status``                            | training, serving, and storage state              |
 +-------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/providers/capabilities``            | scenario provider support and resolver URL        |
++-------------------------------------------------+---------------------------------------------------+
 
 Headers
 -------
@@ -91,6 +93,19 @@ Headers
 |                                   | on the record under ``metadata.tags``, for a processor  |
 |                                   | to correlate on. Reef never reads a value.              |
 +-----------------------------------+---------------------------------------------------------+
+
+Scenario model providers
+------------------------
+
+``GET /reef/providers/capabilities`` returns ``{}`` unless a harness evolve
+provider resolver is configured. Enabled deployments return
+``{"harness_evolve_byok_v1": true, "resolver_url": "..."}``. The route uses
+normal service authentication. Platform inference requests may include
+``x-reef-provider-version`` to require that exact scenario configuration;
+a stale version is rejected before a provider call.
+
+See `Harness BYOK <../user-guide/harness-byok.rst>`__ for the resolver setup,
+scoped credentials and model bindings used throughout evolution.
 
 Manual training
 ---------------

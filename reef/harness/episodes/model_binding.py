@@ -23,7 +23,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -315,6 +315,7 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
     served: ModelBinding
     named: Mapping[str, ModelBinding] = field(default_factory=dict)
+    byok: bool = False
 
     def __post_init__(self) -> None:
         if "served" in self.named:
@@ -335,6 +336,12 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
     def __len__(self) -> int:
         return 1 + len(self.named)
+
+
+class ModelBindingsResolver(Protocol):
+    """Freeze the model configuration once for an entire evolution step."""
+
+    def resolve(self) -> ModelBindings: ...
 
 
 def _mentions_model(value: Any) -> bool:

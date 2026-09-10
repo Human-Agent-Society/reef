@@ -56,6 +56,14 @@ class Recipe:
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
 
+    def for_scenario(self, scenario: str) -> Recipe:
+        """Bind scenario-specific resources without mutating the deployment recipe."""
+        return self
+
+    def provider_capabilities(self) -> Mapping[str, Any]:
+        """Provider configuration contracts supported by this deployment."""
+        return {}
+
     @classmethod
     def from_environment(
         cls,

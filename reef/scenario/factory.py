@@ -215,7 +215,7 @@ class ScenarioFactory:
             backend,
             release_id,
         )
-        recipe_definition = self._recipe
+        recipe_definition = self._recipe.for_scenario(scenario)
         surface = recipe_definition.build_surface(scenario)
         runtime = recipe_definition.runtime
         checkpoint_head = backend.current()
