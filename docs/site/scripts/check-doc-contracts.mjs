@@ -169,6 +169,34 @@ const simplifiedTerminology = [
   ["spill", /spill/i],
   ["HeadSink", /headsink/i],
 ];
+// These existing model prompts keep their original wording. Ignore only their
+// string contents; names, surrounding code, comments, and filenames still count.
+const preservedModelPrompts = new Map([
+  [
+    "recipes/openclawrl/prm.py",
+    /(^_JUDGE_SYSTEM_PROMPT = \(\n)((?:[ \t]+(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')[ \t]*\n)+)(\))/gm,
+  ],
+  [
+    "recipes/skillclaw/harness/prompts.py",
+    /(^(?:EVOLVE_SYSTEM|CREATE_SYSTEM|JUDGE_SYSTEM) = """)([\s\S]*?)(""")/gm,
+  ],
+  [
+    "recipes/meta_harness/results/reef_harness.py",
+    /(^[ \t]+_REVIEW_GATE = """)([\s\S]*?)(""")/gm,
+  ],
+  [
+    "recipes/skillclaw/harness/evolver.py",
+    /(^[ \t]*f")(## Session evidence \(\{len\(sessions\)\} sessions\)\\n\\n)(")/gm,
+  ],
+]);
+
+function terminologySource(path, source) {
+  const prompt = preservedModelPrompts.get(path);
+  if (!prompt) return source;
+  // Keep newlines so failures below still point to the original source lines.
+  return source.replace(prompt, (_, prefix, text, suffix) => prefix + text.replace(/[^\n]/g, " ") + suffix);
+}
+
 const repositoryFiles = new Set(
   execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
     cwd: repoRoot,
@@ -184,7 +212,7 @@ for (const path of repositoryFiles) {
   if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) continue;
   const contents = readFileSync(absolutePath);
   if (contents.includes(0)) continue;
-  const lines = contents.toString("utf8").split("\n");
+  const lines = terminologySource(path, contents.toString("utf8")).split("\n");
   for (const [name, pattern] of simplifiedTerminology) {
     if (pattern.test(path)) {
       failures.push(`${path} uses unclear terminology ${name} in its filename`);

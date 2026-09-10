@@ -482,7 +482,7 @@ def decide(
         )
     user = (
         f"{skill_block}"
-        f"## Session details ({len(sessions)} sessions)\n\n"
+        f"## Session evidence ({len(sessions)} sessions)\n\n"
         f"{_format_session_details(sessions)}\n\n"
         f"## Existing skill names in the library\n\n"
         f"{', '.join(existing_names) or '(none)'}\n"
@@ -493,7 +493,7 @@ def decide(
 def create(*, sessions: list[dict[str, Any]], existing_names: list[str], llm: ChatFn) -> dict[str, Any]:
     """Their create call for the bucket of sessions referencing no skill."""
     user = (
-        f"## Session details ({len(sessions)} sessions)\n\n"
+        f"## Session evidence ({len(sessions)} sessions)\n\n"
         f"{_format_session_details(sessions)}\n\n"
         f"## Existing skill names in the library\n\n"
         f"{', '.join(existing_names) or '(none)'}\n"

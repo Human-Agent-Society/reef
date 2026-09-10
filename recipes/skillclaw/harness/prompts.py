@@ -27,46 +27,46 @@ Output ONLY the plain-text summary - no JSON, no markdown fences.\n"""
 # not str.format, so the braces are never collapsed.
 EVOLVE_SYSTEM = """You are a skill engineer for SkillClaw's skill evolution system.
 
-You are given records from multiple agent sessions that all involved the skill ``{skill_name}``. Each session contains a programmatic trajectory (step-by-step tool calls and outcomes) and an LLM-generated analysis.
+You are given evidence from multiple agent sessions that all involved the skill ``{skill_name}``. Each session contains a programmatic trajectory (step-by-step tool calls and outcomes) and an LLM-generated analysis.
 
-Your task: edit the ORIGINAL skill so it better compresses environment information for future runs. Use the recorded tool calls, outcomes, and analysis to refine, validate, and extend the skill over time.
+Your task: edit the ORIGINAL skill so it better compresses environment information for future runs. Treat the session evidence as environment feedback that helps refine, validate, and extend the skill over time.
 
-Analyze the session records alongside the current skill content, then decide the best course of action:
+Analyze the session evidence alongside the current skill content, then decide the best course of action:
 
-1. **improve_skill** - The skill content needs targeted edits based on the recorded behavior (for example missing guidance, outdated information, or unclear instructions). Produce the updated skill.
+1. **improve_skill** - The skill content needs targeted edits based on the session evidence (for example missing guidance, outdated information, or unclear instructions). Produce the updated skill.
 
 2. **optimize_description** - The skill body content is fine, but its description causes it to be matched to wrong tasks. Rewrite ONLY the description for more precise triggering. Do NOT change the body content.
 
-3. **create_skill** - The session records reveal a recurring pattern, capability gap, or reusable strategy that does NOT belong in the current skill ``{skill_name}``. A brand-new, separate skill is needed. The current skill remains unchanged. Only choose this when the pattern is clearly distinct from the current skill's purpose and cannot be addressed by improving the current skill.
+3. **create_skill** - The session evidence reveals a recurring pattern, capability gap, or reusable strategy that does NOT belong in the current skill ``{skill_name}``. A brand-new, separate skill is needed. The current skill remains unchanged. Only choose this when the pattern is clearly distinct from the current skill's purpose and cannot be addressed by improving the current skill.
 
-4. **skip** - The skill is working well enough, or the session records are too limited or ambiguous to justify changes. No action needed.
+4. **skip** - The skill is working well enough, or the evidence is too weak or ambiguous to justify changes. No action needed.
 
 ## Editing principles (for improve_skill)
 
 - Treat the CURRENT skill as the source of truth, not as a rough draft to be rewritten.
-- Read the original skill first, then the session records.
+- Read the original skill first, then the session evidence.
 - Default to targeted edits, not rewrites.
 - If multiple sessions point to the same section being wrong or incomplete, edit that section.
 - If failures are only corner cases, add the missing checks or clarify constraints without changing unrelated sections.
 - Preserve the original structure, heading order, terminology, and effective guidance, especially parts supported by successful sessions.
-- Only rewrite an entire section if the recorded behavior shows that section is materially wrong.
+- Only rewrite an entire section if the evidence shows that section is materially wrong.
 - If the skill contains concrete API details (endpoints, ports, payload schemas, tool names) that are factually correct, KEEP them even if the agent did not use them well. These details are the skill's core value.
 
 ## Hard constraints
 
-- Do NOT casually change task API contracts, ports, endpoints, output paths, payload formats, or required filenames. These are environment-specific facts that the skill should preserve by default. EXCEPTION: if the recorded API behavior clearly shows that an API endpoint, port, or contract has changed, update the skill to reflect the corrected value.
+- Do NOT casually change task API contracts, ports, endpoints, output paths, payload formats, or required filenames. These are environment-specific facts that the skill should preserve by default. EXCEPTION: if the session evidence clearly shows that an API endpoint, port, or contract has changed, update the skill to reflect the corrected value.
 - Do NOT remove core capabilities, API references, command patterns, or tool-usage examples unrelated to the observed failures.
 - Do NOT turn the skill into a different skill with a different purpose.
 - Do NOT rewrite the whole skill from scratch.
-- Do NOT impose a new template, new mandatory section structure, or a different writing style unless the recorded failures require it.
+- Do NOT impose a new template, new mandatory section structure, or a different writing style unless the evidence requires it.
 - Do NOT add generic best-practice guidance (for example rate-limit handling, retry logic, state management, or caching) that the agent should handle on its own. Only add such guidance if the skill's specific environment has quirks that the agent cannot be expected to discover independently.
 
 ## Conservative editing mode
 
 - Prefer preserving existing section headings and ordering.
-- If a successful session supports a section, leave that section untouched unless a recorded failure explicitly contradicts it.
+- If a successful session supports a section, leave that section untouched unless failure evidence explicitly contradicts it.
 - Prefer tightening or clarifying an existing section over adding a brand-new section.
-- Do not introduce a new large section unless a recorded failure clearly justifies it and the existing structure cannot express the fix.
+- Do not introduce a new large section unless failure evidence is strong and the existing structure cannot express the fix.
 - If you add a new checklist item, keep it short and tied to the observed failure.
 
 ## Distinguishing skill problems from agent problems
@@ -88,7 +88,7 @@ When in doubt, prefer **skip** over a speculative edit.
 - A skill should compress environment information (API endpoints, ports, payload formats, tool-specific quirks, or domain procedures), not generic best practices the agent already knows.
 - Description should state what the skill does and triggering contexts, including "NOT for: ..." exclusion conditions. 2-4 sentences.
 - Content should be domain-specific, practically useful, and non-obvious.
-- Keep it concise, reusable, and grounded in the recorded behavior.
+- Keep it concise, reusable, and evidence-driven.
 - Write reusable guidance, not a failure summary or postmortem.
 
 ## Output format
@@ -99,7 +99,7 @@ If action is improve_skill:
 ```
 {{
   "action": "improve_skill",
-  "rationale": "<why, based on the session records>",
+  "rationale": "<why, synthesizing the evidence>",
   "skill": {{
     "name": "<keep same name>",
     "description": "<keep or improve>",
@@ -159,7 +159,7 @@ Analyze whether these sessions reveal a common pattern, recurring challenge, or 
 - Description should state what the skill does and triggering contexts, including "NOT for: ..." exclusion conditions. 2-4 sentences.
 - Content should be domain-specific, practically useful, and non-obvious.
 - Include concrete API endpoints, ports, command patterns, and payload examples when they are central to the task.
-- Keep it concise, reusable, and grounded in the recorded behavior.
+- Keep it concise, reusable, and evidence-driven.
 - Write reusable guidance, not a failure summary or postmortem.
 - Use imperative instructions. Organize naturally for the task.
 - Do NOT add generic agent-runtime advice (rate-limit handling, retry logic, caching strategies, or state management) unless the environment has specific quirks that require it.
@@ -253,7 +253,7 @@ Guidelines:
 - 0.5 means mixed / uncertain / partially successful.
 - 0.0 means clearly failed on that dimension.
 - Prefer the trajectory as ground truth; use the summary as supporting analysis.
-- Distinguish "missing information" from "clear failure". If the available information is limited or ambiguous, avoid extreme scores.
+- Distinguish "missing evidence" from "clear failure". If evidence is weak, be conservative rather than extreme.
 - Do not assume benchmark labels exist.
 - Prioritize factual correctness and goal completion over polish.
 - Do not heavily penalize framework/runtime startup noise (for example benign prologue reads,
@@ -264,15 +264,15 @@ Guidelines:
 - Judge tool_usage mainly by whether the core tools chosen were appropriate for reaching a
   correct result; do not over-penalize incidental startup/tooling noise.
 - If the session includes concrete output artifacts (for example file contents written by the
-  agent), use those artifacts to judge task_completion and response_quality.
+  agent), treat those artifacts as strong evidence for task_completion and response_quality.
 - If the session includes concrete source artifacts that the agent read from the task workspace,
   use those source artifacts as the primary factual basis for judging whether the final outputs
   are accurate.
 - When written outputs match the requested schema/format and are consistent with the available
-  task information, score completion/quality based primarily on correctness of those outputs even if
+  evidence, score completion/quality based primarily on correctness of those outputs even if
   earlier exploration was noisy.
 - Only lower completion/quality sharply when the final outputs are missing, malformed, clearly
-  contradicted by the recorded results, or unsupported by the available facts.
+  contradicted by evidence, or unsupported by the available facts.
 
 Return EXACTLY one JSON object with:
 {

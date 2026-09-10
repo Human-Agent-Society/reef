@@ -19,11 +19,10 @@ selector and upstream's own `update_frontier`. All eight candidate decisions
 agreed, including Reef's tie. This verifies the overall selection rule given
 identical observations; independent proposals and scores can differ.
 
-The [selected Reef harness](results/reef_harness.py) is based on the iteration 1
-output, with terminology simplified in its comments and completion prompt.
-The measurements below used the original output, whose SHA-256 was
+The [selected Reef harness](results/reef_harness.py) preserves the iteration 1
+code and completion prompt; only its class docstring wording has been simplified.
+The measurements below used the original file, whose SHA-256 was
 `abe8e8b703bd31baaf9ec063fd44596c890f6faebc8804867c98989241d04b89`.
-The version with revised wording has not been benchmarked again.
 
 Evaluating the chosen harnesses again, with two fresh repeats on the same tasks,
 gave **22/60 (36.67%) for Reef's iteration 1** and **21/60 (35.00%) for upstream's
