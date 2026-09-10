@@ -59,7 +59,7 @@ def _propose(nodes, samples, models, *, requests=()):
     return ANSWERS[requests[0]["text"]] if requests else NOTES
 
 
-def _dispatcher(tmp_path: Path) -> Dispatcher:
+def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
     recipe = CordisRecipe(
         resolve_proposer(_propose),
         resolve_episode_scorer(evaluate),
@@ -68,6 +68,7 @@ def _dispatcher(tmp_path: Path) -> Dispatcher:
         seed=SEED,
         runtime=runtime(),
         proposals_dir=str(tmp_path / "inbox"),
+        step_record_dir=str(tmp_path / "steps") if keep_records else None,
         review_kinds=("code_extension",),
         training_mode="hybrid",
     )

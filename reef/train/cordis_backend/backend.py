@@ -1258,6 +1258,12 @@ class CordisBackend(TrainingBackend):
             raise TypeError(f"harness evaluation requires HarnessCandidate, got {type(candidate).__name__}")
         return candidate
 
+    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]:
+        """Read only this scenario's retained step files."""
+        from reef.train.cordis_backend.record_history import read_step_records
+
+        return read_step_records(self._step_record_dir, directory, relative)
+
     def _claim_step_dir(self, step: int) -> Path | None:
         """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
         if self._step_record_dir is None:

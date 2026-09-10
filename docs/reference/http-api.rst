@@ -661,6 +661,34 @@ On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
 install (which replaces the installed tree) and the head's reinstall beside
 it when the release is pending; a promoted release gets none of them.
 
+Retained step files
+~~~~~~~~~~~~~~~~~~~
+
+``GET /reef/harness/releases/{step}/records`` returns the raw file inventory
+for the same catalog step, authenticated and scenario-scoped like the version
+page. The response is ``{"status": "retained", "files": [{"path": "proposer.json",
+"bytes": 123}]}``. Add ``?path=proposer.json`` (or an inventory path under
+``episodes/``) to read ``{"status": "retained", "path": "...", "text": "..."}``.
+The service does not interpret proposer replies or agent events. A console can
+render those persisted formats without changing their learning semantics.
+
+The backend reads only the step directory referenced by the selected catalog
+row under its configured scenario record root. Absolute paths, traversal and
+symlinks are rejected. Only JSON and JSONL files are exposed; inventories are
+limited to 1000 filesystem entries and individual files to 4 MiB. Exceeding
+these limits returns HTTP 400 instead of silently truncating records. A missing
+file or catalog step is HTTP 404. A step with no archive metadata returns
+``status: not_recorded``, disabled recording returns ``status: disabled``, and
+an absent archive directory returns ``status: missing``. These states carry an
+empty files list. All successful reads use ``Cache-Control: no-store``.
+
+Proposer records contain recorded messages and replies. Native sessions retain
+request headers, assistant messages and tool events; reconstructed inputs are
+not exact provider request bodies. They do not retain provider response IDs,
+and a compaction event may prevent complete input reconstruction. Reads neither
+copy records into another store nor change retention. Step files remain separate
+from compacted online record-body retention.
+
 Status
 ------
 
