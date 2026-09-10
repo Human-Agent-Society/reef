@@ -70,3 +70,71 @@ def test_report_route_answers_400_for_a_non_finite_score() -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None:
+    """#228 — an empty release_id is a malformed request, not a missing release."""
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        await client.start_server()
+        try:
+            for path in ("/reef/scenarios", "/reef/scenarios/x/rollback", "/reef/scenarios/x/promote"):
+                for release_id in ("", "   "):
+                    response = await client.post(path, json={"name": "s", "release_id": release_id})
+                    assert response.status == 400, (path, release_id, response.status)
+                    assert "release_id must be a non-empty string" in await response.text()
+
+                if path == "/reef/scenarios":
+                    # create keeps its current behavior: no release_id is allowed there.
+                    missing = await client.post(path, json={"name": "s"})
+                    assert missing.status != 400, (path, missing.status)
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_create_scenario_strips_surrounding_whitespace_from_release_id() -> None:
+    """#228 — a supplied release_id is stripped before use, matching rollback/promote."""
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        await client.start_server()
+        try:
+            # A whitespace-padded release id is stripped, so the lookup names "no-such-release",
+            # not " no-such-release " — the 404 blames the real (unknown) release id.
+            response = await client.post(
+                "/reef/scenarios", json={"name": "padded", "release_id": "  no-such-release  "}
+            )
+            assert response.status == 404, response.status
+            body = await response.text()
+            assert "no-such-release" in body
+            assert '"  no-such-release  "' not in body
+            assert "no link for scenario" not in body
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_promote_route_rejects_non_object_body_with_400() -> None:
+    """#228 — promote now shares the read_object path with the other JSON routes."""
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        await client.start_server()
+        try:
+            for body in NON_OBJECTS:
+                response = await client.post(
+                    "/reef/scenarios/x/promote", data=json.dumps(body), headers={"Content-Type": "application/json"}
+                )
+                assert response.status == 400, (body, response.status)
+                assert "request body must be an object" in await response.text()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

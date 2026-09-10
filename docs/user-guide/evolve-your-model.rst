@@ -1,5 +1,5 @@
-Evolve your model
-=================
+Train model weights from agent feedback
+=======================================
 
 Weight training runs three processes. Reef hot-swaps each accepted update into
 the serving engine, so inference keeps answering across the update.
@@ -44,21 +44,25 @@ localhost; ``--ipc host --shm-size 32g`` is what the training stack needs for
 shared memory. ``recipes/openclawrl/examples/openclawrl/run.sh`` runs the same
 invocation non-interactively.
 
-The cookbook ``recipes/sao/examples/sao/serve.yaml`` declares
-``training.num_gpus: 2`` and ``cuda_visible_devices: "0,1"``.
-``training.num_gpus`` must match the devices you actually expose, and the
-model at ``reef.model_path`` must be present or downloadable.
+The cookbook ``recipes/sao/examples/sao/serve.yaml`` requests one actor GPU
+and one rollout GPU through Slime flags. Reef manages the shared Ray runtime,
+and Slime schedules its model workers there. Its ``run.sh`` defaults the local
+Ray pool to two visible devices; an external cluster controls its own pool.
+The model at ``reef.model_path`` must be present or downloadable.
 
 Start from a config
 -------------------
 
 Each weight-training example ships a complete ``serve.yaml`` that starts the
-three processes in the required order. Copy the closest one and edit it.
+services in the required order and manages the shared Ray runtime. Copy the closest one and edit it.
 
-- ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
+- `SAO rollout training <recipes/sao.rst>`__ uses
+  ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
   with the critic colocated on it, one rollout engine.
-- ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
-- ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
+- `TTT-Discover test-time training <recipes/tttd.rst>`__ uses
+  ``recipes/tttd/examples/tttd/serve.yaml``, two GPUs with LoRA training.
+- `OpenClaw-RL conversation learning <recipes/openclawrl.rst>`__ uses
+  ``recipes/openclawrl/examples/openclawrl/serve.yaml``, the paper's seven-GPU
   stack with a PRM engine and a student model.
 
 `Configuration <../reference/configuration.rst>`__ covers interpolation, command-line
@@ -72,7 +76,7 @@ What to review
    reef.model_path | a local HF model directory or a repo id, downloaded on start
    reef.recipe | the recipe this deployment serves. Recipe fields such as ``batch_size`` sit beside it
    reef.token | the bearer token the service accepts
-   training.num_gpus | GPUs handed to Ray and Slime, with ``training.cuda_visible_devices``
+   training.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
    training.global_batch_size | samples in one optimizer step
    training.checkpoint_dir | where checkpoints land, with the ``reef.artifact_*`` paths
    training.slime_flags | GPU layout, optimizer, sequence length, loss settings
@@ -176,3 +180,11 @@ is admitted the same way. It enters the release chain only if
 ``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
+
+Connect your agent
+------------------
+
+Use the `HTTP API reference <../reference/http-api.rst>`__ for inference,
+feedback reports, and release queries. To compare learning signals before
+choosing a training config, see `Choose a recipe for agent learning
+<recipes.rst>`__.

@@ -17,6 +17,7 @@ exclude: |
       skillclaw/harbor/(environment/workspace/|tests/grade\.py)
       |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
       |tttd/examples/tttd/results/.*/best_solution\.py
+      |meta_harness/results/reef_harness\.py$
     )
     |tests/reef_service/data/harness_goldens/
   )
@@ -32,6 +33,11 @@ repos:
       - id: python-statement-policy
         name: Ban assert and del in Reef source
         entry: python .github/scripts/check_python_statements.py
+        language: system
+        pass_filenames: false
+      - id: readme-i18n
+        name: Check README translation pairing
+        entry: python .github/scripts/check_readme_i18n.py
         language: system
         pass_filenames: false
 

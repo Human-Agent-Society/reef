@@ -1,5 +1,5 @@
-Configuration
-=============
+Configure Reef serving and training
+===================================
 
 A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
 every process in its ``services`` list in dependency order, and hands the
@@ -31,6 +31,11 @@ can be overridden in the environment. Use it when a service must share Reef's
 Python environment. A literal ``python`` keeps its normal meaning and is
 resolved from that service's ``PATH``; Reef never rewrites command names.
 
+Scenario-specific model settings are supplied through the existing scenario
+create/update API. See `Scenario model configuration <../user-guide/scenario-models.rst>`__
+for model selection, persistence and platform upgrades. Omitting the model
+setting preserves deployment-wide configuration.
+
 Start from a cookbook stack
 ---------------------------
 
@@ -50,7 +55,7 @@ examples, and harness evolution ships as a tutorial.
 | ``recipes/<method>/examples/<example>/serve.yaml``          | weight training: Ray head, Slime driver, Reef, and the   |
 |                                                             | method's own services                                    |
 +-------------------------------------------------------------+----------------------------------------------------------+
-| ``tutorials/harness_evolve/serve.yaml``                     | harness evolution: one Reef process, no GPU; ``run.sh``  |
+| ``tutorials/evolve-your-harness/configs/serve.yaml``        | harness evolution: one Reef process, no GPU; ``run.sh``  |
 |                                                             | materializes its recipe preset and starts the stack      |
 +-------------------------------------------------------------+----------------------------------------------------------+
 
@@ -106,6 +111,49 @@ ignored.
 Recipe configuration
 --------------------
 
+``data.training_mode`` is shared by all recipes and defaults to ``auto``.
+In ``auto``, the recipe's processor decides when its data can form a batch,
+and ``POST /reef/train`` is refused. In ``manual``, inference and reports
+cannot authorize training by themselves; ``POST /reef/train`` supplies the
+user instruction, and harness evolution runs it alone. In ``hybrid``, the
+processor batches as in ``auto`` and runs instructions too, a queued
+instruction first; harness evolution hands the proposer, beside the
+instruction, the units an automatic batch would take next, up to
+``batch_size`` and possibly none: failing traces in the score window, or
+records under ``data.batch_policy: records``. The processor defines
+what an instruction batch carries, independently of its automatic batching
+policy.
+For a dotted weight-training deployment this field is also accepted as
+``reef.training_mode``. Named presets set it in their own ``data`` section.
+
+The processor receives ``ProcessorContext.training_mode`` as its initial
+batching mode. The modes share ingestion and retention; the
+``make_training_batch(batch_number, request)`` hook selects batch inputs.
+Processors declare ``supported_training_modes``; unsupported modes or missing
+instruction assembly raise ``NotImplementedError``.
+Harness evolution supports the three modes and requires a proposer that
+explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
+on an inference-only recipe does not create a training backend.
+
+.. code:: yaml
+
+   data:
+     training_mode: hybrid
+
+The mode controls training initiation, independently of
+``evolution.publish: auto | review``. It supplies the initial processor mode.
+Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
+at runtime. This changes subsequent batches; a reserved batch completes under
+its original mode. Mode changes are not persisted: a service restart uses the
+recipe's configured mode again, while a scenario reload after a failed step
+keeps the selected mode. In ``manual`` the reported-feedback processor holds
+at most four batches of units and releases the oldest beyond that with a
+warning, at the switch to ``manual`` and as reports arrive.
+
+.. config::
+
+   data.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of batching by the recipe's rules; ``hybrid`` batches by the recipe's rules and runs a queued instruction first
+
 A recipe is selected three ways:
 
 - **The core record-only recipe:** ``recipe: recipe``
@@ -116,6 +164,16 @@ A recipe is selected three ways:
 There is no recipe-implementation registry. A bare name other than ``recipe``
 is always a preset name; it never imports a learning method implicitly.
 
+A dotted class does not have to be pip-installed. ``reef serve`` looks for
+its top-level package beside the config, walking up from the config file's
+directory to the nearest ancestor that holds ``<package>/__init__.py``, and
+appends that directory to ``PYTHONPATH`` for every service it starts. This is
+how ``recipes.sao.recipe:SAORecipe`` resolves from a source checkout: the
+``recipes/`` cookbook sits next to the example's ``serve.yaml``, so the
+launcher does not export ``PYTHONPATH`` itself. Entries already in
+``PYTHONPATH`` keep their precedence, and a service's ``env`` map can still
+set the variable outright.
+
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
 
@@ -123,6 +181,10 @@ A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
 in a preset. A preset carries its own ``implementation``, ``model``, and
 ``data`` sections, plus an optional ``runtime`` section when the recipe
 builds its own runtime instead of using the deployment's upstream proxy.
+When using the deployment's runtime, a preset may omit ``model.path`` to
+inherit that runtime's model (``reef.upstream_model`` for an upstream proxy).
+An explicit ``model.path`` takes precedence. A preset with its own ``runtime``
+section must still supply its own non-empty ``model.path``.
 Harness-evolution presets also carry an ``evolution`` section:
 
 .. code:: yaml
@@ -146,6 +208,62 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A preset's ``runtime.type: executor_training`` selects an executor-backed
+training coordinator. Its ``executor`` mapping accepts ``backend`` (default
+``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
+``options``. ``coordinator_rank`` defaults to zero. Existing ``ray_training``
+configuration still connects to a named bridge. The Slime driver's separate
+``--reef-executor-backend`` selects the model worker executor and defaults to
+``auto`` (currently Slime's Ray launcher). See `Worker executors <../developer-guide/executors.rst>`__ for the full
+contracts and examples.
+
+Stack execution backends
+------------------------
+
+``execution.services`` selects the deployment executor (default ``auto``).
+``services[].executor`` overrides it for one service, including SGLang, PRM,
+Slime driver or Reef itself. ``execution.training`` and ``execution.rollout``
+select the Slime training-worker and rollout-control executors (both default
+``auto``, resolving to ``ray``). All selectors accept a backend name/import path or a profile under
+``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
+``options``, ``workers``, and ``resources`` containing ``cpus_per_worker`` and
+``gpus_per_worker``. Counts must be positive integers; resource quantities must
+be finite nonnegative numbers. Numeric environment interpolation is accepted.
+
+``execution.evolution`` selects harness evaluation workers (default ``auto``).
+Unlike Slime, ordinary harness evolution calls external model endpoints and
+does not need local GPUs: one worker selects ``uni``, multiple workers select
+``mp``. Local GPU worker requirements follow the same topology rule after
+checking visible CUDA capacity; insufficient GPUs fail with a prompt to
+explicitly select ``ray``. Multiple workers inside a Ray placement group or
+declared cluster/actor options select ``ray``. Local allocations require whole
+GPUs; fractional reservations require explicit Ray. The former worker-level
+``local`` executor is removed (the separate episode-isolation option is unchanged).
+Omitted resources retain component defaults (normally one CPU and no GPUs).
+CPU-only local executors do not reserve cores or enforce CPU quotas.
+
+Service executors accept the same resources, mapped to per-service launch
+requests, but ``workers`` must be one: service replicas are not implemented.
+Slime training/rollout reject these generic workers/resources fields; their
+model-parallel topology and placement groups still come from Slime's existing
+training configuration. Resource declarations are never silently treated as
+model-parallel resizing.
+
+For services, ``auto`` selects ``uni`` unless resource/worker options
+or an existing Ray placement group call for Ray. Explicit local CUDA visibility
+selects ``uni`` and cannot be combined with cluster resource options.
+Explicit service selectors and Slime CLI flags override the corresponding role
+defaults. Backend startup failures never silently fall back to another backend.
+
+For Ray services, ``resources`` supplies actor launch options such as
+``num_gpus`` and ``num_cpus``; do not also set ``cuda``. A service can publish
+``endpoint: http://{host}:23001`` and dependents can use
+``${endpoints.SERVICE_NAME}``. Readiness runs on the service's execution node,
+and dependencies are topologically sorted. Local services advertise localhost
+unless ``advertise_host`` is set. See the `whole-stack examples and backend
+contracts <../developer-guide/executors.rst#whole-stack-deployment-configuration>`__
+before moving services across nodes.
+
 Harness evolution keys
 ~~~~~~~~~~~~~~~~~~~~~~
 
@@ -168,26 +286,38 @@ zero.
    evolution.evaluate | an ``EpisodeScorer``, likewise
    evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
-   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes and whose loop seams listen to ``native_hook`` nodes), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
-   evolution.binary | overrides the adapter's binary name
+   evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
+   evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
-   evolution.max_steps | 0 | stop after this many evolve steps; 0 disables the limit
-   evolution.max_failure_streak | 0 | stop after this many consecutive rejected steps; 0 disables the limit
+   evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
+   evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
+   execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
+   execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
+   execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
+   evolution.episode_workers / worker_executor / worker_resources | | deprecated compatibility aliases; conflicting resource values are rejected; legacy worker_executor cannot accompany role-level workers/resources
    evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent gate task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
-   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the cap and credential screen still apply
-   evolution.seed | entry options loaded into the tree on first boot; recovered state takes precedence
+   evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
+   evolution.promote | | optional callable or dotted ``module:attribute`` choosing which trace prompts to promote; receives the step's samples (and the failure manifest when its signature names ``manifest``); without it every failing trace's user prompt is promoted, and the caps and the credential and directive screens still apply
+   evolution.publish | auto | ``review`` holds every gate win as a pending release until ``POST /reef/scenarios/{scenario}/promote`` names it
+   evolution.review_kinds | [] | node kinds whose wins wait for a promote while the rest publish at once; a win that touches a ``native_loop`` waits whether or not the list names it
+   evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reef-harness <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; ``pi`` only, other adapters refuse boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
+   evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
+   evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
+   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` or ``response`` or ``error``, and ``seconds``; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each gate episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
-against.
+against. The step record holds the proposer's raw traffic and every gate
+episode's session log, so treat its directory like the commit log.
 
 The ``services`` list
 ---------------------
@@ -203,7 +333,7 @@ string commands retain their current ``shlex`` parsing.
    services[].ready | a shell command that succeeds once the service is up
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
-   services[].cuda | the value of ``CUDA_VISIBLE_DEVICES`` for this process
+   services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
    services[].env | extra environment variables
 
 The ``training`` section
@@ -214,8 +344,7 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.num_gpus | GPUs handed to the Ray head
-   training.cuda_visible_devices | the devices Ray and Slime may use
+   training.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
    training.checkpoint_dir | where Megatron and HF checkpoints are written
    training.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start

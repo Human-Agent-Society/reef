@@ -32,10 +32,13 @@ from typing import Any, Literal
 import ray
 
 from reef.core.artifact_ref import parse_runtime_load_spans
-from reef.runtime.adapter_residency import AdapterResidencyManager
+from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
+from reef.runtime.executor import resolve
+from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.surface.adapter import parse_adapter_name
+from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -57,7 +60,7 @@ from reef.train.slime_backend.reef_adapters.training_job.marker import (
     transition_marker,
     write_marker,
 )
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
+from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 DEFAULT_BRIDGE_ACTOR_NAME = DEFAULT_ACTOR_NAME
@@ -245,7 +248,7 @@ def _scenario_staleness_admission(
     payload: Mapping[str, Any],
     *,
     scenario: str,
-    ledger: ScenarioLedger,
+    history: ScenarioHistory,
     serving_runtime_load_id: str,
     max_staleness: int,
 ) -> _StalenessDecision:
@@ -285,7 +288,7 @@ def _scenario_staleness_admission(
                 producing = RuntimeLoadId.parse(value)
             except (TypeError, ValueError):
                 return drop("malformed_producing_runtime_load_id")
-            lag = ledger.lag(scenario, producing)
+            lag = history.lag(scenario, producing)
             if lag is None:
                 return drop("cross_incarnation")
             lags.append(lag)
@@ -318,7 +321,7 @@ def create_rollout_manager(args, placement_group):
 
 def create_train_groups(args, placement_groups, rollout_manager):
     from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
-    from reef.train.slime_backend.reef_adapters.ray_train_groups import create_train_groups as implementation
+    from reef.train.slime_backend.reef_adapters.train_groups import create_train_groups as implementation
 
     return implementation(
         args,
@@ -359,11 +362,10 @@ class _RolloutAdapterEngine:
         payload()
 
     def unload_adapter(self, name: str) -> None:
-        engines, *_ = ray.get(
-            self._rollout_manager.get_updatable_engines_and_lock.remote(), timeout=_TRAIN_RPC_TIMEOUT_S
-        )
-        results = ray.get(
-            [engine.unload_lora_adapter.remote(lora_name=name) for engine in engines], timeout=_TRAIN_RPC_TIMEOUT_S
+        manager = RayExecutor.from_workers([self._rollout_manager])
+        engines, *_ = manager.rpc(0, "get_updatable_engines_and_lock", timeout=_TRAIN_RPC_TIMEOUT_S)
+        results = RayExecutor.from_workers(engines).collective_rpc(
+            "unload_lora_adapter", kwargs={"lora_name": name}, timeout=_TRAIN_RPC_TIMEOUT_S
         )
         for result in results:
             if result is not None and (not isinstance(result, Mapping) or result.get("success") is not True):
@@ -407,16 +409,19 @@ class TrainBridgeActorImpl:
         # the bridge falls back to the historical save-actor-only behavior.
         self._critic_save_root = critic_save_root if critic_group is not None else None
         self._rollout_manager = rollout_manager
+        self._manager_executor = RayExecutor.from_workers([rollout_manager])
         self._save_hf_template = save_hf_template
         self._colocate = colocate
         # A LoRA deployment serves one adapter per scenario: the scenarios
         # time-slice the group's one adapter slot, each publishes under its
-        # own scenario-qualified versioned name, and the ledger keeps the
-        # per-scenario history the engine-global runtime load ID cannot
-        # express. Reporting it in health is what lets the serving side
+        # own scenario-qualified versioned name, and ScenarioHistory records
+        # the per-scenario publications the engine-global runtime load ID
+        # cannot express. Reporting it in health is what lets the serving side
         # address each scenario's adapter.
         self._lora = lora
-        self._ledger = ScenarioLedger(ledger_path(save_hf_template)) if lora and save_hf_template is not None else None
+        self._history = (
+            ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None
+        )
         # One engine, one accounting point for the adapters it holds:
         # publication makes room through it, restart recovery reloads through
         # it, and its status is what the serving side reports.
@@ -434,6 +439,7 @@ class TrainBridgeActorImpl:
         else:
             self._algo = _NullAlgorithm()
         self._phase = "serving"
+        self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None
         self._last_train_metrics: dict[str, Any] = {}
@@ -447,6 +453,7 @@ class TrainBridgeActorImpl:
                 critic_root=self._critic_save_root,
                 source_hf=source_hf,
                 source_megatron=source_megatron,
+                lora=lora,
             )
             if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
             else None
@@ -484,7 +491,7 @@ class TrainBridgeActorImpl:
             # recreates the same serving identity and the durable Reef head
             # remains tied to the correct serving version.
             self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
-        if self._ledger is not None:
+        if self._history is not None:
             self._recover_scenario_adapters(marker)
         if marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED"}:
             try:
@@ -503,7 +510,7 @@ class TrainBridgeActorImpl:
             # so the first Reef inference uses the actual training version. A
             # LoRA bridge that never trained has nothing to publish: the frozen
             # base SGLang booted from is exactly what every fresh adapter
-            # computes, and the ledger replay above restored trained ones.
+            # computes, and the history replay above restored trained ones.
             self._runtime_load_id = self._update_serving(
                 force_full=marker is not None,
                 scenario=self._marker_scenario(marker),
@@ -560,13 +567,13 @@ class TrainBridgeActorImpl:
         activated last: the regular startup republication then publishes it
         under the recovered runtime load ID.
         """
-        ledger = self._require_ledger()
+        history = self._require_history()
         residency = self._require_residency()
         active = marker.get("scenario") if marker is not None else None
         pending = [
             (scenario, adapter)
-            for scenario in ledger.scenarios
-            if (adapter := ledger.adapter(scenario)) is not None and scenario != active
+            for scenario in history.scenarios
+            if (adapter := history.adapter(scenario)) is not None and scenario != active
         ]
         if not pending and active is None:
             return
@@ -582,11 +589,11 @@ class TrainBridgeActorImpl:
         if active is not None:
             self._group.activate_scenario(active)
 
-    def _require_ledger(self) -> ScenarioLedger:
-        """The per-scenario ledger; only LoRA runs with a checkpoint save path keep one."""
-        if self._ledger is None:
+    def _require_history(self) -> ScenarioHistory:
+        """The per-scenario history; only LoRA runs with a checkpoint save path keep one."""
+        if self._history is None:
             raise RuntimeError("scenario bookkeeping requires LoRA training with a checkpoint save path")
-        return self._ledger
+        return self._history
 
     def _require_residency(self) -> AdapterResidencyManager:
         if self._residency is None:
@@ -595,18 +602,41 @@ class TrainBridgeActorImpl:
 
     def _marker_scenario(self, marker: Mapping[str, Any] | None) -> str | None:
         """The scenario a marker's publication belongs to, when the bridge trains per scenario."""
-        if self._ledger is None or marker is None:
+        if self._history is None or marker is None:
             return None
         scenario = marker.get("scenario")
         return str(scenario) if isinstance(scenario, str) and scenario else None
 
     def _job_scenario(self, payload: Mapping[str, Any]) -> str | None:
         scenario = payload.get("scenario")
-        if self._ledger is None:
+        if self._history is None:
             return None
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("per-scenario LoRA training jobs must name their scenario")
         return scenario
+
+    def shutdown(self) -> None:
+        """Release training and rollout workers before retiring their bridge."""
+        with self._operation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._phase = "stopped"
+            errors = []
+            for group in (self._critic_group, self._group):
+                if group is not None:
+                    try:
+                        group.release()
+                    except Exception as exc:
+                        errors.append(exc)
+            try:
+                self._manager_executor.rpc(0, "dispose", timeout=60)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                RayExecutor.from_workers([self._rollout_manager], owned=True).shutdown()
+            if errors:
+                raise errors[0]
 
     def health(self) -> dict[str, Any]:
         """Return a lightweight liveness marker for container health checks."""
@@ -626,7 +656,7 @@ class TrainBridgeActorImpl:
             )
             if "scenario" in marker:
                 training_job["scenario"] = marker["scenario"]
-        ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed"}
+        ok = self._phase not in {"training_failed", "checkpoint_failed", "weight_sync_failed", "stopped"}
         return {
             "ok": ok,
             # A publication failure with a durable UPDATING_WEIGHTS marker is
@@ -645,7 +675,7 @@ class TrainBridgeActorImpl:
             "inference_url": self._inference_url,
             "lora_adapter": None,
             "lora_mode": "scenario" if self._lora else None,
-            "lora_adapters": {} if self._ledger is None else self._ledger.status(),
+            "lora_adapters": {} if self._history is None else self._history.status(),
             "adapter_residency": None if self._residency is None else self._residency.status(),
             "completed_train_steps": self._completed_train_steps,
             "last_train_rollout_id": self._last_train_rollout_id,
@@ -742,7 +772,7 @@ class TrainBridgeActorImpl:
             try:
                 if recovering:
                     self._manager_call("recover_updatable_engines")
-                    if self._ledger is not None:
+                    if self._history is not None:
                         # The failed publication terminated every updatable
                         # engine, so recovery restarted them from the frozen
                         # base with no adapters resident. Align residency with
@@ -753,7 +783,7 @@ class TrainBridgeActorImpl:
                         self._require_residency().reconcile((), self._adapter_engine)
                         self._recover_scenario_adapters(marker)
                 self._pause_generation()
-                if self._ledger is not None:
+                if self._history is not None:
                     # A restart between checkpoint and publication may have
                     # left another scenario in the slot.
                     self._group.activate_scenario(str(marker["scenario"]))
@@ -763,11 +793,11 @@ class TrainBridgeActorImpl:
                     # weights and remains safely replayable from CHECKPOINT.
                     transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
                 published = self._update_serving(force_full=recovering, scenario=self._marker_scenario(marker))
-                if self._ledger is not None:
+                if self._history is not None:
                     from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 
                     scenario = str(marker["scenario"])
-                    self._ledger.record_publication(scenario, published, scenario_adapter_name(scenario, published))
+                    self._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
                 transition_marker(
                     self._marker_path(),
                     marker,
@@ -775,6 +805,15 @@ class TrainBridgeActorImpl:
                     runtime_load_id=published,
                 )
                 self._phase = "awaiting_commit"
+            except AdapterCapacityExhausted:
+                # Capacity failures are classified in _update_serving, which
+                # terminates the engines only for the eviction one an engine
+                # refused (#61). A plain refusal published nothing and touched
+                # no engine, so escalating here would terminate engines it
+                # never involved and then fail identically on the next
+                # attempt; only more slots resolve it (#65).
+                traceback.print_exc(file=sys.stderr)
+                raise
             except BaseException:
                 self._phase = "weight_sync_failed"
                 with suppress(Exception):
@@ -880,7 +919,7 @@ class TrainBridgeActorImpl:
             admission = _scenario_staleness_admission(
                 payload,
                 scenario=scenario,
-                ledger=self._require_ledger(),
+                history=self._require_history(),
                 serving_runtime_load_id=self._runtime_load_id,
                 max_staleness=max_staleness,
             )
@@ -925,14 +964,14 @@ class TrainBridgeActorImpl:
             and rollout_versions is not None
             and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
         ):
-            raise ValueError("loss-family row provenance does not match the shared training payload")
+            raise ValueError("loss-family row producing versions do not match the shared training payload")
         self._algo.validate_payload(rollout_data)
         context: Any = nullcontext(None)
         if self._storage is not None:
             protected = marker_rollouts(prior_marker)
-            if self._ledger is not None:
+            if self._history is not None:
                 # Every scenario's latest checkpoint is its restart source.
-                protected |= self._ledger.protected_rollouts()
+                protected |= self._history.protected_rollouts()
             context = self._storage.admit(
                 rollout_id=rollout_id,
                 active_rollouts=protected,
@@ -951,7 +990,7 @@ class TrainBridgeActorImpl:
             # RolloutManager owns Slime's DP schedule and
             # object-store transport contract. It returns one Box
             # per DP rank, exactly what the training actors expect.
-            packed = self._get(self._rollout_manager.prepare_external_train_data.remote(rollout_data))
+            packed = self._manager_call("prepare_external_train_data", rollout_data)
             marker = {
                 "status": "RUNNING",
                 "job_id": job_id,
@@ -982,7 +1021,7 @@ class TrainBridgeActorImpl:
                 )
                 train_results = training.worker_results
                 durable_metrics.update(training.durable_metrics)
-                durable_metrics.update(self._algo.provenance_metrics(rollout_data, self.serving_runtime_load_id()))
+                durable_metrics.update(self._algo.rollout_metrics(rollout_data, self.serving_runtime_load_id()))
                 worker_metrics = dict(self._get(self._group.async_pop_rank0_metrics()))
                 train_metrics = next(
                     (dict(result) for result in train_results if isinstance(result, Mapping) and result),
@@ -1009,7 +1048,7 @@ class TrainBridgeActorImpl:
                         reward=math.fsum(rewards) / len(rewards),
                     )
                 if scenario is not None:
-                    self._require_ledger().record_checkpoint(scenario, rollout_id)
+                    self._require_history().record_checkpoint(scenario, rollout_id)
                 if durable_metrics:
                     marker["metrics"] = dict(durable_metrics)
                 transition_marker(
@@ -1045,6 +1084,13 @@ class TrainBridgeActorImpl:
         the publishing scenario's own current revision when nothing else
         fits: generation is paused, so no request observes the gap) and
         records the published revision afterwards.
+
+        Admission runs before any weight leaves the trainer. A capacity
+        rejection therefore means nothing was published and every engine still
+        serves what it served, so it must not terminate them — that took down
+        scenarios which were never part of the publication (#65). An eviction
+        the engine refused is the opposite: its state is uncertain, so the
+        terminate-and-recover path stays (#61).
         """
         residency = self._residency if scenario is not None else None
         try:
@@ -1065,6 +1111,15 @@ class TrainBridgeActorImpl:
                 raise RuntimeError(f"serving engines disagree after update: {observed!r}")
             if residency is not None and scenario is not None:
                 residency.register(scenario, raw_version)
+        except AdapterEvictionFailed:
+            self._phase = "weight_sync_failed"
+            with suppress(Exception):
+                self._manager_call("terminate_updatable_engines")
+            raise
+        except AdapterCapacityExhausted:
+            # Admission was refused before any weight left the trainer.
+            self._phase = "serving"
+            raise
         except BaseException:
             self._phase = "weight_sync_failed"
             with suppress(Exception):
@@ -1074,7 +1129,7 @@ class TrainBridgeActorImpl:
         return raw_version
 
     def _manager_call(self, method: str, *args: Any) -> Any:
-        return self._get(getattr(self._rollout_manager, method).remote(*args))
+        return self._manager_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
 
     def _pause_generation(self) -> None:
         if self._generation_paused:
@@ -1090,7 +1145,7 @@ class TrainBridgeActorImpl:
 
     @staticmethod
     def _get(value: Any) -> Any:
-        return ray.get(value, timeout=_TRAIN_RPC_TIMEOUT_S)
+        return resolve(value, timeout=_TRAIN_RPC_TIMEOUT_S)
 
     def _checkpoint_path(self, rollout_id: int) -> str:
         if self._save_hf_template is None:
@@ -1139,9 +1194,17 @@ def start_bridge(
     """
     spec = resolve_loss_family(loss_family) if loss_family is not None else None
     validate_bridge_args(args, spec)
+    if loss_family is not None and ":" not in loss_family:
+        loss_family = loss_family_refs().get(loss_family) or loss_family
     configure_sglang_runtime(args)
     configure_megatron_runtime(args)
     configure_rollout_runtime(args)
+    from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
+
+    slime_executor_class(getattr(args, "reef_executor_backend", "auto"), role="training")
+    from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
+
+    rollout_executor_class(args)
     colocate = bool(getattr(args, "colocate", False))
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
@@ -1154,29 +1217,53 @@ def start_bridge(
     if not ray.is_initialized():
         ray.init(namespace=namespace)
     pgs = create_placement_groups(args)
-    rollout_manager = create_rollout_manager(args, pgs["rollout"])
-    # Loss families that train a value model need the critic actor group;
-    # the others discard it. ``args.use_critic`` comes from the explicit
-    # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
-    # so keeping the group here is what wires the value model into the bridge
-    # schedule rather than leaving it uninitialized.
-    actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
-    return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
-        actor_group,
-        rollout_manager,
-        save_hf_template=args.save_hf,
-        start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
-        storage_config=retention,
-        megatron_save_root=args.save,
-        critic_save_root=getattr(args, "critic_save", None),
-        source_hf=getattr(args, "hf_checkpoint", None),
-        source_megatron=getattr(args, "load", None),
-        colocate=colocate,
-        lora=lora,
-        adapter_capacity=lora_engine_slots(args) if lora else None,
-        critic_group=critic_group,
-        critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
-        critic_only_steps=getattr(args, "num_critic_only_steps", 0),
-        loss_family=loss_family,
-        loss_family_config=loss_family_config,
-    )
+    rollout_manager = None
+    actor_group = None
+    critic_group = None
+    try:
+        rollout_manager = create_rollout_manager(args, pgs["rollout"])
+        # Loss families that train a value model need the critic actor group;
+        # the others discard it. ``args.use_critic`` comes from the explicit
+        # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
+        # so keeping the group here is what wires the value model into the bridge
+        # schedule rather than leaving it uninitialized.
+        actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
+        return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
+            actor_group,
+            rollout_manager,
+            save_hf_template=args.save_hf,
+            start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
+            storage_config=retention,
+            megatron_save_root=args.save,
+            critic_save_root=getattr(args, "critic_save", None),
+            source_hf=getattr(args, "hf_checkpoint", None),
+            source_megatron=getattr(args, "load", None),
+            colocate=colocate,
+            lora=lora,
+            adapter_capacity=lora_engine_slots(args) if lora else None,
+            critic_group=critic_group,
+            critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
+            critic_only_steps=getattr(args, "num_critic_only_steps", 0),
+            loss_family=loss_family,
+            loss_family_config=loss_family_config,
+        )
+    except BaseException:
+        for group in (critic_group, actor_group):
+            if group is not None:
+                with suppress(Exception):
+                    group.release()
+        if rollout_manager is not None:
+            with suppress(Exception):
+                RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)
+            with suppress(Exception):
+                RayExecutor.from_workers([rollout_manager], owned=True).shutdown()
+        # This function created the reservation; per-role executors only borrow it.
+        with suppress(Exception):
+            from ray.util.placement_group import remove_placement_group
+
+            released = set()
+            for placement in pgs.values():
+                if placement is not None and placement[0] is not None and placement[0].id not in released:
+                    released.add(placement[0].id)
+                    remove_placement_group(placement[0])
+        raise

@@ -56,7 +56,15 @@ SLIME_DRIVER_MODULE = "reef.train.slime_backend.reef_adapters.driver"
 
 
 def _iter_config_files() -> list[Path]:
-    return [path for root in CONFIG_ROOTS if root.is_dir() for path in root.rglob("*.yaml")]
+    # Running an example materializes runtime YAML under its ignored work/.
+    # Those are local deployment state, not shipped configuration contracts.
+    return [
+        path
+        for root in CONFIG_ROOTS
+        if root.is_dir()
+        for path in root.rglob("*.yaml")
+        if "work" not in path.relative_to(root).parts
+    ]
 
 
 def _discover_training_configs() -> list[Path]:
@@ -143,7 +151,6 @@ _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
     "TTTD_CHECKPOINT_INTERVAL": "2",
     "TTTD_CUDA_GRAPH_MAX_BS": "8",
-    "TTTD_CUDA_VISIBLE_DEVICES": "0,1",
     "TTTD_GLOBAL_BATCH_SIZE": "8",
     "TTTD_GROUPS_PER_STEP": "2",
     "TTTD_INFERENCE_HOST": "127.0.0.1",
@@ -310,6 +317,17 @@ def _apply_validation_derivations(args) -> None:
 
 
 @pytest.mark.unit
+def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypatch):
+    shipped = tmp_path / "example" / "serve.yaml"
+    generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
+    for path in (shipped, generated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("reef: {}\nservices: []\n")
+    monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
+    assert _discover_example_deployments() == [shipped]
+
+
+@pytest.mark.unit
 def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
@@ -325,10 +343,14 @@ def test_user_facing_example_deployments_are_discovered() -> None:
     paths = {_config_id(path) for path in EXAMPLE_DEPLOYMENTS}
     assert paths == {
         "recipes/basic/external-provider.yaml",
+        "recipes/coral/examples/coral_demo/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
-        "tutorials/harness_evolve/serve.yaml",
+        "tutorials/harness-requests/configs/deployment.yaml",
+        "tutorials/evolve-your-harness/configs/deployment.yaml",
+        "tutorials/evolve-your-harness/configs/serve-native.yaml",
+        "tutorials/evolve-your-harness/configs/serve.yaml",
         "recipes/sao/examples/sao/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
     }

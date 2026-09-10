@@ -1,4 +1,4 @@
-"""Guarantees of reef.harness.render and the bundled adapter descriptors."""
+"""Guarantees of reef.harness.tree.render and the bundled adapter descriptors."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
     import tomli as tomllib
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindingError
-from reef.harness.render import RenderError, render_composition
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
 
@@ -165,14 +165,20 @@ def test_terminus_rejects_a_max_turns_that_is_not_a_positive_integer(turns) -> N
         render_composition([("config", {"data": {"max_turns": turns}})], get_adapter("terminus"))
 
 
-def test_terminus_rejects_code_extensions_that_would_run_outside_the_container() -> None:
-    # Harbor isolates the commands the model writes, not Reef's own process,
-    # so an evolved module would outrank the agent it configures.
-    with pytest.raises(RenderError, match="outside the container"):
+def test_terminus_extension_requires_an_agent_class() -> None:
+    with pytest.raises(RenderError, match="must define class Agent"):
         render_composition(
             [("code_extension", {"name": "assemble", "code": "def assemble(s, r, f): return None\n"})],
             get_adapter("terminus"),
         )
+
+
+def test_terminus_renders_one_extension_without_executing_it() -> None:
+    node = ("code_extension", {"name": "agent", "code": "raise RuntimeError('must not run')\nclass Agent: pass\n"})
+    files = render_composition([node], get_adapter("terminus"))
+    assert files["terminus/context/agent.py"] == node[1]["code"]
+    with pytest.raises(RenderError, match="exactly one code_extension"):
+        render_composition([node, ("code_extension", {**node[1], "name": "second"})], get_adapter("terminus"))
 
 
 def test_terminus_binding_renders_the_litellm_provider() -> None:
@@ -326,16 +332,21 @@ NATIVE_TOOL = (
 
 NATIVE_HOOK = (
     "native_hook",
-    {"name": "guard", "seam": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
+    {"name": "guard", "event": "post_execute", "code": "def listen(payload, next):\n    return next()\n"},
 )
 
 
 def test_native_render_matches_the_golden_tree() -> None:
-    # The native harness loads Python extensions, so its golden carries a Python body.
-    nodes = [node for node in NODES if node[0] != "code_extension"]
-    extension = ("code_extension", {"name": "tracer", "code": "def tracer():\n    pass\n"})
-    rendered = render_composition([*nodes, extension, NATIVE_TOOL, NATIVE_HOOK], get_adapter("native"))
+    # The loop never reads a command or an extension, so native declares no path for either kind.
+    nodes = [node for node in NODES if node[0] not in ("agent_command", "code_extension")]
+    rendered = render_composition([*nodes, NATIVE_TOOL, NATIVE_HOOK], get_adapter("native"))
     assert rendered == golden_tree("native")
+    descriptor = get_adapter("native")
+    assert descriptor.tree_path == "native/tree.json" and get_adapter("pi").tree_path is None
+    assert get_adapter("opencode").tree_path is None
+    for kind, node in (("agent_command", "summarize"), ("code_extension", "tracer")):
+        with pytest.raises(RenderError, match=f"does not render {kind} nodes"):
+            render_composition([node_ for node_ in NODES if node_[1].get("name") == node], descriptor)
 
 
 def test_config_nodes_deep_merge_in_tree_order() -> None:
@@ -376,3 +387,23 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
 
 def test_bundled_adapters_are_discoverable() -> None:
     assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
+
+
+def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
+    """The wrapper adds ``client_env`` to a person's run; the install script names ``client_tools`` missing from PATH."""
+    descriptor = get_adapter("pi")
+    assert descriptor.client_env == {"PI_SKIP_VERSION_CHECK": "1"}
+    assert "PI_OFFLINE" not in descriptor.client_env  # an interactive run talks to reef
+    assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
+
+
+def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
+    files = render_composition(
+        [("skill", {"name": "notes", "text": "# Notes skill\n\nKeep short notes.\n"})], get_adapter("pi")
+    )
+    assert (
+        files["pi-agent/skills/notes/SKILL.md"]
+        == "---\nname: notes\ndescription: Notes skill\n---\n# Notes skill\n\nKeep short notes.\n"
+    )
+    own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
+    assert render_composition([own], get_adapter("pi"))["pi-agent/skills/own/SKILL.md"] == own[1]["text"]

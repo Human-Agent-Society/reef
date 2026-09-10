@@ -168,7 +168,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     assert sample.reward == pytest.approx(0.75)
     # No explicit action mask -> the whole response is one action.
     assert sample.action_mask == sample.loss_mask
-    # Provenance rides through for policy-lag / queue-age reporting.
+    # The producing version and timestamp support policy-lag / queue-age reporting.
     assert sample.runtime_load_id == "slime-v3"
     assert sample.rollout_created_at is not None
 
@@ -397,7 +397,7 @@ class _StubTrainingRuntime(TrainingRuntime):
             checkpoint_path=str(checkpoint),
             current_runtime_load_id=self._served_version,
             # A real SAO backend reports its schedule cadence and async
-            # provenance here; the shapes are asserted in test_sao_bridge.
+            # rollout metrics here; the shapes are asserted in test_sao_bridge.
             training_metrics={"sao/critic_updates": 2, "sao/actor_trained": 1},
         )
         self.completed[rollout_id] = result
@@ -417,7 +417,7 @@ def _wait_for_step(dispatcher: Dispatcher, step: int) -> None:
         if dispatcher.get_or_create_scenario("math").scenario_step == step:
             return
         Event().wait(0.01)
-    pytest.fail(f"scenario did not reach step {step}: {dispatcher.training_status}")
+    pytest.fail(f"scenario did not reach step {step}: {dispatcher.build_training_status()}")
 
 
 @pytest.mark.integration
@@ -610,8 +610,10 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         )
         batch = first.reserve_training_batch()
         assert batch is not None
-        assert first.execute_reserved_step(0).result is not None
-        prepared = first.commit()
+        result = first.execute_reserved_step(0).result
+        assert result is not None
+        prepared = first.prepare_commit(result)
+        first.commit(prepared)
         first.apply_compaction(prepared.compacted_ids)
 
     with RecordStore(database) as second_store:

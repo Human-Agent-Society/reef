@@ -10,7 +10,9 @@ effect of the loader's fiber, so tree teardown is plain LIFO replay), and a
 changed one patches its context and reconfigures through ``fiber.update``,
 restarting only the affected subtree. The live state also writes back: a
 config update or self-disposal of a tracked fiber lands in its entry's
-options, keeping the desired tree the single source of truth.
+options, keeping the desired tree the single source of truth. The loader
+owns the option dicts it is given and writes those live changes into them;
+to change an entry pass a new dict, never edit one the loader already holds.
 
 Plugins are named: the loader maps an entry's ``name`` to a plugin through
 the resolver callable given at construction, and the tree lives in memory.
@@ -42,7 +44,7 @@ _ENTRY_KEY = "_loader_entry"
 """Override key marking a context as belonging to an entry (Entry.key)."""
 
 
-def _entry_of(ctx: Context) -> Entry | None:
+def entry_of(ctx: Context) -> Entry | None:
     """The nearest entry owning ``ctx``, through the override chain."""
     node: Context | None = ctx
     while node is not None:
@@ -72,7 +74,7 @@ class Entry:
     def id(self) -> str:
         """The tree-qualified id: subtree entries prefix their owner's id."""
         id_ = str(self.options.get("id", ""))
-        owner = _entry_of(self.parent.tree.ctx)
+        owner = entry_of(self.parent.tree.ctx)
         if owner is not None:
             return owner.id + EntryTree.sep + id_
         return id_
@@ -86,13 +88,18 @@ class Entry:
         while entry is not None:
             if entry.options.get("disabled"):
                 return True
-            entry = _entry_of(entry.parent.ctx)
+            entry = entry_of(entry.parent.ctx)
         return False
 
     def _resolve_config(self) -> Any:
         # The reference interpolates JS expressions into the config here; a
         # permanent omission, so the options hold the config literally.
-        return self.options.get("config")
+        config = self.options.get("config")
+        if self.options.get("group") and not isinstance(config, list):
+            # A group's config is its children's live list, so a config that is not a list becomes the one list
+            # the entry keeps and the group shares (group.ts:47-49 over entry.ts:80).
+            config = self.options["config"] = list(config or [])
+        return config
 
     def _patch_context(self, diff: Sequence[str]) -> None:
         """Re-attach the entry context under its (possibly new) group and
@@ -128,12 +135,13 @@ class Entry:
         """Reconcile new options: dispose when disabled, patch and
         reconfigure when live and changed, load when not yet live.
 
-        In non-create mode a None value deletes its key; ``create`` replaces
-        the options wholesale.
+        In non-create mode a None value deletes its key; ``create`` adopts
+        the given options object wholesale.
         """
         legacy = dict(self.options)
         if create:
-            self.options = dict(options)
+            # The group's row and the entry's options must be one object: unlink finds the row by identity.
+            self.options = options
         else:
             for key, value in options.items():
                 if value is None:
@@ -192,7 +200,7 @@ class EntryGroup:
         self.ctx = ctx
         self.tree = tree
         self.data: list[EntryOptions] = []
-        entry = _entry_of(ctx)
+        entry = entry_of(ctx)
         if entry is not None:
             entry.subgroup = self
 
@@ -227,7 +235,9 @@ class EntryGroup:
         """Reconcile the desired child list: create or update every entry
         still present, remove every entry that is not."""
         old = self.data
-        self.data = list(config)
+        # The list itself, as upstream: a group entry's ``options["config"]`` is its children's live list, so a
+        # move, create or remove inside the group lands in the entry's own options.
+        self.data = config if isinstance(config, list) else list(config)
         old_map = {str(options["id"]): options for options in old if options.get("id")}
         new_map = {self.tree.ensure_id(options): options for options in self.data}
         for id_ in {**old_map, **new_map}:
@@ -253,18 +263,21 @@ class Group(EntryGroup):
     """
 
     def __init__(self, ctx: Context, config: Sequence[EntryOptions] | None) -> None:
-        owner = _entry_of(ctx)
+        owner = entry_of(ctx)
         if owner is None:
             raise RuntimeError("the group plugin only loads under a loader entry")
         super().__init__(ctx, owner.parent.tree)
-        self.config = list(config or [])
+        # The entry resolved its config to the list it keeps; a group built any other way gets a list of its own.
+        self.config = config if isinstance(config, list) else list(config or [])
         ctx.on("internal/update", self._on_update)
 
     def _on_update(
         self, fiber: Fiber, config: Sequence[EntryOptions], no_save: bool, next_: Callable[[], Any]
     ) -> None:
         # Deliberately do not call through: reconfiguring a group does not restart it.
-        self.update(config or [])
+        self.update(config if isinstance(config, list) else list(config or []))
+        # The call through is what would have stored the config on the fiber; a restart must rebuild from the live list.
+        fiber.config = self.data
 
     def __compose_init__(self) -> Any:
         yield self.stop
@@ -281,7 +294,7 @@ class EntryTree:
         self.enable_logs = False
         self.store: dict[str, Entry] = {}
         self.root = EntryGroup(self.ctx, self)
-        entry = _entry_of(self.ctx)
+        entry = entry_of(self.ctx)
         if entry is not None:
             entry.subtree = self
 
@@ -462,7 +475,7 @@ class Loader(EntryTree):
     def _track_fiber(self, fiber: Fiber) -> None:
         """'internal/plugin' hook: adopt created fibers into their entry, and
         write a tracked fiber's self-disposal back as disabled (index.ts:88-124)."""
-        parent_entry = _entry_of(fiber.parent)
+        parent_entry = entry_of(fiber.parent)
         if parent_entry is not None and fiber.entry is None:
             fiber.entry = parent_entry
             fiber.inject.update(_resolve_inject(parent_entry.options.get("inject")))
@@ -574,7 +587,7 @@ def _entry_isolate(ctx: Context, config: Any = None) -> None:
         while node is not None:
             if node is entry:
                 return True
-            node = _entry_of(node.parent.ctx)
+            node = entry_of(node.parent.ctx)
         return False
 
     def on_patch(entry: Entry, next_: Callable[[], Any]) -> None:

@@ -23,6 +23,11 @@
 # /tmp/reef-stack, beside every other example's.
 run_dir: work/stack
 
+# Service processes launch locally; Slime owns distributed GPU model workers.
+execution:
+  training: ray
+  rollout: ray
+
 reef:
   host: 127.0.0.1
   model_path: ~/models/Qwen2.5-1.5B-Instruct
@@ -32,7 +37,6 @@ reef:
   batch_size: 1                        # MUST equal training.global_batch_size
   max_staleness: 18
   checkpoint_every_n_versions: 1
-  ray_address: 127.0.0.1:${training.ray_port}
   ray_namespace: reef
   ray_actor_name: reef-train-bridge
   # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
@@ -63,10 +67,6 @@ observability:
     upload_checkpoints: false
 
 training:
-  num_gpus: 2                          # ray-head GPU total (actor+critic colocated, rollout)
-  cuda_visible_devices: "0,1"
-  ray_port: 6379
-  ray_dashboard_port: 8265
   sglang_port: "30000"
   # Relative paths resolve against the directory reef serve runs from. The
   # checkpoint preflight requires roughly 16x the HF model size free on this
@@ -78,6 +78,14 @@ training:
   # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)
   # automatically. --eps-clip / --eps-clip-high are the mask's bounds.
   # Reef derives architecture flags from the HF config.
+  #
+  # Value-model settings are the paper's (Section 4.1): the critic trains at
+  # 5e-6 against the 1e-6 policy lr, and the first 10 rollout steps train the
+  # critic only. The value head starts from zero, so without the warmup the
+  # first actor steps train on advantages built from an unfitted critic —
+  # the cold-start problem the paper's value-training designs exist to avoid.
+  # Warmup steps still commit one training release per rollout; the actor's
+  # weights first move on step 11.
   slime_flags: >-
     --padded-vocab-size=151936
     --position-embedding-type=rope
@@ -92,19 +100,13 @@ training:
     --use-critic
     --eps-clip=0.3 --eps-clip-high=5.0
     --critic-steps-per-actor=2
+    --critic-lr=5e-6
+    --num-critic-only-steps=10
     --sao-length-adaptive-lambda --sao-lambda-alpha=1.5
     --gamma=1.0 --lambd=1.0
     --entropy-coef=0.0 --n-samples-per-prompt=1
 
 services:
-  - name: ray-head
-    command: >-
-      ray start --head --port=${training.ray_port}
-      --dashboard-host=0.0.0.0 --dashboard-port=${training.ray_dashboard_port}
-      --num-gpus=${training.num_gpus} --disable-usage-stats --block
-    ready: ray health-check --address=127.0.0.1:${training.ray_port}
-    cuda: ${training.cuda_visible_devices}
-
   - name: slime-driver
     command: >-
       "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
@@ -123,14 +125,10 @@ services:
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     ready_timeout: 900
     env:
-      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
       REEF_RAY_NAMESPACE: reef
       REEF_RAY_ACTOR_NAME: reef-train-bridge
-    depends_on: [ray-head]
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
     ready: curl -sf http://127.0.0.1:${reef.port}/healthz
-    env:
-      RAY_ADDRESS: 127.0.0.1:${training.ray_port}
     depends_on: [slime-driver]

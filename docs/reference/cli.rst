@@ -1,5 +1,5 @@
-CLI
-===
+Reef CLI: start a deployment
+============================
 
 Reef has one command you run. It reads a deployment config and starts every
 process the config declares, in dependency order. (The wheel also installs

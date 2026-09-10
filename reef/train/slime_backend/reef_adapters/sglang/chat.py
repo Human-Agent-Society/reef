@@ -300,7 +300,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         return {
             "input_tokens": len(prompt_ids),
             # RequestService strips this block from the client response. It
-            # supplies provenance required by durable-request validation, but
+            # supplies the producing version required by durable-request validation, but
             # deliberately contains no tokens/loss mask/log-probabilities, so
             # a token-count call can never become a policy sample.
             "training": {

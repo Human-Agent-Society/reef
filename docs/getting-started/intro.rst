@@ -1,5 +1,5 @@
-Introduction
-============
+Reef: continual learning for AI agents
+======================================
 
 Reef is a continual learning infrastructure. It sits between your agent's
 harness and the model that harness calls. It records each request, its
@@ -77,5 +77,14 @@ Reef is capable of evolve both the model weights and the `harness tree
   into the serving engine. See `Evolve your model
   <../user-guide/evolve-your-model.rst>`__.
 - **The harness tree.** Reef proposes an edit, runs the current and proposed
-  versions on your tasks, and keeps the winner. See `Evolve your harness
-  <../user-guide/evolve-your-harness.rst>`__.
+  versions on your tasks, and keeps the winner. Adapters cover pi, opencode,
+  Claude Code, Codex, DeepSeek Harness, Hermes Agent, Terminus 2, and Reef's
+  own native harness, whose tools, hook listeners, and loop graph evolve too.
+  See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__.
+
+Start using Reef
+----------------
+
+Follow the `inference and feedback quickstart <quickstart.rst>`__ to run
+Reef locally and submit your first report. Then `choose a learning recipe
+<../user-guide/recipes.rst>`__ for your workload and compute budget.

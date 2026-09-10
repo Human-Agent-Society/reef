@@ -1,5 +1,5 @@
-sao
-===
+SAO: learn from individual rollouts
+===================================
 
 Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
 <https://arxiv.org/abs/2607.07508>`__) trains on one graded rollout at a
@@ -51,6 +51,12 @@ The DIS ratio compares the current policy against the log-probabilities
 recorded when the rollout was generated. SAO therefore requires an inference
 backend that attaches engine-native tensors.
 
+The value model carries the paper's cold-start mitigations: it trains at its
+own, higher learning rate (``--critic-lr``) and the first
+``--num-critic-only-steps`` rollout steps fit the zero-initialized value head
+before any policy update. Warmup steps still commit one training release per
+rollout; the policy's weights first move after the warmup.
+
 Configuration
 -------------
 
@@ -101,3 +107,13 @@ untrained base at 0.458 above GRPO(+DIS) at 0.417.
 
 .. image:: ../../assets/sao/learning-curve.png
    :alt: Cumulative mean reward over the 48 scored rollouts per arm
+
+Related guides
+--------------
+
+- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
+  learn the request, receipt, and report workflow.
+- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
+  set up the GPU stack and inspect published updates.
+- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
+  and query feedback, scenarios, and releases.

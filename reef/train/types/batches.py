@@ -5,19 +5,21 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.artifact_ref import RuntimeLoadSpan
+from reef.core.training_request import TrainingRequest
 
 
 @dataclass(frozen=True)
 class TrainingBatch:
     """Base type for every batch flowing from a processor to a preparer.
 
-    Carries only the batch identity; each subclass adds its concrete payload
+    Carries batch identity and an optional explicit training request; each subclass adds its concrete payload
     (tokenized policy samples, grouped comparison sets, raw recorded traces).
     Concrete subclasses provide wiring safety between processors and backend
     algorithms or local artifact backends.
     """
 
     batch_id: str
+    request: TrainingRequest | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -42,8 +44,8 @@ class PolicySample:
       ``runtime_load_id`` (the producing version, from the serving
       ``artifact_ref``) it also gives policy lag.
     * ``turn_count`` — number of ordered inference calls represented by this
-      sample. Values greater than one mark a multi-turn trajectory. This is
-      Reef-side provenance and is not part of the Slime training payload.
+      sample. Values greater than one mark a multi-turn trajectory. Reef
+      records this count, but excludes it from the Slime training payload.
     * ``topk_indices`` / ``topk_log_probs`` — the generation-time top-K vocab
       ids and log-probs per response token, present when the serving backend
       captures them (``capture_topk``). Objectives that compare the rollout

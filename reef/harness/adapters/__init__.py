@@ -3,7 +3,7 @@
 Bundled adapters are directories beside this file, each holding a
 ``descriptor.yaml`` and a ``quirks`` module; external distributions add
 theirs through the ``reef.harness_adapters`` entry point group (see
-``reef.harness.descriptor``). Descriptors load lazily and cache per process:
+``reef.harness.adapters.descriptor``). Descriptors load lazily and cache per process:
 loading imports the quirks module, and a registry import must stay cheap.
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reef.harness.descriptor import AdapterDescriptor, DescriptorError, external_descriptors, load_descriptor
+from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, external_descriptors, load_descriptor
 
 BUILTIN_ADAPTERS = ("claude", "codex", "dsh", "hermes", "native", "opencode", "pi", "terminus")
 

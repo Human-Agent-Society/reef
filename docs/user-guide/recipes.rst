@@ -1,5 +1,5 @@
-Choosing a recipe
-=================
+Choose a recipe for agent learning
+==================================
 
 A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 
@@ -14,8 +14,8 @@ A recipe is picked along two axes: **what it evolves**, and **how it learns**.
 |                         | reward read from the next state                  |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
 | **Harness:** prompts,   | ``skillclaw``: grows a skill pool from           | not available                            |
-| rules, skills, config   | the failures in its own served traffic           |                                          |
-|                         |                                                  |                                          |
+| rules, skills, config,  | the failures in its own served traffic           |                                          |
+| tools, loop             |                                                  |                                          |
 |                         | ``gepa``: rewrites the tree by reflecting on     |                                          |
 |                         | the transcripts it already served                |                                          |
 +-------------------------+--------------------------------------------------+------------------------------------------+
@@ -63,3 +63,13 @@ describes each spelling.
 
 Every recipe has a checkpoint strategy, defaulting to ``EveryNVersions(1)``.
 ``checkpoint_every_n_versions`` is the shorter spelling in deployment YAML.
+
+Run the recipe you chose
+------------------------
+
+Start with the `inference and feedback quickstart
+<../getting-started/quickstart.rst>`__ if you have not sent traffic through
+Reef yet. For a harness recipe, follow `Evolve agent prompts, rules, and skills
+<evolve-your-harness.rst>`__. For a weight recipe, follow `Train model weights
+from agent feedback <evolve-your-model.rst>`__. Each recipe page above provides
+its own configuration and example.

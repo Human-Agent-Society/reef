@@ -32,6 +32,7 @@ def _storage(
     cap: int = 1000,
     free: int = 1000,
     min_free: int = 0,
+    lora: bool = False,
 ) -> CheckpointStorage:
     root = tmp_path / "checkpoints"
     source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
@@ -46,6 +47,7 @@ def _storage(
         source_megatron=source_megatron,
         measure=_logical_bytes,
         disk_usage=lambda path: Usage(1000, 1000 - free, free),
+        lora=lora,
     )
 
 
@@ -83,6 +85,18 @@ class TestCheckpointStorage:
         storage = _storage(tmp_path)
         _write_bytes(storage._source_megatron_checkpoint, 10)
         assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    def test_lora_estimate_reserves_base_weights_plus_adapter_margin(self, tmp_path: Path) -> None:
+        full = _storage(tmp_path).validate_capacity()["reservation_bytes"]
+        lora = _storage(tmp_path, lora=True).validate_capacity()["reservation_bytes"]
+        assert lora == int(1.2 * 90)  # 1.2 x max(hf, megatron source)
+        assert lora > 90  # still covers the base weights themselves
+        assert full == 100  # unchanged full-training estimate
+
+    def test_lora_estimate_does_not_double_count_the_base_model(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path, lora=True)
+        _write_bytes(storage._source_megatron_checkpoint, 10)
+        assert storage.validate_capacity()["reservation_bytes"] == int(1.2 * 10)
 
     def test_cold_start_estimates_from_the_hf_source_alone(self, tmp_path: Path) -> None:
         # The first boot of a fresh deployment has saved nothing yet, and
@@ -292,12 +306,12 @@ class TestCheckpointStorage:
             pass
 
     def test_lora_control_files_are_owned_not_unknown(self, tmp_path: Path) -> None:
-        """The scenario ledger and adapter-slot snapshots live in the managed roots by design."""
-        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_LEDGER_FILENAME
+        """The scenario history and adapter-slot snapshots live in the managed roots by design."""
+        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_HISTORY_FILENAME
 
         storage = _storage(tmp_path)
         _complete(storage, 0)
-        (storage.hf_root / SCENARIO_LEDGER_FILENAME).write_text("{}", encoding="utf-8")
+        (storage.hf_root / SCENARIO_HISTORY_FILENAME).write_text("{}", encoding="utf-8")
         _write_bytes(storage.megatron_root / ADAPTER_SLOTS_DIRNAME / "bWF0aA" / "rank_00000.pt", 5)
 
         plan = _storage(tmp_path).validate_capacity(active_rollouts={0})

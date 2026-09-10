@@ -72,7 +72,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.14.7",
+    "ruff==0.16.6",
 ]
 
 [dependency-groups]
@@ -88,8 +88,8 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 
 [project.scripts]
 reef = "reef.cli:main"
-reef-native = "reef.harness.native:main"
-reef-terminus = "reef.harness.terminus:main"
+reef-native = "reef.harness.runners.native.__main__:main"
+reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
@@ -108,7 +108,7 @@ fallback_version = "0.0.0.dev0"
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md"]
 
 [tool.isort]
 profile = "black"  # black-compatible

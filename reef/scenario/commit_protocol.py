@@ -10,16 +10,20 @@ operations.
 from __future__ import annotations
 
 import itertools
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from copy import deepcopy
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Literal
 
 from reef.artifact.artifact import (
     Artifact,
+    ArtifactConflict,
     ArtifactError,
     ArtifactNotFound,
+    ArtifactPublicationError,
     ArtifactRef,
     LiveWeightArtifactRef,
     is_local_release,
@@ -42,6 +46,13 @@ from reef.train.types import (
 )
 
 
+@dataclass(frozen=True)
+class _ArtifactHeadSync:
+    state: Literal["synchronized", "pending", "conflict"]
+    release_id: str
+    error: str | None = None
+
+
 class ScenarioCommitProtocol:
     """Own one scenario's atomic commit, rollback, catalog, and recovery rules."""
 
@@ -59,6 +70,8 @@ class ScenarioCommitProtocol:
     ) -> None:
         if not isinstance(scenario_step, int) or scenario_step < 0:
             raise ValueError("scenario_step must be non-negative")
+        if commit_log is not None:
+            artifacts.repository.require_staged_commit_support()
         self._name = name
         self._binding = binding
         self._artifacts = artifacts
@@ -68,6 +81,11 @@ class ScenarioCommitProtocol:
         self._commit_log = commit_log
         self._creation_artifact = self._resolve_creation_artifact()
         self._lock = RLock()
+        # Preparation holds the operation lock across proposer calls and
+        # evaluation episodes, neither of which changes committed releases.
+        # Readers share only the publication lock with commit and rollback.
+        # Writers must acquire the operation lock first; readers never take it.
+        self._publication_lock = RLock()
         records = (
             (() if recovered_head_record is None else (recovered_head_record,))
             if commit_log is None
@@ -77,7 +95,8 @@ class ScenarioCommitProtocol:
             (record for record in reversed(records) if record.operation == "training"),
             None,
         )
-        self._commit_status_snapshot = (scenario_step, self._latest_training_record)
+        self._artifact_head_sync = _ArtifactHeadSync("synchronized", artifacts.checkpoint.release_id)
+        self._commit_status_snapshot = (scenario_step, self._latest_training_record, self._artifact_head_sync)
 
     @property
     def lock(self) -> RLock:
@@ -102,9 +121,10 @@ class ScenarioCommitProtocol:
     @property
     def commit_status(self) -> Mapping[str, Any]:
         """Current step and latest training outcome from one non-blocking snapshot."""
-        step, record = self._commit_status_snapshot
+        step, record, head_sync = self._commit_status_snapshot
         return {
             "scenario_step": step,
+            "artifact_head_sync": asdict(head_sync),
             "last_committed_step": (
                 None
                 if record is None
@@ -120,11 +140,11 @@ class ScenarioCommitProtocol:
         if step != self._step + 1:
             raise ValueError(f"scenario step must advance from {self._step} to {self._step + 1}")
         self._step = step
-        self._commit_status_snapshot = (step, self._latest_training_record)
+        self._commit_status_snapshot = (step, self._latest_training_record, self._artifact_head_sync)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
-        with self._lock:
+        with self._publication_lock:
             records = () if self._commit_log is None else self._commit_log.records()
             rows = [
                 self._release_row(
@@ -167,7 +187,7 @@ class ScenarioCommitProtocol:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._lock:
+        with self._lock, self._publication_lock:
             current_ref = self._artifacts.current
             if current_ref.release_id == release_id:
                 return current_ref
@@ -185,12 +205,20 @@ class ScenarioCommitProtocol:
             artifacts = self._artifacts
             checkpoint = artifacts.checkpoint
             next_step = self._step + 1
+            prepared = self._trainer.prepare_commit(None)
+            recorded = self._recorded_operation_retry(prepared, operation, release_id, next_step)
+            if recorded is not None:
+                self._reconcile_recorded_artifact(recorded)
+                self._settle_trainer_commit(prepared, recorded, next_step)
+                return recorded.artifact_ref
+            if self._commit_log is not None:
+                self._synchronize_checkpoint()
             source = artifacts.resolve(target_ref)
+            has_commit_log = self._commit_log is not None
             surface = self._binding.surface
             self._binding.artifact_validator.validate(source)
             if surface.loader is not None:
                 surface.loader.load(source, self._binding.runtime)
-            prepared = self._trainer.commit()
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 snapshot_metadata = snapshot_metadata_for(
@@ -212,10 +240,11 @@ class ScenarioCommitProtocol:
                         **dict(source.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
+                    advance_heads=not has_commit_log,
                 )
                 if isinstance(surface.loader, ArtifactActivator):
                     surface.loader.activate(artifacts.resolve(published_ref), self._binding.runtime, source=source)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
                     checkpoint=True,
@@ -223,16 +252,29 @@ class ScenarioCommitProtocol:
                     operation=operation,
                     rollback_target_release_id=release_id,
                 )
-                self._finish_trainer_commit(prepared)
+                if has_commit_log:
+                    self._install_committed_checkpoint(
+                        published_ref, expected=current_ref, expected_checkpoint=checkpoint
+                    )
             except Exception:
                 artifacts.discard(staged)
                 raise
-            self.advance_to(next_step)
+            self._settle_trainer_commit(prepared, record, next_step)
             return published_ref
 
     def commit(self, result: TrainStepResult) -> Any:
         """Commit a pending training result as one atomic version record."""
-        with self._lock:
+        with self._lock, self._publication_lock:
+            next_step = self._step + 1
+            prepared = self._trainer.prepare_commit(result)
+            recorded = self._recorded_training_retry(prepared, result, next_step)
+            if recorded is not None:
+                self._reconcile_recorded_artifact(recorded)
+                self._settle_trainer_commit(prepared, recorded, next_step)
+                return result.state
+
+            if self._commit_log is not None:
+                self._synchronize_checkpoint()
             publication = result.publication
             if isinstance(publication, DurableWeightsPublication):
                 # Checkpoint policy lives here, so a backend that exported
@@ -249,15 +291,20 @@ class ScenarioCommitProtocol:
                     publication = LiveWeightPublication(publication.runtime_load_id)
 
             if isinstance(publication, LiveWeightPublication):
-                return self._commit_live_weights(result, publication)
+                return self._commit_live_weights(result, publication, prepared)
             if isinstance(publication, NoArtifactPublication):
-                return self._commit_without_artifact(result)
-            return self._commit_saved_artifact(result, publication)
+                return self._commit_without_artifact(result, prepared)
+            return self._commit_saved_artifact(result, publication, prepared)
 
     def _should_checkpoint(self, result: TrainStepResult) -> bool:
         return self._checkpoint_strategy.should_checkpoint(self._name, self._step + 1, result)
 
-    def _commit_live_weights(self, result: TrainStepResult, publication: LiveWeightPublication) -> Any:
+    def _commit_live_weights(
+        self,
+        result: TrainStepResult,
+        publication: LiveWeightPublication,
+        prepared: PreparedCommit,
+    ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
         if self._should_checkpoint(result):
@@ -268,49 +315,51 @@ class ScenarioCommitProtocol:
             # Live weights have no durable bytes to promote later, so holding them back is not expressible.
             raise ReefError("a pending release requires a durable checkpoint; this step publishes live weights only")
         head, live_ref = artifacts.prepare_live(step=next_step, runtime_load_id=publication.runtime_load_id)
-        prepared = self._trainer.commit()
-        self._append_commit_record(
+        record = self._append_commit_record(
             step=next_step,
             artifact_ref=live_ref,
             checkpoint=False,
             prepared=prepared,
         )
-        self._finish_trainer_commit(prepared)
         artifacts.advance(live_ref, expected=head)
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
-    def _commit_without_artifact(self, result: TrainStepResult) -> Any:
+    def _commit_without_artifact(self, result: TrainStepResult, prepared: PreparedCommit) -> Any:
         # No pending check: a pending step carries durable bytes by construction, so it never lands here.
         next_step = self._step + 1
-        prepared = self._trainer.commit()
-        self._append_commit_record(
+        record = self._append_commit_record(
             step=next_step,
             artifact_ref=self._artifacts.current,
             checkpoint=False,
             prepared=prepared,
         )
-        self._finish_trainer_commit(prepared)
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
 
-    def _commit_saved_artifact(self, result: TrainStepResult, publication: SavedArtifactPublication) -> Any:
+    def _commit_saved_artifact(
+        self,
+        result: TrainStepResult,
+        publication: SavedArtifactPublication,
+        prepared: PreparedCommit,
+    ) -> Any:
         artifacts = self._artifacts
         next_step = self._step + 1
         checkpoint = artifacts.checkpoint
         head = artifacts.current
         self._binding.artifact_validator.validate(publication.artifact)
-        prepared = self._trainer.commit()
-        local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
-        # A pending release is minted into the catalog but never activated and moves no head.
         pending = result.pending
+        has_commit_log = self._commit_log is not None
+        checkpointed = pending or self._should_checkpoint(result)
+        local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         try:
+            # A pending release is minted into the catalog but never activated and moves no head.
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
-            if pending or self._should_checkpoint(result):
+            if checkpointed:
                 snapshot_metadata = snapshot_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
@@ -325,11 +374,11 @@ class ScenarioCommitProtocol:
                         **dict(publication.artifact.metadata),
                         SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
                     },
-                    advance_heads=not pending,
+                    advance_heads=not pending and not has_commit_log,
                 )
                 if not pending:
                     self._activate(artifacts.resolve(published_ref), source=local_artifact)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=published_ref,
                     checkpoint=True,
@@ -337,30 +386,149 @@ class ScenarioCommitProtocol:
                     pending=pending,
                 )
             else:
-                artifacts.advance(local_artifact.ref, expected=head)
-                self._append_commit_record(
+                record = self._append_commit_record(
                     step=next_step,
                     artifact_ref=local_artifact.ref,
                     checkpoint=False,
                     prepared=prepared,
                 )
-            self._finish_trainer_commit(prepared)
+            if not pending:
+                if checkpointed and has_commit_log:
+                    self._install_committed_checkpoint(published_ref, expected=head, expected_checkpoint=checkpoint)
+                elif not checkpointed:
+                    artifacts.advance(local_artifact.ref, expected=head)
         except Exception:
-            artifacts.discard(local_artifact)
+            # A lost append acknowledgment can leave a committed local release.
+            # Its bytes must survive so retry can settle that exact record.
+            if self._commit_log is None or not any(
+                row.artifact_ref == local_artifact.ref for row in self._commit_log.records()
+            ):
+                artifacts.discard(local_artifact)
             raise
 
-        self.advance_to(next_step)
+        self._settle_trainer_commit(prepared, record, next_step)
         return result.state
+
+    def _install_committed_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef
+    ) -> None:
+        """Install the refs already recorded in the commit log, then synchronize storage."""
+        self._artifacts.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+        self._refresh_committed_checkpoint()
+
+    def _refresh_committed_checkpoint(self) -> None:
+        # The step is already committed. Expose the pointer failure in
+        # commit_status without making the caller repeat a successful step.
+        # A new commit must synchronize first and propagates any failure.
+        with suppress(ArtifactPublicationError, ArtifactConflict):
+            self._synchronize_checkpoint()
+
+    def _synchronize_checkpoint(self) -> None:
+        checkpoint = self._artifacts.checkpoint
+        try:
+            self._artifacts.repository.synchronize_checkpoint()
+        except ArtifactConflict as exc:
+            self._artifact_head_sync = _ArtifactHeadSync("conflict", checkpoint.release_id, str(exc))
+            raise
+        except ArtifactPublicationError as exc:
+            self._artifact_head_sync = _ArtifactHeadSync("pending", checkpoint.release_id, str(exc))
+            raise
+        else:
+            self._artifact_head_sync = _ArtifactHeadSync("synchronized", checkpoint.release_id)
+        finally:
+            self._commit_status_snapshot = (self._step, self._latest_training_record, self._artifact_head_sync)
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         loader = self._binding.surface.loader
         if isinstance(loader, ArtifactActivator):
             loader.activate(artifact, self._binding.runtime, source=source)
 
-    def _finish_trainer_commit(self, prepared: PreparedCommit) -> None:
-        """Run post-commit effects only after the version record is durable."""
+    def _settle_trainer_commit(self, prepared: PreparedCommit, record: CommitRecord, next_step: int) -> None:
+        """Finish recoverable effects before exposing the prepared state."""
         self._trainer.commit_applied(prepared.algorithm_state)
         self._trainer.apply_compaction(prepared.compacted_ids)
+        self._trainer.commit(prepared)
+        if self._commit_log is None:
+            self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
+        if record.operation == "training":
+            self._latest_training_record = record
+        self.advance_to(next_step)
+
+    def _recorded_training_retry(
+        self,
+        prepared: PreparedCommit,
+        result: TrainStepResult,
+        next_step: int,
+    ) -> CommitRecord | None:
+        if self._commit_log is None:
+            return None
+        records = self._commit_log.records()
+        if not records or records[-1].step != next_step:
+            return None
+        record = records[-1]
+        matches = (
+            record.operation == "training"
+            and record.pending == result.pending
+            and self._record_matches_prepared(record, prepared)
+        )
+        if not matches:
+            raise ReefError(f"commit log step {next_step} conflicts with the pending training result")
+        return record
+
+    def _recorded_operation_retry(
+        self,
+        prepared: PreparedCommit,
+        operation: str,
+        target_release_id: str,
+        next_step: int,
+    ) -> CommitRecord | None:
+        if self._commit_log is None:
+            return None
+        records = self._commit_log.records()
+        if not records or records[-1].step != next_step:
+            return None
+        record = records[-1]
+        if (
+            record.operation != operation
+            or record.rollback_target_release_id != target_release_id
+            or not self._record_matches_prepared(record, prepared)
+        ):
+            raise ReefError(f"commit log step {next_step} conflicts with the pending {operation}")
+        return record
+
+    @staticmethod
+    def _record_matches_prepared(record: CommitRecord, prepared: PreparedCommit) -> bool:
+        return (
+            record.algorithm_state == prepared.algorithm_state
+            and record.high_water_sequence == prepared.high_water_sequence
+            and record.high_water_offset == prepared.high_water_offset
+            and record.compacted_ids == prepared.compacted_ids
+            and record.consumed_ids == prepared.consumed_ids
+            and record.metrics == prepared.metrics
+            and record.training_job_id == prepared.training_job_id
+        )
+
+    def _reconcile_recorded_artifact(self, record: CommitRecord) -> None:
+        current = self._artifacts.current
+        if record.pending:
+            return
+        if current == record.artifact_ref:
+            if record.checkpoint:
+                self._refresh_committed_checkpoint()
+            return
+        if self._commit_log is None:
+            raise RuntimeError("a recorded retry requires a commit log")
+        records = self._commit_log.records()
+        previous = next(
+            (prior.artifact_ref for prior in reversed(records[:-1]) if not prior.pending),
+            self._creation_artifact,
+        )
+        if record.checkpoint:
+            self._install_committed_checkpoint(
+                record.artifact_ref, expected=previous, expected_checkpoint=self._artifacts.checkpoint
+            )
+        else:
+            self._artifacts.advance(record.artifact_ref, expected=previous)
 
     def _append_commit_record(
         self,
@@ -391,8 +559,6 @@ class ScenarioCommitProtocol:
         )
         if self._commit_log is not None:
             self._commit_log.append(record)
-        if record.operation == "training":
-            self._latest_training_record = record
         return record
 
     def _find_release_id(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
@@ -442,6 +608,18 @@ class ScenarioCommitProtocol:
                 return record.metrics
         return None
 
+    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries the training step that published ``release_id`` committed, if logged."""
+        if self._commit_log is None:
+            return None
+        for record in self._commit_log.records():
+            if record.artifact_ref.release_id == release_id and record.operation == "training":
+                entries = (record.algorithm_state or {}).get("entries")
+                if isinstance(entries, Sequence) and not isinstance(entries, str):
+                    return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
+                return None
+        return None
+
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a catalog version for a read-only content serve.
 
@@ -455,7 +633,7 @@ class ScenarioCommitProtocol:
         if not isinstance(release_id, str) or not release_id.strip():
             raise ValueError("release_id must be a non-empty string")
         release_id = release_id.strip()
-        with self._lock:
+        with self._publication_lock:
             found = self._find_release_id(release_id)
         if found is None:
             raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
@@ -468,6 +646,20 @@ class ScenarioCommitProtocol:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
             raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}") from exc
+
+    def artifact_snapshot(
+        self,
+        release_id: str | None = None,
+    ) -> tuple[Artifact, Mapping[str, Any] | None]:
+        """Capture one artifact and its metrics without waiting for preparation."""
+        with self._publication_lock:
+            artifact = (
+                Artifact(self._artifacts.current, self._artifacts.repository)
+                if release_id is None
+                else self.artifact_for_version(release_id)
+            )
+            metrics = self.metrics_for_version(artifact.ref.release_id)
+            return artifact, metrics
 
     @staticmethod
     def _release_row(

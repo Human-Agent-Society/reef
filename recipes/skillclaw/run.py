@@ -72,7 +72,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
+from reef.harness.tree.render import render_composition
 from reef.recipe.registry import build_recipe
 from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -82,7 +82,7 @@ from reef.service.deploy.config import load_config
 from reef.service.wire import SCENARIO_HEADER
 
 
-class Ledger:
+class EventLog:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
@@ -102,6 +102,7 @@ def load_recipe() -> Any:
     """
     config = load_config(HERE / "skillclaw.yaml")
     sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    sections.update({key: config[key] for key in ("execution", "executors") if key in config})
     runtime = InferenceProxyRuntime(
         model_path=AGENT_MODEL,
         base_url=UPSTREAM_BASE,
@@ -233,7 +234,7 @@ class RunService:
         while time.monotonic() < deadline:
             if self.training_step() > after:
                 return
-            if error := self.dispatcher.training_status["error"]:
+            if error := self.dispatcher.build_training_status()["error"]:
                 raise RuntimeError(f"night training failed: {error}")
             time.sleep(1.0)
         raise TimeoutError(f"night training did not advance past step {after}")
@@ -362,7 +363,7 @@ def run_day(
     client: ReefClient,
     round_dir: Path,
     round_index: int,
-    ledger: Ledger,
+    event_log: EventLog,
 ) -> list[dict[str, Any]]:
     key = brave_key()
     pool = round_dir / "pool"
@@ -411,7 +412,7 @@ def run_day(
             "error": str(result["error"]),
             "breakdown": result["breakdown"],
         }
-        # The day ledger the night's digests read (TraceSample carries no
+        # The day reports the night's digests read (TraceSample carries no
         # metadata channel); written before the report so the trigger report
         # never races its own night.
         report_path = round_dir / "reports" / f"{slug}.json"
@@ -427,7 +428,7 @@ def run_day(
                     "references": [reference],
                 },
             )
-        ledger.write({"event": "sc_task", "task": task_id, "score": score})
+        event_log.write({"event": "sc_task", "task": task_id, "score": score})
         return {
             "category": category,
             "task_id": task_id,
@@ -552,7 +553,7 @@ def _bootstrap_pool(run_dir: Path, scenario: str, recipe: Any) -> Path:
 def main() -> None:
     run_dir = WORKDIR / RUN
     run_dir.mkdir(parents=True, exist_ok=True)
-    ledger = Ledger(run_dir / "ledger.jsonl")
+    event_log = EventLog(run_dir / "events.jsonl")
     day.ensure_benchmark()
     recipe = load_recipe()
     service = RunService(
@@ -572,24 +573,24 @@ def main() -> None:
         if RUN != "frozen" and service.poke_night():
             # A crash between the day's last report and its commit left a full
             # batch behind; the step just ran, so persist what it published.
-            ledger.write({"event": "sc_night_recovered"})
+            event_log.write({"event": "sc_night_recovered"})
             _persist_pool(service, run_dir)
         for round_index in range(1, NIGHTS + 2):
             round_dir = run_dir / f"round-{round_index}"
             summary_path = round_dir / "summary.json"
             if summary_path.exists():
                 continue
-            ledger.write({"event": "sc_round_start", "round": round_index, "run": RUN})
+            event_log.write({"event": "sc_round_start", "round": round_index, "run": RUN})
             versions_before = service.training_versions()
             step_before = service.training_step()
-            results = run_day(service, client, round_dir, round_index, ledger)
+            results = run_day(service, client, round_dir, round_index, event_log)
             scores = category_scores(results)
             unscored = sum(1 for result in results if result["score"] is None)
             summary: dict[str, Any] = {"round": round_index, "run": RUN, "categories": scores, "unscored": unscored}
             if round_index == 1:
                 # Advisory only: one round varies too much to be a gate.
                 summary["regime"] = regime_verdict(scores)
-                ledger.write({"event": "sc_regime", **summary["regime"]})
+                event_log.write({"event": "sc_regime", **summary["regime"]})
             if RUN == "frozen":
                 if service.training_versions():
                     raise RuntimeError("the control run changed the pool; its scores would no longer be a reference")
@@ -604,7 +605,7 @@ def main() -> None:
                     summary["audit"] = json.loads(audit_path.read_text())["audit"]
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
-            ledger.write(
+            event_log.write(
                 {
                     "event": "sc_round_done",
                     "round": round_index,
@@ -612,7 +613,7 @@ def main() -> None:
                     "advanced": summary.get("advanced", False),
                 }
             )
-        ledger.write({"event": "sc_campaign_done", "run": RUN})
+        event_log.write({"event": "sc_campaign_done", "run": RUN})
     finally:
         # Never close the store under a night that is still committing. The
         # snapshot is best effort: the commit log is the recovery authority.

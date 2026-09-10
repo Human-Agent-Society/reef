@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from reef.core.reports import ReportBase
@@ -23,6 +24,7 @@ from reef.runtime.inference import InferenceBackend
 from reef.runtime.proxy import resolve_proxy_runtime
 from reef.scenario.binding import AcceptAnyArtifact, ArtifactValidator
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.surface.base import Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_preparer
@@ -43,7 +45,23 @@ class Recipe:
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
+
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """Directories that belong to one scenario alone, archived when the scenario is deleted; none by default."""
+        return ()
+
     checkpoint_strategy: CheckpointStrategy = field(default_factory=lambda: EveryNVersions(1))
+    training_mode: str = config_field("auto")
+
+    def __post_init__(self) -> None:
+        if self.training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+
+    def with_model_config(self, config: ScenarioModelConfig) -> Recipe:
+        """Bind model settings supplied for this scenario."""
+        if config.runtime is not None and isinstance(self.runtime, TrainingRuntime):
+            raise RecipeConfigError("model overrides require an inference-only runtime")
+        return self
 
     @classmethod
     def from_environment(
@@ -101,6 +119,7 @@ class Recipe:
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )
 
     @property
@@ -119,6 +138,10 @@ class Recipe:
         scenario-specific (an adapter on a shared engine) route by it.
         """
         return Surface()
+
+    def base_artifact_files(self) -> Mapping[str, str] | None:
+        """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
+        return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """Runtime-wide serving state this recipe owns, for ``/reef/status``.
@@ -193,6 +216,7 @@ class WeightTrainingRecipe(Recipe):
         return WeightTrainingSpec(step_preparer="", loss_family="")
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         runtime_max_staleness = self.runtime.max_staleness
@@ -301,7 +325,11 @@ class WeightTrainingRecipe(Recipe):
         retention, so it is not included in processor config. Override this
         method to rename keys or add processor-only entries.
         """
-        return {name: getattr(self, name) for name in recipe_config_fields(type(self)) if name != "max_staleness"}
+        return {
+            name: getattr(self, name)
+            for name in recipe_config_fields(type(self))
+            if name not in ("max_staleness", "training_mode")
+        }
 
     def build(
         self,
@@ -378,4 +406,5 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )

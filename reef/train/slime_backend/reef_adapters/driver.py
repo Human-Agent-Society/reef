@@ -105,6 +105,25 @@ def _parse_slime_args(arguments: Sequence[str]):
         sys.argv = original_argv
 
 
+def _configure_executors(args, config: Mapping[str, Any], arguments: Sequence[str]) -> None:
+    from reef.runtime.executor.config import executor_settings, role_executor_settings, select_executor
+
+    for role, attribute, flag in (
+        ("training", "reef_executor_backend", "--reef-executor-backend"),
+        ("rollout", "reef_rollout_executor_backend", "--reef-rollout-executor-backend"),
+    ):
+        explicit = any(value == flag or value.startswith(flag + "=") for value in arguments)
+        settings = (
+            executor_settings(config, getattr(args, attribute)) if explicit else role_executor_settings(config, role)
+        )
+        selection = select_executor(settings, role=role)
+        settings = selection.settings
+        logging.getLogger(__name__).info("%s: executor=%s (%s)", role, settings.backend, selection.reason)
+        setattr(args, attribute, settings.backend)
+        options_attribute = "reef_train_executor_options" if role == "training" else "reef_rollout_executor_options"
+        setattr(args, options_attribute, dict(settings.options))
+
+
 def _resolve_training_recipe(config: Mapping[str, Any]) -> tuple[str, str, SlimeAlgorithm]:
     """Resolve the recipe and its loss family from ``reef.recipe``.
 
@@ -254,6 +273,28 @@ def _healthcheck(ready_file: Path) -> int:
             ray.shutdown()
 
 
+def _job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any] | None:
+    """Ray job ``runtime_env`` carrying the driver's ``PYTHONPATH`` to its actors.
+
+    The deploy layer appends the recipe source root to every *service*
+    process's ``PYTHONPATH``, but Ray actors are forked from the raylet,
+    whose environment predates the stack: with ``execution: training: ray``
+    the shared local cluster starts inside ``reef serve``, before any
+    service environment exists. Cookbook loss families
+    (``recipes.<method>.slime:...``) resolve inside the Megatron workers, so
+    without the driver's ``PYTHONPATH`` the first train actor dies with
+    ``No module named 'recipes'``. Setting the job-level ``runtime_env``
+    here covers every actor this driver creates — the bridge and the train
+    workers — on local and external clusters alike; Slime's per-actor
+    ``env_vars`` merge over the job-level mapping rather than replacing it.
+    """
+    source = os.environ if environ is None else environ
+    pythonpath = source.get("PYTHONPATH", "").strip()
+    if not pythonpath:
+        return None
+    return {"env_vars": {"PYTHONPATH": pythonpath}}
+
+
 def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     # Remove a stale marker before parsing or connecting. This also makes a
     # configuration error fail closed instead of advertising the previous job.
@@ -268,6 +309,7 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     retention, remaining_args = _retention_options(combined_args)
     loss_family_config, slime_args = spec.parse_driver_options(remaining_args)
     args = _parse_slime_args(slime_args)
+    _configure_executors(args, config, slime_args)
     _validate_tracking_args(args)
     _apply_bridge_resume_fallback(args)
     # Family-specific flags stripped by ``parse_specific_options`` are
@@ -289,7 +331,7 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
 
     bridge = None
     try:
-        ray.init(address=ray_address, namespace=namespace)
+        ray.init(address=ray_address, namespace=namespace, runtime_env=_job_runtime_env())
         # Importing the bridge initializes the Slime serving/training modules;
         # keep that work out of the lightweight healthcheck path.
         from reef.train.slime_backend.reef_adapters.bridge import start_bridge
@@ -312,6 +354,10 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     finally:
         ready_file.unlink(missing_ok=True)
         if bridge is not None and ray.is_initialized():
+            try:
+                ray.get(bridge.shutdown.remote(), timeout=90)
+            except Exception as exc:
+                print(f"failed to release bridge workers cleanly: {exc}", file=sys.stderr)
             try:
                 ray.kill(bridge, no_restart=True)
             except Exception as exc:

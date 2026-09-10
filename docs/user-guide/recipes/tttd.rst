@@ -1,5 +1,5 @@
-tttd
-====
+TTT-Discover: train a model at test time
+========================================
 
 TTT-Discover (`arXiv:2601.16175 <https://arxiv.org/abs/2601.16175>`__) specializes
 a model to one problem while it searches for the highest-scoring solution. The
@@ -221,7 +221,7 @@ values when it starts. Slime's ``--global-batch-size`` in that file must equal
    MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
    enable_thinking | True | Qwen3 chat-template thinking mode, in ``harness/harbor_agent.py``.
    TTTD_SEQ_LENGTH | 30000 | training and serving context length; ``run.sh`` sets it per task, ``32768`` for packing, beside ``TTTD_MAX_TOKENS_PER_GPU`` and ``TTTD_LOG_PROBS_CHUNK_SIZE``.
-   num_gpus | 2 | GPUs assigned to Ray, training, and serving, in ``serve.yaml``, with ``cuda_visible_devices`` and ``--tensor-model-parallel-size`` beside it.
+   num_gpus | 2 | GPU count passed to Slime's training and serving topology in ``serve.yaml``; Ray assigns worker devices, and ``--tensor-model-parallel-size`` sets training parallelism.
    TTTD_STATE_DIR | work/erdos_min_overlap | the durable state root, exported by ``run.sh`` as an absolute path because Ray workers and Git resolve a relative one from their own directories.
 
 The reference grid contains ``8 x 64 = 512`` rollouts per optimizer step.
@@ -352,7 +352,7 @@ programs stored in the search archives.
 The `circle-packing overview
 <../../../recipes/tttd/examples/tttd/results/formal-8x64-v3-packing/README.md>`__
 contains the combined W&B history, verified configurations, generated programs,
-milestone summaries, and provenance records.
+milestone summaries, and records of how the results were produced.
 
 Enable W&B tracking
 -------------------
@@ -445,7 +445,8 @@ latest checkpoint under its storage policy. The formal circle-packing jobs used
 an interval of one version so that each completed step could be recovered from
 disk. Select the interval before the run. The retention policy controls which
 completed checkpoints remain stored; it does not change the creation interval.
-`Architecture <../../getting-started/architecture.rst>`__ describes the commit and recovery model.
+`State model <../../advanced_topics/state-model.rst>`__ describes the commit
+and recovery model.
 
 Add another problem
 -------------------
@@ -469,3 +470,13 @@ Add tests for the program contract, invalid outputs, reward calculation, and
 task registration. ``tests/test_tttd_harness.py`` and
 ``tests/test_tttd_packing_tasks.py`` show how the shared harness hands programs
 to a task-specific judge.
+
+Related guides
+--------------
+
+- `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
+  learn the request, receipt, and report workflow.
+- `Train model weights from agent feedback <../evolve-your-model.rst>`__:
+  set up the GPU stack and inspect published updates.
+- `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
+  and query feedback, scenarios, and releases.

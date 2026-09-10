@@ -129,6 +129,8 @@ training stack under the same `reef:` section.
 1. Set environment variables (port, token, scenario, work dir); select the
    deployment recipe in YAML.
 2. Start `reef serve -c <yaml>` in the background; wait for `/healthz`.
+   `reef serve` finds the `recipes/` package beside the YAML and puts it on
+   every service's `PYTHONPATH`; the script does not set it.
 3. Run reef-eval with `--with-editable "$PWD"` (installs `harness/`) and
    `--with reef-client` (installs the SDK from PyPI).
 4. reef-eval resolves `--agent harness:HarborAgent` and runs the Harbor task.

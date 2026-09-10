@@ -12,26 +12,25 @@ skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
 renders under the second root and the runner names those skills as
 user-invocable when it joins them.
 
-``code_extension`` is rejected. Harbor's container isolates the commands the
-model writes, not Reef's own process, so an evolved module would run in the
-runner with the runner's privileges - the same hazard the codex adapter
-refuses, and worse here because this adapter disables Reef's jail. It is also
-outside Meta-Harness's search space, which mutates rules, skills, and
-commands only, so nothing that depends on this adapter needs it. Issue #210
-carries what a real boundary would require.
+One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
+Rendering only checks its syntax. Execution requires Reef's sandbox around
+the runner and Harbor's remote E2B environment for the terminal task: the
+task container alone does not isolate evolved Python in the outer runner.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any
 
 import yaml
 
-from reef.harness.render import RenderError
+from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
+from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
+from reef.harness.tree.render import RenderError
 
 _CONFIG = "terminus/config.json"
-_CONTEXT = "terminus/context/"
 _SKILL_ROOTS = ("terminus/skills/", "terminus-commands/")
 
 #: Terminus 2 constructor arguments a tree may set. Verified against harbor
@@ -79,14 +78,31 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         raise RenderError("terminus primary config must be an object")
     _validate_config(config)
 
-    if any(path.startswith(_CONTEXT) for path in files):
-        raise RenderError(
-            "terminus code_extension is not supported safely because evolved modules would run in the "
-            "runner's process, outside the container that isolates the agent's own commands"
-        )
+    try:
+        extension_source(files)
+    except TerminusTreeError as exc:
+        raise RenderError(str(exc)) from exc
 
     for path, text in list(files.items()):
         if path.startswith(_SKILL_ROOTS) and path.endswith("/SKILL.md"):
             files[path] = _with_frontmatter(path, text)
 
     return files
+
+
+def validate_execution(files: Mapping[str, str], executor: EpisodeExecutor) -> None:
+    """Refuse unisolated Python and local Docker nested in Reef's jail."""
+    try:
+        extension = extension_source(files)
+    except TerminusTreeError as exc:
+        raise EpisodeLaunchError(str(exc)) from exc
+    if isinstance(executor, SandboxExecutor):
+        if executor.env.get(ENVIRONMENT_ENV) != "e2b":
+            raise EpisodeLaunchError(
+                "terminus Docker cannot run under evolution.executor: sandbox; "
+                "set REEF_TERMINUS_ENVIRONMENT=e2b and include it in evolution.sandbox.env_from"
+            )
+        if not executor.egress_hosts or not executor.env.get("E2B_API_KEY"):
+            raise EpisodeLaunchError("sandboxed terminus requires egress_hosts and E2B_API_KEY in sandbox.env_from")
+    elif extension is not None:
+        raise EpisodeLaunchError("terminus code_extension requires evolution.executor: sandbox with remote E2B tasks")

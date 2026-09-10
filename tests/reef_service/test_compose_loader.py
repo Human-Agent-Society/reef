@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import logging
 
 import pytest
 
@@ -88,8 +90,25 @@ def test_remove_entry_disposes_fiber() -> None:
     log.clear()
     loader.remove("a")
     assert log == [("alpha-out", {"n": 1})]
+    assert loader.root.data == []  # the row leaves the group with the entry
     with pytest.raises(LookupError, match="cannot resolve entry a"):
         loader.resolve("a")
+
+
+def test_remove_entry_unlinks_only_its_row() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "a", "name": "alpha", "config": {"n": 1}},
+            {"id": "b", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    log.clear()
+    loader.remove("a")
+    assert log == [("alpha-out", {"n": 1})]
+    assert [options["id"] for options in loader.root.data] == ["b"]
+    assert loader.resolve("b").options is loader.root.data[0]
 
 
 def test_dependent_entry_waits_for_provider_entry() -> None:
@@ -192,6 +211,44 @@ def test_move_entry_between_groups() -> None:
     assert entry.fiber.state is FiberState.ACTIVE
 
 
+def test_move_within_group_keeps_one_row_per_entry() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "r1", "name": "alpha", "config": {"n": 1}},
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    log.clear()
+    loader.update("r2", {}, None, 0, move=True)
+    assert [options["id"] for options in loader.root.data] == ["r2", "r1"]  # moved once, not duplicated (#274)
+    assert all(loader.resolve(options["id"]).options is options for options in loader.root.data)
+    assert log == []  # a move alone reconfigures nothing
+
+
+def test_root_update_after_move_still_reconciles_by_id() -> None:
+    log: list = []
+    _root, loader = build(log)
+    loader.root.update(
+        [
+            {"id": "r1", "name": "alpha", "config": {"n": 1}},
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+        ]
+    )
+    loader.update("r2", {}, None, 0, move=True)
+    log.clear()
+    loader.root.update(
+        [
+            {"id": "r2", "name": "alpha", "config": {"n": 2}},
+            {"id": "r1", "name": "alpha", "config": {"n": 3}},
+        ]
+    )
+    assert [options["id"] for options in loader.root.data] == ["r2", "r1"]
+    assert log == [("alpha-out", {"n": 1}), ("alpha", {"n": 3})]  # only the changed entry reloads
+    assert all(loader.resolve(options["id"]).options is options for options in loader.root.data)
+
+
 def test_unresolvable_name_leaves_entry_without_fiber() -> None:
     log: list = []
     _root, loader = build(log)
@@ -258,3 +315,134 @@ def test_reconcile_after_self_reconfigure_is_a_noop() -> None:
     log.clear()
     loader.resolve("t").update({"config": {"n": 5}})
     assert log == []
+
+
+def test_a_failing_entry_lands_failed_beside_active_siblings_on_load_and_on_update(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An async plugin body that raises is reported by its fiber: the entry is FAILED, its siblings
+    ACTIVE, the loader's join of the failed fiber leaves no unretrieved task exception, and a config
+    update of the bad entry fails the same way (cordis 2ceea23)."""
+    log: list = []
+    unhandled: list[object] = []
+
+    async def bad(ctx, config):
+        await asyncio.sleep(0)
+        raise RuntimeError("boom")
+
+    async def alpha(ctx, config):
+        await asyncio.sleep(0)
+        log.append(("alpha", config))
+
+    async def main() -> None:
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: unhandled.append(context))
+        loader = Loader(compose.Context(), {"bad": bad, "alpha": alpha}.get)
+        with caplog.at_level(logging.ERROR):
+            loader.root.update([{"id": "1", "name": "bad"}, {"id": "2", "name": "alpha"}])
+            await loader.wait()
+        states = {e.options["id"]: e.fiber.state for e in loader.entries()}
+        assert states == {"1": FiberState.FAILED, "2": FiberState.ACTIVE}
+        with caplog.at_level(logging.ERROR):
+            loader.root.update([{"id": "1", "name": "bad", "config": {"a": 1}}, {"id": "2", "name": "alpha"}])
+            await loader.wait()
+        states = {e.options["id"]: e.fiber.state for e in loader.entries()}
+        assert states == {"1": FiberState.FAILED, "2": FiberState.ACTIVE}
+        assert log == [("alpha", None)]
+
+    asyncio.run(main())
+    gc.collect()
+    assert unhandled == []
+
+
+def _subgroup(log):
+    """A group entry with two children; the group entry, its subgroup and the loader."""
+    _root, loader = build(log)
+    loader.create(
+        {
+            "id": "g",
+            "group": True,
+            "config": [
+                {"id": "g1", "name": "alpha", "config": {"g": 1}},
+                {"id": "g2", "name": "alpha", "config": {"g": 2}},
+            ],
+        }
+    )
+    group = loader.resolve("g")
+    assert group.subgroup is not None
+    return loader, group, group.subgroup
+
+
+def _ids(rows) -> list[str]:
+    return [str(options["id"]) for options in rows]
+
+
+def test_a_move_inside_a_subgroup_lands_in_the_group_entrys_config() -> None:
+    loader, group, subgroup = _subgroup([])
+    assert group.options["config"] is subgroup.data  # the group entry's config is the children's live list
+    loader.update("g2", {}, "g", 0, move=True)
+    assert _ids(subgroup.data) == ["g2", "g1"] and _ids(group.options["config"]) == ["g2", "g1"]
+    loader.update("g", {})  # a forced update of the group entry reconciles the order it already has
+    assert _ids(subgroup.data) == ["g2", "g1"] and _ids(group.options["config"]) == ["g2", "g1"]
+    assert all(
+        loader.resolve(id_).options is options for id_, options in zip(_ids(subgroup.data), subgroup.data, strict=True)
+    )
+
+
+def test_a_create_inside_a_subgroup_appears_in_the_group_entrys_config() -> None:
+    loader, group, subgroup = _subgroup([])
+    loader.create({"id": "g3", "name": "alpha", "config": {"g": 3}}, "g")
+    assert _ids(subgroup.data) == ["g1", "g2", "g3"] and _ids(group.options["config"]) == ["g1", "g2", "g3"]
+    assert loader.resolve("g3").options is subgroup.data[2]
+
+
+def test_a_remove_inside_a_subgroup_leaves_no_ghost() -> None:
+    loader, group, subgroup = _subgroup([])
+    loader.remove("g2")
+    assert _ids(subgroup.data) == ["g1"] and _ids(group.options["config"]) == ["g1"]
+    loader.update("g", {})
+    assert _ids(subgroup.data) == ["g1"] and "g2" not in loader.root.tree.store
+
+
+def test_a_group_config_that_is_not_a_list_gets_one_list_the_entry_shares() -> None:
+    _root, loader = build([])
+    loader.create({"id": "t", "group": True, "config": ({"id": "t1", "name": "alpha", "config": {"t": 1}},)})
+    group = loader.resolve("t")
+    assert group.subgroup is not None and isinstance(group.options["config"], list)
+    assert group.options["config"] is group.subgroup.data and _ids(group.subgroup.data) == ["t1"]
+
+
+def test_a_new_list_given_through_update_is_the_list_the_group_shares() -> None:
+    loader, group, _ = _subgroup([])
+    loader.update("g", {"config": []})  # an empty list is a list, not a missing one
+    assert group.options["config"] is group.subgroup.data and group.subgroup.data == []
+    loader.create({"id": "g3", "name": "alpha", "config": {"g": 3}}, "g")
+    loader.update("g", {})
+    assert _ids(group.subgroup.data) == ["g3"] and _ids(group.options["config"]) == ["g3"]
+    loader.update("g", {"config": ({"id": "g4", "name": "alpha", "config": {"g": 4}},)})
+    assert isinstance(group.options["config"], list) and group.options["config"] is group.subgroup.data
+    loader.update("g4", {}, "g", 0, move=True)
+    loader.update("g", {})
+    assert _ids(group.subgroup.data) == ["g4"] and "g3" not in loader.root.tree.store
+
+
+def test_a_restart_of_the_group_fiber_rebuilds_from_the_live_list() -> None:
+    _root, loader = build([])
+    loader.create({"id": "d", "name": "db", "config": "v1"})
+    loader.create(
+        {
+            "id": "g",
+            "group": True,
+            "inject": ["db"],
+            "config": (
+                {"id": "g1", "name": "alpha", "config": {"g": 1}},
+                {"id": "g2", "name": "alpha", "config": {"g": 2}},
+            ),
+        }
+    )
+    group = loader.resolve("g")
+    assert group.fiber is not None and group.fiber.config is group.options["config"]
+    loader.update("g2", {}, "g", 0, move=True)
+    loader.update("d", {"config": "v2"})  # the provider restarts and the group fiber follows it
+    assert group.subgroup is not None
+    assert _ids(group.subgroup.data) == ["g2", "g1"] and group.options["config"] is group.subgroup.data
+    assert group.fiber is not None and group.fiber.config is group.subgroup.data

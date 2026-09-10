@@ -33,7 +33,7 @@
           - "reef/train/cordis_backend/**"
           - "reef/surface/**"
           - "third_party/cordis/**"
-          - "tutorials/harness_evolve/**"
+          - "tutorials/evolve-your-harness/**"
           - "recipes/skillclaw/**"
           - "recipes/gepa/**"
           - "tests/reef_service/test_compose*.py"

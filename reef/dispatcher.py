@@ -8,10 +8,12 @@ handling lives in ``reef.service``; the dispatcher is transport-free.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import shutil
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -22,6 +24,8 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
+from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
     ExperimentTracker,
     NullExperimentTracker,
@@ -37,19 +41,6 @@ from reef.scenario.scenario import Scenario
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
-
-_STORAGE_RETRY_SECONDS = 5.0
-# Poll cadence while a processor reports asynchronous derivation in flight
-# (see DataProcessor.derivation_pending): its judgments land without a new
-# record ever setting the ready event, so readiness is re-checked on a
-# bounded interval instead of sleeping until the next accept.
-_DERIVATION_POLL_SECONDS = 1.0
-# One drain, plus one more after reloading the scenario from durable state.
-_DRAIN_ATTEMPTS = 2
-# A ready batch should be reserved by the next drain; one that sits longer
-# means the training thread is not waking. Status reads perform the check,
-# so the alarm rides the health polling that already watches the service.
-_UNDRAINED_WARNING_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -70,6 +61,10 @@ class _PublicationState:
     def record(self, scenario: str, value: Any) -> None:
         with self.lock:
             self.values[scenario] = value
+
+    def forget(self, scenario: str) -> None:
+        with self.lock:
+            self.values.pop(scenario, None)
 
 
 class _ScenarioTrainingError(Exception):
@@ -100,6 +95,25 @@ class _LifecycleState:
     preload_thread: Thread | None = None
 
 
+def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
+    """Why admission refuses an instruction; the reason names the rule, never the text or the item.
+
+    The text becomes proposer input and a catalog row, so it meets the
+    screens a promoted task prompt meets; a ``requires`` name or check is
+    shown to the person and recorded in the commit, so it meets them too."""
+    if secret_shaped(text):
+        return "the request text carries a credential shaped literal; a request never holds secrets"
+    if directive_shaped(text):
+        return "the request text carries an instruction override phrasing or a chat template control token"
+    for item in requires:
+        for value in (str(item.get("name", "")), str(item.get("check") or "")):
+            if secret_shaped(value):
+                return "a requires item carries a credential shaped literal; a request never holds secrets"
+            if directive_shaped(value):
+                return "a requires item carries an instruction override phrasing or a chat template control token"
+    return None
+
+
 class Dispatcher:
     """Coordinate scenario creation, inference state, training, and model commits.
 
@@ -108,7 +122,21 @@ class Dispatcher:
     ``TrainingRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
+    The dispatcher owns its recipe's runtime and closes it after all scenarios.
     """
+
+    storage_retry_seconds: float = 5.0
+    # Poll cadence while a processor reports asynchronous derivation in flight
+    # (see DataProcessor.derivation_pending): its judgments land without a new
+    # record ever setting the ready event, so readiness is re-checked on a
+    # bounded interval instead of sleeping until the next accept.
+    derivation_poll_seconds: float = 1.0
+    # One drain, plus one more after reloading the scenario from durable state.
+    drain_attempts: int = 2
+    # A ready batch should be reserved by the next drain; one that sits longer
+    # means the training thread is not waking. Status reads perform the check,
+    # so the alarm rides the health polling that already watches the service.
+    undrained_warning_seconds: float = 60.0
 
     def __init__(
         self,
@@ -168,8 +196,73 @@ class Dispatcher:
             allow_implicit_creation=allow_implicit_creation,
         )
 
+    def configure_scenario_model(
+        self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
+    ) -> Scenario:
+        return self._registry.configure_model(scenario, model, create=create, release_id=release_id)
+
+    def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
+        with self._registry.lock_for(scenario):
+            current = self._registry.set_training_mode(scenario, training_mode)
+            self._wake_training(current)
+            return {"scenario": scenario, "training_mode": current.trainer.training_mode}
+
+    def _wake_training(self, current: Scenario) -> None:
+        if isinstance(current.runtime, TrainingRuntime):
+            self._training.ready.set()
+        elif current.trainer.training_backend is not None:
+            self._start_local_backend_worker(current.name)
+
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
+
+    def delete_scenario(self, scenario: str) -> dict[str, Any]:
+        """Remove a scenario from this deployment and move its own state aside.
+
+        Under the scenario's lock, so no accept or commit interleaves: the
+        training thread and the local worker lose the name, the loaded
+        instance closes, the records and commit log move under
+        ``agent_record_dir/archived``, the recipe's own directories move
+        beside themselves, and the repository registration is archived so
+        the name is free. Artifacts other scenarios share stay.
+        """
+        if "/" in scenario or scenario in ("", ".", ".."):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        with self._registry.lock_for(scenario):
+            if not self._registry.has(scenario):
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            dropped = self._registry.remove(scenario)
+            self._stop_local_backend_worker(scenario)
+            self._publication.forget(scenario)
+            self._record_training_error(scenario, None)
+            if dropped is not None:
+                backend = dropped.trainer.training_backend
+                if backend is not None:
+                    backend.retire_scenario(scenario)
+                dropped.close()
+            archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
+        self._registry.forget_lock(scenario)
+        return {"scenario": scenario, "archived": archived}
+
+    def _archive_scenario_state(self, scenario: str) -> list[str]:
+        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        moved: list[str] = []
+        record_dir = self._registry.agent_record_dir
+        if record_dir is not None:
+            destination = record_dir / "archived" / f"{hashlib.sha256(scenario.encode('utf-8')).hexdigest()}-{stamp}"
+            for path in self._registry.state_paths(scenario):
+                if path.exists():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(path), str(destination / path.name))
+                    moved.append(str(destination / path.name))
+        for directory in self._recipe.scenario_state_dirs(scenario):
+            if directory.exists():
+                destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(directory), str(destination))
+                moved.append(str(destination))
+        return moved
 
     def recipe_has_files(self) -> bool:
         return self._registry.recipe_has_files()
@@ -240,12 +333,30 @@ class Dispatcher:
         release_id: str | None = None,
     ) -> AgentRecord:
         with self._registry.lock_for(item.scenario):
-            current = self.get_or_create_scenario(item.scenario, release_id=release_id)
+            # An instruction names a scenario that exists; inference and reports keep implicit creation.
+            current = self.get_or_create_scenario(
+                item.scenario,
+                release_id=release_id,
+                allow_implicit_creation=False if item.request_type is RequestType.TRAIN else None,
+            )
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             return self._accept_record(current, item)
 
     def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
+        if item.request_type is RequestType.TRAIN:
+            if (existing := current.records.existing_receipt(item)) is not None:
+                return existing
+            if current.trainer.training_mode == "auto":
+                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+            if current.trainer.training_backend is None:
+                raise ValueError("explicit training requests require a training backend")
+            request = TrainingRequest.from_dict(item.payload)
+            if item.references:
+                raise ValueError("training instructions do not reference inference receipts")
+            refusal = training_request_refusal(request.text, request.requires)
+            if refusal is not None:
+                raise ValueError(refusal)
         # Schema enforcement: reject a malformed report before it is durably
         # appended, so the producer's POST fails with the violation naming
         # the broken field instead of the record dying silently at training
@@ -310,9 +421,7 @@ class Dispatcher:
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
-        records = () if current.commit_log is None else current.commit_log.records()
-        run_segment = max((record.step for record in records if record.operation == "rollback"), default=0)
-        run_step = sum(record.operation == "training" and record.step > run_segment for record in records)
+        run_segment, run_step = (0, 0) if current.commit_log is None else current.commit_log.training_run_position()
         return TrainingExperimentContext(
             scenario=current.name,
             recipe=self._recipe.name,
@@ -378,12 +487,23 @@ class Dispatcher:
                 thread.start()
         worker.ready.set()
 
+    def _stop_local_backend_worker(self, scenario: str) -> None:
+        """Let the scenario's worker thread run out: it re-checks its registration after every wake."""
+        with self._training.lock:
+            worker = self._training.local_workers.pop(scenario, None)
+        if worker is not None:
+            worker.ready.set()
+
+    def _local_backend_worker_registered(self, scenario: str) -> bool:
+        with self._training.lock:
+            return scenario in self._training.local_workers
+
     def _run_local_backend_worker(self, scenario: str, ready: Event) -> None:
         try:
             while True:
                 ready.wait()
                 ready.clear()
-                if self._lifecycle.closed.is_set():
+                if self._lifecycle.closed.is_set() or not self._local_backend_worker_registered(scenario):
                     return
                 self._drain_local_backend(scenario)
         except Exception as exc:
@@ -403,7 +523,37 @@ class Dispatcher:
             return
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
-                self._registry.reload(scenario)
+                self._reload_with_instruction_failures(scenario, current)
+
+    def _recover_failed_step(self, scenario: str, current: Scenario, cause: Exception) -> None:
+        """Mark the failed instruction, then reload; a logless scenario keeps the batch and skips it on its next wake."""
+        self._fail_instruction(current, cause)
+        self._reload_durable_local_scenario(scenario, current)
+
+    def _fail_instruction(self, current: Scenario, cause: Exception) -> None:
+        """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
+        if current.trainer.fail_pending_instruction(self._error_text(cause)):
+            # Wake the worker so failed instructions settle even when no new records arrive.
+            self._wake_training(current)
+
+    def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
+        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
+        failures = current.trainer.instruction_failures()
+        recovered = self._registry.reload(scenario)
+        if failures:
+            recovered.trainer.set_instruction_failures(failures)
+        return recovered
+
+    def _reload_after_training_failure(self, scenario: str, cause: Exception) -> None:
+        current = self._registry.get_optional(scenario)
+        if current is None:
+            if not self._registry.has(scenario):
+                # Deleted while its step was in flight: nothing durable to reload.
+                return
+            self._registry.reload(scenario)
+            return
+        self._fail_instruction(current, cause)
+        self._reload_with_instruction_failures(scenario, current)
 
     def _process_local_backend_step(self, scenario: str) -> bool:
         current = self._registry.get_optional(scenario)
@@ -414,11 +564,8 @@ class Dispatcher:
         self._record_training_error(scenario, None)
         try:
             result = current.prepare_training_step()
-        except Exception:
-            # Durable records let recovery reconstruct the reserved batch. A
-            # logless deployment must retain its in-memory pending batch for a
-            # later wake instead.
-            self._reload_durable_local_scenario(scenario, current)
+        except Exception as exc:
+            self._recover_failed_step(scenario, current, exc)
             raise
         if result is None:
             return False
@@ -464,11 +611,13 @@ class Dispatcher:
         new record ever setting the event, so it is polled on a bounded
         interval. Otherwise sleep until the next accept.
         """
-        timeout: float | None = _STORAGE_RETRY_SECONDS if self._training.storage_status is not None else None
+        timeout: float | None = self.storage_retry_seconds if self._training.storage_status is not None else None
         for name in self._training_scenario_names():
             current = self._registry.get_optional(name)
             if current is not None and current.trainer.processor.derivation_pending():
-                timeout = _DERIVATION_POLL_SECONDS if timeout is None else min(timeout, _DERIVATION_POLL_SECONDS)
+                timeout = (
+                    self.derivation_poll_seconds if timeout is None else min(timeout, self.derivation_poll_seconds)
+                )
         return timeout
 
     def _drain_training(self) -> None:
@@ -478,7 +627,7 @@ class Dispatcher:
         # second failure still reloads (leaving a clean scenario for the next
         # wake-up) but is not spun on; the cause is reported through
         # training_status.
-        for _ in range(_DRAIN_ATTEMPTS):
+        for _ in range(self.drain_attempts):
             try:
                 while self._process_training():
                     pass
@@ -487,12 +636,12 @@ class Dispatcher:
                 name = failure.scenario
                 logger.exception("training thread failed to commit for scenario %r", name)
                 self._record_training_error(name, self._error_text(failure.cause))
-                self._registry.reload(name)
+                self._reload_after_training_failure(name, failure.cause)
             except Exception as exc:
                 name = self._registry.training_scenario_name or "<unbound>"
                 logger.exception("training thread failed to commit for scenario %r", name)
                 self._record_training_error(name, self._error_text(exc))
-                self._registry.reload(name)
+                self._reload_after_training_failure(name, exc)
 
     def _training_scenario_names(self) -> tuple[str, ...]:
         names = getattr(self._registry, "training_scenario_names", None)
@@ -590,7 +739,7 @@ class Dispatcher:
             self._training.undrained_warned = False
 
     def _warn_if_undrained(self, scenario: str, last_drain: float | None) -> None:
-        if last_drain is None or time.time() - last_drain < _UNDRAINED_WARNING_SECONDS:
+        if last_drain is None or time.time() - last_drain < self.undrained_warning_seconds:
             return
         with self._training.lock:
             first = not self._training.undrained_warned
@@ -604,7 +753,16 @@ class Dispatcher:
 
     def _set_training_storage_status(self, value: Mapping[str, Any] | None) -> None:
         with self._training.lock:
+            was_blocked = self._training.storage_status is not None
             self._training.storage_status = value
+        if value is not None and not was_blocked:
+            logger.warning(
+                "training is blocked on checkpoint storage: %s; retrying every %.0f seconds until it clears",
+                "; ".join(str(reason) for reason in value.get("reasons", ())) or "no reason reported",
+                self.storage_retry_seconds,
+            )
+        elif value is None and was_blocked:
+            logger.info("checkpoint storage block cleared; training resumes")
 
     @property
     def storage_status(self) -> Mapping[str, Any] | None:
@@ -612,56 +770,86 @@ class Dispatcher:
         with self._training.lock:
             return self._training.storage_status
 
-    @property
-    def training_status(self) -> Mapping[str, Any]:
-        name = self._registry.training_scenario_name
-        names = self._registry.training_status_scenario_names
+    def build_training_status(self) -> Mapping[str, Any]:
+        """Assemble the training status block, checking training health as it goes.
+
+        This is a method rather than a property because reading it is also the
+        only health check Reef runs: it is where an undrained batch is warned
+        about and where a training thread that died without recording an error
+        is noticed. Both record state so a repeated read does not repeat the
+        log line, so callers must expect a status read to have effects.
+        """
         preload_errors = self._registry.preload_errors
         with self._training.lock:
             storage_status = self._training.storage_status
             last_drain = self._training.last_drain
-        scenarios = {}
-        status_error: str | None = None
-        for scenario_name in names:
+        # One scenario's status failing stops the sweep: the recorded error goes
+        # out with whatever was collected before it.
+        scenarios: dict[str, dict[str, Any]] = {}
+        failed = False
+        for scenario_name in self._registry.training_status_scenario_names:
             try:
-                current = self._registry.get_optional(scenario_name)
-                if current is not None:
-                    runtime = current.runtime
-                    inference_admission = runtime.inference_admission_status if runtime is not None else None
-                    batch_ready = current.trainer.batch_ready()
-                    if batch_ready:
-                        self._warn_if_undrained(scenario_name, last_drain)
-                    block: dict[str, Any] = {
-                        **current.commit_status,
-                        # A version is current only after Reef commits its head
-                        # and reopens admission. The backend may report it
-                        # earlier while the update is still being published.
-                        "current_runtime_load_id": (
-                            runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
-                        ),
-                        "checkpoint_storage": storage_status,
-                        "batch_ready": batch_ready,
-                        "processor": current.trainer.processor_status(),
-                        "inference_admission": inference_admission,
-                    }
-                    if isinstance(runtime, TrainingRuntime) and getattr(
-                        runtime, "concurrent_training_scenarios", False
-                    ):
-                        block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
-                    scenarios[scenario_name] = block
-            except Exception as exc:  # noqa: PERF203
-                status_error = f"{scenario_name}: {self._error_text(exc)}"
-                if self._record_status_build_error(status_error):
+                block = self._scenario_status(scenario_name, storage_status, last_drain)
+            except Exception as exc:
+                failed = True
+                if self._record_status_build_error(f"{scenario_name}: {self._error_text(exc)}"):
                     logger.exception("failed to build training status for scenario %r", scenario_name)
                 break
-        if status_error is None:
+            if block is not None:
+                scenarios[scenario_name] = block
+        if not failed:
             self._record_status_build_error(None)
+        errors = self._training_errors()
+        return {
+            "error": "\n".join(errors) or None,
+            "last_drain_at": last_drain,
+            "preload_errors": preload_errors,
+            "scenarios": scenarios,
+            "serving": self._serving_status(),
+        }
 
+    def _scenario_status(
+        self,
+        scenario_name: str,
+        storage_status: Mapping[str, Any] | None,
+        last_drain: float | None,
+    ) -> dict[str, Any] | None:
+        current = self._registry.get_optional(scenario_name)
+        if current is None:
+            return None
+        runtime = current.runtime
+        batch_ready = current.trainer.batch_ready()
+        if batch_ready:
+            self._warn_if_undrained(scenario_name, last_drain)
+        processor = dict(current.trainer.processor_status())
+        if "buffered_requests" in processor:
+            # Include instructions still unread in storage alongside the buffered ones.
+            processor["pending_instructions"] = current.trainer.pending_instructions()
+        block: dict[str, Any] = {
+            **current.commit_status,
+            # A version is current only after Reef commits its head
+            # and reopens admission. The backend may report it
+            # earlier while the update is still being published.
+            "current_runtime_load_id": (
+                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
+            ),
+            "checkpoint_storage": storage_status,
+            "batch_ready": batch_ready,
+            "training_mode": current.trainer.training_mode,
+            "processor": processor,
+            "inference_admission": runtime.inference_admission_status if runtime is not None else None,
+        }
+        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+        return block
+
+    def _training_errors(self) -> list[str]:
+        """Every recorded training error, noticing a training thread that died silently."""
         with self._training.lock:
             training_errors = dict(self._training.errors)
             status_build_error = self._training.status_build_error
             training_thread = self._training.thread
-        training_scenario = name or "<unbound>"
+        training_scenario = self._registry.training_scenario_name or "<unbound>"
         if (
             training_scenario not in training_errors
             and training_thread is not None
@@ -675,13 +863,7 @@ class Dispatcher:
         errors = [f"{key}: {training_errors[key]}" for key in sorted(training_errors)]
         if status_build_error is not None:
             errors.append(status_build_error)
-        return {
-            "error": "\n".join(errors) or None,
-            "last_drain_at": last_drain,
-            "preload_errors": preload_errors,
-            "scenarios": scenarios,
-            "serving": self._serving_status(),
-        }
+        return errors
 
     def _serving_status(self) -> dict[str, Any]:
         """Runtime-wide serving state for the deployment's recipe."""
@@ -694,6 +876,7 @@ class Dispatcher:
     # -- Lifecycle -------------------------------------------------------
 
     def close(self) -> None:
+        """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
         self._lifecycle.closed.set()
@@ -708,15 +891,26 @@ class Dispatcher:
             self._training.thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         for scenario in self._registry.close_all():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
-            scenario.close()
+            try:
+                scenario.close()
+            except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
+                errors.append(exc)
+        if self._recipe.runtime is not None:
+            try:
+                self._recipe.runtime.shutdown()
+            except BaseException as exc:
+                errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        if errors:
+            raise errors[0]
 
 
 def build_default_dispatcher(

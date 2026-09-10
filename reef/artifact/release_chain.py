@@ -49,7 +49,7 @@ class ArtifactReleaseChain:
         """Build a live child of the durable checkpoint without moving a head."""
         expected = self.current
         ref = LiveWeightArtifactRef(
-            content_id=f"weights:{uuid.uuid4().hex}",
+            content_id=f"weights:{self._process_id}:{runtime_load_id}:{step}",
             release_id=f"live:{self._process_id}:{runtime_load_id}:{step}",
             parent_release_id=self.checkpoint.release_id,
             runtime_load_id=runtime_load_id,
@@ -58,6 +58,9 @@ class ArtifactReleaseChain:
 
     def advance(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
         self._repository.advance_current(ref, expected=expected)
+
+    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        self._repository.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
 
     def stage(self, step: int, artifact: Artifact, *, parent: ArtifactRef | None = None) -> Artifact:
         return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)

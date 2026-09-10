@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.render import render_composition
+from reef.harness.episodes.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import CordisRecipe
@@ -127,6 +127,114 @@ def test_streams_fold_to_one_reply_in_all_dialects(monkeypatch) -> None:
     )
 
 
+def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monkeypatch) -> None:
+    """``usage`` rides the response object and ``last_usage`` keeps it for a
+    wrapper of ``chat``, normalised to input/output tokens; a stream folds its
+    usage in from the chunk or event that carried it."""
+    from reef.harness.episodes.model_binding import usage_of
+
+    binding = ModelBinding("http://up", "m")
+    assert binding.last_usage() is None
+    _capture(
+        monkeypatch,
+        {
+            "choices": [{"message": {"role": "assistant", "content": "a"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+        },
+    )
+    assert binding.chat([{"role": "user", "content": "u"}]) == "a"
+    assert binding.last_usage() == {"input_tokens": 12, "output_tokens": 3}
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "b"}}]})
+    binding.chat([{"role": "user", "content": "u"}])
+    assert binding.last_usage() is None
+    openai = (
+        b'data: {"choices":[{"delta":{"role":"assistant","content":"a"}}]}\n'
+        b'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1}}\ndata: [DONE]\n'
+    )
+    _capture(monkeypatch, openai)
+    response = binding.complete({"messages": [], "stream": True})
+    assert response["choices"][0]["message"]["content"] == "a" and usage_of(response) == {
+        "input_tokens": 7,
+        "output_tokens": 1,
+    }
+    anthropic = (
+        b'data: {"type":"message_start","message":{"model":"claude","usage":{"input_tokens":20,"output_tokens":1}}}\n'
+        b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"a"}}\n'
+        b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}\n'
+    )
+    _capture(monkeypatch, anthropic)
+    claude = ModelBinding("http://up", "claude", api="anthropic")
+    assert claude.chat([{"role": "user", "content": "u"}], stream=True) == "a"
+    assert claude.last_usage() == {"input_tokens": 20, "output_tokens": 5}
+    assert usage_of({"usage": {"input_tokens": True}}) is None and usage_of({"usage": {"output_tokens": 4}}) == {
+        "input_tokens": 0,
+        "output_tokens": 4,
+    }
+
+
+def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
+    from reef.train.cordis_backend.backend import _BudgetedBinding
+
+    record: list[dict[str, Any]] = []
+    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record)
+    _capture(
+        monkeypatch,
+        {
+            "choices": [{"message": {"role": "assistant", "content": "a"}}],
+            "usage": {"prompt_tokens": 9, "completion_tokens": 2},
+        },
+    )
+    assert budgeted.chat([{"role": "user", "content": "u"}]) == "a"
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "b"}}]})
+    budgeted.chat([{"role": "user", "content": "u"}])
+    assert record[0]["usage"] == {"input_tokens": 9, "output_tokens": 2} and "usage" not in record[1]
+
+
+def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> None:
+    """With client models, the provider block lists them all, the served one first
+    and still the default; a template with no such list is unchanged."""
+    binding = ModelBinding("http://up", "served", api_key="k")
+    pi = binding.compose_nodes(get_adapter("pi"), models=("other/big", "served", "other/small"))
+    providers = next(data for _, data in pi if "providers" in data["data"])["data"]["providers"]["reef"]
+    assert [m["id"] for m in providers["models"]] == ["served", "other/big", "other/small"]
+    primary = next(data for _, data in pi if "defaultModel" in data["data"])["data"]
+    assert primary["defaultModel"] == "reef/served"
+    opencode = binding.compose_nodes(get_adapter("opencode"), models=("other/big",))
+    data = opencode[0][1]["data"]
+    assert list(data["provider"]["reef"]["models"]) == ["served", "other/big"] and data["model"] == "reef/served"
+    assert binding.compose_nodes(get_adapter("opencode")) == binding.compose_nodes(
+        get_adapter("opencode"), models=("served",)
+    )
+
+
+def test_recipe_reads_client_models_into_the_harness_surface(tmp_path) -> None:
+    module = tmp_path / "demo_client_models.py"
+    module.write_text(
+        "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    import sys
+
+    sys.path.insert(0, str(tmp_path))
+    try:
+        config = {
+            "model": {"path": "small"},
+            "evolution": {
+                "propose": "demo_client_models:propose",
+                "evaluate": "demo_client_models:evaluate",
+                "tasks": ["t"],
+                "client_models": ["big/one", "big/two"],
+            },
+        }
+        runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
+        built = CordisRecipe.from_environment({}, config=config, runtime=runtime)
+        assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
+        bad = {**config, "evolution": {**config["evolution"], "client_models": "big/one"}}
+        with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
+            CordisRecipe.from_environment({}, config=bad, runtime=runtime)
+    finally:
+        sys.path.remove(str(tmp_path))
+
+
 def test_unknown_api_is_refused() -> None:
     with pytest.raises(ValueError, match="api must be one of"):
         ModelBinding("http://up", "m", api="cohere")
@@ -142,6 +250,24 @@ def test_episode_templates_follow_the_dialect() -> None:
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up"
     for files in (openai, anthropic):
         assert json.loads(files["pi-agent/settings.json"])["defaultModel"] == "reef/m"
+
+
+def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> None:
+    """A local endpoint needs no key, but pi refuses to start without one.
+
+    Rendering the empty string made every evaluation episode exit 1 with
+    "No API key found for the selected model" before reaching the endpoint,
+    so both sides of the gate scored 0 and no proposal could ever publish.
+    """
+    pi = get_adapter("pi")
+    files = render_composition(ModelBinding("http://127.0.0.1:11434", "m").compose_nodes(pi), pi)
+    assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == NO_KEY_PLACEHOLDER
+
+
+def test_a_real_key_is_rendered_verbatim_over_the_placeholder() -> None:
+    pi = get_adapter("pi")
+    files = render_composition(ModelBinding("http://up", "m", api_key="sk-real").compose_nodes(pi), pi)
+    assert json.loads(files["pi-agent/models.json"])["providers"]["reef"]["apiKey"] == "sk-real"
 
 
 def test_the_dialect_rides_the_proxy_runtime_into_the_binding() -> None:

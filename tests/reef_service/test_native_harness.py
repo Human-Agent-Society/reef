@@ -1,4 +1,4 @@
-"""The native adapter: a loop inside the tree whose tools and seams are nodes, driven through the real episode engine.
+"""The native adapter: a loop inside the tree whose tools and events are nodes, driven through the real episode engine.
 
 A stdlib HTTP server plays the served model: it answers by conversation state
 (write a file, then read it back, then answer), so the whole loop, the tool
@@ -7,24 +7,46 @@ and hook modules, and the trajectory run hermetically."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from reef_service.test_native_enforce import PROBE, require_nested_jail
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.episode import run_episode
-from reef.harness.model_binding import ModelBinding
-from reef.harness.native import _DEFAULTS, MAX_RESULT_CHARS, HookModule, ToolModule, _invoke, _waterfall, load_hooks
-from reef.harness.native.seed import SEED_NODES, SEED_TOOLS
-from reef.harness.nodes import NODE_KINDS
-from reef.harness.render import RenderError, render_composition
-from reef.harness.trajectory import reader_for
+from reef.harness.episodes.executor import SandboxExecutor
+from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.trajectory import reader_for
+from reef.harness.runners.native import (
+    _DEFAULTS,
+    MAX_COMPLETION_TOKENS,
+    MAX_RESULT_CHARS,
+    TOOL_OUTPUT_TAIL_CHARS,
+    HookModule,
+    LoadError,
+    ToolModule,
+    _invoke,
+    _waterfall,
+    enforcer_for,
+    load_hooks,
+    load_tools,
+    run_loop,
+)
+from reef.harness.runners.native.enforce import BwrapEnforcer
+from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
+from reef.harness.tree.nodes import NODE_KINDS
+from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation.evaluators import AlwaysSelect
 from reef.train.types import TraceBatch, TraceSample
 
 TOOL = (
@@ -36,14 +58,17 @@ TOOL = (
         "code": "def run(args, workdir):\n    return str(args.get('text', '')).upper()\n",
     },
 )
-HOOK = ("native_hook", {"name": "echo", "seam": "pre_step", "code": "def listen(payload, next):\n    return next()\n"})
-# One hook per seam: retry the first failed request, block writes with a note, stop before the third step.
-SEAM_HOOKS = (
+HOOK = (
+    "native_hook",
+    {"name": "echo", "event": "pre_step", "code": "def listen(payload, next):\n    return next()\n"},
+)
+# One hook per event: retry the first failed request, block writes with a note, stop before the third step.
+EVENT_HOOKS = (
     (
         "native_hook",
         {
             "name": "retry",
-            "seam": "request_error",
+            "event": "request_error",
             "code": "def listen(payload, next):\n    return {'kind': 'retry', 'delay_ms': 0}\n",
         },
     ),
@@ -51,7 +76,7 @@ SEAM_HOOKS = (
         "native_hook",
         {
             "name": "veto",
-            "seam": "post_execute",
+            "event": "post_execute",
             "code": (
                 "def listen(payload, next):\n"
                 "    decision = next()\n"
@@ -65,7 +90,7 @@ SEAM_HOOKS = (
         "native_hook",
         {
             "name": "stop",
-            "seam": "pre_step",
+            "event": "pre_step",
             "code": (
                 "def listen(payload, next):\n"
                 "    if payload['step'] == 3:\n"
@@ -163,7 +188,7 @@ def _launcher(tmp_path: Path) -> str:
     path = tmp_path / "reef-native"
     path.write_text(
         f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(root)!r})\n"
-        "from reef.harness.native import main\nsys.exit(main())\n"
+        "from reef.harness.runners.native import main\nsys.exit(main())\n"
     )
     path.chmod(0o755)
     return str(path)
@@ -188,13 +213,15 @@ def test_native_adapter_is_bundled_and_renders_tools_as_modules() -> None:
     assert "native" in available_adapters()
     descriptor = get_adapter("native")
     assert descriptor.binary == "reef-native" and descriptor.trajectory_format == "native-jsonl"
+    # The session directory is the one path the sandbox opens, so the loop can write its log inside the jail.
+    assert descriptor.writable_paths == ("native/sessions",) and descriptor.trajectory_path == "native/sessions"
     files = render_composition([("rules", {"text": "Be brief."}), TOOL, HOOK], descriptor)
     module = files["native/tools/shout.py"]
     assert "NAME = 'shout'" in module and "PARAMETERS = {" in module and "def run(args, workdir):" in module
     # The config constants come after the code, so the tree's values are what the module ends with.
     assert (
         files["native/hooks/echo.py"]
-        == "def listen(payload, next):\n    return next()\n\nNAME = 'echo'\nSEAM = 'pre_step'\n"
+        == "def listen(payload, next):\n    return next()\n\nNAME = 'echo'\nEVENT = 'pre_step'\n"
     )
     assert files["native/RULES.md"] == "Be brief.\n"
     assert type(reader_for("native-jsonl")).__name__ == "NativeSessionReader"
@@ -214,14 +241,14 @@ def test_native_tool_is_optional_per_adapter_and_validated() -> None:
         NODE_KINDS["native_tool"](None, {**TOOL[1], "code": "def run(args, workdir)\n    return 1\n"})
 
 
-def test_native_hook_is_optional_per_adapter_and_bound_to_a_seam() -> None:
+def test_native_hook_is_optional_per_adapter_and_bound_to_an_event() -> None:
     with pytest.raises(RenderError, match="does not render native_hook"):
         render_composition([HOOK], get_adapter("pi"))
     NODE_KINDS["native_hook"](None, HOOK[1])
-    with pytest.raises(ValueError, match="'seam' must be one of pre_step, request_error, post_execute"):
-        NODE_KINDS["native_hook"](None, {**HOOK[1], "seam": "tool_router"})
+    with pytest.raises(ValueError, match="'event' must be one of pre_step, pre_execute, request_error, post_execute"):
+        NODE_KINDS["native_hook"](None, {**HOOK[1], "event": "tool_router"})
     with pytest.raises(ValueError, match="'code'"):
-        NODE_KINDS["native_hook"](None, {"name": "x", "seam": "pre_step"})
+        NODE_KINDS["native_hook"](None, {"name": "x", "event": "pre_step"})
     with pytest.raises(ValueError, match="'code' does not compile"):
         NODE_KINDS["native_hook"](None, {**HOOK[1], "code": "def listen(:\n"})
     # A lone surrogate survives JSON but cannot be written as UTF-8 at render.
@@ -234,15 +261,15 @@ def test_native_hook_is_optional_per_adapter_and_bound_to_a_seam() -> None:
 def test_rendered_constants_bind_over_what_the_code_assigns(tmp_path: Path) -> None:
     sneaky = {
         "name": "sneaky",
-        "seam": "pre_step",
-        "code": "SEAM = 'post_execute'\nNAME = 'loop_guard'\ndef listen(payload, next):\n    return next()\n",
+        "event": "pre_step",
+        "code": "EVENT = 'post_execute'\nNAME = 'loop_guard'\ndef listen(payload, next):\n    return next()\n",
     }
     files = render_composition([("native_hook", sneaky)], get_adapter("native"))
     for relative, text in files.items():
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / relative).write_text(text)
     hooks = load_hooks(tmp_path / "native" / "hooks")
-    assert [(hook.name, hook.seam) for hook in hooks["pre_step"]] == [("sneaky", "pre_step")]
+    assert [(hook.name, hook.event) for hook in hooks["pre_step"]] == [("sneaky", "pre_step")]
     assert hooks["post_execute"] == []
 
 
@@ -271,7 +298,7 @@ def test_hooks_form_a_waterfall_where_next_runs_once_and_a_raising_hook_is_skipp
     trace: list[dict] = []
     decision = _waterfall(hooks, 0, {"step": 1}, _DEFAULTS["pre_step"], trace)
     assert decision == {"kind": "enter", "messages": ["from c", "from a"]}
-    # c owned the seam, so d never ran; b's error fell through to c.
+    # c owned the event, so d never ran; b's error fell through to c.
     assert calls == ["a", "b", "c"]
     assert trace == [
         {"hook": "b", "error": "RuntimeError: boom"},
@@ -345,12 +372,27 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
     assert ok["meta"]["truncated"] is False
     long = _invoke(tools, "shout", '{"text": "long"}', tmp_path)
     assert len(long["content"]) == MAX_RESULT_CHARS and long["meta"]["truncated"] is True
+    # With a full output path the whole result lands on disk and the model reads head, marker, and tail within the cap.
+    saved_output = _invoke(
+        tools, "shout", '{"text": "long"}', tmp_path, full_output_path=tmp_path / ".reef" / "tool-output" / "1-c1.txt"
+    )
+    assert (tmp_path / ".reef" / "tool-output" / "1-c1.txt").read_text() == "x" * (MAX_RESULT_CHARS + 5)
+    assert (
+        saved_output["meta"]["truncated"] is True
+        and saved_output["meta"]["output_file"] == ".reef/tool-output/1-c1.txt"
+    )
+    assert len(saved_output["content"]) <= MAX_RESULT_CHARS
+    assert "[5 characters omitted; the full result is in .reef/tool-output/1-c1.txt]" in saved_output["content"]
+    assert saved_output["content"].startswith("x" * 100) and saved_output["content"].endswith(
+        "x" * TOOL_OUTPUT_TAIL_CHARS
+    )
 
 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
     result = _episode(tmp_path, fake_model, [*_seed_nodes(), ("rules", {"text": "Be brief."})])
     kinds = [event["type"] for event in result.trajectory]
-    assert kinds == [
+    # The seed graph reproduces the fixed loop it replaced: without the stage events the sequence is the old one.
+    assert [kind for kind in kinds if not kind.startswith("stage/")] == [
         "session",
         "turn/start",
         "step/start",
@@ -369,34 +411,78 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
         "step/end",
         "turn/end",
     ]
+    assert kinds == [
+        "session",
+        "turn/start",
+        "stage/enter",
+        "step/start",
+        "request/header",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "tool/call",
+        "tool/result",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "step/start",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "tool/call",
+        "tool/result",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "step/start",
+        "assistant/message",
+        "stage/exit",
+        "stage/enter",
+        "step/end",
+        "turn/end",
+    ]
     assert [event["seq"] for event in result.trajectory] == list(range(len(kinds)))
     header = result.trajectory[0]["data"]
-    assert header["version"] == 1 and header["tools"] == ["read_file", "run_bash", "write_file"]
-    assert header["hooks"] == {"loop_guard": "post_execute"}
+    assert header["version"] == 1 and header["tools"] == ["execute", "read_file", "run_bash", "write_file"]
+    assert header["hooks"] == {"loop_guard": "post_execute"} and header["graph"] == "main"
+    # The local executor sets no enforcer, and the log says so on the header and on every result.
+    assert header["enforcement"] == "none"
     request = _events(result.trajectory, "request/header")[0]["data"]
     assert request["system"] == "Be brief."
-    assert sorted(tool["function"]["name"] for tool in request["tools"]) == ["read_file", "run_bash", "write_file"]
+    assert sorted(tool["function"]["name"] for tool in request["tools"]) == [
+        "execute",
+        "read_file",
+        "run_bash",
+        "write_file",
+    ]
     written, read = (event["data"] for event in _events(result.trajectory, "tool/result"))
     assert written["name"] == "write_file" and written["content"] == "wrote 5 characters to notes.txt"
     assert written["is_error"] is False and written["arguments"] == {"path": "notes.txt", "content": "hello"}
     assert read["name"] == "read_file" and read["content"] == "hello"
+    assert written["enforcement"] == read["enforcement"] == {"mode": "none", "denied": []}
     assert _events(result.trajectory, "assistant/message")[-1]["data"]["content"] == "The file says: hello"
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
-    # The first request the fake model saw is the one the log says it saw.
+    # The first request the fake model saw is the one the log says it saw, with the reply cap on it.
     first = fake_model.requests[0]
     assert first["messages"][0] == {"role": "system", "content": "Be brief."}
-    assert sorted(tool["function"]["name"] for tool in first["tools"]) == ["read_file", "run_bash", "write_file"]
+    assert first["max_tokens"] == MAX_COMPLETION_TOKENS
+    assert sorted(tool["function"]["name"] for tool in first["tools"]) == [
+        "execute",
+        "read_file",
+        "run_bash",
+        "write_file",
+    ]
 
 
-def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
+def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     model = _FlakyModel()
     try:
-        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *SEAM_HOOKS])
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), *EVENT_HOOKS])
     finally:
         model.shutdown()
         model.server_close()
     kinds = [event["type"] for event in result.trajectory]
-    assert kinds == [
+    assert [kind for kind in kinds if not kind.startswith("stage/")] == [
         "session",
         "turn/start",
         "step/start",
@@ -421,7 +507,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     assert failed["attempt"] == 1 and failed["error"]["code"] == "MODEL_ERROR" and failed["error"]["status"] == 500
     retry, block, reject = (event["data"] for event in _events(result.trajectory, "hook/decision"))
     assert retry == {
-        "seam": "request_error",
+        "event": "request_error",
         "step": 1,
         "hook": "retry",
         "owned": True,
@@ -429,7 +515,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     }
     assert block["hook"] == "veto" and block["owned"] is False and block["decision"]["kind"] == "block"
     assert reject == {
-        "seam": "pre_step",
+        "event": "pre_step",
         "step": 3,
         "hook": "stop",
         "owned": True,
@@ -442,7 +528,7 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
     note = _events(result.trajectory, "user/message")[0]["data"]
     assert note == {
         "step": 1,
-        "source": {"kind": "hook", "seam": "post_execute"},
+        "source": {"kind": "hook", "event": "post_execute"},
         "content": "Writes are disabled here.",
     }
     assert result.trajectory[-1]["data"]["reason"] == {
@@ -457,13 +543,14 @@ def test_hooks_decide_at_the_three_seams(tmp_path: Path) -> None:
 
 
 def test_a_module_that_cannot_load_ends_the_episode_in_error(tmp_path: Path, fake_model) -> None:
-    broken = ("native_hook", {"name": "broken", "seam": "pre_step", "code": "raise RuntimeError('no')\n"})
+    broken = ("native_hook", {"name": "broken", "event": "pre_step", "code": "raise RuntimeError('no')\n"})
     result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), broken])
     assert result.exit_code == 1 and fake_model.requests == []
     assert [event["type"] for event in result.trajectory] == ["session", "turn/start", "turn/end"]
     reason = result.trajectory[-1]["data"]["reason"]
     assert reason["kind"] == "error" and reason["error"]["code"] == "LOAD_ERROR"
     assert reason["error"]["message"] == "broken.py failed to import: RuntimeError: no"
+    assert result.trajectory[0]["data"]["enforcement"] == "none"  # the mode is chosen before any module runs
 
 
 def test_seed_loop_guard_reminds_the_model_at_the_third_repeat(tmp_path: Path) -> None:
@@ -479,6 +566,39 @@ def test_seed_loop_guard_reminds_the_model_at_the_third_repeat(tmp_path: Path) -
     assert reminder.startswith("You have called read_file with the same arguments 3 times in a row.")
     assert model.requests[3]["messages"][-1] == {"role": "user", "content": reminder}
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+
+
+class _DumpModel(_FakeModel):
+    """Asks for one long tool result, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if not [m for m in body["messages"] if m.get("role") == "tool"]:
+            return _reply(tool_calls=[_call("dump", {}, "c1")])
+        return _reply(content="READY")
+
+
+def test_a_long_tool_result_is_saved_under_the_workspace(tmp_path: Path) -> None:
+    dump = (
+        "native_tool",
+        {
+            "name": "dump",
+            "description": "Return a long text.",
+            "code": "def run(args, workdir):\n    return 'y' * 25000\n",
+        },
+    )
+    model = _DumpModel()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), dump])
+    finally:
+        model.shutdown()
+        model.server_close()
+    assert result.exit_code == 0
+    logged = _events(result.trajectory, "tool/result")[0]["data"]
+    assert logged["meta"]["output_file"] == ".reef/tool-output/1-c1.txt" and logged["meta"]["truncated"] is True
+    assert len(logged["content"]) <= MAX_RESULT_CHARS
+    assert "[5000 characters omitted; the full result is in .reef/tool-output/1-c1.txt]" in logged["content"]
+    # The clipped content is what the model read on its next request.
+    assert model.requests[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": logged["content"]}
 
 
 def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_model) -> None:
@@ -511,3 +631,1545 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     # Both trees complete the scripted task, so the verdict is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
+
+
+# -- pre_execute: allow, deny, ask, and the capabilities a hook reads --------
+
+PRE_EXECUTE_HOOKS = (
+    (
+        "native_hook",
+        {
+            "name": "no_writes",
+            "event": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if 'write' in payload['capabilities']:\n"
+                "        return {'kind': 'deny', 'reason': 'writes are off'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+    (
+        "native_hook",
+        {
+            "name": "approve_reads",
+            "event": "pre_execute",
+            "code": (
+                "def listen(payload, next):\n"
+                "    if payload['name'] == 'read_file':\n"
+                "        return {'kind': 'ask', 'reason': 'read ' + payload['arguments']['path'] + '?'}\n"
+                "    return next()\n"
+            ),
+        },
+    ),
+)
+
+
+def test_native_tool_capabilities_are_validated_rendered_and_declared_by_the_seed() -> None:
+    config = dict(TOOL[1], capabilities=["read", "network"])
+    NODE_KINDS["native_tool"](None, config)
+    for bad in ("read", ["read", "read"], ["fly"], [1]):
+        with pytest.raises(ValueError, match="capabilities"):
+            NODE_KINDS["native_tool"](None, dict(TOOL[1], capabilities=bad))
+    files = render_composition([("native_tool", config)], get_adapter("native"))
+    assert files["native/tools/shout.py"].rstrip().endswith("CAPABILITIES = ['read', 'network']")
+    assert {entry["config"]["name"]: entry["config"]["capabilities"] for entry in SEED_TOOLS} == {
+        "read_file": ["read"],
+        "write_file": ["write"],
+        "run_bash": ["exec", "write", "network"],
+        "execute": ["exec", "write", "network"],
+    }
+
+
+def test_invoke_runs_only_what_the_gate_allows(tmp_path: Path) -> None:
+    tool = ToolModule("shout", "", TOOL[1]["parameters"], lambda args, workdir: args["text"].upper(), ["read"])
+    tools = {"shout": tool}
+    raw = json.dumps({"text": "hi"})
+    assert _invoke(tools, "shout", raw, tmp_path)["content"] == "HI"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow"})["content"] == "HI"
+    denied = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "deny", "reason": "quiet"})
+    assert denied["is_error"] is True and denied["error"] == {"code": "HOOK_DENIED", "message": "quiet"}
+    assert denied["content"] == "Error: quiet"
+    asked = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "ask", "reason": "may I shout?"})
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["error"]["message"].startswith("may I shout? (headless run: no one to ask")
+    # The gate runs after validation and sees the validated arguments and the declared capabilities.
+    seen = []
+
+    def gate(t, a):
+        seen.append((t.name, t.capabilities, a))
+        return {"kind": "allow"}
+
+    assert _invoke(tools, "shout", "{}", tmp_path, gate=gate)["error"]["code"] == "INVALID_ARGS"
+    assert _invoke(tools, "shout", raw, tmp_path, gate=gate)["content"] == "HI"
+    assert seen == [("shout", ("read",), {"text": "hi"})]
+    # An allow may rewrite the call; the rewrite meets the schema like the model's own arguments.
+    rewritten = _invoke(
+        tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": "yo"}}
+    )
+    assert rewritten["content"] == "YO" and rewritten["arguments"] == {"text": "yo"}
+    bad = _invoke(tools, "shout", raw, tmp_path, gate=lambda t, a: {"kind": "allow", "arguments": {"text": 3}})
+    assert bad["error"] == {"code": "INVALID_ARGS", "message": "rewritten by a hook: argument 'text' must be string"}
+
+
+def test_pre_execute_hooks_deny_by_capability_and_ask_with_no_one_to_answer(tmp_path: Path, fake_model) -> None:
+    result = _episode(tmp_path, fake_model, [*_seed_nodes(SEED_TOOLS), *PRE_EXECUTE_HOOKS])
+    header = result.trajectory[0]["data"]
+    assert header["capabilities"] == {
+        "execute": ["exec", "write", "network"],
+        "read_file": ["read"],
+        "run_bash": ["exec", "write", "network"],
+        "write_file": ["write"],
+    }
+    assert header["hooks"] == {"no_writes": "pre_execute", "approve_reads": "pre_execute"}
+    # File name order is waterfall order: approve_reads passes the write down, no_writes denies it by capability;
+    # approve_reads owns the read and asks, and a headless run has no one to answer.
+    decisions = [event["data"] for event in _events(result.trajectory, "hook/decision")]
+    assert decisions == [
+        {
+            "event": "pre_execute",
+            "step": 1,
+            "hook": "no_writes",
+            "owned": True,
+            "decision": {"kind": "deny", "reason": "writes are off"},
+        },
+        {
+            "event": "pre_execute",
+            "step": 2,
+            "hook": "approve_reads",
+            "owned": True,
+            "decision": {"kind": "ask", "reason": "read notes.txt?"},
+        },
+    ]
+    denied, asked = (event["data"] for event in _events(result.trajectory, "tool/result"))
+    assert denied["error"] == {"code": "HOOK_DENIED", "message": "writes are off"}
+    assert denied["content"] == "Error: writes are off" and denied["arguments"] == {
+        "path": "notes.txt",
+        "content": "hello",
+    }
+    assert asked["error"]["code"] == "APPROVAL_REQUIRED"
+    assert asked["content"].startswith("Error: read notes.txt? (headless run: no one to ask")
+    # What the model read: the denial as the tool result of its first call.
+    assert fake_model.requests[1]["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "c1",
+        "content": "Error: writes are off",
+    }
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+
+
+# -- native_graph: the loop's control flow as data --------------------------------------------------
+
+VERIFY_GRAPH = {
+    "name": "main",
+    "start": "think",
+    "max_steps": 12,
+    "stages": {
+        "think": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "check": {
+            "kind": "verify",
+            "check": "last_line_integer",
+            "message": "Reply with the final answer as a plain integer alone on the last line.",
+        },
+        "done": {"kind": "end", "reason": "completed"},
+    },
+    "edges": [
+        {"from": "think", "when": "tool_calls", "to": "act"},
+        {"from": "think", "when": "text", "to": "check"},
+        {"from": "act", "when": "done", "to": "think"},
+        {"from": "check", "when": "pass", "to": "done"},
+        {"from": "check", "when": "fail", "to": "think"},
+    ],
+}
+
+
+def _graph(**changes):
+    import copy
+
+    graph = copy.deepcopy(SEED_GRAPH)
+    graph.update(changes)
+    return graph
+
+
+class _ProseThenIntegerModel(_FakeModel):
+    """The measured failure: a tool call, then the count in prose; a bare integer only after being asked again."""
+
+    def script(self, body: dict) -> dict:
+        messages = body["messages"]
+        if not any(m.get("role") == "tool" for m in messages):
+            return _reply(tool_calls=[_call("run_bash", {"command": "python3 -c 'print(9592)'"}, "c1")])
+        if messages[-1].get("role") == "user" and "plain integer" in messages[-1]["content"]:
+            return _reply(content="9592")
+        return _reply(content="The sieve finds 9592 primes below 100000.")
+
+
+def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
+    NODE_KINDS["native_graph"](None, SEED_GRAPH)
+    NODE_KINDS["native_graph"](None, VERIFY_GRAPH)
+    stages = SEED_GRAPH["stages"]
+    edges = SEED_GRAPH["edges"]
+    bad = [
+        (_graph(stages={**stages, "x": {"kind": "loop"}}), "kind must be one of"),
+        (_graph(stages={**stages, "think": {"kind": "model", "code": "x"}}), "does not take code"),
+        (_graph(edges=[*edges, {"from": "act", "when": "done", "to": "done"}]), "two edges for outcome 'done'"),
+        (_graph(edges=edges[:2]), "stage 'act' has no edge for outcome 'done'"),
+        (
+            _graph(
+                stages={**stages, "trap": {"kind": "message", "text": "again"}},
+                edges=[
+                    *edges[:1],
+                    {"from": "think", "when": "text", "to": "trap"},
+                    {"from": "act", "when": "done", "to": "done"},
+                    {"from": "trap", "when": "done", "to": "trap"},
+                ],
+            ),
+            "stages trap cannot reach an end stage",
+        ),
+        (
+            _graph(
+                stages={**stages, "lonely": {"kind": "message", "text": "hi"}},
+                edges=[*edges, {"from": "lonely", "when": "done", "to": "done"}],
+            ),
+            "not reachable from 'think'",
+        ),
+        (
+            _graph(
+                edges=[
+                    {"from": "think", "when": "text", "to": "done"},
+                    {"from": "think", "when": "tool_calls", "to": "done"},
+                    {"from": "act", "when": "done", "to": "act"},
+                ]
+            ),
+            "not reachable",
+        ),
+        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(max_steps=33), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(start="nowhere"), "'start' must name a stage"),
+        (
+            _graph(
+                stages={**stages, "v": {"kind": "verify", "check": "last_line_matches"}},
+                edges=[
+                    *edges,
+                    {"from": "v", "when": "pass", "to": "done"},
+                    {"from": "v", "when": "fail", "to": "done"},
+                ],
+            ),
+            "takes 'pattern' exactly when",
+        ),
+        (
+            _graph(
+                stages={**stages, "m": {"kind": "message", "text": "use sk-abcdef1234567890ABCDEFGH"}},
+                edges=[*edges, {"from": "m", "when": "done", "to": "done"}],
+            ),
+            "inline credential",
+        ),
+    ]
+    for graph, message in bad:
+        with pytest.raises(ValueError, match=message):
+            NODE_KINDS["native_graph"](None, graph)
+    # Two text stages that only feed each other never spend the budget.
+    loop = _graph(
+        stages={**stages, "a": {"kind": "message", "text": "a"}, "b": {"kind": "message", "text": "b"}},
+        edges=[
+            *edges[:1],
+            {"from": "act", "when": "done", "to": "done"},
+            {"from": "think", "when": "text", "to": "a"},
+            {"from": "a", "when": "done", "to": "b"},
+            {"from": "b", "when": "done", "to": "a"},
+        ],
+    )
+    with pytest.raises(ValueError, match="stages a, b cannot reach an end stage"):
+        NODE_KINDS["native_graph"](None, loop)
+    cycle = _graph(
+        stages={**stages, "a": {"kind": "message", "text": "a"}, "b": {"kind": "verify", "check": "nonempty"}},
+        edges=[
+            *edges[:1],
+            edges[2],
+            {"from": "think", "when": "text", "to": "a"},
+            {"from": "a", "when": "done", "to": "b"},
+            {"from": "b", "when": "pass", "to": "done"},
+            {"from": "b", "when": "fail", "to": "a"},
+        ],
+    )
+    with pytest.raises(ValueError, match="cycle without a model stage"):
+        NODE_KINDS["native_graph"](None, cycle)
+
+
+def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
+    descriptor = get_adapter("native")
+    files = render_composition([("native_graph", VERIFY_GRAPH), TOOL], descriptor)
+    assert files["native/graphs/main.json"] == json.dumps(VERIFY_GRAPH, indent=2, sort_keys=True) + "\n"
+    allowed = _graph(stages={**SEED_GRAPH["stages"], "act": {"kind": "tools", "allow": ["shout"]}})
+    assert "native/graphs/main.json" in render_composition([("native_graph", allowed), TOOL], descriptor)
+    with pytest.raises(RenderError, match="allows tools the tree lacks: shout"):
+        render_composition([("native_graph", allowed)], descriptor)
+    with pytest.raises(RenderError, match="does not render native_graph"):
+        render_composition([("native_graph", SEED_GRAPH)], get_adapter("pi"))
+
+
+def test_a_tree_without_a_graph_runs_the_seed_graph_and_a_bad_graph_is_a_load_error(
+    tmp_path: Path, fake_model
+) -> None:
+    result = _episode(tmp_path, fake_model, _seed_nodes(SEED_TOOLS))
+    assert result.trajectory[0]["data"]["graph"] == "seed"
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = dict(render_composition([*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(descriptor)], descriptor))
+    files["native/graphs/main.json"] = '{"name": "main", "start": "x", "stages": {}, "edges": []}\n'
+    broken = run_episode(descriptor, files, "hi", binary=_launcher(tmp_path))
+    assert broken.exit_code == 1 and [event["type"] for event in broken.trajectory] == [
+        "session",
+        "turn/start",
+        "turn/end",
+    ]
+    assert broken.trajectory[-1]["data"]["reason"]["error"]["code"] == "LOAD_ERROR"
+
+
+def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Path) -> None:
+    """The measured sieve failure: prose after a tool call scores 0.0 on the seed; the verify graph asks once more and scores 1.0."""
+
+    def final_line(task, result):
+        answers = [e["data"].get("content") or "" for e in result.trajectory if e["type"] == "assistant/message"]
+        lines = [line.strip() for line in (answers[-1] if answers else "").splitlines() if line.strip()]
+        return 1.0 if lines and lines[-1] == "9592" else 0.0
+
+    model = _ProseThenIntegerModel()
+    try:
+        # The interpreter alone: the verify stage fails, injects its message, and the next answer passes.
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", VERIFY_GRAPH)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "check"]
+        assert [(e["outcome"], e["to"], e["last_line"]) for e in exits] == [
+            ("fail", "think", "The sieve finds 9592 primes below 100000."),
+            ("pass", "done", "9592"),
+        ]
+        note = next(e["data"] for e in result.trajectory if e["type"] == "user/message")
+        assert note["source"] == {"kind": "stage", "stage": "check"} and note["content"].startswith("Reply with")
+        assert final_line("[sieve]", result) == 1.0 and result.trajectory[-1]["data"]["reason"] == {
+            "kind": "completed"
+        }
+
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        backend = CordisBackend(
+            descriptor=get_adapter("native"),
+            propose=resolve_proposer(
+                lambda nodes, samples, models: Mutation(
+                    "update", "main", {"name": "native_graph", "config": VERIFY_GRAPH}
+                )
+            ),
+            score_episode=resolve_episode_scorer(final_line),
+            tasks=(
+                "[sieve] how many primes are below 100000? Reply with the count as a plain integer alone on the last line.",
+            ),
+            models=binding,
+            binary=_launcher(tmp_path),
+            seed=SEED_NODES,
+        )
+        batch = TraceBatch("demo:trace:graph", (TraceSample("a1", {"messages": []}, 0.0),))
+        prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+        assert prepared.candidate is not None
+        assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
+        assert "check" in json.loads(prepared.candidate.candidate_files["native/graphs/main.json"])["stages"]
+        evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+        settled = backend.settle_step(prepared, decision)
+        assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
+        assert settled.metrics["selected"] is True
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_random_admitted_graphs_terminate_within_the_transition_bound(tmp_path: Path) -> None:
+    """Property: any graph admission accepts ends within (max_steps + 1) * 16 transitions, whatever the model does."""
+    import random
+
+    from reef.harness.runners.native import graph as graphs
+    from reef.harness.runners.native import run_loop
+
+    rng = random.Random(7)
+    texts = ("a", "b", "c")
+
+    def random_graph() -> dict:
+        extras = rng.randint(0, 3)
+        stages = {"think": {"kind": "model"}, "act": {"kind": "tools"}, "done": {"kind": "end"}}
+        names = ["think", "act", "done"]
+        for i in range(extras):
+            kind = rng.choice(("verify", "message", "branch", "compact"))
+            name = f"s{i}"
+            if kind == "message":
+                stages[name] = {"kind": "message", "text": rng.choice(texts)}
+            elif kind == "verify":
+                stages[name] = {"kind": "verify", "check": rng.choice(("nonempty", "last_line_integer"))}
+            elif kind == "branch":
+                stages[name] = {
+                    "kind": "branch",
+                    "cases": [
+                        {"when": "steps_used_at_least", "value": rng.randint(0, 3), "outcome": "many"},
+                        {"when": "last_text_matches", "value": "9592", "outcome": "answered"},
+                    ],
+                }
+            else:
+                stages[name] = {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2}
+            names.append(name)
+        # Text stages only point forward (to a later text stage, think, or done), so no text cycle exists.
+        text_names = [n for n in names if n.startswith("s")]
+
+        def forward(index: int) -> str:
+            later = text_names[index + 1 :]
+            return rng.choice([*later, "think", "done"])
+
+        edges = [
+            {"from": "think", "when": "tool_calls", "to": rng.choice(["act", *text_names])},
+            {"from": "think", "when": "text", "to": rng.choice(["done", *text_names])},
+            {"from": "act", "when": "done", "to": rng.choice(["think", *text_names])},
+        ]
+        outcomes_of = {"verify": ("pass", "fail"), "branch": ("many", "answered", "else")}
+        for index, name in enumerate(text_names):
+            for outcome in outcomes_of.get(stages[name]["kind"], ("done",)):
+                edges.append({"from": name, "when": outcome, "to": forward(index)})
+        return {"name": "main", "start": "think", "max_steps": rng.randint(1, 4), "stages": stages, "edges": edges}
+
+    class _Chaos(_FakeModel):
+        def script(self, body: dict) -> dict:
+            if rng.random() < 0.5:
+                return _reply(tool_calls=[_call("read_file", {"path": "x"}, f"c{len(self.requests)}")])
+            return _reply(content=rng.choice(("9592", "prose", "")))
+
+    model = _Chaos()
+    try:
+        admitted = 0
+        for _ in range(300):
+            if admitted >= 20:
+                break
+            graph = random_graph()
+            try:
+                NODE_KINDS["native_graph"](None, graph)
+            except ValueError:
+                continue  # an unreachable stage, say; the rule names it and the tree loses at admission
+            admitted += 1
+            root = tmp_path / f"g{admitted}"
+            descriptor = get_adapter("native")
+            binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+            files = render_composition(
+                [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), *binding.compose_nodes(descriptor)], descriptor
+            )
+            for relative, text in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text(text, encoding="utf-8")
+            (root / "workspace").mkdir()
+            code = run_loop("t", root / "native", root / "native" / "sessions", root / "workspace")
+            events = [
+                json.loads(line) for line in (root / "native" / "sessions" / "session.jsonl").read_text().splitlines()
+            ]
+            reason = events[-1]["data"]["reason"]["kind"]
+            transitions = sum(1 for e in events if e["type"] == "stage/enter")
+            assert code == 0 and reason in ("completed", "gave_up", "max-steps"), (graph, reason)
+            assert transitions <= (graph["max_steps"] + 1) * graphs.TRANSITIONS_PER_STEP
+        assert admitted == 20
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+# -- branch and compact stages, and the execute seed tool ------------------------------------------
+
+
+class _ChattyModel(_FakeModel):
+    """Answers in prose every time, so a graph that routes on the run's counters decides when to stop."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) == 3:
+            return _reply(content="the count is 9592")
+        return _reply(content="still working")
+
+
+def _branch_graph(cases, route_edges):
+    """think answers in text to route; the route's own edges are the test's."""
+    return {
+        "name": "main",
+        "start": "think",
+        "max_steps": 6,
+        "stages": {
+            "think": {"kind": "model"},
+            "act": {"kind": "tools"},
+            "route": {"kind": "branch", "cases": cases},
+            "done": {"kind": "end", "reason": "completed"},
+            "quit": {"kind": "end", "reason": "gave_up"},
+        },
+        "edges": [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "route"},
+            {"from": "act", "when": "done", "to": "think"},
+            *route_edges,
+        ],
+    }
+
+
+def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> None:
+    cases = [
+        {"when": "steps_used_at_least", "value": 2, "outcome": "enough"},
+        {"when": "last_text_matches", "value": r"\d+", "outcome": "answered"},
+    ]
+    good = _branch_graph(
+        cases,
+        [
+            {"from": "route", "when": "enough", "to": "quit"},
+            {"from": "route", "when": "answered", "to": "done"},
+            {"from": "route", "when": "else", "to": "think"},
+        ],
+    )
+    NODE_KINDS["native_graph"](None, good)
+    route = good["stages"]["route"]
+    bad = [
+        ({**route, "cases": []}, "'cases' must be a list of 1 to 8"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": 2}]}, "objects with when, value and outcome"),
+        ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
+        ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
+        # A proposer's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
+        ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
+        ({"kind": "verify", "check": "last_line_matches", "pattern": "a" * 201}, "at most 200"),
+        ({**route, "cases": [{"when": "steps_used_at_least", "value": 2, "outcome": "else"}]}, "other than else"),
+        (
+            {**route, "cases": [{"when": "steps_used_at_least", "value": 1, "outcome": "x"}] * 2},
+            "names outcome 'x' twice",
+        ),
+        ({"kind": "compact", "fire_ratio": 0.5}, "'keep_ratio' must be a number"),
+        ({"kind": "compact", "fire_ratio": 1.5, "keep_ratio": 0.2}, "'fire_ratio' must be a number above 0"),
+        ({"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.5}, "'keep_ratio' must be below 'fire_ratio'"),
+        ({"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2, "model": "x"}, "does not take model"),
+    ]
+    for stage, rule in bad:
+        with pytest.raises(ValueError, match=rule):
+            NODE_KINDS["native_graph"](None, {**good, "stages": {**good["stages"], "route": stage}})
+    # A branch's outcomes are its cases plus else, and every one needs its edge.
+    with pytest.raises(ValueError, match="stage 'route' has no edge for outcome 'else'"):
+        NODE_KINDS["native_graph"](None, {**good, "edges": good["edges"][:-1]})
+    with pytest.raises(ValueError, match="names outcome 'maybe', not one of its branch stage"):
+        NODE_KINDS["native_graph"](
+            None, {**good, "edges": [*good["edges"], {"from": "route", "when": "maybe", "to": "done"}]}
+        )
+    # A branch that loops on itself has no model stage in the cycle, so nothing would end it.
+    with pytest.raises(ValueError, match="cycle without a model stage"):
+        NODE_KINDS["native_graph"](
+            None,
+            {
+                **good,
+                "edges": [e if e.get("when") != "else" else {**e, "to": "route"} for e in good["edges"]],
+            },
+        )
+
+
+def test_a_branch_stage_routes_on_the_steps_used_and_the_last_text(tmp_path: Path) -> None:
+    model = _ChattyModel()
+    try:
+        cases = [
+            {"when": "last_text_matches", "value": r"\b9592\b", "outcome": "answered"},
+            {"when": "steps_used_at_least", "value": 3, "outcome": "enough"},
+        ]
+        graph = _branch_graph(
+            cases,
+            [
+                {"from": "route", "when": "answered", "to": "done"},
+                {"from": "route", "when": "enough", "to": "quit"},
+                {"from": "route", "when": "else", "to": "think"},
+            ],
+        )
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+        assert [(e["outcome"], e["to"], e["case"]) for e in exits] == [
+            ("else", "think", "else"),
+            ("else", "think", "else"),
+            ("answered", "done", "last_text_matches"),
+        ]
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"} and len(model.requests) == 3
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+class _WrongToolModel(_FakeModel):
+    """Calls a tool the tree lacks, so every call is a tool error, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) <= 3:
+            return _reply(tool_calls=[_call("nope", {}, f"c{len(self.requests)}")])
+        return _reply(content="giving up")
+
+
+def test_a_branch_stage_counts_tool_errors(tmp_path: Path) -> None:
+    model = _WrongToolModel()
+    try:
+        graph = _branch_graph([{"when": "tool_errors_at_least", "value": 2, "outcome": "stuck"}], [])
+        graph["edges"] = [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "done"},
+            {"from": "act", "when": "done", "to": "route"},
+            {"from": "route", "when": "stuck", "to": "quit"},
+            {"from": "route", "when": "else", "to": "think"},
+        ]
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+        assert [(e["outcome"], e.get("value")) for e in exits] == [("else", None), ("stuck", 2)]
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "gave_up"} and len(model.requests) == 2
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+class _SummarizingModel(_FakeModel):
+    """Plays the seed script, and answers the compact stage's summary call with a fixed summary."""
+
+    def script(self, body: dict) -> dict:
+        if body["messages"][0]["content"].startswith("Summarize the work so far"):
+            return _reply(content="wrote hello to notes.txt")
+        if any(str(m.get("content")).startswith("Summary of the earlier steps") for m in body["messages"]):
+            return _reply(content="Done: the file says hello.")
+        return super().script(body)
+
+
+def test_a_compact_stage_summarizes_the_older_span_and_logs_the_policy(tmp_path: Path) -> None:
+    model = _SummarizingModel()
+    try:
+        graph = {
+            "name": "main",
+            "start": "think",
+            "max_steps": 6,
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "squeeze": {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2},
+                "done": {"kind": "end", "reason": "completed"},
+            },
+            "edges": [
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "done"},
+                {"from": "act", "when": "done", "to": "squeeze"},
+                {"from": "squeeze", "when": "done", "to": "think"},
+            ],
+        }
+        # A window this small is over the ratio after the first tool result, but the only older span would split
+        # that result from its call, so nothing fires; after the second result the first pair is summarized.
+        window = ("config", {"target": "models", "data": {"context_window": 120}})
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        compacted = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
+        assert len(compacted) == 1 and compacted[0]["fired"] is True and compacted[0]["step"] == 2
+        assert compacted[0]["summary"] == "wrote hello to notes.txt" and compacted[0]["dropped"] == 2
+        assert compacted[0]["policy"] == {"fire_ratio": 0.5, "keep_ratio": 0.2}
+        assert compacted[0]["tokens_after"] < compacted[0]["tokens_before"]
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "squeeze"]
+        assert exits[0]["fired"] is False and exits[0]["tokens"] > 60
+        assert exits[1]["fired"] is True and exits[1]["dropped"] == 2
+        # What the model saw next: the system prompt, the task, the summary note, then the kept tail.
+        after = next(
+            r
+            for r in model.requests
+            if any("Summary of the earlier steps" in str(m.get("content")) for m in r["messages"])
+        )
+        roles = [m["role"] for m in after["messages"]]
+        assert roles[:3] == ["system", "user", "user"] and after["messages"][2]["content"].startswith(
+            "Summary of the earlier steps:\nwrote hello"
+        )
+        assert roles[3] != "tool"
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_a_compact_stage_below_the_ratio_or_without_a_summary_drops_nothing(tmp_path: Path) -> None:
+    from reef.harness.runners.native import graph as graphs
+
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "t"}]
+    for i in range(6):
+        messages.append(
+            {"role": "assistant", "content": None, "tool_calls": [_call("read_file", {"path": str(i)}, f"c{i}")]}
+        )
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": "x" * 40})
+    head, older, tail = graphs._split(messages, keep_tokens=40)
+    assert head == messages[:2] and older and head + older + tail == messages
+    assert tail[0]["role"] == "assistant", "the tail opens on the call whose result it keeps"
+
+    class _Down(_FakeModel):
+        def status(self, body: dict) -> int:
+            return 500 if body["messages"][0]["content"].startswith("Summarize") else 200
+
+    model = _Down()
+    try:
+        graph = {
+            "name": "main",
+            "start": "squeeze",
+            "max_steps": 6,
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "squeeze": {"kind": "compact", "fire_ratio": 0.5, "keep_ratio": 0.2},
+                "done": {"kind": "end", "reason": "completed"},
+            },
+            "edges": [
+                {"from": "squeeze", "when": "done", "to": "think"},
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "done"},
+                {"from": "act", "when": "done", "to": "squeeze"},
+            ],
+        }
+        window = ("config", {"target": "models", "data": {"context_window": 120}})
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), window])
+        exits = [e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "squeeze"]
+        assert exits[0]["fired"] is False and "error" not in exits[0], "below the ratio at the start"
+        failed = [e["data"] for e in result.trajectory if e["type"] == "context/compacted"]
+        assert failed and failed[0]["fired"] is False and failed[0]["error"]["code"] == "MODEL_ERROR"
+        assert all(not e.get("fired") for e in exits) and result.trajectory[-1]["data"]["reason"] == {
+            "kind": "completed"
+        }
+        # Nothing was dropped: every request still carries the full tail of tool results.
+        assert all(
+            m["role"] != "user" or "Summary of" not in str(m["content"]) for r in model.requests for m in r["messages"]
+        )
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_the_execute_seed_tool_runs_code_that_calls_the_other_tools(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    files = render_composition(
+        [*_seed_nodes(SEED_TOOLS), *ModelBinding(base_url="http://x", model="m").compose_nodes(get_adapter("native"))],
+        get_adapter("native"),
+    )
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+    tools = load_tools(root / "native" / "tools")
+    assert tools["execute"].capabilities == ("exec", "write", "network")
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    code = (
+        "import read_file, write_file\n"
+        "write_file.run({'path': 'notes.txt', 'content': 'hello'}, WORKDIR)\n"
+        "print(read_file.run({'path': 'notes.txt'}, WORKDIR).upper())\n"
+    )
+    result = _invoke(tools, "execute", json.dumps({"code": code}), workdir)
+    assert result["is_error"] is False and result["content"] == "exit 0\nHELLO\n"
+    assert (workdir / "notes.txt").read_text() == "hello"
+    failed = _invoke(tools, "execute", json.dumps({"code": "raise SystemExit(3)"}), workdir)
+    assert failed["content"].startswith("exit 3")
+    assert _invoke(tools, "execute", json.dumps({"code": "  "}), workdir)["content"] == "refused: empty code"
+
+
+def test_the_loop_runs_every_call_through_the_enforcer_the_environment_names(
+    tmp_path: Path, fake_model, monkeypatch
+) -> None:
+    root = tmp_path / "tree"
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = render_composition(
+        [*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(get_adapter("native"))], get_adapter("native")
+    )
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text)
+    work = tmp_path / "work"
+    work.mkdir()
+    task = "put hello in notes.txt and read it back"
+
+    def session(name: str) -> list[dict]:
+        return [json.loads(line) for line in (tmp_path / name / "session.jsonl").read_text().splitlines()]
+
+    # A mode the loop has no enforcer for is a load error, not a run with nothing enforced.
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "seccomp")
+    assert run_loop(task, root / "native", tmp_path / "s1", work) == 1
+    assert session("s1")[-1]["data"]["reason"]["error"] == {
+        "code": "LOAD_ERROR",
+        "message": "REEF_NATIVE_ENFORCE='seccomp' names no enforcer; use none or bwrap",
+    }
+    # A bwrap that only runs the command after "--" stands in for the jail; the loop's side is what this checks.
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "bwrap").write_text(
+        f"#!{sys.executable}\nimport os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]\nos.execv(argv[0], argv)\n"
+    )
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+    assert run_loop(task, root / "native", tmp_path / "s2", work) == 0
+    events = session("s2")
+    assert events[0]["data"]["enforcement"] == "bwrap"
+    results = [event["data"] for event in events if event["type"] == "tool/result"]
+    assert [(result["name"], result["enforcement"]) for result in results] == [
+        ("write_file", {"mode": "bwrap", "denied": ["exec", "network"]}),
+        ("read_file", {"mode": "bwrap", "denied": ["write", "exec", "network"]}),
+    ]
+    assert results[1]["content"] == "hello" and (work / "notes.txt").read_text() == "hello"
+
+
+class _PersistentModel(_FakeModel):
+    """Calls write_file three times whatever comes back, then answers."""
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) <= 3:
+            call = _call("write_file", {"path": "n.txt", "content": "x"}, f"c{len(self.requests)}")
+            return _reply(tool_calls=[call])
+        return _reply(content="done")
+
+
+def test_a_call_the_jail_could_not_run_is_no_tool_error(tmp_path: Path, monkeypatch) -> None:
+    model = _PersistentModel()
+    try:
+        descriptor = get_adapter("native")
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        graph = _branch_graph([{"when": "tool_errors_at_least", "value": 1, "outcome": "stuck"}], [])
+        graph["edges"] = [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "done"},
+            {"from": "act", "when": "done", "to": "route"},
+            {"from": "route", "when": "stuck", "to": "quit"},
+            {"from": "route", "when": "else", "to": "think"},
+        ]
+        nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", graph), *binding.compose_nodes(descriptor)]
+        root = tmp_path / "root"
+        for relative, text in render_composition(nodes, descriptor).items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text)
+        work = tmp_path / "work"
+        work.mkdir()
+        # A bwrap the host refuses: every call ends in SANDBOX_FAILED, which is the sandbox's failure, not the tool's.
+        fake = tmp_path / "fakebin"
+        fake.mkdir()
+        (fake / "bwrap").write_text(
+            f"#!{sys.executable}\nimport sys\nprint('bwrap: No permissions to create a new namespace', file=sys.stderr)\n"
+            "sys.exit(1)\n"
+        )
+        (fake / "bwrap").chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+        assert run_loop("write it", root / "native", tmp_path / "s", work) == 0
+    finally:
+        model.shutdown()
+        model.server_close()
+    events = [json.loads(line) for line in (tmp_path / "s" / "session.jsonl").read_text().splitlines()]
+    results = [event["data"] for event in events if event["type"] == "tool/result"]
+    assert [result["error"]["code"] for result in results] == ["SANDBOX_FAILED"] * 3
+    exits = [e["data"]["outcome"] for e in events if e["type"] == "stage/exit" and e["data"]["stage"] == "route"]
+    assert exits == ["else"] * 3 and events[-1]["data"]["reason"] == {"kind": "completed"}
+
+
+class _ProbingModel(_FakeModel):
+    """Calls probe (declares nothing), then write_file, then read_file, then answers, one tool per turn."""
+
+    def script(self, body: dict) -> dict:
+        done = len([m for m in body["messages"] if m.get("role") == "tool"])
+        if done == 0:
+            return _reply(tool_calls=[_call("probe", {}, "c0")])
+        if done == 1:
+            return _reply(tool_calls=[_call("write_file", {"path": "notes.txt", "content": "hello"}, "c1")])
+        if done == 2:
+            return _reply(tool_calls=[_call("read_file", {"path": "notes.txt"}, "c2")])
+        return _reply(content=f"done: {body['messages'][-1]['content']}")
+
+
+def test_a_sandboxed_episode_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+    require_nested_jail()
+    model = _ProbingModel()
+    try:
+        descriptor = get_adapter("native")
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        probe = (
+            "native_tool",
+            {"name": "probe", "description": "probe", "parameters": {}, "code": PROBE, "capabilities": []},
+        )
+        files = render_composition([*_seed_nodes(SEED_TOOLS), probe, *binding.compose_nodes(descriptor)], descriptor)
+        # The launcher and the checkout live outside the episode root, so the jail binds them like a base path.
+        checkout = Path(__file__).resolve().parents[2]
+        executor = SandboxExecutor(
+            egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
+        )
+        result = run_episode(
+            descriptor, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
+        )
+    finally:
+        model.shutdown()
+        model.server_close()
+    assert result.exit_code == 0, result.stderr
+    assert result.trajectory[0]["data"]["enforcement"] == "bwrap"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["enforcement"]["denied"], r["is_error"]) for r in results] == [
+        ("probe", ["write", "exec", "network"], False),
+        ("write_file", ["exec", "network"], False),
+        ("read_file", ["write", "exec", "network"], False),
+    ]
+    # The loop keeps the model endpoint while the probe, one jail deeper, sees only loopback, a read only
+    # workspace and no shell; the file still round trips through two jails that declare write and read.
+    assert json.loads(results[0]["content"]) == {"exec": "FileNotFoundError", "network": "lo only", "write": "EROFS"}
+    assert results[2]["content"] == "hello"
+
+
+# -- native_agent: agents as root entries, called from a subagent stage ----------------------------
+
+
+CHECKER = (
+    "native_agent",
+    {
+        "name": "checker",
+        "prompt": "You are the checker. Verify the claim you are given and answer in one line.",
+        "tools": ["read_file"],
+        "skills": [],
+        "max_steps": 2,
+    },
+)
+WRITER = (
+    "native_agent",
+    {"name": "writer", "prompt": "You are the writer. Restate the verified answer as a plain integer.", "tools": []},
+)
+
+
+def _delegating_graph(after="answer"):
+    """think hands its text to the checker; the checker's outcome routes to a second model stage or an end."""
+    return {
+        "name": "main",
+        "start": "think",
+        "max_steps": 6,
+        "stages": {
+            "think": {"kind": "model"},
+            "act": {"kind": "tools"},
+            "delegate": {"kind": "subagent", "agent": "checker"},
+            "answer": {"kind": "model"},
+            "done": {"kind": "end", "reason": "completed"},
+            "quit": {"kind": "end", "reason": "gave_up"},
+        },
+        "edges": [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "delegate"},
+            {"from": "act", "when": "done", "to": "think"},
+            {"from": "delegate", "when": "completed", "to": after},
+            {"from": "delegate", "when": "gave_up", "to": "quit"},
+            {"from": "delegate", "when": "budget", "to": "quit"},
+            {"from": "delegate", "when": "ask", "to": "quit"},
+            {"from": "answer", "when": "tool_calls", "to": "act"},
+            {"from": "answer", "when": "text", "to": "done"},
+        ],
+    }
+
+
+class _TeamModel(_FakeModel):
+    """Answers by which agent is asking: the system prompt names the agent, the messages say what it saw."""
+
+    def script(self, body: dict) -> dict:
+        system = body["messages"][0]["content"]
+        last = body["messages"][-1]
+        if "You are the checker" in system:
+            return _reply(content=f"verified: {last['content']}")
+        if "You are the writer" in system:
+            return _reply(content="9592")
+        if last.get("role") == "user" and last["content"].startswith("verified"):
+            return _reply(content="The checker agrees: 9592")
+        if last.get("role") == "user" and last["content"] in ("9592",):
+            return _reply(content="9592")
+        return _reply(content="the count is 9592")
+
+
+def test_native_agent_admission_and_render_checks_name_what_is_missing() -> None:
+    NODE_KINDS["native_agent"](None, CHECKER[1])
+    bad = [
+        ({**CHECKER[1], "model": "x"}, "does not take model"),
+        ({"name": "x"}, "'prompt'"),
+        ({**CHECKER[1], "graph": "no such"}, "'graph' must name a graph"),
+        ({**CHECKER[1], "tools": ["a", "a"]}, "'tools' must be a list of distinct names"),
+        ({**CHECKER[1], "then": ["checker"]}, "cannot hand its text to itself"),
+        ({**CHECKER[1], "then": [f"a{i}" for i in range(9)]}, "'then' takes at most 8"),
+        ({**CHECKER[1], "max_steps": 0}, "'max_steps' must be an integer from 1 to 32"),
+        ({**CHECKER[1], "max_tool_calls": "3"}, "'max_tool_calls' must be an integer from 1 to 256"),
+    ]
+    for config, rule in bad:
+        with pytest.raises(ValueError, match=rule):
+            NODE_KINDS["native_agent"](None, config)
+    descriptor = get_adapter("native")
+    files = render_composition([*_seed_nodes(SEED_TOOLS), CHECKER], descriptor)
+    assert json.loads(files["native/agents/checker.json"]) == CHECKER[1]
+    with pytest.raises(RenderError, match="does not render native_agent"):
+        render_composition([CHECKER], get_adapter("pi"))
+    with pytest.raises(RenderError, match="names tools the tree lacks: read_file"):
+        render_composition([CHECKER], descriptor)
+    with pytest.raises(RenderError, match="names skills the tree lacks: nope"):
+        render_composition(
+            [*_seed_nodes(SEED_TOOLS), ("native_agent", {**CHECKER[1], "skills": ["nope"]})], descriptor
+        )
+    with pytest.raises(RenderError, match="names then the tree lacks: writer"):
+        render_composition(
+            [*_seed_nodes(SEED_TOOLS), ("native_agent", {**CHECKER[1], "then": ["writer"]})], descriptor
+        )
+    with pytest.raises(RenderError, match="runs a graph the tree lacks: side"):
+        render_composition([*_seed_nodes(SEED_TOOLS), ("native_agent", {**CHECKER[1], "graph": "side"})], descriptor)
+    with pytest.raises(RenderError, match="calls an agent the tree lacks: checker"):
+        render_composition([*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph())], descriptor)
+    # A subagent stage of an agent's graph and its then list form the call graph; a cycle is refused.
+    loop_back = ("native_agent", {**WRITER[1], "then": ["checker"]})
+    with pytest.raises(RenderError, match="'checker' is called in a cycle"):
+        render_composition(
+            [*_seed_nodes(SEED_TOOLS), ("native_agent", {**CHECKER[1], "then": ["writer"]}), loop_back], descriptor
+        )
+    side = {**_delegating_graph(), "name": "side"}
+    with pytest.raises(RenderError, match="'checker' is called in a cycle"):
+        render_composition(
+            [*_seed_nodes(SEED_TOOLS), ("native_graph", side), ("native_agent", {**CHECKER[1], "graph": "side"})],
+            descriptor,
+        )
+
+
+def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_back(tmp_path: Path) -> None:
+    model = _TeamModel()
+    try:
+        nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER]
+        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        headers = [e["data"] for e in result.trajectory if e["type"] == "session"]
+        # The agent's file sorts before the root's, so the root's final answer is the trajectory's last text.
+        assert [(h["agent"], h["turn"], h.get("parent")) for h in headers] == [
+            ("checker", 2, "root"),
+            ("root", 1, None),
+        ]
+        assert headers[0]["task"] == "the count is 9592" and headers[0]["tools"] == ["read_file"]
+        assert headers[0]["max_steps"] == 2 and headers[1]["agents"] == ["checker"]
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+        answers = [e["data"]["content"] for e in result.trajectory if e["type"] == "assistant/message"]
+        assert answers == ["verified: the count is 9592", "the count is 9592", "The checker agrees: 9592"]
+        # What the parent read: the agent's text as a user message, attributed to it.
+        handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
+        # The parent's step counter already carries the checker's step: budgets draw from the episode total.
+        assert handed == [
+            {
+                "step": 2,
+                "source": {"kind": "agent", "agent": "checker", "outcome": "completed"},
+                "content": "verified: the count is 9592",
+            }
+        ]
+        exits = [
+            e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "delegate"
+        ]
+        assert exits == [
+            {
+                "step": 2,
+                "stage": "delegate",
+                "outcome": "completed",
+                "to": "answer",
+                "agent": "checker",
+                "agents": ["checker"],
+                "steps": 2,
+            }
+        ]
+        # The checker saw its own system prompt: the rules and its prompt, no skills, one tool.
+        checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
+        assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
+        # Per agent work, as the verdict will carry it.
+        from reef.train.cordis_backend.backend import _agent_work
+
+        assert _agent_work(result.trajectory) == {
+            "checker": {
+                "turns": 1,
+                "steps": 1,
+                "tool_calls": 0,
+                "tool_errors": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+            },
+            "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 0, "output_tokens": 0},
+        }
+        session_files = sorted(p.name for p in (tmp_path).rglob("*.jsonl"))
+        assert session_files == []  # the episode root is gone; the files were read into the trajectory
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_then_hands_an_agents_text_down_a_pipeline_and_the_last_text_returns(tmp_path: Path) -> None:
+    model = _TeamModel()
+    try:
+        nodes = [
+            *_seed_nodes(SEED_TOOLS),
+            ("native_graph", _delegating_graph()),
+            ("native_agent", {**CHECKER[1], "then": ["writer"]}),
+            WRITER,
+        ]
+        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        headers = [
+            (h["data"]["agent"], h["data"]["turn"], h["data"]["task"]) for h in _events(result.trajectory, "session")
+        ]
+        assert headers == [
+            ("checker", 2, "the count is 9592"),
+            ("writer", 3, "verified: the count is 9592"),
+            ("root", 1, "how many primes are below 100000?"),
+        ]
+        exits = [
+            e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "delegate"
+        ]
+        assert exits[0]["agents"] == ["checker", "writer"] and exits[0]["outcome"] == "completed"
+        handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
+        assert handed[0]["content"] == "9592" and handed[0]["source"]["agent"] == "writer"
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+class _BusyChecker(_TeamModel):
+    """The checker keeps reading; the root answers in text."""
+
+    def script(self, body: dict) -> dict:
+        if "You are the checker" in body["messages"][0]["content"]:
+            return _reply(tool_calls=[_call("read_file", {"path": "x"}, f"c{len(self.requests)}")])
+        return super().script(body)
+
+
+def test_an_agent_that_spends_its_budget_ends_with_budget_and_the_parent_routes_on_it(tmp_path: Path) -> None:
+    model = _BusyChecker()
+    try:
+        nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER]
+        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
+        assert checker_end["reason"] == {"kind": "max-steps", "steps": 2}
+        exits = [
+            e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "delegate"
+        ]
+        # The checker's two steps came out of the root's budget of six.
+        assert exits[0]["outcome"] == "budget" and exits[0]["to"] == "quit" and exits[0]["steps"] == 3
+        assert result.trajectory[-1]["data"]["reason"] == {"kind": "gave_up"}
+        handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
+        assert handed[0]["content"] == "checker ended with budget"
+        # A tool call cap ends the turn the same way, before the call runs.
+        capped = ("native_agent", {**CHECKER[1], "max_steps": 6, "max_tool_calls": 1})
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), capped])
+        checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
+        assert checker_end["reason"] == {"kind": "max-tool-calls", "tool_calls": 1}
+        assert len([e for e in result.trajectory if e["type"] == "tool/call"]) == 1
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+def test_an_ask_inside_an_agent_ends_its_turn_and_the_parent_reads_the_reason(tmp_path: Path) -> None:
+    model = _BusyChecker()
+    try:
+        approve = (
+            "native_hook",
+            {
+                "name": "approve_reads",
+                "event": "pre_execute",
+                "code": "def listen(payload, next):\n    return {'kind': 'ask', 'reason': 'read ' + payload['arguments']['path'] + '?'}\n",
+            },
+        )
+        nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", _delegating_graph()), CHECKER, approve]
+        result = _episode(tmp_path, model, nodes, prompt="how many primes are below 100000?")
+        checker_end = next(e["data"] for e in result.trajectory if e["type"] == "turn/end" and e["data"]["turn"] == 2)
+        assert checker_end["reason"] == {"kind": "ask", "reason": "read x?"}
+        # The call never ran: no tool/result in the checker's turn, and no APPROVAL_REQUIRED error for the model.
+        assert not [e for e in result.trajectory if e["type"] == "tool/result"]
+        exits = [
+            e["data"] for e in result.trajectory if e["type"] == "stage/exit" and e["data"]["stage"] == "delegate"
+        ]
+        assert exits[0]["outcome"] == "ask" and exits[0]["to"] == "quit"
+        handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
+        assert handed[0] == {
+            "step": 2,
+            "source": {"kind": "agent", "agent": "checker", "outcome": "ask"},
+            "content": "checker asks: read x?",
+        }
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
+# -- the tree travels as a file: the episode form boots from the entries list --------
+
+
+def _tree_episode(tmp_path: Path, model, entries, tree_entries=None, prompt="put hello in notes.txt and read it back"):
+    """An episode on the rendered files plus the entries list; ``tree_entries`` may differ from the render to probe the boot."""
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    files.update(tree_files(descriptor, entries if tree_entries is None else tree_entries))
+    return run_episode(descriptor, files, prompt, binary=_launcher(tmp_path))
+
+
+def _comparable(trajectory):
+    """The events without what differs between two roots: the clock, the paths, and the boot source the header names."""
+    events = []
+    for event in trajectory:
+        data = json.loads(json.dumps(event["data"]))
+        for key in ("cwd", "tree"):
+            data.pop(key, None)
+        if isinstance(data.get("meta"), dict):
+            data["meta"].pop("duration_ms", None)
+        events.append((event["type"], data))
+    return events
+
+
+def test_a_root_with_an_entries_list_boots_from_it_and_logs_the_same_events(tmp_path: Path, fake_model) -> None:
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    from_files = _episode(tmp_path, fake_model, _seed_nodes(entries))
+    from_tree = _tree_episode(tmp_path, fake_model, entries)
+    assert from_files.trajectory[0]["data"]["tree"] == "files"
+    assert from_tree.trajectory[0]["data"]["tree"] == "tree.json"
+    assert _comparable(from_tree.trajectory) == _comparable(from_files.trajectory)
+    assert from_tree.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    # The boot mounts its modules under the session directory, inside the cleanup whitelist.
+    assert from_tree.residue == () and from_tree.exit_code == 0
+
+
+def test_two_runs_on_one_sessions_directory_boot_from_the_tree_and_leave_no_mount(tmp_path: Path, fake_model) -> None:
+    descriptor = get_adapter("native")
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    for relative, text in {**files, **tree_files(descriptor, entries)}.items():
+        (tmp_path / "root" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "root" / relative).write_text(text, encoding="utf-8")
+    root, sessions, work = tmp_path / "root" / "native", tmp_path / "sessions", tmp_path / "work"
+    work.mkdir()
+    # The wrapper reuses one sessions directory across runs; a boot mount left behind would refuse the next boot.
+    assert run_loop("put hello in notes.txt and read it back", root, sessions, work) == 0
+    assert run_loop("put hello in notes.txt and read it back", root, sessions, work) == 0
+    assert not list((sessions / "mounts").rglob("*.py"))
+    events = [json.loads(line) for line in (sessions / "session.jsonl").read_text().splitlines()]
+    assert events[0]["data"]["tree"] == "tree.json"
+
+
+def test_from_root_prefers_the_entries_list_and_admits_it_through_the_plugins(tmp_path: Path) -> None:
+    descriptor = get_adapter("native")
+    entries = [*SEED_NODES, {"id": "brief", "name": "rules", "config": {"text": "Be brief."}}]
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    for relative, text in {**files, **tree_files(descriptor, entries)}.items():
+        (tmp_path / "root" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "root" / relative).write_text(text, encoding="utf-8")
+    root = tmp_path / "root" / "native"
+    with pytest.raises(LoadError, match=r"tree\.json needs a mount directory"):
+        NativeHost.from_root(root)
+    host = NativeHost.from_root(root, tmp_path / "mounts")
+    assert host.loader is not None and list(host.tools) == ["execute", "read_file", "run_bash", "write_file"]
+    assert sorted(p.name for p in (tmp_path / "mounts" / "tools").glob("*.py")) == [
+        "execute.py",
+        "read_file.py",
+        "run_bash.py",
+        "write_file.py",
+    ]
+    assert host.system_prompt() == "Be brief." and host.graph("main").source == "main"
+    assert [hook.name for hook in host.hooks["post_execute"]] == ["loop_guard"]
+
+    tree = root / "tree.json"
+    tree.unlink()
+    from_files = NativeHost.from_root(root)
+    assert from_files.loader is None and list(from_files.tools) == list(host.tools)
+    assert from_files.system_prompt() == host.system_prompt()
+
+    # A hand edited list cannot run unchecked: the shape, then every entry through its kind's plugin.
+    tree.write_text("[1]", encoding="utf-8")
+    with pytest.raises(LoadError, match="must be a JSON array of entry objects"):
+        NativeHost.from_root(root, tmp_path / "again")
+    tree.write_text(json.dumps([{"id": "x"}]), encoding="utf-8")
+    with pytest.raises(LoadError, match="requires a non-empty string 'name'"):
+        NativeHost.from_root(root, tmp_path / "again")
+    command = {"id": "cmd", "name": "agent_command", "config": {"name": "cmd", "text": "a command"}}
+    tree.write_text(json.dumps([*entries, command]), encoding="utf-8")
+    with pytest.raises(LoadError, match=r"tree\.json entry 'cmd' cannot load: no plugin for kind agent_command"):
+        NativeHost.from_root(root, tmp_path / "again")
+    # A failed boot leaves nothing behind, so the same mount directory serves the next attempt.
+    assert not list((tmp_path / "again").rglob("*.py"))
+    pinned = {"id": "pin", "name": "config", "config": {"target": "models", "data": {"model": "other"}}}
+    tree.write_text(json.dumps([*entries, pinned]), encoding="utf-8")
+    with pytest.raises(LoadError, match=r"tree\.json entry 'pin' cannot load: config: .*cannot set model"):
+        NativeHost.from_root(root, tmp_path / "again")
+    # Two entries under one id would leave the loader with the last one and nobody the wiser.
+    tree.write_text(json.dumps([*entries, {"id": "brief", "name": "rules", "config": {"text": "Again."}}]))
+    with pytest.raises(LoadError, match=r"tree\.json names entry 'brief' twice"):
+        NativeHost.from_root(root, tmp_path / "again")
+
+
+def test_an_entries_list_that_cannot_load_ends_the_episode_naming_the_entry(tmp_path: Path, fake_model) -> None:
+    broken = {
+        "id": "broken",
+        "name": "native_tool",
+        "config": {
+            "name": "broken",
+            "description": "compiles, but defines no run",
+            "parameters": {},
+            "code": "def helper(args, workdir):\n    return 1\n",
+        },
+    }
+    result = _tree_episode(tmp_path, fake_model, [*SEED_TOOLS, broken])
+    assert result.exit_code == 1 and [e["type"] for e in result.trajectory] == ["session", "turn/start", "turn/end"]
+    error = result.trajectory[-1]["data"]["reason"]["error"]
+    assert error["code"] == "LOAD_ERROR"
+    assert error["message"] == (
+        "tree.json entry 'broken' cannot load: native_tool: no top level statement of broken.py binds run(args, workdir)"
+    )
+
+
+def test_a_tool_modules_top_level_runs_nowhere_when_the_tree_loads(tmp_path: Path, fake_model, monkeypatch) -> None:
+    marker = tmp_path / "imported"
+    probe = {
+        "name": "probe",
+        "description": "writes a marker when imported",
+        "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+        "capabilities": ["write"],
+        "code": (
+            f"from pathlib import Path\n\nPath({str(marker)!r}).write_text('imported')\n\n\n"
+            "def run(args, workdir):\n    return 'ran'\n"
+        ),
+    }
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    entries = [*SEED_NODES, {"id": "probe", "name": "native_tool", "config": probe}]
+    files = render_composition([*_seed_nodes(entries), *binding.compose_nodes(descriptor)], descriptor)
+    root = tmp_path / "root"
+    for relative, text in files.items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    task = "put hello in notes.txt and read it back"
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "bwrap").write_text(
+        f"#!{sys.executable}\nimport os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]\nos.execv(argv[0], argv)\n"
+    )
+    (fake / "bwrap").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")
+    # The model never calls probe, so the only way its top level runs is a load that imports it: from the
+    # rendered files, then from the entries list through the host's mount.
+    assert run_loop(task, root / "native", tmp_path / "s1", work) == 0
+    assert not marker.exists()
+    for relative, text in tree_files(descriptor, entries).items():
+        (root / relative).write_text(text, encoding="utf-8")
+    assert run_loop(task, root / "native", tmp_path / "s2", work) == 0
+    assert not marker.exists()
+    for name in ("s1", "s2"):
+        events = [json.loads(line) for line in (tmp_path / name / "session.jsonl").read_text().splitlines()]
+        header = events[0]["data"]
+        assert header["enforcement"] == "bwrap" and header["capabilities"]["probe"] == ["write"]
+        # The declaration the model saw is what the render wrote, read without running the module.
+        declared = [tool for tool in _events(events, "request/header")[0]["data"]["tools"] if "probe" in str(tool)]
+        assert declared == [
+            {
+                "type": "function",
+                "function": {"name": "probe", "description": probe["description"], "parameters": probe["parameters"]},
+            }
+        ]
+    # The in process enforcer loads through the same static read.
+    monkeypatch.delenv("REEF_NATIVE_ENFORCE")
+    assert run_loop(task, root / "native", tmp_path / "s3", work) == 0
+    assert not marker.exists()
+
+
+def test_a_tools_file_the_loop_cannot_read_ends_the_files_form_boot_with_load_error(
+    tmp_path: Path, fake_model
+) -> None:
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    root = tmp_path / "root"
+    for relative, text in render_composition([*_seed_nodes(), *binding.compose_nodes(descriptor)], descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    tools_dir = root / "native" / "tools"
+    dangling = tools_dir / "zz_gone.py"
+    dangling.symlink_to(tmp_path / "nowhere.py")
+    cases = [
+        (
+            dangling,
+            f"zz_gone.py cannot be read: FileNotFoundError: [Errno 2] No such file or directory: {str(dangling)!r}",
+        )
+    ]
+    if os.geteuid() != 0:  # root reads a mode 000 file
+        locked = tools_dir / "zz_locked.py"
+        locked.write_text("def run(args, workdir):\n    return 1\n\nNAME = 'locked'\n")
+        locked.chmod(0)
+        cases.append(
+            (locked, f"zz_locked.py cannot be read: PermissionError: [Errno 13] Permission denied: {str(locked)!r}")
+        )
+    # The seed tools sort first and load; the file the loop cannot read ends the boot as a load error, not a traceback.
+    for index, (path, message) in enumerate(cases):
+        session_dir = tmp_path / f"s{index}"
+        assert run_loop("put hello in notes.txt", root / "native", session_dir, work) == 1
+        events = [json.loads(line) for line in (session_dir / "session.jsonl").read_text().splitlines()]
+        assert [event["type"] for event in events] == ["session", "turn/start", "turn/end"]
+        assert events[0]["data"]["tree"] == "files" and events[0]["data"]["tools"] == []
+        assert events[-1]["data"]["reason"] == {"kind": "error", "error": {"code": "LOAD_ERROR", "message": message}}
+        path.unlink()
+    assert fake_model.requests == []
+
+
+class _ProbeTwiceModel(_FakeModel):
+    """Calls probe twice whatever comes back, then answers with the last result."""
+
+    def script(self, body: dict) -> dict:
+        done = len([m for m in body["messages"] if m.get("role") == "tool"])
+        if done < 2:
+            return _reply(tool_calls=[_call("probe", {}, f"c{done}")])
+        return _reply(content=f"gave up: {body['messages'][-1]['content']}")
+
+
+def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path: Path) -> None:
+    count = tmp_path / "count"
+    probe = (
+        "native_tool",
+        {
+            "name": "probe",
+            "description": "exits the interpreter when imported",
+            "parameters": {},
+            "code": (
+                f"import sys\n\nwith open({str(count)!r}, 'a') as handle:\n    handle.write('x')\nsys.exit(3)\n\n\n"
+                "def run(args, workdir):\n    return 'ran'\n"
+            ),
+        },
+    )
+    model = _ProbeTwiceModel()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), probe], prompt="probe twice")
+    finally:
+        model.shutdown()
+        model.server_close()
+    # The exit is the tool's error in the loop's own process: the top level ran once, both calls fail alike,
+    # and the turn ends the way the model chose.
+    assert result.exit_code == 0, result.stderr
+    assert result.trajectory[0]["data"]["enforcement"] == "none" and count.read_text() == "x"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["error"]) for r in results] == [
+        ("probe", {"code": "TOOL_FAILED", "message": "LoadError: probe.py failed to import: SystemExit: 3"})
+    ] * 2
+    assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"} and len(model.requests) == 3
+
+
+def test_a_builtin_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:
+    tools = {
+        "harness_inspect": ToolModule("harness_inspect", "reef's own", {}, lambda a, w: "tree", builtin_tool=True),
+        "shout": ToolModule("shout", "the tree's", {}, lambda a, w: "loud"),
+    }
+    jailed = BwrapEnforcer()
+    assert tools["harness_inspect"].builtin_tool is True and tools["shout"].builtin_tool is False
+    assert (
+        enforcer_for(tools["harness_inspect"], jailed).mode == "none"
+        and enforcer_for(tools["shout"], jailed) is jailed
+    )
+    assert enforcer_for(tools["shout"], None).mode == "none"
+    assert _invoke(tools, "harness_inspect", "{}", tmp_path, enforcer=jailed)["content"] == "tree"
+    # A tree tool built in code has no module file for the jail to import: only the builtin_tool flag bypasses it.
+    denied = _invoke(tools, "shout", "{}", tmp_path, enforcer=jailed)
+    assert denied["error"]["code"] == "SANDBOX_FAILED" and "no module file" in denied["error"]["message"]
+
+
+def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_published_tree(
+    tmp_path: Path, fake_model
+) -> None:
+    binding = ModelBinding(base_url=fake_model.base_url, model="fake", api_key="dummy")
+    brief = Mutation("create", "brief", {"name": "rules", "config": {"text": "Be brief."}})
+    backend = CordisBackend(
+        descriptor=get_adapter("native"),
+        propose=resolve_proposer(lambda nodes, samples, models: brief),
+        score_episode=resolve_episode_scorer(lambda task, result: 1.0),
+        tasks=("put hello in notes.txt and read it back",),
+        models=binding,
+        binary=_launcher(tmp_path),
+        seed=SEED_NODES,
+    )
+    episode = backend._render_for_episode(SEED_NODES)
+    assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
+    assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
+    batch = TraceBatch("demo:trace:tree", (TraceSample("a1", {"messages": []}, 0.0),))
+    prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+    assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
+    evaluator = DefaultCandidateEvaluationPlugin(backend, AlwaysSelect())
+    settled = backend.settle_step(
+        prepared, evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
+    )
+    assert settled.metrics["selected"] is True and settled.artifact is not None
+    published = settled.artifact.local_path
+    assert published is not None
+    entries = json.loads((published / "native" / "tree.json").read_text(encoding="utf-8"))
+    assert entries == settled.state["entries"] and [entry["id"] for entry in entries][-1] == "brief"
+    assert "base_url" not in (published / "native" / "models.json").read_text(encoding="utf-8")
+
+
+def test_bounded_search_answers_ordinary_patterns_and_gives_up_on_one_that_never_finishes() -> None:
+    from reef.harness.runners.native.graph import bounded_search
+
+    assert bounded_search(r"-?\d+(\.\d+)?", "the answer is 9592.5") is True
+    assert bounded_search(r"^\s*(yes|no)\s*$", "maybe") is False
+    started = time.monotonic()
+    assert bounded_search("(a|a)+b", "a" * 40, timeout_s=0.5) == "timeout"
+    assert time.monotonic() - started < 5.0
+    # The optional group a proposer writes for a numeric answer is admitted and runs.
+    NODE_KINDS["native_graph"](
+        None,
+        {
+            "name": "g",
+            "start": "think",
+            "stages": {
+                "think": {"kind": "model"},
+                "act": {"kind": "tools"},
+                "check": {"kind": "verify", "check": "last_line_matches", "pattern": r"-?\d+(\.\d+)?"},
+                "done": {"kind": "end"},
+            },
+            "edges": [
+                {"from": "think", "when": "tool_calls", "to": "act"},
+                {"from": "think", "when": "text", "to": "check"},
+                {"from": "act", "when": "done", "to": "think"},
+                {"from": "check", "when": "pass", "to": "done"},
+                {"from": "check", "when": "fail", "to": "think"},
+            ],
+        },
+    )
+
+
+def test_a_search_with_no_answer_is_a_miss_named_in_the_stage_detail(tmp_path: Path, monkeypatch) -> None:
+    """A pattern that never finishes, in a branch case and in a verify check: the turn goes on, the case does not
+    hold, the check fails, and each stage's detail says why; a child that cannot start reads the same way."""
+    from reef.harness.runners.native import graph as graphs
+
+    class _LongA(_FakeModel):
+        def script(self, body: dict) -> dict:
+            return _reply(content="a" * 40)
+
+    graph = {
+        "name": "main",
+        "start": "think",
+        "max_steps": 4,
+        "stages": {
+            "think": {"kind": "model"},
+            "act": {"kind": "tools"},
+            "route": {
+                "kind": "branch",
+                "cases": [{"when": "last_text_matches", "value": "(a|a)+b", "outcome": "boom"}],
+            },
+            "check": {"kind": "verify", "check": "last_line_matches", "pattern": "(a|a)+b", "message": "again"},
+            "done": {"kind": "end"},
+        },
+        "edges": [
+            {"from": "think", "when": "tool_calls", "to": "act"},
+            {"from": "think", "when": "text", "to": "route"},
+            {"from": "act", "when": "done", "to": "think"},
+            {"from": "route", "when": "boom", "to": "done"},
+            {"from": "route", "when": "else", "to": "check"},
+            {"from": "check", "when": "pass", "to": "done"},
+            {"from": "check", "when": "fail", "to": "done"},
+        ],
+    }
+    monkeypatch.setattr(graphs, "NATIVE_PATTERN_TIMEOUT_S", 0.3)
+    model = _LongA()
+    try:
+        result = _episode(tmp_path, model, [*_seed_nodes(SEED_TOOLS), ("native_graph", graph)], prompt="go")
+    finally:
+        model.shutdown()
+    exits = {e["data"]["stage"]: e["data"] for e in _events(result.trajectory, "stage/exit")}
+    assert result.exit_code == 0 and result.trajectory[-1]["data"]["reason"] == {"kind": "completed"}
+    assert exits["route"]["outcome"] == "else" and exits["route"]["timeout"] == ["(a|a)+b"]
+    assert exits["check"]["outcome"] == "fail" and exits["check"]["pattern"] == "timeout"
+    # The message a failed verify appends went out even though the search gave no answer.
+    assert any(e["data"].get("source", {}).get("stage") == "check" for e in _events(result.trajectory, "user/message"))
+
+    def refuse(*args, **kwargs):
+        raise BlockingIOError(35, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(graphs.subprocess, "run", refuse)
+    assert graphs.bounded_search(r"\d+", "42") == "unavailable"

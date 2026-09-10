@@ -8,12 +8,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactRef, LiveWeightArtifactRef
+from reef.artifact.artifact import (
+    Artifact,
+    ArtifactConflict,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    ArtifactRef,
+    LiveWeightArtifactRef,
+)
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendFactory,
+    StagedReleaseRepositoryBackend,
 )
 from reef.core.errors import ReefError
 from reef.observability import ExperimentLogger, ExperimentTracker
@@ -22,6 +30,7 @@ from reef.records import RecordStore
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot import (
     SCENARIO_SNAPSHOT_METADATA_KEY,
@@ -111,12 +120,32 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
     ) -> None:
         self._recipe = recipe
+        self._model_configs: dict[str, ScenarioModelConfig] = {}
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
         self._experiment_tracker = experiment_tracker
         if self._agent_record_dir is not None:
             self._agent_record_dir.mkdir(parents=True, exist_ok=True)
+
+    def model_config(self, scenario: str) -> ScenarioModelConfig:
+        if scenario not in self._model_configs:
+            path = (
+                None
+                if self._agent_record_dir is None
+                else self._agent_record_dir / f"{self._scenario_key(scenario)}-model.json"
+            )
+            self._model_configs[scenario] = ScenarioModelConfig(path)
+        return self._model_configs[scenario]
+
+    def forget_model_config(self, scenario: str) -> None:
+        self._model_configs.pop(scenario, None)
+
+    def configure_model(self, scenario: str, value: object) -> None:
+        config = ScenarioModelConfig()
+        config.save(value)
+        self._recipe.with_model_config(config)
+        self.model_config(scenario).save(value)
 
     def has_registration(self, scenario: str) -> bool:
         """True when the scenario is durably registered with the backend."""
@@ -131,6 +160,10 @@ class ScenarioFactory:
     ) -> Scenario:
         """Create or recover a scenario in this deployment's repository."""
         backend = self._backend_factory(scenario)
+        if self._agent_record_dir is not None and not isinstance(backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError(
+                "scenarios with a commit log require a backend implementing StagedReleaseRepositoryBackend"
+            )
         metadata = backend.metadata()
         snapshot_data = None if metadata is None else metadata.get(SCENARIO_SNAPSHOT_METADATA_KEY)
         if snapshot_data is not None:
@@ -203,7 +236,7 @@ class ScenarioFactory:
             backend,
             release_id,
         )
-        recipe_definition = self._recipe
+        recipe_definition = self._recipe.with_model_config(self.model_config(scenario))
         surface = recipe_definition.build_surface(scenario)
         runtime = recipe_definition.runtime
         checkpoint_head = backend.current()
@@ -226,6 +259,18 @@ class ScenarioFactory:
             else _RecoveredHead.from_snapshot(snapshot)
         )
 
+        # Publication stages durable bytes before the commit record is durable, while
+        # the backend's head is only a post-commit mirror. A crash between the
+        # two leaves the commit log's checkpoint ahead of that pointer.
+        if commit_log is not None:
+            checkpoints = [
+                record
+                for record in commit_log.records()
+                if record.checkpoint and not record.pending and record.step >= snapshot.scenario_step
+            ]
+            if checkpoints:
+                checkpoint_head = checkpoints[-1].artifact_ref
+
         current_artifact = (
             checkpoint_head
             if surface.loader is None
@@ -239,6 +284,7 @@ class ScenarioFactory:
             checkpoint_artifact=checkpoint_head,
             local_dir=self._local_artifact_dir,
         )
+        repository.synchronize_checkpoint()
         if isinstance(surface.loader, ArtifactActivator) and not isinstance(current_artifact, LiveWeightArtifactRef):
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
@@ -272,6 +318,26 @@ class ScenarioFactory:
 
     def _scenario_key(self, scenario: str) -> str:
         return hashlib.sha256(scenario.encode("utf-8")).hexdigest()
+
+    def state_paths(self, scenario: str) -> tuple[Path, ...]:
+        """The files under ``agent_record_dir`` that are this scenario's alone: its record store and its commit log."""
+        if self._agent_record_dir is None:
+            return ()
+        key = self._scenario_key(scenario)
+        return tuple(
+            self._agent_record_dir / name
+            for name in (
+                f"{key}.sqlite3",
+                f"{key}.sqlite3-wal",
+                f"{key}.sqlite3-shm",
+                f"{key}.commits.jsonl",
+                f"{key}-model.json",
+            )
+        )
+
+    @property
+    def agent_record_dir(self) -> Path | None:
+        return self._agent_record_dir
 
     def _commit_log_for(self, scenario: str) -> CommitLog | None:
         if self._agent_record_dir is None:
@@ -316,6 +382,7 @@ class ScenarioFactory:
         )
         return Scenario(
             name=scenario,
+            model_config=self.model_config(scenario),
             binding=ScenarioBinding(
                 surface=surface,
                 runtime=recipe_definition.runtime,
@@ -342,12 +409,16 @@ class ScenarioFactory:
         experiment_logger: ExperimentLogger,
     ) -> Trainer:
         """Build a recipe trainer with the complete current recipe contract."""
-        return recipe.build(
+        trainer = recipe.build(
             scenario,
             records,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
+        if trainer.training_mode != recipe.training_mode:
+            trainer.close()
+            raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+        return trainer
 
     def _artifact_selector_matches(
         self,

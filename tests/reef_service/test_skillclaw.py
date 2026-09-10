@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from reef.core import AgentRecord, RequestType
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
@@ -150,7 +150,7 @@ def night_llm(
         for name, decision in (decisions or {}).items():
             if f"``{name}``" in system:
                 return json.dumps(decision)
-        return json.dumps({"action": "skip", "rationale": "no evidence"})
+        return json.dumps({"action": "skip", "rationale": "no useful session details"})
 
     monkeypatch.setattr(example["evolver"], "chat_client", lambda model: chat)
 
@@ -285,7 +285,7 @@ def test_propose_maps_a_remove_requesting_decision_to_no_remove(skillclaw, examp
     assert all(mutation.op in ("create", "update") for mutation in mutations)
 
 
-def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
+def test_the_day_reports_feed_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
     sample = TraceSample("ref-1", PAYLOAD_PLAIN, -1.0)
     fallback = skillclaw._fallback_meta(sample)
     assert fallback["score"] is None  # -1.0 is the unscored sentinel, not a grade
@@ -314,6 +314,25 @@ def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillcl
 
 
 # -- the recipe: yaml boot, delivery surface --------------------------------
+
+
+@pytest.mark.parametrize("selector", ["role", "worker"])
+def test_driver_preserves_executor_profiles(driver, monkeypatch, selector):
+    monkeypatch.setenv("REEF_MODEL", "test-model")
+    monkeypatch.setenv("REEF_PI_BINARY", "pi")
+    monkeypatch.setenv("REEF_SC_SKILLS", "")
+    config = driver.load_config(EXAMPLE_DIR / "skillclaw.yaml")
+    config["evolution"]["seed_skills"] = ""
+    config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
+    config["execution"] = {"evolution": "cpu-pool"}
+    if selector == "worker":
+        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["execution"]["evolution"] = "uni"
+    monkeypatch.setattr(driver, "load_config", lambda path: config)
+    monkeypatch.setattr(driver, "read_key", lambda: "dummy")
+    recipe = driver.load_recipe()
+    assert recipe.worker_executor.backend == "mp"
+    assert recipe.episode_workers == 2
 
 
 def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, monkeypatch) -> None:
@@ -373,7 +392,7 @@ def test_seed_skill_directory_names_land_verbatim(example, tmp_path) -> None:
     assert entry["id"] == "self-improving-agent-3.0.5"
     assert entry["config"]["name"] == "self-improving-agent-3.0.5"
     from reef.harness.adapters import get_adapter
-    from reef.harness.render import render_composition
+    from reef.harness.tree.render import render_composition
 
     files = render_composition((("skill", entry["config"]),), get_adapter("pi"))
     assert "pi-agent/skills/self-improving-agent-3.0.5/SKILL.md" in files
@@ -532,7 +551,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
 
         assert service.training_versions() == 0
         step_before = service.training_step()
-        results = driver.run_day(service, client, round_dir, 1, driver.Ledger(run_dir / "ledger.jsonl"))
+        results = driver.run_day(service, client, round_dir, 1, driver.EventLog(run_dir / "events.jsonl"))
         assert driver.category_scores(results) == {"01_Demo": 100.0}  # unscored stays out of the mean
         assert sorted(result["task_id"] for result in results) == ["one", "two"]
 
@@ -540,7 +559,9 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert service.training_versions() == 1
         manifest = driver.pull_pool(client, service, tmp_path / "pulled")
         assert manifest["gate"]["published"] is True
-        assert manifest["gate"]["mutation"] == {"op": "create", "id": "csv-median"}
+        mutation = manifest["gate"]["mutation"]
+        assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("create", "csv-median", "skill")
+        assert "Sort, take the middle." in mutation["options"]["config"]["text"]
         assert "Sort, take the middle." in manifest["files"]["pi-agent/skills/csv-median/SKILL.md"]
 
         # The served pool's catalog section appears in the recorded request
@@ -555,7 +576,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert "## Skills (mandatory)" in system["content"]
         assert catalog_cls.catalog_names(payload) == ("answer-style",)
 
-        # The day ledger the night read is on disk, keyed by the reference.
+        # The day reports read by the night step are on disk, keyed by reference.
         reports = sorted((round_dir / "reports").glob("*.json"))
         assert [json.loads(path.read_text())["task_id"] for path in reports] == ["one", "two"]
 
@@ -674,7 +695,7 @@ def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> Non
 def test_evolver_chat_client_runs_their_loop_over_the_model_binding(example) -> None:
     """The ported retry loop now drives reef's binding: temperature dropped
     on the provider's 400, stream-only fallback folded, model never named."""
-    from reef.harness.model_binding import ModelBindingError
+    from reef.harness.episodes.model_binding import ModelBindingError
 
     evolver = example["evolver"]
     seen: list[dict[str, Any]] = []

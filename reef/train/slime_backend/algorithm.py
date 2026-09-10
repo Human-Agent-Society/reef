@@ -34,7 +34,7 @@ implementations — override only what your algorithm needs):
        train step, for families that keep state on the actor (a frozen
        teacher, for one).
     6. **train step**  — ``train``: critic→actor orchestration on the bridge
-       actor; ``provenance_metrics`` for telemetry.
+       actor; ``rollout_metrics`` for telemetry.
 
 Stages 1-4 and 6 run in the driver process.  Stage 5 runs in Megatron workers
 that only receive a serialized ``args`` Namespace.  The driver stamps
@@ -188,7 +188,7 @@ class SlimeAlgorithm(ABC):
         ``bind``                      — return a runtime-bound instance.
         ``prepare_rollout``           — pre-training work on the bridge actor.
         ``train``                     — critic→actor orchestration.
-        ``provenance_metrics``        — telemetry after training.
+        ``rollout_metrics``           — telemetry after training.
     """
 
     # --- required class attributes (set in subclass) ---
@@ -334,7 +334,7 @@ class SlimeAlgorithm(ABC):
         results = resolve(actor_group.async_train(rollout_id, rollout_data_refs))
         return TrainResult(worker_results=list(results or ()))
 
-    def provenance_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
+    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
         """Return telemetry metrics after training. Default: none."""
         return {}
 

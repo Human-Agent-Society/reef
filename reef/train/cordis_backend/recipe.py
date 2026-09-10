@@ -12,27 +12,41 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 from __future__ import annotations
 
 import importlib
+import warnings
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
-from reef.harness.descriptor import DescriptorError
-from reef.harness.executor import EpisodeExecutor, build_executor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.version_check import version_check_entry
+from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.episodes.executor import EpisodeExecutor, build_executor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.requests import request_entries
+from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.tree.render import render_composition
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
+from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend import CordisBackend, EpisodeScorer, Promoter, Proposer, ScoreComparisonSelector
+from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonSelector, tree_files
+from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    resolve_episode_scorer,
+    resolve_promoter,
+    resolve_proposer,
+)
 from reef.train.evaluation.contracts import CandidateSelector
 from reef.train.evaluation.evaluators import AlwaysSelect, DefaultCandidateEvaluationPlugin
 from reef.train.trainer import Trainer
@@ -41,6 +55,19 @@ _CANDIDATE_SELECTORS: dict[str, CandidateSelector] = {
     "score_comparison": ScoreComparisonSelector(),
     "always": AlwaysSelect(),
 }
+
+
+@dataclass(frozen=True)
+class _ScenarioModels:
+    config: ScenarioModelConfig
+    recipe: CordisRecipe
+
+    def resolve(self) -> ModelBindings:
+        runtime = self.config.runtime
+        if runtime is None:
+            return self.recipe.default_model_bindings()
+        served = ModelBinding.from_runtime(runtime)
+        return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
 
 def _resolve_callable(value: Any, what: str) -> Any:
@@ -56,6 +83,20 @@ def _resolve_callable(value: Any, what: str) -> Any:
         if callable(resolved):
             return resolved
     raise RecipeConfigError(f"{what} must be a callable or a dotted 'module:attribute' reference")
+
+
+def _resolve_seed_entries(value: str) -> Sequence[Mapping[str, Any]]:
+    """The entry sequence a dotted ``module:attribute`` seed reference names."""
+    module_name, _, attribute = value.partition(":")
+    try:
+        resolved = getattr(importlib.import_module(module_name), attribute)
+    except (ImportError, AttributeError) as exc:
+        raise RecipeConfigError(f"cannot import evolution.seed reference {value!r}: {exc}") from exc
+    if isinstance(resolved, str) or not isinstance(resolved, Sequence):
+        raise RecipeConfigError(f"evolution.seed reference {value!r} must name a sequence of entry option mappings")
+    if not all(isinstance(entry, Mapping) for entry in resolved):
+        raise RecipeConfigError(f"evolution.seed reference {value!r} must name a sequence of entry option mappings")
+    return resolved
 
 
 def _resolve_candidate_selector(value: Any) -> CandidateSelector:
@@ -82,19 +123,40 @@ class CordisRecipe(Recipe):
     Config shape (the ``evolution`` section): ``adapter`` (a name
     ``reef.harness.adapters.get_adapter`` resolves), ``propose`` and
     ``evaluate`` (callables or dotted references), ``tasks`` (the episode
-    prompts scored per step), optional ``binary`` (a path overriding the
-    adapter's binary name - the seam tests drive a fake harness through),
+    prompts scored per step), optional ``binary`` (a path to the harness
+    binary; left unset, backend construction installs the adapter descriptor's
+    pinned version through the vendor's own channel, into the same prefix a
+    client's install script uses - see :mod:`reef.harness.episodes.vendor_install`),
     optional ``seed`` (a list of entry options - id, name, config -
-    loaded into the composition tree on first boot; a recovered algorithm
-    state always wins over the seed), optional ``selection`` (the
+    loaded into the composition tree on first boot, where an item may also
+    be a dotted ``module:attribute`` naming a sequence of them; a recovered
+    algorithm state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``always``;
     or a dotted reference to an object implementing ``decide``), optional
-    ``episode_workers`` (how many evaluation episodes run at once, default
-    one; a large task set is one wave instead of a long turn-taking pass),
+    optional ``step_record_dir`` (a directory under which every scenario's
+    steps write the proposer's model calls, the parsed proposal and each gate
+    episode's trajectory files, so the decision is reconstructible; off by
+    default),
+    optional ``client_models`` (further model names the installed client
+    may switch to; the install script renders them into its config beside
+    the served model, which stays the default),
     and optional ``version_check``
     (``true`` appends the adapter's shipped update notice extension to the
     seed, so every pulled tree tells its user at startup when it is behind
-    the channel head; adapters without a shipped extension refuse boot).
+    the channel head; adapters without a shipped extension refuse boot),
+    optional ``requests`` (``true`` appends the adapter's shipped harness requests
+    extension and its pi extension API skill to the seed after the notice,
+    so a session can ask for a harness change from the TUI and the method
+    reads the API reference before it writes an extension; same refusal for
+    adapters without one),
+    the agent proposal inbox: ``proposals_dir`` (default
+    ``.reef/proposals``, one directory per scenario under it, created when
+    the first proposal arrives) and ``max_pending_proposals`` (default 8,
+    the number of admitted proposals a scenario holds before the route
+    refuses more).
+
+    Worker placement/count/resources live under ``execution.evolution``, not
+    the business configuration. Legacy ``episode_workers`` remains an alias.
 
     The model under test is the recipe's inference runtime - the
     deployment's ``reef.upstream_url`` / ``reef.upstream_model`` (and
@@ -141,27 +203,42 @@ class CordisRecipe(Recipe):
     executor: EpisodeExecutor = field(default_factory=lambda: build_executor(None))
     promote_failures: bool = False
     max_promoted_tasks: int = 50
+    max_promoted_per_client: int = 5
     promote: Promoter | None = None
     recheck_every: int = 0
     max_rejected_history: int = 25
     min_win_margin: int = 0
     publish: str = "auto"
     review_kinds: tuple[str, ...] = ()
+    #: Models an installed client may switch to besides the served one, rendered into its config.
+    client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     candidate_selector: CandidateSelector = field(default_factory=ScoreComparisonSelector, repr=False)
-    episode_workers: int = 1
+    episode_workers: int | None = None  # Deprecated Python compatibility alias.
+    #: Default proposal inbox root, with one directory per scenario.
+    proposals_dir: str = ".reef/proposals"
+    max_pending_proposals: int = 8
+    step_record_dir: str | None = None
+    worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
+    worker_gpus: float | None = None
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
+    scenario_model: ScenarioModelConfig | None = field(default=None, repr=False, kw_only=True)
+
+    def with_model_config(self, config: ScenarioModelConfig) -> CordisRecipe:
+        super().with_model_config(config)
+        return replace(self, scenario_model=config)
 
     @property
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if not isinstance(self.propose, Proposer):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_episode, EpisodeScorer):
@@ -170,8 +247,10 @@ class CordisRecipe(Recipe):
             raise ValueError("harness evolution requires tasks")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.episode_workers < 1:
-            raise ValueError("episode_workers must be positive")
+        settings = legacy_worker_settings(self.worker_executor, self.episode_workers, self.worker_gpus)
+        _, requirements = evaluation_selection(self.score_episode, None, settings)
+        object.__setattr__(self, "worker_executor", settings)
+        object.__setattr__(self, "episode_workers", requirements.workers)
         if self.batch_policy not in ("reports", "records"):
             raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
@@ -192,6 +271,14 @@ class CordisRecipe(Recipe):
             raise ValueError("publish must be 'auto' or 'review'")
         if not callable(getattr(self.candidate_selector, "decide", None)):
             raise ValueError("candidate_selector must provide decide(candidate, evaluation)")
+        if not isinstance(self.proposals_dir, str) or not self.proposals_dir.strip():
+            raise ValueError("proposals_dir must be a non-empty path")
+        if isinstance(self.max_pending_proposals, bool) or self.max_pending_proposals < 1:
+            raise ValueError("max_pending_proposals must be an integer of at least 1")
+        if self.step_record_dir is not None and (
+            not isinstance(self.step_record_dir, str) or not self.step_record_dir
+        ):
+            raise ValueError("step_record_dir must be a non-empty path when set")
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
@@ -214,7 +301,7 @@ class CordisRecipe(Recipe):
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
         try:
-            executor = build_executor(evolution)
+            executor = build_executor(evolution, environ=values)
         except ReefError as exc:
             raise RecipeConfigError(str(exc)) from exc
         budget_defaults = {
@@ -237,14 +324,24 @@ class CordisRecipe(Recipe):
         max_promoted_tasks = evolution.get("max_promoted_tasks", 50)
         if isinstance(max_promoted_tasks, bool) or not isinstance(max_promoted_tasks, int) or max_promoted_tasks < 0:
             raise RecipeConfigError("evolution.max_promoted_tasks must be an integer of at least 0")
+        per_client = evolution.get("max_promoted_per_client", 5)
+        if isinstance(per_client, bool) or not isinstance(per_client, int) or per_client < 0:
+            raise RecipeConfigError("evolution.max_promoted_per_client must be an integer of at least 0")
         seed = evolution.get("seed")
         if seed is None:
             seed = ()
         elif not isinstance(seed, Sequence) or isinstance(seed, str):
             raise RecipeConfigError("evolution.seed must be a list of entry option mappings")
+        entries: list[Mapping[str, Any]] = []
         for entry in seed:
-            if not isinstance(entry, Mapping):
-                raise RecipeConfigError("evolution.seed entries must be entry option mappings")
+            # A dotted reference names a shipped sequence, such as the native harness's seed tools and hook.
+            if isinstance(entry, str) and ":" in entry:
+                entries.extend(_resolve_seed_entries(entry))
+            elif isinstance(entry, Mapping):
+                entries.append(entry)
+            else:
+                raise RecipeConfigError("evolution.seed entries must be entry option mappings or dotted references")
+        seed = entries
         if "acceptance" in evolution:
             raise RecipeConfigError("evolution.acceptance was removed; configure evolution.selection")
         selection = evolution.get("selection", "score_comparison")
@@ -261,6 +358,11 @@ class CordisRecipe(Recipe):
             raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
         if not all(isinstance(kind, str) and kind for kind in review_kinds):
             raise RecipeConfigError("evolution.review_kinds must be a list of node kind names")
+        client_models = evolution.get("client_models", ())
+        if isinstance(client_models, str) or not isinstance(client_models, Sequence):
+            raise RecipeConfigError("evolution.client_models must be a list of model names")
+        if not all(isinstance(name, str) and name for name in client_models):
+            raise RecipeConfigError("evolution.client_models must be a list of model names")
         adapter = str(evolution.get("adapter", "pi"))
         version_check = evolution.get("version_check", False)
         if not isinstance(version_check, bool):
@@ -268,6 +370,14 @@ class CordisRecipe(Recipe):
         if version_check:
             try:
                 seed = (*seed, version_check_entry(adapter))
+            except DescriptorError as exc:
+                raise RecipeConfigError(str(exc)) from exc
+        requests = evolution.get("requests", False)
+        if not isinstance(requests, bool):
+            raise RecipeConfigError("evolution.requests must be a boolean")
+        if requests:
+            try:
+                seed = (*seed, *request_entries(adapter))
             except DescriptorError as exc:
                 raise RecipeConfigError(str(exc)) from exc
         model = settings.get("model")
@@ -288,16 +398,60 @@ class CordisRecipe(Recipe):
         if "served" in models:
             raise RecipeConfigError("evolution.models may not name a model 'served'; that is the model under test")
         # A ``${VAR}`` interpolation arrives as text, so a digit string counts.
-        raw_workers = evolution.get("episode_workers", 1)
+        raw_workers = evolution.get("episode_workers")
         if isinstance(raw_workers, str) and raw_workers.strip().isdigit():
             raw_workers = int(raw_workers)
-        if isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1:
+        if "episode_workers" in evolution and (
+            isinstance(raw_workers, bool) or not isinstance(raw_workers, int) or raw_workers < 1
+        ):
             raise RecipeConfigError("evolution.episode_workers must be a positive integer")
         episode_workers = raw_workers
+        proposals_dir = evolution.get("proposals_dir", cls.proposals_dir)
+        if not isinstance(proposals_dir, str) or not proposals_dir.strip():
+            raise RecipeConfigError("evolution.proposals_dir must be a non-empty path")
+        max_pending = evolution.get("max_pending_proposals", 8)
+        if isinstance(max_pending, bool) or not isinstance(max_pending, int) or max_pending < 1:
+            raise RecipeConfigError("evolution.max_pending_proposals must be an integer of at least 1")
+        step_record_dir = evolution.get("step_record_dir")
+        if step_record_dir is not None and (not isinstance(step_record_dir, str) or not step_record_dir.strip()):
+            raise RecipeConfigError("evolution.step_record_dir must be a non-empty path when set")
+        try:
+            role_settings = role_executor_settings(settings, "evolution")
+            if "worker_executor" in evolution and (
+                role_settings.workers is not None or role_settings.resources != WorkerResources()
+            ):
+                raise ValueError(
+                    "remove deprecated evolution.worker_executor when execution.evolution defines workers/resources"
+                )
+            worker_executor = (
+                executor_settings(settings, evolution["worker_executor"])
+                if "worker_executor" in evolution
+                else role_settings
+            )
+            resources = evolution.get("worker_resources", {})
+            if not isinstance(resources, Mapping) or set(resources) - {"num_gpus"}:
+                raise ValueError("evolution.worker_resources accepts only num_gpus")
+            worker_gpus = resources.get("num_gpus")
+            if any(key in evolution for key in ("episode_workers", "worker_executor", "worker_resources")):
+                warnings.warn(
+                    "evolution.episode_workers/worker_executor/worker_resources are deprecated; "
+                    "use execution.evolution.backend/workers/resources",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+            worker_executor = legacy_worker_settings(worker_executor, episode_workers, worker_gpus)
+            scorer = resolve_episode_scorer(evolution.get("evaluate"))
+            evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
+        except (TypeError, ValueError) as exc:
+            raise RecipeConfigError(str(exc)) from exc
         return {
+            "proposals_dir": proposals_dir.strip(),
+            "max_pending_proposals": max_pending,
             "propose": resolve_proposer(evolution.get("propose")),
             "promote": resolve_promoter(evolution["promote"]) if "promote" in evolution else None,
-            "score_episode": resolve_episode_scorer(evolution.get("evaluate")),
+            "score_episode": scorer,
+            "worker_executor": worker_executor,
+            "worker_gpus": worker_gpus,
             "tasks": tuple(str(task) for task in tasks),
             "adapter": adapter,
             "binary": binary,
@@ -308,13 +462,16 @@ class CordisRecipe(Recipe):
             "executor": executor,
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,
+            "max_promoted_per_client": per_client,
             "publish": publish,
             "review_kinds": tuple(review_kinds),
+            "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
             "candidate_selector": candidate_selector,
             "episode_workers": episode_workers,
+            "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
     def model_binding(self) -> ModelBinding:
@@ -329,12 +486,46 @@ class CordisRecipe(Recipe):
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
 
-    def model_bindings(self) -> ModelBindings:
-        """What ``propose`` receives: the served model plus ``evolution.models``."""
+    def default_model_bindings(self) -> ModelBindings:
         return ModelBindings(served=self.model_binding(), named=dict(self.models))
 
+    def model_bindings(self) -> ModelBindings:
+        """The scenario's model override, or the recipe's served and named models."""
+        if self.scenario_model is not None:
+            return _ScenarioModels(self.scenario_model, self).resolve()
+        return self.default_model_bindings()
+
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
+        model = self.model_name or getattr(self.runtime, "model_path", None)
+        client_models = self.client_models
+        override = self.scenario_model.runtime if self.scenario_model is not None else None
+        if override is not None:
+            model = override.model_path
+            client_models = ()
+        return create_harness_surface(
+            seed_entries=tuple(dict(entry) for entry in self.seed),
+            served_model=model if isinstance(model, str) and model else None,
+            client_models=client_models,
+        )
+
+    def base_artifact_files(self) -> Mapping[str, str] | None:
+        """The seed rendered for the adapter, with its entries list where the adapter carries one: a fresh scenario serves it before any step publishes."""
+        if not self.seed:
+            return None
+        descriptor = get_adapter(self.adapter)
+        nodes = tuple((str(entry["name"]), entry.get("config")) for entry in self.seed if not entry.get("disabled"))
+        return {**render_composition(nodes, descriptor), **tree_files(descriptor, self.seed)}
+
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """The scenario's proposal inbox and its step records: what a delete archives beside the record store."""
+        dirs = [self.proposals_path(scenario)]
+        if self.step_record_dir is not None:
+            dirs.append(Path(self.step_record_dir).expanduser().resolve() / scenario)
+        return tuple(dirs)
+
+    def proposals_path(self, scenario: str) -> Path:
+        """The scenario's proposal inbox: ``proposals_dir`` made absolute, one directory per scenario under it."""
+        return Path(self.proposals_dir).expanduser().resolve() / scenario
 
     def build(
         self,
@@ -344,7 +535,14 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        training_backend = CordisBackend(**self._backend_kwargs())
+        kwargs = self._backend_kwargs()
+        if self.scenario_model is not None:
+            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self)
+        # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
+        # so the path a commit record names resolves from any working directory.
+        if kwargs["step_record_dir"] is not None:
+            kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
+        training_backend = CordisBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
         return self._build_trainer(
             scenario,
             records,
@@ -371,13 +569,16 @@ class CordisRecipe(Recipe):
             "max_model_calls_per_step": self.max_model_calls_per_step,
             "promote_failures": self.promote_failures,
             "max_promoted_tasks": self.max_promoted_tasks,
+            "max_promoted_per_client": self.max_promoted_per_client,
             "promote": self.promote,
             "recheck_every": self.recheck_every,
             "max_rejected_history": self.max_rejected_history,
             "publish": self.publish,
             "review_kinds": self.review_kinds,
             "seed": self.seed,
-            "episode_workers": self.episode_workers,
+            "max_pending_proposals": self.max_pending_proposals,
+            "step_record_dir": self.step_record_dir,
+            "worker_executor": self.worker_executor,
         }
 
     def _build_trainer(
@@ -389,17 +590,29 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
     ) -> Trainer:
+        if self.training_mode != "auto" and not self.propose.reads_requests:
+            raise RecipeConfigError(
+                f"harness evolution in training_mode={self.training_mode!r} requires a proposer "
+                "that accepts the 'requests' keyword"
+            )
         return Trainer.build(
             scenario,
             records,
             processor_factory=lambda context: (
-                RecordDrivenTraceProcessor(context.with_config({"batch_size": self.batch_size}))
-                if self.batch_policy == "records"
-                else CordisProcessor(context.with_config({"batch_size": self.batch_size, "max_score": self.max_score}))
+                RecordDrivenTraceProcessor if self.batch_policy == "records" else CordisProcessor
+            )(
+                context.with_config(
+                    {
+                        "batch_size": self.batch_size,
+                        "max_score": self.max_score,
+                        "manual_enabled": self.propose.reads_requests,
+                    }
+                )
             ),
             training_backend=training_backend,
             candidate_evaluator=DefaultCandidateEvaluationPlugin(training_backend, self.candidate_selector),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
         )

@@ -16,7 +16,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, LATEST_JOB_MARKER_FILENAME, SCENARIO_LEDGER_FILENAME
+from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, LATEST_JOB_MARKER_FILENAME, SCENARIO_HISTORY_FILENAME
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import fsync_dir as _fsync_dir
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import mkdir_durable as _mkdir_durable
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json as _read_json
@@ -83,8 +83,10 @@ class CheckpointStorage:
         source_megatron: str | Path | None = None,
         measure: Callable[[Path], int] | None = None,
         disk_usage: Callable[[Path], Any] = shutil.disk_usage,
+        lora: bool = False,
     ) -> None:
         self.config = config
+        self._lora = bool(lora)
         template = Path(hf_template).expanduser()
         if "{rollout_id}" not in template.name:
             raise ValueError("HF checkpoint template must contain {rollout_id} in its basename")
@@ -313,10 +315,10 @@ class CheckpointStorage:
     def _unknown_assets(self, known: set[Path]) -> list[str]:
         unknown: list[str] = []
         # Control files Reef itself keeps in the managed roots: the job marker
-        # and the LoRA scenario ledger beside the HF exports, and the
+        # and the LoRA scenario history beside the HF exports, and the
         # adapter-slot snapshots beside the Megatron checkpoints.
         roots = [
-            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_LEDGER_FILENAME}),
+            (self.hf_root, LATEST_JOB_MARKER_FILENAME, {SCENARIO_HISTORY_FILENAME}),
             (self.megatron_root, "latest_checkpointed_iteration.txt", {ADAPTER_SLOTS_DIRNAME}),
         ]
         if self.critic_root is not None:
@@ -363,6 +365,8 @@ class CheckpointStorage:
         # HF export + model, FP32 master weights, and two Adam moments; the
         # critic checkpoint (when configured) is a second full model plus
         # optimizer state of roughly the same footprint.
+        if self._lora:
+            return int(1.2 * max(hf_bytes, megatron_bytes))
         training_state = 8 * hf_bytes * (2 if self.critic_root is not None else 1)
         return max(hf_bytes + megatron_bytes, training_state)
 

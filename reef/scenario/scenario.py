@@ -16,6 +16,7 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.model_config import ScenarioModelConfig
 from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_metadata_for
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
@@ -35,6 +36,7 @@ class Scenario:
         checkpoint_strategy: CheckpointStrategy,
         records: RecordStore,
         trainer: Trainer,
+        model_config: ScenarioModelConfig | None = None,
         scenario_step: int = 0,
         process_id: str | None = None,
         commit_log: CommitLog | None = None,
@@ -42,6 +44,7 @@ class Scenario:
     ) -> None:
         self._name = name
         self._binding = binding
+        self.model_config = model_config or ScenarioModelConfig()
         self._surface = binding.surface
         self._records = records
         self._trainer = trainer
@@ -64,7 +67,7 @@ class Scenario:
     @property
     def runtime(self) -> InferenceRuntime | None:
         """Inference or training runtime bound to this scenario."""
-        return self._binding.runtime
+        return self.model_config.runtime or self._binding.runtime
 
     @property
     def report_type(self) -> type[ReportBase] | None:
@@ -73,7 +76,8 @@ class Scenario:
 
     @property
     def inference_backend(self) -> InferenceBackend | None:
-        return self._binding.inference_backend
+        runtime = self.model_config.runtime
+        return runtime.inference_backend if runtime is not None else self._binding.inference_backend
 
     @property
     def repository(self) -> Repository:
@@ -110,6 +114,10 @@ class Scenario:
         """The serving surface built for this scenario."""
         return self._surface
 
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches without waiting for a running backend step."""
+        self._trainer.set_training_mode(training_mode)
+
     def prepare_training_step(self) -> TrainStepResult | None:
         """Prepare one local-backend step while excluding rollback and commit."""
         with self._commit_protocol.lock:
@@ -141,12 +149,12 @@ class Scenario:
 
     @property
     def commit_log(self) -> CommitLog | None:
-        """The commit protocol's durable journal, for read-only inspection."""
+        """The durable commit log, for read-only inspection."""
         return self._commit_protocol.commit_log
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
-        """The non-blocking step and durable training-outcome snapshot."""
+        """The non-blocking committed step, training outcome, and artifact-head sync status."""
         return self._commit_protocol.commit_status
 
     @property
@@ -181,19 +189,16 @@ class Scenario:
         """Materialize a catalog version for read-only serving; absence raises ArtifactNotFound."""
         return self._commit_protocol.artifact_for_version(release_id)
 
+    def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
+        """The composition entries behind a catalog version, if its training commit logged them."""
+        return self._commit_protocol.entries_for_version(release_id)
+
     def artifact_snapshot(
         self,
         release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Freeze one artifact and its gate metrics outside an in-flight commit."""
-        with self._commit_protocol.lock:
-            artifact = (
-                Artifact(self.repository.require_current_artifact(), self.repository)
-                if release_id is None
-                else self._commit_protocol.artifact_for_version(release_id)
-            )
-            metrics = self._commit_protocol.metrics_for_version(artifact.ref.release_id)
-            return artifact, metrics
+        """Freeze one artifact and its gate metrics without waiting for preparation."""
+        return self._commit_protocol.artifact_snapshot(release_id)
 
     def current_artifact_ref(self) -> ArtifactRef:
         return self._artifact_chain.current
@@ -213,8 +218,10 @@ class Scenario:
         than once; the trainer closes first so no processor thread can touch
         the record store after it closes.
         """
-        self._trainer.close()
-        self._records.close()
+        try:
+            self._trainer.close()
+        finally:
+            self._records.close()
 
     def to_snapshot_metadata(self) -> dict[str, object]:
         return snapshot_metadata_for(

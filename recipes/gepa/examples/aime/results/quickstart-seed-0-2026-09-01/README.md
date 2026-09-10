@@ -39,7 +39,7 @@ pattern closely for seed 0. Seeds 1 and 2 and the multi-node extension were not
 run, so this result does not estimate across-seed variance or complete the
 four-cell study.
 
-## Baseline provenance
+## Baseline source
 
 The baseline gate was paid under one Reef commit of the replication branch and
 run identity `0ffbc8e3`, then imported into the seed-0 optimization run at a

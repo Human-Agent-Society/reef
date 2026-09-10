@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import inspect
 import shutil
 import tempfile
 import uuid
@@ -55,6 +54,25 @@ class RepositoryBackend(ABC):
     ) -> ArtifactRef: ...
 
 
+class StagedReleaseRepositoryBackend(RepositoryBackend):
+    """Optional storage contract for publication followed by head promotion.
+
+    ``publish(advance_head=False)`` must store resolvable release bytes and
+    metadata without moving the head. ``commit_release`` then promotes that
+    release without publishing its bytes again.
+    """
+
+    @abstractmethod
+    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+        """Advance a staged durable release after the scenario commits it.
+
+        Implementations must accept an already-current release so recovery can
+        repeat an interrupted post-commit mirror update without publishing new
+        bytes. They must reject an unrelated current head.
+        """
+        ...
+
+
 class CachedRepositoryBackendFactory(ABC):
     """Own per-scenario backend caching instead of hiding it in a closure."""
 
@@ -106,6 +124,19 @@ class CachedRepositoryBackendFactory(ABC):
             loaded = {name for name, backend in self._backends.items() if backend.metadata() is not None}
         return tuple(sorted(loaded | set(self._list_persisted_registrations())))
 
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Forget the scenario's backend and move its durable registration aside; what was archived, by name.
+
+        After this the factory answers ``has_registration`` false and
+        ``list_registrations`` without the name, so a later create under the
+        same name starts from the base artifact. Content-addressed storage
+        the scenario shared with others stays.
+        """
+        with self._lock:
+            self._backends.pop(scenario, None)
+            self._registration_misses.pop(scenario, None)
+        return self._archive_persisted_registration(scenario)
+
     @abstractmethod
     def _build_backend(self, scenario: str) -> RepositoryBackend: ...
 
@@ -113,6 +144,10 @@ class CachedRepositoryBackendFactory(ABC):
         return False
 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
+        return ()
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the durable registration aside; nothing to do for a backend that registers in memory only."""
         return ()
 
 
@@ -212,6 +247,29 @@ class Repository:
                 )
             self._current_artifact = ref
 
+    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        """Install already-committed serving and checkpoint refs without storage I/O."""
+        with self._head_lock:
+            if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
+                raise ArtifactConflict("repository heads changed before the committed release was installed")
+            self._current_artifact = ref
+            self._checkpoint_artifact = ref
+
+    def synchronize_checkpoint(self) -> None:
+        """Repair a stale backend head from the committed checkpoint, never vice versa."""
+        checkpoint = self.require_checkpoint_artifact()
+        if self.backend.current() == checkpoint:
+            return
+        if checkpoint.parent_release_id is None:
+            raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
+        parent = self.backend.resolve_release(checkpoint.parent_release_id)
+        self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
+
+    def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
+        if not isinstance(self.backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
+        return self.backend
+
     def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
         ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)
         with self._head_lock:
@@ -273,13 +331,14 @@ class Repository:
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
     ) -> ArtifactRef:
-        # A pending release (advance_heads=False) needs a backend that can mint without moving its head; the
-        # keyword is only passed then, so backends on the older signature keep working for normal publishes.
-        options: dict[str, bool] = {}
-        if not advance_heads:
-            if "advance_head" not in inspect.signature(self._backend.publish).parameters:
-                raise ArtifactPublicationError("repository backend cannot hold a pending release")
-            options["advance_head"] = False
+        """Publish ``artifact`` as the next release.
+
+        ``advance_heads`` is plural because it covers both heads this
+        repository owns, its current and checkpoint refs, along with the one
+        storage head the backend owns (``RepositoryBackend.publish``'s
+        ``advance_head``). ``False`` mints a pending release that no head
+        moves to.
+        """
         ref = self._backend.publish(
             (
                 artifact.with_repository(self)
@@ -292,7 +351,7 @@ class Repository:
                 )
             ),
             expected_parent=expected_parent,
-            **options,
+            advance_head=advance_heads,
         )
         if advance_heads:
             with self._head_lock:

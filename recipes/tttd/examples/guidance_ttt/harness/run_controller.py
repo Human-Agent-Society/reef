@@ -81,7 +81,7 @@ class RayTrainingBridge:
         scenario: str,
         *,
         token: str | None = None,
-        ray_address: str = "127.0.0.1:6379",
+        ray_address: str,
         ray_namespace: str = "reef",
         ray_actor_name: str = "reef-train-bridge",
         timeout_s: float = 14_400.0,

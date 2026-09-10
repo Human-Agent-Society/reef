@@ -1,5 +1,5 @@
-Python API
-==========
+Python API for custom learning methods
+======================================
 
 The Python API is the set of extension points a learning method plugs into. Reef
 owns everything around them: accepting and replaying records, holding a batch
@@ -243,6 +243,14 @@ thread, so they must not block on network or model latency.
 |                   | grouping state, retention,    | retention, replay             |
 |                   | replay                        |                               |
 +-------------------+-------------------------------+-------------------------------+
+
+``DataProcessor.training_mode`` selects automatic, instruction-triggered or
+combined batching on the same processor. Declare ``supported_training_modes`` and
+implement ``make_training_batch(batch_number, request)`` to select inputs;
+``request`` is the queued instruction in ``manual`` and ``hybrid`` and ``None``
+for an automatic batch. Ingestion, acknowledgement, retention,
+compaction and background derivation are shared. See
+`Processors <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.
 
 Every processor gets the scenario's experiment logger as
 ``self.experiment_logger``. Log finite numeric metrics under the ``processor``

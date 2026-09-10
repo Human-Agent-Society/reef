@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from reef.core import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.reported import (
     NEVER,
@@ -12,7 +13,7 @@ from reef.train.processors.reported import (
     ReportDecision,
     ReportedFeedbackProcessor,
 )
-from reef.train.types import ProcessorContext, TraceBatch, TraceSample
+from reef.train.types import ProcessorContext, TraceBatch, TraceSample, TrainingBatch
 
 
 class CordisProcessor(ReportedFeedbackProcessor):
@@ -24,10 +25,22 @@ class CordisProcessor(ReportedFeedbackProcessor):
     outside it are terminal and release their records. A report may reference
     one request or a whole run's worth; several references become one
     trajectory sample. The backends consume
-    the resulting trace batches without adding processor logic.
+    the resulting trace batches without adding processor logic. In ``hybrid``
+    a queued instruction batches with the failing traces an automatic batch
+    would take next, up to ``batch_size``, so the proposer reads the request
+    beside them; in ``manual`` it runs alone.
     """
 
     output_schema = TraceBatch
+    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    required_request_types = frozenset(RequestType)
+
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        if request is not None and self.training_mode == "manual":
+            self._pending_units = ()
+            return TraceBatch(request.id, ())
+        # In hybrid an instruction takes the units an automatic batch would, none included; the base attaches it.
+        return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:
         self._min_score = float(context.config.get("min_score", float("-inf")))
@@ -88,10 +101,20 @@ class RecordDrivenTraceProcessor(DataProcessor):
     ``score=None``, and the proposer contract requires handling unscored
     samples. Reports that arrive under this policy are released untouched;
     a deployment with real outcome signal selects the reported policy
-    instead, because a measured result beats model self judgment.
+    instead, because a measured result beats model self judgment. In ``hybrid``
+    a queued instruction batches with the oldest held records, up to
+    ``batch_size``, as an automatic batch would; in ``manual`` it runs alone.
     """
 
     output_schema = TraceBatch
+    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    required_request_types = frozenset(RequestType)
+
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        if request is not None and self.training_mode == "manual":
+            return TraceBatch(request.id, ())
+        # In hybrid an instruction takes the records an automatic batch would, none included; the base attaches it.
+        return self._make_pending(batch_number)
 
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
@@ -99,7 +122,9 @@ class RecordDrivenTraceProcessor(DataProcessor):
         self._released: set[str] = set()
 
     def ingest(self, item: AgentRecord) -> None:
-        if item.request_type is RequestType.INFERENCE:
+        if item.request_type is RequestType.TRAIN:
+            super().ingest(item)
+        elif item.request_type is RequestType.INFERENCE:
             self._records.append(item)
         else:
             self._released.add(item.agent_record_id)
@@ -131,9 +156,12 @@ class RecordDrivenTraceProcessor(DataProcessor):
 
     def retention_decision(self) -> RetentionDecision:
         return RetentionDecision(
-            protected_agent_record_ids=frozenset(record.agent_record_id for record in self._records),
-            releasable_agent_record_ids=frozenset(self._released),
+            protected_agent_record_ids=frozenset(
+                {record.agent_record_id for record in self._records} | self._training_requests.keys()
+            ),
+            releasable_agent_record_ids=frozenset(self._released | self._consumed_requests),
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        super().compaction_applied(agent_record_ids)
         self._released -= agent_record_ids

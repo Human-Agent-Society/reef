@@ -17,9 +17,9 @@ from reef.runtime import (
     TrainingJobResult,
     TrainingRuntime,
 )
-from reef.runtime.adapters import ray_runtime
 from reef.runtime.adapters.ray_runtime import RemoteRayTrainGroupHandle
 from reef.runtime.base import InferenceAdmissionController
+from reef.runtime.executor import ray as ray_executor
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.service.app import RequestService
 from reef.service.streaming import stream_record
@@ -437,9 +437,9 @@ def test_slime_backend_preparation_emits_framework_agnostic_rows() -> None:
 
 @pytest.mark.unit
 @pytest.mark.unit
-def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_provenance() -> None:
+def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_source_fields() -> None:
     # SAO ships an 8-element row: the action mask (for skip-observation GAE)
-    # and rollout provenance (producing runtime load ID, creation time) have no
+    # and rollout source fields (producing runtime load ID, creation time) have no
     # slot in the policy 5-tuple. Each sample is its own rollout (no grouping)
     # and advantages are never shipped — the critic computes them in-backend.
     batch = PolicyBatch(
@@ -480,7 +480,7 @@ def test_slime_backend_preparation_emits_sao_rows_with_action_mask_and_provenanc
 
 
 @pytest.mark.unit
-def test_slime_backend_preparation_sao_rows_tolerate_missing_provenance() -> None:
+def test_slime_backend_preparation_sao_rows_tolerate_missing_source_fields() -> None:
     batch = PolicyBatch(
         "math:sao:1",
         (
@@ -573,7 +573,7 @@ def test_ray_runtime_fences_enabled_sao_window_with_serving_version() -> None:
 
 
 @pytest.mark.unit
-def test_ray_runtime_preserves_enabled_sao_mixed_provenance() -> None:
+def test_ray_runtime_preserves_enabled_sao_mixed_producing_versions() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
         def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
@@ -603,7 +603,7 @@ def test_ray_runtime_preserves_enabled_sao_mixed_provenance() -> None:
 
 
 @pytest.mark.unit
-def test_ray_runtime_preserves_enabled_grouped_mixed_provenance() -> None:
+def test_ray_runtime_preserves_enabled_grouped_mixed_producing_versions() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
         def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
@@ -639,7 +639,7 @@ def test_ray_runtime_preserves_sao_batch_when_serving_version_is_unverified() ->
 
 
 @pytest.mark.unit
-def test_ray_runtime_carries_shared_provenance_for_other_losses() -> None:
+def test_ray_runtime_carries_shared_source_fields_for_other_losses() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
         def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
@@ -722,7 +722,7 @@ def test_ray_runtime_sends_mixed_spans_to_exact_admission_instead_of_poisoning_t
 
 
 @pytest.mark.unit
-def test_ray_runtime_rejects_a_sao_batch_missing_provenance() -> None:
+def test_ray_runtime_rejects_a_sao_batch_missing_source_fields() -> None:
     runtime = RayRuntime(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
     batch = PolicyBatch(
         "math:sao:1",
@@ -743,7 +743,7 @@ def test_ray_runtime_rejects_a_sao_batch_missing_provenance() -> None:
 
 
 @pytest.mark.unit
-def test_enabled_sao_window_sends_missing_provenance_to_bridge_admission() -> None:
+def test_enabled_sao_window_sends_missing_source_fields_to_bridge_admission() -> None:
     class VersionedHandle(FakeTrainGroupHandle):
         def serving_runtime_load_id(self) -> str | None:
             return "engine:3"
@@ -786,7 +786,7 @@ def test_remote_handle_delegates_step_preparation_to_the_backend_actor(monkeypat
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
     actor = Bridge()
     handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
 
@@ -813,12 +813,13 @@ def test_remote_handle_probes_the_named_serving_runtime_load_id_method(monkeypat
             FakeRay.calls.append(kwargs)
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     handle = RemoteRayTrainGroupHandle(train_group_actor=Bridge())
 
     assert handle.serving_runtime_load_id() == "engine-incarnation:3"
-    assert FakeRay.calls == [{"timeout": 300.0}]
+    assert handle._timeout_s == 300.0
+    assert FakeRay.calls == [{"timeout": 0.1}]
 
 
 @pytest.mark.unit
@@ -835,7 +836,7 @@ def test_remote_handle_preserves_missing_serving_runtime_load_id(monkeypatch) ->
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     assert RemoteRayTrainGroupHandle(train_group_actor=Bridge()).serving_runtime_load_id() is None
 
@@ -866,7 +867,7 @@ def test_remote_handle_forwards_durable_training_payload(monkeypatch) -> None:
         def get(value, **kwargs):
             return value
 
-    monkeypatch.setattr(ray_runtime, "_require_ray", lambda: FakeRay)
+    monkeypatch.setattr(ray_executor, "_require_ray", lambda: FakeRay)
 
     actor = Bridge()
     handle = RemoteRayTrainGroupHandle(train_group_actor=actor)
@@ -1429,7 +1430,7 @@ def _two_epoch_sample_preparer(batch, state):
 
 
 @pytest.mark.unit
-def test_ray_runtime_provenance_follows_the_step_schedule() -> None:
+def test_ray_runtime_producing_versions_follow_the_step_schedule() -> None:
     # Epochs repeat every wire row; the producing runtime load IDs (and spans)
     # must repeat with them, in the schedule's order, or bounded-staleness
     # admission counts one version per batch row against two rows per sample.

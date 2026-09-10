@@ -149,7 +149,9 @@ RUN MCORE_SSM=/root/Megatron-LM/megatron/core/ssm/mamba_hybrid_layer_allocation.
 # Reef image after running their own GPU qualification.
 FROM reef-common AS tttd
 
-RUN pip install --no-cache-dir cvxpy && \
+# CVXPY 1.9+ requires NumPy 2.x. Constrain both packages so the resolver
+# preserves the common layer's NumPy pin and CUDA-matched dependency stack.
+RUN pip install --no-cache-dir "cvxpy<1.9" "numpy==1.26.4" && \
     python -c "import cvxpy, numpy; assert numpy.__version__ == '1.26.4', numpy.__version__"
 
 CMD ["bash", "-c", "echo 'reef TTT-Discover image. Run python -m recipes.tttd.examples.tttd.deployments.qwen3_8b_lora.cluster'"]

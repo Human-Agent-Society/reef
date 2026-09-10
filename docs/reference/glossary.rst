@@ -145,7 +145,8 @@ Harness tree
 
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
-adapter, the loop's own tools and hook listeners. Reef serves it over
+adapter, the loop's own tools, hook listeners, and control flow graph. Reef
+serves it over
 ``GET /reef/harness``. An adapter combines the rendered tree with a harness
 executable; that harness and its configured model form the running agent.
 
@@ -162,8 +163,9 @@ Runtime
 Two meanings.
 
 1. **The request-plane contract:** ``InferenceRuntime`` and
-   ``TrainingRuntime``: the external service that executes model work. Inference
-   is always required; GPU training only for weight recipes.
+   ``TrainingRuntime``: the external service that executes model work.
+   ``InferenceRuntime`` is always required while ``TrainingRuntime`` is only
+   required for weight recipes.
 2. **A training backend integration:** a concrete implementation of that
    contract, such as Reef's Slime runtime.
 

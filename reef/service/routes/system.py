@@ -5,8 +5,9 @@ import asyncio
 from aiohttp import web
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.descriptor import DescriptorError
+from reef.harness.adapters.descriptor import DescriptorError
 from reef.service.request_service import RequestService
+from reef.service.routes.payload import read_object
 
 
 def register_health_route(app: web.Application) -> None:
@@ -35,8 +36,18 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
         return web.json_response(catalog)
 
+    async def harness_release_page(request: web.Request) -> web.Response:
+        step = int(request.match_info["step"])
+        page = await asyncio.to_thread(request_service.harness_release_page, request.headers, step)
+        return web.Response(text=page, content_type="text/html")
+
+    async def harness_proposals(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        answer = await asyncio.to_thread(request_service.harness_propose, request.headers, payload)
+        return web.json_response(answer)
+
     async def status(request: web.Request) -> web.Response:
-        value = await asyncio.to_thread(lambda: request_service.dispatcher.training_status)
+        value = await asyncio.to_thread(lambda: request_service.dispatcher.build_training_status())
         return web.json_response(value)
 
     async def adapters(request: web.Request) -> web.Response:
@@ -66,6 +77,9 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_get("/reef/harness", harness)
     app.router.add_get("/reef/harness/install", harness_install)
     app.router.add_get("/reef/harness/releases", harness_releases)
+    # One to nine digits: a step that is no number, or longer than any catalog, is no row; the router's own 404 answers it.
+    app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", harness_release_page)
+    app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)
 

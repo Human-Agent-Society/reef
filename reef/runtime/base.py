@@ -34,7 +34,7 @@ class TrainingJobResult:
     ``metrics`` is backend telemetry carried opaquely, the same contract as
     ``TrainStepResult.metrics``: the backend that produced it owns the schema,
     reef never interprets it, and it reaches the commit record so per-step
-    provenance survives to serving.
+    metrics remain available when the resulting version is served.
     """
 
     outcome: Literal["complete", "checkpoint", "stale", "storage_blocked"]
@@ -213,6 +213,14 @@ class InferenceRuntime(ABC):
     @abstractmethod
     def inference_backend(self) -> InferenceBackend:
         """The inference backend owned by this runtime."""
+
+    def shutdown(self) -> None:
+        """Release owned resources after all users of this runtime have stopped.
+
+        Shared or injected runtimes are closed by their owner, never by an
+        individual scenario. Proxy-only runtimes have no local resources.
+        """
+        return
 
 
 class TrainingRuntime(InferenceRuntime, ABC):

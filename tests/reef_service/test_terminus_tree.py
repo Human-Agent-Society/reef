@@ -13,9 +13,16 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
-from reef.harness.terminus import TerminusTreeError, instruction_paths, load_tree, runner, skill_roots, terminus_kwargs
-from reef.harness.trajectory import read_terminus_atif
+from reef.harness.episodes.trajectory import read_terminus_atif
+from reef.harness.runners.terminus import (
+    TerminusTreeError,
+    instruction_paths,
+    load_tree,
+    runner,
+    skill_roots,
+    terminus_kwargs,
+)
+from reef.harness.tree.render import render_composition
 
 
 def _tree(**nodes: str) -> dict[str, str]:
@@ -99,6 +106,19 @@ def test_the_agent_spec_names_harbors_own_agent_and_carries_the_tree(tmp_path: P
 def test_a_tree_without_a_model_name_cannot_run() -> None:
     with pytest.raises(TerminusTreeError, match="carries no model_name"):
         runner.agent_spec("/root", {})
+
+
+@pytest.mark.unit
+def test_runner_refuses_extension_before_importing_or_executing_it(monkeypatch) -> None:
+    from reef.harness.episodes.executor import ISOLATION_ENV
+
+    monkeypatch.delenv(ISOLATION_ENV, raising=False)
+    tree = {
+        "terminus/config.json": '{"model_name":"stub"}',
+        "terminus/context/agent.py": "raise RuntimeError('must not run')\nclass Agent: pass\n",
+    }
+    with pytest.raises(TerminusTreeError, match="must run inside Reef's sandbox"):
+        runner.agent_spec("/root", tree)
 
 
 @pytest.mark.unit

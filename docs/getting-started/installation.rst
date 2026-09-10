@@ -1,5 +1,5 @@
-Installation
-============
+Install Reef on a laptop or GPU server
+======================================
 
 Installation depends on what you want Reef to evolve:
 
@@ -31,7 +31,7 @@ Or, to work on Reef itself:
 ``git lfs`` is required: Reef keeps release history in Git, with weight files
 under LFS. The checkout includes the core ``recipe`` example, the paper-backed
 methods under ``recipes/``, and the harness evolution demo under
-``tutorials/harness_evolve/``.
+``tutorials/evolve-your-harness/``.
 
 GPU image, for weight training
 ------------------------------
@@ -71,3 +71,11 @@ stdlib-only wire client:
 .. code:: bash
 
    pip install reef-client
+
+Run your first request
+----------------------
+
+Continue with the `inference and feedback quickstart <quickstart.rst>`__
+to start the service, capture a receipt, and submit feedback. If you installed
+the GPU image for weight training, follow `Train model weights from agent
+feedback <../user-guide/evolve-your-model.rst>`__ for the training stack.

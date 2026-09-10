@@ -327,7 +327,7 @@ def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_handles_policy_versions_and_clock_skew() -> None:
+def test_sao_rollout_metrics_handles_policy_versions_and_clock_skew() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = {
         "producing_runtime_load_ids": ["inc:3"],
@@ -335,7 +335,7 @@ def test_sao_provenance_metrics_handles_policy_versions_and_clock_skew() -> None
         "response_lengths": [4],
         "loss_masks": [[1, 1, 1, 0]],
     }
-    metrics = sao.provenance_metrics(rollout_data, serving_version="inc:7")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:7")
     assert metrics["sao/policy_lag_max"] == 4
     assert metrics["sao/policy_lag_mean"] == 4.0
     assert metrics["sao/effective_token_rate"] == 3 / 4

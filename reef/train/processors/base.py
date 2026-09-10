@@ -8,10 +8,11 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import PolicyBatch, ProcessorContext, TrainingBatch
 
@@ -86,10 +87,19 @@ class DataProcessor:
     history.
     """
 
-    required_request_types: frozenset[RequestType] = frozenset(RequestType)
+    required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
+    supported_training_modes: frozenset[str] = frozenset({"auto"})
 
     def __init__(self, context: ProcessorContext) -> None:
         self._context = context
+        # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
+        if not context.config.get("manual_enabled", True):
+            self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
+        self.set_training_mode(context.training_mode)
+        self._training_requests: dict[str, TrainingRequest] = {}
+        self._consumed_requests: set[str] = set()
+        # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
+        self._request_failures: dict[str, str] = {}
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -111,6 +121,39 @@ class DataProcessor:
         return self._scenario
 
     @property
+    def training_mode(self) -> str:
+        """The batching policy selected for this processor."""
+        return self._context.training_mode
+
+    def set_training_mode(self, training_mode: str) -> None:
+        """Select future batches while preserving shared buffers and reservations."""
+        if training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if training_mode not in self.supported_training_modes:
+            raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
+        self._context = replace(self._context, training_mode=training_mode)
+
+    def buffered_requests(self) -> int:
+        """How many instructions are read into memory and not yet consumed."""
+        return len(self._training_requests)
+
+    def request_failure(self, request_id: str) -> str | None:
+        """What the instruction's failed step said, when it failed at all."""
+        return self._request_failures.get(request_id)
+
+    def request_failures(self) -> Mapping[str, str]:
+        """The failed instructions still buffered, by id, with what their step said."""
+        return dict(self._request_failures)
+
+    def mark_request_failed(self, request_id: str, error: str) -> None:
+        """Record that the instruction's step failed; its next batch is consumed with a skip row."""
+        self._request_failures[request_id] = error
+
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+        """Carry the failed instructions of a replaced processor into this one."""
+        self._request_failures = dict(failures)
+
+    @property
     def experiment_logger(self) -> ExperimentLogger:
         """The scenario logger shared by its recipe, processor, and backend."""
         return self._context.experiment_logger
@@ -119,33 +162,91 @@ class DataProcessor:
     output_schema: type[TrainingBatch] = PolicyBatch
 
     def ingest(self, item: AgentRecord) -> None:
-        self._agent_record_ids.add(item.agent_record_id)
+        if item.request_type is RequestType.TRAIN:
+            if item.scenario != self.scenario:
+                raise ValueError("training records must belong to the processor's scenario")
+            request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
+            if request.id not in self._consumed_requests:
+                self._training_requests.setdefault(request.id, request)
+        else:
+            self._agent_record_ids.add(item.agent_record_id)
 
     # ------------------------------------------------------------ batch cycle
     #
     # The shape is the same for every processor: batch when enough units are
-    # held, hand the same batch out until it is acknowledged, then release
-    # what it consumed. An engine fills in the three things that differ —
-    # what a unit is, how the selected ones become a batch, and what
-    # consuming them releases.
+    # held (auto, hybrid) or an instruction is queued (manual, hybrid), hand the
+    # same batch out until it is acknowledged, then release what it consumed.
+    # An engine fills in the three things that differ: what a unit is, how
+    # the selected ones become a batch, and what consuming them releases.
 
     def ready(self) -> bool:
-        return self._pending is not None or self._ready_count() >= self._batch_size
+        if self._pending is not None:
+            return True
+        if self.training_mode == "manual":
+            return bool(self._training_requests)
+        if self.training_mode == "hybrid" and self._training_requests:
+            return True
+        return self._ready_count() >= self._batch_size
 
     def build_batch(self) -> TrainingBatch:
         if self._pending is None:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
             self._batch_number += 1
-            self._pending = self._make_pending(self._batch_number)
+            # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
+            request = (
+                next(iter(self._training_requests.values()))
+                if self.training_mode != "auto" and self._training_requests
+                else None
+            )
+            self._pending = self.make_training_batch(self._batch_number, request)
+            if request is not None:
+                self._pending = replace(
+                    self._pending, batch_id=f"{self.scenario}:instruction:{request.id}", request=request
+                )
         return self._pending
+
+    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+        """Select inputs for one batch; in ``manual`` and ``hybrid`` a queued instruction arrives as ``request``.
+
+        Override this single assembly hook to take instructions. Ingestion,
+        acknowledgement and retention operate on the same state in every mode.
+        With a request the hook's own batch id is replaced by
+        ``<scenario>:instruction:<request id>`` and the request is attached.
+        """
+        if request is not None:
+            raise NotImplementedError(f"{type(self).__name__} does not implement instruction batch assembly")
+        return self._make_pending(batch_number)
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         consumed = self._consume_pending()
+        if self._pending.request is not None:
+            request_id = self._pending.request.id
+            self._training_requests.pop(request_id)
+            self._request_failures.pop(request_id, None)
+            self._consumed_requests.add(request_id)
+            consumed = consumed | {request_id}
         self._pending = None
         return consumed
+
+    def release_batch(self, batch_id: str) -> None:
+        """Forget the handed out batch without consuming anything; the next ``build_batch`` selects again."""
+        if self._pending is None or self._pending.batch_id != batch_id:
+            raise ValueError(f"unknown batch_id {batch_id!r}")
+        self._pending = None
+
+    def discard_request(self, request_id: str) -> frozenset[str]:
+        """Consume one queued instruction without a batch; the committed row that names it is what recovery skips."""
+        if self._pending is not None and self._pending.request is not None and self._pending.request.id == request_id:
+            raise ValueError(f"training request {request_id!r} is reserved; release its batch first")
+        if request_id not in self._training_requests:
+            raise ValueError(f"unknown training request {request_id!r}")
+        self._training_requests.pop(request_id)
+        self._request_failures.pop(request_id, None)
+        self._consumed_requests.add(request_id)
+        return frozenset({request_id})
 
     def _ready_count(self) -> int:
         """How many batch-ready units are held.
@@ -176,11 +277,15 @@ class DataProcessor:
         Subclasses with real pairing semantics override this to derive
         protected/releasable sets from their own state.
         """
-        return RetentionDecision(protected_agent_record_ids=frozenset(self._agent_record_ids))
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
+            releasable_agent_record_ids=frozenset(self._consumed_requests),
+        )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
         self._agent_record_ids -= agent_record_ids
+        self._consumed_requests -= agent_record_ids
 
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
@@ -200,6 +305,8 @@ class DataProcessor:
         override this for a terminal outcome that cannot become a training
         batch, allowing a bounded external wait to fail explicitly.
         """
+        if self.supported_training_modes & {"manual", "hybrid"}:
+            return {"buffered_requests": self.buffered_requests()}
         return {}
 
     def close(self) -> None:

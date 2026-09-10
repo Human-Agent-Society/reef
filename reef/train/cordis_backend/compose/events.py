@@ -62,6 +62,25 @@ class EventOptions:
     glob: bool = False
 
 
+class EventName:
+    """An opaque event name, the port's stand in for the reference host's symbol events.
+
+    A string names an event too; this type exists so a dispatch can tell a
+    name from a leading receiver object (a symbol is its own primitive type
+    upstream, events.ts:73), and so two names never collide by text."""
+
+    __slots__ = ("description",)
+
+    def __init__(self, description: str = "") -> None:
+        self.description = description
+
+    def __repr__(self) -> str:
+        return f"EventName({self.description!r})"
+
+
+Name = str | EventName
+
+
 @dataclass
 class Hook:
     """One registered listener with the context that registered it."""
@@ -114,7 +133,7 @@ class EventsService:
 
     def __init__(self, ctx: Context) -> None:
         self.ctx = ctx
-        self._hooks: dict[str, list[Hook]] = {}
+        self._hooks: dict[Name, list[Hook]] = {}
         # A non-global 'internal/update' listener is per-fiber reconfigure
         # middleware: it rides on the registering fiber, and the global
         # prepended chain below threads it into every update waterfall
@@ -130,9 +149,9 @@ class EventsService:
         listeners of a receiver-carrying dispatch see it as their first
         argument (the module docstring's receiver convention)."""
         rest = list(args)
-        receiver = rest.pop(0) if rest and not isinstance(rest[0], str) else None
+        receiver = rest.pop(0) if rest and not isinstance(rest[0], (str, EventName)) else None
         name = rest.pop(0)
-        if not name.startswith("internal/") and self._hooks.get("internal/dispatch"):
+        if (not isinstance(name, str) or not name.startswith("internal/")) and self._hooks.get("internal/dispatch"):
             self.emit("internal/dispatch", mode, name, list(rest), receiver)
         event_filter = getattr(receiver, "__event_filter__", None) if receiver is not None else None
         hooks = list(self._hooks.get(name, ()))
@@ -196,8 +215,12 @@ class EventsService:
         """Thread a ``next`` continuation through the listeners.
 
         The last positional argument is the caller's innermost callback;
-        every listener (and the innermost callback) receives the remaining
-        arguments plus ``next``, and decides whether to call through.
+        every listener receives the remaining arguments plus its own
+        ``next`` and decides whether to call through, and the innermost
+        callback receives the remaining arguments. Each frame owns one
+        continuation: a second call, from that frame or from an outer one,
+        raises rather than running the tail again (events.ts:117-131,
+        cordis 5b195b3).
         """
         _, callbacks, rest = self._resolve("waterfall", args)
         inner = rest.pop()
@@ -207,19 +230,28 @@ class EventsService:
         # silent never-awaited bug the sync-mode guard exists for.
         passthrough: list[Any] = []
 
-        def next_() -> Any:
-            if queue:
-                result = queue.pop(0)(*rest)
-                if not any(result is allowed for allowed in passthrough):
-                    self._reject_awaitable("waterfall", result)
+        def dispatch() -> Any:
+            if not queue:
+                result = inner()  # neither the arguments nor a continuation, as events.ts:122
+                if inspect.isawaitable(result):
+                    passthrough.append(result)
                 return result
-            result = inner(*rest)
-            if inspect.isawaitable(result):
-                passthrough.append(result)
+            callback = queue.pop(0)
+            called = False
+
+            def next_() -> Any:
+                nonlocal called
+                if called:
+                    raise RuntimeError("next() called multiple times")
+                called = True
+                return dispatch()
+
+            result = callback(*rest, next_)
+            if not any(result is allowed for allowed in passthrough):
+                self._reject_awaitable("waterfall", result)
             return result
 
-        rest.append(next_)
-        return next_()
+        return dispatch()
 
     def _reject_awaitable(self, mode: str, result: Any) -> None:
         if not inspect.isawaitable(result) or isinstance(result, EffectHandle):
@@ -232,7 +264,7 @@ class EventsService:
 
     def on(
         self,
-        name: str,
+        name: Name,
         listener: Callable[..., Any],
         *,
         prepend: bool = False,
@@ -241,7 +273,9 @@ class EventsService:
     ) -> EffectHandle:
         """Register a listener as a tracked effect of ``ctx``'s fiber.
 
-        ``ctx`` names the registering scope explicitly because the traceable
+        ``name`` is a string or an ``EventName``, the stand in for the
+        reference host's symbol events (cordis 1c1a10e). ``ctx``
+        names the registering scope explicitly because the traceable
         machinery that rebinds a service's context is deferred; Context's
         delegating method supplies itself.
         """
@@ -251,9 +285,10 @@ class EventsService:
         seam = self.bail(owner, "internal/listener", name, listener, options)
         if seam:
             return seam
-        hooks = self._hooks.setdefault(name, [])
 
         def forward() -> Callable[[], None]:
+            # The bucket exists only while a listener does, so the table names live events and nothing else.
+            hooks = self._hooks.setdefault(name, [])
             hook = Hook(ctx=owner, callback=listener, options=options)
             if prepend:
                 hooks.insert(0, hook)
@@ -261,18 +296,24 @@ class EventsService:
                 hooks.append(hook)
 
             def inverse() -> None:
-                for index, existing in enumerate(hooks):
+                bucket = self._hooks.get(name)
+                if bucket is None:
+                    return
+                for index, existing in enumerate(bucket):
                     if existing.callback is listener:
-                        hooks.pop(index)
-                        return
+                        bucket.pop(index)
+                        break
+                if not bucket:
+                    self._hooks.pop(name, None)
 
             return inverse
 
-        return owner.fiber.effect(forward, f'ctx.on("{name}")')
+        label = f'ctx.on("{name}")' if isinstance(name, str) else f"ctx.on({name!r})"
+        return owner.fiber.effect(forward, label)
 
     def once(
         self,
-        name: str,
+        name: Name,
         listener: Callable[..., Any],
         *,
         prepend: bool = False,

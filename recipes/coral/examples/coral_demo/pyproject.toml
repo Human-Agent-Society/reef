@@ -1,0 +1,22 @@
+[project]
+name = "coral-demo"
+version = "0.0.1"
+description = "Reef adapter for CORAL multi-agent test-time training (reef issue #3)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+# The runnable entry (run.py) drives the real CORAL runtime (AgentManager,
+# gateway, grader daemon, agent runtime CLIs); the adapter modules themselves
+# have no CORAL dependency. Pinned to the commit the example was developed
+# and smoke-tested against.
+coral = [
+    "coral @ git+https://github.com/Human-Agent-Society/CORAL.git@0123dfb939b35228cf2c1fde224cd0561e727408",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["recipes.coral*"]

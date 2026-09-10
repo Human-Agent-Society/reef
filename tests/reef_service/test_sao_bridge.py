@@ -65,7 +65,7 @@ def _execute_and_update_weights(actor, payload):
 
 
 @pytest.mark.unit
-def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
+def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     converted = to_slime_rollout_data(
         _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_runtime_load_id="slime-v4")])
     )
@@ -77,7 +77,7 @@ def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
     assert converted["rewards"] == [0.5, 1.0]
     assert converted["response_lengths"] == [3, 3]
     assert converted["rollout_log_probs"] == [[-0.1, -0.2, -0.3], [-0.1, -0.2, -0.3]]
-    # Provenance rides through for policy lag / queue age.
+    # The producing version and timestamp support policy lag / queue age.
     assert converted["producing_runtime_load_ids"] == ["slime-v3", "slime-v4"]
     assert converted["rollout_created_ats"] == [1234.5, 1234.5]
     # No comparison-group barrier: one rollout per id, and no advantages.
@@ -142,7 +142,7 @@ def test_sao_parser_requires_rollout_ids_for_every_sample() -> None:
 
 
 @pytest.mark.unit
-def test_sao_parser_tolerates_missing_provenance() -> None:
+def test_sao_parser_tolerates_missing_source_fields() -> None:
     converted = to_slime_rollout_data(_payload([_sao_row(producing_runtime_load_id=None, rollout_created_at=None)]))
 
     assert converted["producing_runtime_load_ids"] == [None]
@@ -165,7 +165,7 @@ def test_runtime_load_id_sequence_is_none_across_incarnations() -> None:
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> None:
+def test_sao_rollout_metrics_reports_lag_queue_age_and_effective_tokens() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
@@ -176,7 +176,7 @@ def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> 
         )
     )
 
-    metrics = sao.provenance_metrics(rollout_data, serving_version="inc:5")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
 
     assert metrics["sao/policy_lag_max"] == 3
     assert metrics["sao/policy_lag_mean"] == 2.0
@@ -185,7 +185,7 @@ def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> 
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplog) -> None:
+def test_sao_rollout_metrics_warns_when_dropping_future_producing_steps(caplog) -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
@@ -197,18 +197,18 @@ def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplo
     )
 
     with caplog.at_level("WARNING", logger="recipes.sao.slime"):
-        metrics = sao.provenance_metrics(rollout_data, serving_version="inc:5")
+        metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
 
     assert metrics["sao/policy_lag_max"] == 3
     assert any("ahead of serving step 5" in record.message for record in caplog.records)
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_skips_lag_across_incarnation() -> None:
+def test_sao_rollout_metrics_skips_lag_across_incarnation() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="oldinc:2")]))
 
-    metrics = sao.provenance_metrics(rollout_data, serving_version="newinc:5")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="newinc:5")
 
     assert "sao/policy_lag_max" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
@@ -513,6 +513,31 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
     assert critic_args.lambd == 1.0
     # The actor args are untouched.
     assert args.sao_length_adaptive_lambda is True
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = _critic_prep_args(critic_lr=5e-6, lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 5e-6
+    assert args.lr == 1e-6  # the actor keeps the policy lr
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = _critic_prep_args(lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 1e-6
 
 
 @pytest.mark.unit

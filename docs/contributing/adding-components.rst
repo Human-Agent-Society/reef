@@ -121,13 +121,23 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 
+Add a worker executor
+---------------------
+
+Use an ``Executor`` subclass when worker launch or control transport changes
+while the training lifecycle stays the same. Implement the common interface
+under ``reef/runtime/executor/`` for a general-purpose backend, or inside the
+owning training integration for a backend-specific launcher. See
+`Worker executors <../developer-guide/executors.rst>`__ for configuration,
+ownership, rank ordering and the Slime extension contract.
+
 Add a surface or artifact type
 ------------------------------
 
 Artifacts own immutable bytes and release heads; surfaces own validation and
 delivery. A change that needs both still keeps those responsibilities in
 separate packages. Read the `Python API <../reference/python-api.rst#surface>`__ and the
-release-chain section of `Architecture <../getting-started/architecture.rst>`__.
+release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``

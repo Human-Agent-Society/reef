@@ -32,7 +32,7 @@ harbor-tasks/
     instruction.md               what the agent is told
     environment/
       Dockerfile                 hermes-agent, pinned to a commit
-      Dockerfile.judge           FROM the shared sidecar image, plus this session's problem.json
+      Dockerfile.judge           FROM the shared student service image, plus this session's problem.json
       docker-compose.yaml        main container + judge service
       problem.json               this session's question and gold answer
     tests/test.sh                copies the judge's /final verdict into the verifier output
@@ -40,16 +40,16 @@ harness/
   agent.py                       HermesStreamAgent: the reef-eval agent that runs one session
 user_sim/
   personas.py                    the student persona and the strict acceptance criterion
-  student_server.py              the judge sidecar (HTTP), scripted or LLM-backed
+  student_server.py              the judge service (HTTP), scripted or LLM-backed
   pyproject.toml                 packaged as openclawrl-user-sim
-  Dockerfile                     the shared sidecar image, built by run.sh
+  Dockerfile                     the shared student service image, built by run.sh
 results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
 serve.yaml                       the paper's training stack: Reef, Slime, the PRM, the student model
 docker-compose.yaml              the reef container: GPUs, mounts, host networking, the health check
-run.sh                           builds the sidecar image, starts the stack, runs the stream
+run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
 pyproject.toml                   makes harness/ importable
 ```
@@ -57,12 +57,16 @@ pyproject.toml                   makes harness/ importable
 ## The ordinary agent
 
 The agent is a stock `hermes-agent` install inside each task container. It
-is driven through its command line, one `hermes -z` turn per student
-message, with its home directory on the stream's state mount. Hermes reads
+is driven through its command line, one quiet `hermes chat -q` turn per
+student message (`--resume latest` after the first, so the model keeps its
+own earlier replies in context), with its home directory on the stream's
+state mount. The one-shot `hermes -z` cannot be used for this: it accepts
+`--resume` but ignores it, so every turn would start a fresh conversation.
+Hermes reads
 its model endpoint from its own config and sends OpenAI-compatible chat
 requests; it knows nothing about Reef, scenarios, or training.
 
-The judge sidecar plays the student. `student_server.py` runs the persona
+The judge service plays the student. `student_server.py` runs the persona
 from `personas.py`, reacts to each reply, and records the session. The
 reactions come from the Qwen3-32B persona served by the stack, named by
 `OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL`; the task
@@ -81,10 +85,10 @@ independent trials.
 
 The committed stream has the original OpenClaw-RL paper's 72 GSM8K problems
 as 72 tasks. Each task is a stock Harbor task whose environment carries only
-its own `problem.json`; the judge sidecar is a compose service built from one
+its own `problem.json`; the judge runs as a compose service built from one
 shared image.
 
-The sidecar scores each session on the agent's first solution reply, under
+The student service scores each session on the agent's first solution reply, under
 the strict criterion in `personas.py`: no AI-style markers (bold, headers,
 bullet or numbered lists, horizontal rules, tables, `\boxed`, "final
 answer:"), at least two visible calculation steps, and the gold answer
@@ -105,17 +109,18 @@ position. Around the unmodified agent it makes three changes:
 2. It mints a Reef scenario id at position 0 and writes it to
    `$REEF_EVAL_STATE_DIR`. One stream is one scenario, which is one chain of
    runtime load IDs in Reef.
-3. It writes the hermes config on first use with context compression turned
-   off.
+3. It writes the hermes config at the start of every position, with context
+   compression, reasoning display and the tirith scanner turned off (the
+   reply on stdout must be the answer alone).
 
 The runtime flow is:
 
 ```text
-reef-eval starts the task container and the judge sidecar for the next session
-  -> the harness reads the student's message from the sidecar
+reef-eval starts the task container and the judge service for the next session
+  -> the harness reads the student's message from the student service
   -> hermes runs one turn; its model calls go through the shim to Reef
   -> the SGLang backend records the sampled tokens, loss mask, log-probabilities, and top-K capture
-  -> the harness posts hermes's reply to the sidecar, and the student reacts
+  -> the harness posts hermes's reply to the student service, and the student reacts
   -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
   -> the PRM judges that next state and may propose a hindsight hint
   -> batch_size judged turns form one batch; the top-K select loss trains the policy
@@ -125,11 +130,25 @@ reef-eval starts the task container and the judge sidecar for the next session
 
 ## Setup (once)
 
-You need a GPU host that matches the cuda maps in `serve.yaml`, Docker, and
-`uv` (for `uvx`, which runs reef-eval). The default map uses seven GPUs and leaves
-GPU 0 free for other users of a shared host: GPUs 1-4 for the Megatron actor
-(tensor parallel 4), 5 for the policy rollout engine, 6 for the PRM, and 7
-for the student model.
+You need a GPU host with seven available GPUs, Docker, and `uv` (for `uvx`,
+which runs reef-eval). In `docker-compose.yaml`, `device_ids` defines the
+container's pool once: the default exposes physical GPUs 1-7, leaving GPU 0 free.
+Ray assigns device IDs within that pool: the PRM and student model each reserve
+one GPU through `services[].resources.num_gpus`; Slime reserves five more for
+the Megatron actor (tensor parallel 4) and policy rollout engine (one GPU).
+The inference services start before Slime allocates its group. The CPU-only
+`slime-driver` does not reserve GPUs itself, and individual services do not
+set CUDA visibility. This is a single-host stack, not a multi-node deployment.
+
+There is no `ray-head` service or fixed Ray port to configure. The first GPU
+service selects the Ray executor and Reef starts one shared local runtime.
+Reef passes its actual address to Slime and subsequent services, and stops
+the runtime after the services exit. Set `RAY_ADDRESS` only to connect to an
+external cluster; Reef does not stop that cluster. An unavailable external
+address is an error, not a reason to start a different local cluster.
+When launching directly instead of through Compose, restrict the available
+pool once at the deployment boundary, for example
+`CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml`.
 
 ```bash
 docker build -f docker/Dockerfile.reef -t reef-openclawrl .
@@ -156,7 +175,7 @@ OPENCLAWRL_USER_LLM_MODEL=qwen3-32b-user-llm \
 bash recipes/openclawrl/examples/openclawrl/run.sh
 ```
 
-This builds the sidecar image, boots the training stack in Docker (about six
+This builds the student service image, boots the training stack in Docker (about six
 minutes on B200s), waits for it to become healthy, then runs the 72-session
 stream through reef-eval. The stack keeps running after the stream ends.
 Re-running the same command resumes the stream where the lab left off and
@@ -170,7 +189,7 @@ environments and other processes read them:
 - `OPENCLAWRL_USER_LLM_URL` and `OPENCLAWRL_USER_LLM_MODEL` name the student
   model the stack serves on port 30001. The task environments require both,
   and reef-eval rejects every task when either is unset. Use the host's
-  address, not localhost, because the sidecar calls it from inside a
+  address, not localhost, because the student service calls it from inside a
   container.
 - `WANDB_API_KEY=...` is forwarded into the stack for live training curves
   (also set `observability.wandb.enabled: true` in `serve.yaml`) and starts
@@ -182,6 +201,24 @@ stream name, or a fresh run directory, at a stack that has already trained is
 rejected with "training is already bound to scenario ...". Stop the stack
 with `docker compose down` in this directory before switching streams or
 starting a variant.
+
+A stopped stack restarts from `$RUN_DIR`: the actor resumes its Megatron
+checkpoint, the teacher is reloaded from the base HF weights, and the
+committed head is republished. Two cases need a hand:
+
+- A stop while Reef is committing a step (after the bridge has published its
+  weights) leaves the bridge waiting for that commit, and every later batch
+  is refused with "training marker is READY_TO_COMMIT; operator recovery
+  required". The batch cannot be replayed (the judges sample), so start the
+  training state over: stop the stack and move `checkpoints`,
+  `artifacts.git`, `artifact-work`, `artifact-cache`, `agent-record` and
+  `prm-records.jsonl` out of `$RUN_DIR`. The lab and stream state stay, and
+  a re-run continues at the next position.
+- The harness runs every container command, hermes included, as your user
+  and hands the hermes home to you at the start of each position, so a
+  killed run leaves nothing root-owned in `$RUN_DIR/lab/streams/<stream>/state`
+  that reef-eval could not reset. A state directory written by an earlier
+  harness may still need a one-time chown to your user.
 
 ### Reading a run
 

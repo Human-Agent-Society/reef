@@ -10,10 +10,10 @@ pytest.importorskip("ray")
 
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted
+from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
+from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row
 
@@ -180,15 +180,15 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     assert group.publications == [("a", "inc:1"), ("b", "inc:2"), ("a", "inc:3")]
     assert Path(template.format(rollout_id=2)).is_dir()
 
-    ledger = ScenarioLedger(ledger_path(template))
-    assert ledger.status()["a"] == {
+    history = ScenarioHistory(history_path(template))
+    assert history.status()["a"] == {
         "runtime_load_id": "inc:3",
         "adapter": scenario_adapter_name("a", "inc:3"),
         "publications": 2,
         "rollout_id": 2,
         "steps": 2,
     }
-    assert ledger.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
+    assert history.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
@@ -214,6 +214,34 @@ def test_staleness_counts_only_the_scenarios_own_publications(tmp_path, _local_r
     # b has published once; a's two later publications do not age b's rollouts.
     assert _run(actor, _job("b", 1, "inc:2")).outcome == "complete"
     assert _run(actor, _job("b", 2, "old:1")).outcome == "stale"
+
+
+@pytest.mark.unit
+def test_sample_remains_admissible_after_the_adapter_that_produced_it_is_evicted(tmp_path, _local_ray_get) -> None:
+    # Issue #26's last open item asked whether the residency window has to be
+    # sized against the staleness bound, the way AReaL ties lora_keep_versions
+    # to max_head_offpolicyness. It does not: a Reef sample carries its own
+    # rollout_log_probs and producing runtime load ID, so admission is sequence
+    # arithmetic over recorded data and never reaches for the producing engine.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # engine inc:1
+    assert _run(actor, _job("a", 1, "inc:1")).outcome == "complete"  # engine inc:2
+
+    # One slot, so publishing inc:2 unloaded the adapter that served inc:1.
+    assert manager.engine.unloaded == [scenario_adapter_name("a", "inc:1")]
+    assert actor.health()["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:2"]
+
+    # A rollout that inc:1 produced is one publication behind and its adapter
+    # is gone. The staleness bound alone decides: refused at zero lag,
+    # admitted at one, with nothing reloaded either way.
+    assert _run(actor, _job("a", 2, "inc:1")).outcome == "stale"
+    admitted = _run(actor, _job("a", 2, "inc:1", max_staleness=1))
+    assert admitted.outcome == "complete"
+    assert manager.engine.unloaded == [
+        scenario_adapter_name("a", "inc:1"),
+        scenario_adapter_name("a", "inc:2"),
+    ]
 
 
 @pytest.mark.unit
@@ -306,11 +334,30 @@ def test_a_full_engine_refuses_to_evict_another_scenarios_current_revision(tmp_p
     _run(actor, _job("a", 0, "inc:0"))
     result = actor.execute_training_job(_job("b", 0, "inc:1"))
     assert result.outcome == "checkpoint"
+    with pytest.raises(AdapterCapacityExhausted, match="max-loaded-loras") as raised:
+        actor.update_serving_weights(result.training_job_id)
+    # A refusal, not a wedged engine: the eviction never even ran.
+    assert not isinstance(raised.value, AdapterEvictionFailed)
+    assert manager.engine.unloaded == []
+    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+
+
+@pytest.mark.unit
+def test_a_rejected_publication_leaves_every_scenario_serving(tmp_path, _local_ray_get) -> None:
+    # Issue #65: the capacity check runs before update_weights touches an
+    # engine, so a rejection means nothing was published and nothing is
+    # inconsistent. Terminating the engines for it took down the innocent
+    # scenario's serving too, and cost a full stack restart.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    _run(actor, _job("a", 0, "inc:0"))
+    result = actor.execute_training_job(_job("b", 0, "inc:1"))
     with pytest.raises(AdapterCapacityExhausted, match="exhausted"):
         actor.update_serving_weights(result.training_job_id)
-    assert manager.engine.unloaded == []
-    assert actor.health()["phase"] == "weight_sync_failed"
-    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+    health = actor.health()
+    assert health["phase"] != "weight_sync_failed"
+    assert manager.recovered == 0, "engines were terminated for a publication that never started"
+    assert health["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:1"]
 
 
 @pytest.mark.unit

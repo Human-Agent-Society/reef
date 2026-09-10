@@ -31,6 +31,101 @@ def _local_ray_get(monkeypatch):
     monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
 
 
+def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failure(monkeypatch):
+    from threading import Lock
+
+    from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+
+    events = []
+
+    class Executor:
+        def __init__(self, name):
+            self.name = name
+
+        def shutdown(self):
+            events.append(self.name)
+            if self.name == "critic":
+                raise RuntimeError("critic unavailable")
+
+    def group(name):
+        train_group = object.__new__(SlimeTrainGroup)
+        train_group._executor = Executor(name)
+        return train_group
+
+    class Dispose:
+        def remote(self):
+            events.append("rollout-dispose")
+
+    manager = SimpleNamespace(dispose=Dispose())
+    actor = object.__new__(bridge.TrainBridgeActorImpl)
+    actor._closed = False
+    actor._operation_lock = Lock()
+    actor._critic_group = group("critic")
+    actor._group = group("actor")
+    actor._rollout_manager = manager
+    actor._manager_executor = bridge.RayExecutor.from_workers([manager])
+    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
+    with pytest.raises(RuntimeError, match="critic unavailable"):
+        actor.shutdown()
+    actor.shutdown()
+    assert events == ["critic", "actor", "rollout-dispose", "rollout-kill"]
+    assert actor._phase == "stopped"
+
+
+def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tmp_path, monkeypatch):
+    import importlib
+
+    from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+
+    events = []
+
+    class Executor:
+        def __init__(self, name):
+            self.name = name
+
+        def shutdown(self):
+            events.append(self.name)
+
+    def group(name):
+        train_group = object.__new__(SlimeTrainGroup)
+        train_group._executor = Executor(name)
+        return train_group
+
+    actor_group = group("actor")
+    critic_group = group("critic")
+
+    class Dispose:
+        def remote(self):
+            events.append("dispose")
+
+    manager = SimpleNamespace(dispose=Dispose())
+    pg = SimpleNamespace(id="shared")
+    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill"))
+    pg_module = importlib.import_module("ray.util.placement_group")
+    monkeypatch.setattr(pg_module, "remove_placement_group", lambda target: events.append("remove-pg"))
+    monkeypatch.setattr(
+        bridge, "create_placement_groups", lambda args: {"actor": (pg, [], []), "rollout": (pg, [], [])}
+    )
+    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: manager)
+    monkeypatch.setattr(bridge, "create_train_groups", lambda *args: (actor_group, critic_group))
+
+    class FailingBridgeActor:
+        @staticmethod
+        def options(**kwargs):
+            return SimpleNamespace(
+                remote=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("bridge creation failed"))
+            )
+
+    monkeypatch.setattr(bridge, "TrainBridgeActor", FailingBridgeActor)
+    monkeypatch.setattr(
+        bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
+    )
+    with pytest.raises(RuntimeError, match="bridge creation failed"):
+        bridge.start_bridge(_bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")))
+    assert events == ["critic", "actor", "dispose", "kill", "remove-pg"]
+
+
 def _row(
     source_id: str,
     *,
@@ -857,7 +952,7 @@ def test_bridge_admits_bounded_lag_for_every_cookbook_loss_family(tmp_path, loss
         (None, "missing_producing_runtime_load_id", None),
     ],
 )
-def test_bridge_drops_inadmissible_sao_provenance_without_consuming_rollout(
+def test_bridge_drops_inadmissible_sao_producing_versions_without_consuming_rollout(
     tmp_path,
     producing_version,
     reason,
@@ -1663,6 +1758,73 @@ def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> 
     # The critic group rides the keyword contract: recipes without a value
     # model (this one) hand the bridge None rather than omitting the argument.
     assert events[1][2]["critic_group"] is None
+
+
+@pytest.mark.unit
+def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeypatch) -> None:
+    """An external family must reach the actor as its dotted reference.
+
+    The bridge actor re-resolves ``loss_family`` in a fresh Ray process whose
+    registry is empty, so the plain name of a family registered via
+    ``register_loss_family_ref`` only resolves there as its dotted reference
+    (``resolve`` imports it and registers the spec). Names without a
+    registered reference ship unchanged.
+    """
+    import sys
+    from types import ModuleType
+
+    from reef.train.algos.registry import register_loss_family_ref
+    from reef.train.slime_backend.algorithm import SlimeAlgorithm
+    from reef.train.slime_backend.loss_families import unregister_loss_family
+
+    class _ExternalAlgorithm(SlimeAlgorithm):
+        loss_family = "external_family"
+        loss_type = "sft_loss"
+
+        def validate_specific_args(self, args, source):
+            pass
+
+    module = ModuleType("external_family_pkg")
+    module.ALGORITHM = _ExternalAlgorithm()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "external_family_pkg", module)
+    register_loss_family_ref("external_family", "external_family_pkg:ALGORITHM")
+
+    events = []
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    class ActorClass:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, *args, **kwargs):
+            events.append(kwargs)
+            return "bridge-handle"
+
+    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
+    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: object())
+    monkeypatch.setattr(bridge, "create_train_groups", lambda args, pgs, manager: (object(), None))
+    monkeypatch.setattr(bridge, "TrainBridgeActor", ActorClass())
+    monkeypatch.setattr(
+        bridge.CheckpointStorage,
+        "validate_capacity",
+        lambda self, **kwargs: {"blocked": False, "reasons": []},
+    )
+    args = _bridge_args(
+        save_hf="~/checkpoints/hf/{rollout_id}",
+        save="~/checkpoints/megatron",
+    )
+
+    try:
+        assert bridge.start_bridge(args, loss_family="external_family") == "bridge-handle"
+        assert events[0]["loss_family"] == "external_family_pkg:ALGORITHM"
+    finally:
+        unregister_loss_family("external_family")
+
+    # A registered family without a dotted reference ships under its own
+    # name, and an explicit dotted reference passes through untouched.
+    bridge.start_bridge(args, loss_family="sft")
+    assert events[1]["loss_family"] == "sft"
 
 
 @pytest.mark.unit

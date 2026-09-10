@@ -155,6 +155,13 @@ rollouts, one optimizer step, thinking enabled, two GPUs. Nothing has to be
 exported first except `TTTD_TASK` — `run.py`, `harness/harbor_agent.py`, and
 `serve.yaml` each write out the values they use.
 
+Reef starts and stops the shared Ray runtime automatically; no `ray start`
+or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
+`CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
+`training.num_gpus` still sets Slime's model topology. To use an existing
+cluster, set `RAY_ADDRESS`; its nodes control GPU visibility and Reef leaves
+it running on exit. The local Slime driver does not reserve model GPUs itself.
+
 We recommend allocating at least 256 GiB of host memory to the reference
 8 × 64 setup. With less memory, reduce evaluator concurrency or request a
 larger allocation to avoid stalls or termination.
@@ -346,7 +353,7 @@ packing runs and are not present in their stored W&B history.
 
 The [circle-packing overview](results/formal-8x64-v3-packing/README.md) contains
 the combined W&B history, verified configurations, generated programs,
-milestone summaries, and provenance records.
+milestone summaries, and records of how the results were produced.
 
 ## Attribution and license
 

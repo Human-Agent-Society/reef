@@ -16,6 +16,16 @@ REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.mode
 def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Register options implemented by Reef rather than the runtime."""
     parser.add_argument(
+        "--reef-executor-backend",
+        default="auto",
+        help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
+    )
+    parser.add_argument(
+        "--reef-rollout-executor-backend",
+        default="auto",
+        help="SGLang rollout executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
+    )
+    parser.add_argument(
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
@@ -40,6 +50,12 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Critic optimizer steps per actor step; unset means the loss family's own default.",
     )
     parser.add_argument("--critic-save", type=str, default=None)
+    parser.add_argument(
+        "--critic-lr",
+        type=float,
+        default=None,
+        help="Learning rate for the critic role; unset inherits --lr.",
+    )
     parser.add_argument(
         "--custom-pg-loss-function-path",
         type=str,
