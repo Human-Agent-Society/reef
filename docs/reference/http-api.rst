@@ -20,52 +20,56 @@ To put the release routes into practice, follow the `agent harness tutorial
 Routes
 ------
 
-+-------------------------------------------------+---------------------------------------------------+
-| Route                                           | Response                                          |
-+=================================================+===================================================+
-| ``GET /healthz``                                | readiness; the only unauthenticated route         |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/chat/completions``                   | OpenAI-format inference                           |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages``                           | Anthropic-format inference                        |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages/count_tokens``              | count request tokens; recorded like any inference |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/report``                           | submit feedback about one or more receipts        |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/train``                            | enqueue one training instruction                  |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                         | every known scenario and current release          |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios``                        | create a scenario explicitly                      |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``      | update the scenario training mode                 |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract``     | what this scenario accepts                        |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/releases``     | ``{scenario, releases}``, newest first            |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/rollback``    | republish an earlier release as the head          |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/promote``     | serve a release held for review                   |
-+-------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``           | remove a scenario; its state is archived          |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                           | the served harness tree                           |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases``                  | the harness release catalog, oldest first         |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``      | one HTML page per catalog step: why, what         |
-|                                                 | changed, verdict, setup, chain                    |
-+-------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/harness/proposals``                | an agent's proposed tree change, admitted or not  |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/install``                   | a shell script that installs the tree             |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/adapters``                  | every harness adapter this process resolves       |
-+-------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/status``                            | training, serving, and storage state              |
-+-------------------------------------------------+---------------------------------------------------+
++--------------------------------------------------------+---------------------------------------------------+
+| Route                                                  | Response                                          |
++========================================================+===================================================+
+| ``GET /healthz``                                       | readiness; the only unauthenticated route         |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages``                                  | Anthropic-format inference                        |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/report``                                  | submit feedback about one or more receipts        |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/train``                                   | enqueue one training instruction                  |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios``                                | every known scenario and current release          |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios``                               | create a scenario explicitly                      |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/update``             | update the scenario training mode                 |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/contract``            | what this scenario accepts                        |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/learning``            | retained summaries and committed learning links   |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/records/{record_id}`` | one retained record and its trace payload         |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/releases``            | ``{scenario, releases}``, newest first            |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/rollback``           | republish an earlier release as the head          |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/promote``            | serve a release held for review                   |
++--------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/scenarios/{scenario}``                  | remove a scenario; its state is archived          |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness``                                  | the served harness tree                           |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases``                         | the harness release catalog, oldest first         |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, what         |
+|                                                        | changed, verdict, setup, chain                    |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/install``                          | a shell script that installs the tree             |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/adapters``                         | every harness adapter this process resolves       |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/status``                                   | training, serving, and storage state              |
++--------------------------------------------------------+---------------------------------------------------+
 
 Headers
 -------
