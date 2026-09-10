@@ -80,5 +80,5 @@ body:
           required: true
         - label: I compared equivalent configurations and documented all material differences.
           required: true
-        - label: I removed credentials, private data, and sensitive prompts from all evidence.
+        - label: I removed credentials, private data, and sensitive prompts from all logs and results.
           required: true

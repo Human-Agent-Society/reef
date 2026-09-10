@@ -24,7 +24,7 @@ and the score returned by the verifier.
 ## Files
 
 - [`runs.json`](runs.json) contains configurations, summary metrics, selected
-  archive identifiers, reevaluation values, and SHA-256 provenance.
+  archive identifiers, reevaluation values, and SHA-256 hashes of source files.
 - [`polyomino.md`](polyomino.md) follows one guidance-to-candidate transition in
   the packing run.
 - [`trimul.md`](trimul.md) follows one guidance-to-kernel transition in the

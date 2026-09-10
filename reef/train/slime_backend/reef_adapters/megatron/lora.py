@@ -81,7 +81,7 @@ def lora_engine_slots(args: Namespace) -> int:
     correction scores samples through the producing adapter, which must
     therefore stay loaded. Reef records ``rollout_log_probs`` and the
     producing runtime load ID on the sample itself, so admission is sequence
-    arithmetic over recorded data: evidence stays admissible for exactly as
+    arithmetic over recorded data: a sample stays admissible for exactly as
     long as the bound says, whether or not the adapter that produced it is
     still resident. The scenario count sizes this; the staleness bound does
     not.

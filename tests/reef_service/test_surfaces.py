@@ -241,7 +241,7 @@ def test_weight_surface_accepts_exact_mixed_token_versions_from_an_in_place_upda
     _weight_hooks().verify_response(_live_artifact("engine:6"), "/v1/chat/completions", response)
 
 
-def test_weight_surface_reads_anthropic_provenance_from_private_training_spans() -> None:
+def test_weight_surface_reads_anthropic_producing_version_from_private_training_spans() -> None:
     response = {
         "type": "message",
         "content": [{"type": "text", "text": "done"}],

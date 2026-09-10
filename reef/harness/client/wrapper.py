@@ -35,7 +35,7 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
      you: every ``training_request.requires`` item over the release's chain
      in ``GET /reef/harness/releases``, merged by name as the manifest merges
      them (``permission``, ``env`` or ``service`` items, each with an optional
-     ``check``), and the check offs the ``.reef-harness-release`` sidecar
+     ``check``), and the check offs the ``.reef-harness-release`` release file
      records under ``setup``.
   2. Prints every item with its check as written; for an unmet ``permission``
      or ``service`` item asks ``run it? [y/N]`` (``--yes`` answers yes) and
@@ -44,7 +44,7 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
      ``--mark <name>`` checks an item off by hand and runs nothing. A check
      off records the check it stood for, so an item whose check changed
      since counts as unmet and runs again.
-  3. Records each met item in the sidecar's ``setup`` and exits 0 when every
+  3. Records each met item in the release file's ``setup`` and exits 0 when every
      item is met, 1 otherwise. This is the one place a check ever runs: the
      install script only reads the check offs, and a session start prints
      what is unmet and runs the session anyway.
@@ -488,40 +488,40 @@ class CaptureProxy:
         return len(turns)
 
 
-#: The release sidecar the install script and harness_pull write at the tree
+#: The release file the install script and harness_pull write at the tree
 #: root; version_check.ts reads the same name.
-HARNESS_RELEASE_SIDECAR = ".reef-harness-release"
+HARNESS_RELEASE_FILE = ".reef-harness-release"
 
 
-def _sidecar_path(compose_dir: str) -> Path:
-    return Path(compose_dir).parent / HARNESS_RELEASE_SIDECAR
+def _release_file_path(compose_dir: str) -> Path:
+    return Path(compose_dir).parent / HARNESS_RELEASE_FILE
 
 
-def _read_sidecar(compose_dir: str) -> dict[str, Any] | None:
-    """The sidecar beside the installed tree as a dict; None when there is none or it is not JSON."""
+def _read_release_info(compose_dir: str) -> dict[str, Any] | None:
+    """The release file beside the installed tree as a dict; None when there is none or it is not JSON."""
     try:
-        record = json.loads(_sidecar_path(compose_dir).read_text(encoding="utf-8"))
+        record = json.loads(_release_file_path(compose_dir).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) else None
 
 
-def _write_sidecar(compose_dir: str, record: Mapping[str, Any]) -> None:
+def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     # Written beside and renamed over, so a session starting meanwhile reads the old record or the new, never half.
-    sidecar = _sidecar_path(compose_dir)
-    staging = sidecar.with_name(f".{sidecar.name}.part")
+    release_file = _release_file_path(compose_dir)
+    staging = release_file.with_name(f".{release_file.name}.part")
     staging.write_text(json.dumps(dict(record), indent=2) + "\n", encoding="utf-8")
-    os.replace(staging, sidecar)
+    os.replace(staging, release_file)
 
 
 def _installed_release(compose_dir: str) -> str | None:
-    """The release id of the installed tree, from the sidecar beside it."""
-    release = (_read_sidecar(compose_dir) or {}).get("release_id")
+    """The release id of the installed tree, from the release file beside it."""
+    release = (_read_release_info(compose_dir) or {}).get("release_id")
     return release if isinstance(release, str) and release else None
 
 
 def _named_items(value: Any) -> list[dict[str, Any]]:
-    """The objects with a string ``name`` in a list; the sidecar's ``requires`` and ``setup`` and a row's are read alike."""
+    """The objects with a string ``name`` in a list; the release file's ``requires`` and ``setup`` and a row's are read alike."""
     if not isinstance(value, list):
         return []
     return [dict(item) for item in value if isinstance(item, Mapping) and isinstance(item.get("name"), str)]
@@ -530,7 +530,7 @@ def _named_items(value: Any) -> list[dict[str, Any]]:
 def _met(item: Mapping[str, Any], record: Mapping[str, Any] | None) -> bool:
     """Whether a check off meets an item: it names it and the check it recorded is the item's.
 
-    A check off without a recorded check, from an older sidecar, counts by
+    A check off without a recorded check, from an older release file, counts by
     name; the install script's gate applies the same rule."""
     return record is not None and ("check" not in record or record.get("check") == item.get("check"))
 
@@ -550,7 +550,7 @@ def _item_line(item: Mapping[str, Any]) -> str:
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     upstream = _reef_url_of(adapter, compose_dir)
 
-    record = _read_sidecar(compose_dir) or {}
+    record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
     unmet = _unmet(record.get("requires"), record.get("setup"))
     if unmet:
@@ -676,7 +676,7 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
 
 
 def _spooled_session(scenario: str) -> str | None:
-    """Read session provenance without claiming or consuming feedback receipts."""
+    """Read the session id without claiming or consuming feedback receipts."""
     directory = _captures_dir()
     paths = [directory / f"{scenario}.json", *sorted(directory.glob(f"{_scenario_key(scenario)}-*.pending.json"))]
     for path in paths:
@@ -704,13 +704,13 @@ def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
     release = _installed_release(compose_dir)
     if release is None:
         sys.exit(
-            f"reef-{adapter}: no {HARNESS_RELEASE_SIDECAR} sidecar at {Path(compose_dir).resolve().parent}: this "
+            f"reef-{adapter}: no {HARNESS_RELEASE_FILE} release file at {Path(compose_dir).resolve().parent}: this "
             "tree did not come through reef's install channel, so a request cannot name the release it runs; "
             "nothing was sent"
         )
     upstream = _reef_url_of(adapter, compose_dir)
 
-    # Session and release are provenance; they do not select an inference batch.
+    # Session and release identify where the request came from; they do not select an inference batch.
     session = _spooled_session(scenario) or str(uuid.uuid4())
 
     body = {"text": text, "session": session, "release_id": release}
@@ -806,10 +806,10 @@ def setup(
     newest that is not pending; what it requires is its chain's union, as
     the manifest lists it. ``marks`` are items checked off by hand, running
     nothing; an unknown name is exit 2. A check runs here and nowhere else."""
-    record = _read_sidecar(compose_dir)
+    record = _read_release_info(compose_dir)
     if record is None:
         sys.exit(
-            f"reef-{adapter}: no {HARNESS_RELEASE_SIDECAR} sidecar at {Path(compose_dir).resolve().parent}: this "
+            f"reef-{adapter}: no {HARNESS_RELEASE_FILE} release file at {Path(compose_dir).resolve().parent}: this "
             "tree did not come through reef's install channel, so there is nowhere to record a check off"
         )
     upstream = _reef_url_of(adapter, compose_dir)
@@ -853,7 +853,7 @@ def setup(
         # The check rides beside the name, so a release that changes it asks again.
         checked[name] = {"name": name, "checked_at": time.time(), "check": item.get("check")}
     if checked != recorded:
-        _write_sidecar(compose_dir, {**record, "setup": list(checked.values())})
+        _write_release_info(compose_dir, {**record, "setup": list(checked.values())})
     unmet = [item["name"] for item in requires if not _met(item, checked.get(item["name"]))]
     if unmet:
         print(f"reef-{adapter} setup: {len(unmet)} item(s) not met: {', '.join(unmet)}")

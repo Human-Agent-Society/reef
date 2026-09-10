@@ -417,11 +417,11 @@ clock), or ``error`` (its ``error`` code ``MODEL_ERROR``, ``LOAD_ERROR``,
 ``GRAPH_ERROR``, ``LOOP_ERROR`` under a ``native_loop``, or ``TURN_ERROR`` in
 the serve form). Arguments are
 validated against the tool's declared
-schema before ``run`` sees them. A result over 20,000 characters is spilled:
-the whole text is written to ``.reef/spill/<step>-<call_id>.txt`` under the
+schema before ``run`` sees them. A result over 20,000 characters is saved to a file:
+the whole text is written to ``.reef/tool-output/<step>-<call_id>.txt`` under the
 workspace, the model reads the head, one marker line naming that file and the
 omitted count, and the last 2,000 characters, and ``tool/result`` carries the
-file in ``meta.spill``. A failed model call logs ``request/error``
+file in ``meta.output_file``. A failed model call logs ``request/error``
 (``attempt`` and the ``MODEL_ERROR`` failure) before the ``request_error``
 event runs. A hook whose decision differs from the layer
 below it logs ``hook/decision`` (``event``, ``step``, ``hook``, ``owned``, and
@@ -461,7 +461,8 @@ shape, to the open turn's session when there is one and else to
 number, the ``prompt`` and the ``cwd``; ``request/header`` repeats whenever
 the prompt or the declarations changed since the last one; a turn the wall
 clock ended has ``turn/end`` with reason ``turn-timeout``. Steps restart at
-1 each turn, so a turn's spill files land under ``.reef/spill/t<turn>/``.
+1 each turn, so a turn's full tool outputs land under
+``.reef/tool-output/t<turn>/``.
 
 The socket protocol is one request per connection, JSON lines, UTF-8, on a
 Unix domain socket at ``native/serve.sock`` (or under ``/tmp`` when that
@@ -476,7 +477,7 @@ turn as written, then ``{"type": "turn/result", "data": {"exit", "session",
 malformed request answers ``{"type": "error", "data": {"message"}}``.
 Turns are served one at a time; a second connection waits. The three self
 tools (``reef/harness/runners/native/selftools.py``) are ``ToolModule`` instances
-built in code with ``host_plane`` set, run in process whatever
+built in code with ``builtin_tool`` set, run in process whatever
 ``REEF_NATIVE_ENFORCE`` says, and registered only under ``--self-tools``;
 a tree entry named like one fails to mount with ``reserved name``.
 

@@ -12,8 +12,8 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// The release sidecar the install script and harness_pull write at the tree root.
-const SIDECAR = ".reef-harness-release";
+// The release file the install script and harness_pull write at the tree root.
+const RELEASE_FILE = ".reef-harness-release";
 
 function readJson(path) {
   try {
@@ -34,7 +34,7 @@ export default function requests(pi) {
   const scenario = process.env.REEF_SCENARIO;
   if (!agentDir || !serviceUrl || !scenario) return;
   // The wrapper relocates the agent into a temp copy and exports the true
-  // install root; a tree run directly falls back to the sidecar beside it.
+  // install root; a tree run directly falls back to the release file beside it.
   const destDir = process.env.REEF_HARNESS_DEST || join(agentDir, "..");
 
   const reefHeaders = () => {
@@ -43,8 +43,8 @@ export default function requests(pi) {
   };
 
   const installedRelease = () => {
-    const sidecar = readJson(join(destDir, SIDECAR));
-    return sidecar && typeof sidecar.release_id === "string" && sidecar.release_id ? sidecar.release_id : null;
+    const releaseInfo = readJson(join(destDir, RELEASE_FILE));
+    return releaseInfo && typeof releaseInfo.release_id === "string" && releaseInfo.release_id ? releaseInfo.release_id : null;
   };
 
   pi.registerCommand("reef-harness", {
@@ -58,7 +58,7 @@ export default function requests(pi) {
       const releaseId = installedRelease();
       if (!releaseId) {
         ctx.ui.notify(
-          `no ${SIDECAR} sidecar at ${destDir}: this tree did not come through reef's install channel, ` +
+          `no ${RELEASE_FILE} release file at ${destDir}: this tree did not come through reef's install channel, ` +
             "so a request cannot name the release it runs; nothing was sent",
           "error",
         );

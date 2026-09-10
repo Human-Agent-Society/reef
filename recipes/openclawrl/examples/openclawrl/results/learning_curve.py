@@ -1,6 +1,6 @@
 """Per-session accept and style metrics of a GSM8K homework stream.
 
-Reef's training run logs loss and rewards; the judge sidecar's verdict, whether
+Reef's training run logs loss and rewards; the judge service's verdict, whether
 the agent's first reply satisfies the student, lands per session in the reef-eval
 lab as ``verifier/final.json``, which Reef never sees. This script reads those
 verdicts and turns them into the stream's learning curve, in two ways.

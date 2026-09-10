@@ -13,7 +13,7 @@ from reef_service.test_sao_bridge import _RecordingGroup
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
+from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row
 
@@ -180,15 +180,15 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     assert group.publications == [("a", "inc:1"), ("b", "inc:2"), ("a", "inc:3")]
     assert Path(template.format(rollout_id=2)).is_dir()
 
-    ledger = ScenarioLedger(ledger_path(template))
-    assert ledger.status()["a"] == {
+    history = ScenarioHistory(history_path(template))
+    assert history.status()["a"] == {
         "runtime_load_id": "inc:3",
         "adapter": scenario_adapter_name("a", "inc:3"),
         "publications": 2,
         "rollout_id": 2,
         "steps": 2,
     }
-    assert ledger.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
+    assert history.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
@@ -217,7 +217,7 @@ def test_staleness_counts_only_the_scenarios_own_publications(tmp_path, _local_r
 
 
 @pytest.mark.unit
-def test_evidence_outlives_the_eviction_of_the_adapter_that_produced_it(tmp_path, _local_ray_get) -> None:
+def test_sample_remains_admissible_after_the_adapter_that_produced_it_is_evicted(tmp_path, _local_ray_get) -> None:
     # Issue #26's last open item asked whether the residency window has to be
     # sized against the staleness bound, the way AReaL ties lora_keep_versions
     # to max_head_offpolicyness. It does not: a Reef sample carries its own

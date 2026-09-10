@@ -952,7 +952,7 @@ def test_bridge_admits_bounded_lag_for_every_cookbook_loss_family(tmp_path, loss
         (None, "missing_producing_runtime_load_id", None),
     ],
 )
-def test_bridge_drops_inadmissible_sao_provenance_without_consuming_rollout(
+def test_bridge_drops_inadmissible_sao_producing_versions_without_consuming_rollout(
     tmp_path,
     producing_version,
     reason,

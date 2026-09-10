@@ -19,9 +19,9 @@ def sao_sample_row(sample: PolicySample) -> list[Any]:
     """Shape one Reef sample into SAO's 8-element wire row.
 
     The first five columns are the shared policy 5-tuple; SAO appends the
-    action mask (for skip-observation GAE) and rollout provenance (producing
-    runtime load ID, creation time) the 5-tuple has no slot for. Outbound
-    mirror of :func:`build_sao_rollout_data`.
+    action mask (for skip-observation GAE), producing runtime load ID, and
+    creation time, which the 5-tuple has no slots for. Outbound mirror of
+    :func:`build_sao_rollout_data`.
     """
     return [
         sample.source_agent_record_id,
@@ -43,8 +43,8 @@ def build_sao_rollout_data(
     """Validate and convert Reef SAO rows into Slime's external rollout payload.
 
     SAO's wire row keeps the policy 5-tuple as its prefix and appends the
-    action mask plus rollout provenance: ``[source_id, tokens, loss_mask,
-    rollout_log_probs, reward, action_mask, producing_runtime_load_id,
+    action mask, producing version, and creation time: ``[source_id, tokens,
+    loss_mask, rollout_log_probs, reward, action_mask, producing_runtime_load_id,
     rollout_created_at]``. The shared policy builder assembles the 5-tuple
     columns; this builder validates the appended columns and attaches them.
     Each SAO sample is one independently scheduled rollout, so there is no

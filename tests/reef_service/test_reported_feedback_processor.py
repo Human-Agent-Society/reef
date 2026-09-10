@@ -352,7 +352,7 @@ def test_units_emit_in_report_arrival_order_across_late_resolution() -> None:
 
 
 @pytest.mark.unit
-def test_compaction_scrubs_the_ledger_for_reingest() -> None:
+def test_compaction_clears_records_for_reingest() -> None:
     processor = engine()
     processor.ingest(inference("i1"))
     processor.ingest(report("r1", "i1"))

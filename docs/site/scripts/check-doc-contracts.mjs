@@ -1,4 +1,5 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -96,9 +97,11 @@ for (const { method, path } of routes) {
 
 const terminologyFiles = [
   resolve(repoRoot, "README.md"),
+  resolve(repoRoot, "README.zh.md"),
   ...readTerminologyFiles(resolve(repoRoot, "docs"), documentationExtensions),
   ...readTerminologyFiles(resolve(repoRoot, "recipes"), documentationExtensions),
   ...readTerminologyFiles(resolve(repoRoot, "reef"), documentationExtensions),
+  ...readTerminologyFiles(resolve(repoRoot, "tutorials"), documentationExtensions),
 ];
 const droppedConcepts = [
   ["evidence", /\bevidence\b/i],
@@ -150,6 +153,45 @@ for (const path of readTerminologyFiles(resolve(repoRoot, "reef"), sourceExtensi
   for (const [name, pattern] of droppedIdentifiers) {
     if (pattern.test(source)) {
       failures.push(`${relative(repoRoot, path)} uses dropped identifier ${name}`);
+    }
+  }
+}
+
+// Check filenames, identifiers, and embedded UI copy as well as prose. Git's
+// file list includes new work and respects ignore rules, so generated output
+// and installed dependencies do not need directory-name exceptions here.
+const simplifiedTerminology = [
+  ["ledger", /ledger/i],
+  ["sidecar", /sidecar/i],
+  ["provenance", /provenance/i],
+  ["evidence", /evidence/i],
+  ["host plane", /host[ _-]?plane/i],
+  ["spill", /spill/i],
+  ["HeadSink", /headsink/i],
+];
+const repositoryFiles = new Set(
+  execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  }).split("\0").filter(Boolean),
+);
+const terminologyCheckPath = relative(repoRoot, fileURLToPath(import.meta.url));
+for (const path of repositoryFiles) {
+  // This file defines the rejected spellings. Dependency lockfiles describe
+  // external packages whose names are outside Reef's control.
+  if (path === terminologyCheckPath || /(?:^|\/)(?:package-lock\.json|[^/]+\.lock)$/.test(path)) continue;
+  const absolutePath = resolve(repoRoot, path);
+  if (!existsSync(absolutePath) || !statSync(absolutePath).isFile()) continue;
+  const contents = readFileSync(absolutePath);
+  if (contents.includes(0)) continue;
+  const lines = contents.toString("utf8").split("\n");
+  for (const [name, pattern] of simplifiedTerminology) {
+    if (pattern.test(path)) {
+      failures.push(`${path} uses unclear terminology ${name} in its filename`);
+    }
+    const line = lines.findIndex((text) => pattern.test(text));
+    if (line !== -1) {
+      failures.push(`${path}:${line + 1} uses unclear terminology ${name}`);
     }
   }
 }

@@ -25,7 +25,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from reef.harness.client import wrapper as harness_wrapper
-from reef.harness.client.wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy
+from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy
 from reef.harness.runners.native import serve
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.runners.native.selftools import RESERVED_NAMES
@@ -199,7 +199,7 @@ def reef() -> Iterator[_FakeReef]:
 
 
 def _tree(tmp_path: Path, reef: _FakeReef, release_id: str) -> Path:
-    """The pulled tree of one release: native/tree.json, the model binding at the fake reef, the sidecar."""
+    """The pulled tree of one release: native/tree.json, the model binding at the fake reef, the release file."""
     dest = tmp_path / "reef-harness"
     (dest / "native").mkdir(parents=True)
     (dest / "native" / "tree.json").write_text(
@@ -209,7 +209,7 @@ def _tree(tmp_path: Path, reef: _FakeReef, release_id: str) -> Path:
         json.dumps({"api": "openai", "base_url": reef.base_url, "api_key": "tok", "model": "fake"}) + "\n",
         encoding="utf-8",
     )
-    (dest / HARNESS_RELEASE_SIDECAR).write_text(json.dumps({"release_id": release_id}) + "\n", encoding="utf-8")
+    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"release_id": release_id}) + "\n", encoding="utf-8")
     return dest
 
 
@@ -337,8 +337,8 @@ def test_a_response_header_moves_the_head_and_the_mount_lands_between_two_steps(
     results = _typed(events, "tool/result")
     assert results[0]["error"]["code"] == "UNKNOWN_TOOL" and results[1]["content"] == "LOUD"
     assert [request["headers"]["x-reef-tag-release"] for request in reef.requests] == ["r1", "r2", "r2"]
-    # What a restart boots from: the tree file and the sidecar name the mounted release.
-    assert json.loads((dest / HARNESS_RELEASE_SIDECAR).read_text())["release_id"] == "r2"
+    # What a restart boots from: the tree file and the release file name the mounted release.
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["release_id"] == "r2"
     assert [entry["id"] for entry in json.loads((dest / "native" / "tree.json").read_text())] == [
         "r",
         "whisper",
@@ -391,7 +391,7 @@ def test_a_failed_mount_rolls_back_and_the_previous_composition_keeps_serving(tm
         time.sleep(0.35)
         assert len(_typed(_events(log), "harness/mount-failed")) == 1
 
-    assert json.loads((dest / HARNESS_RELEASE_SIDECAR).read_text()) == {"release_id": "r1"}
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text()) == {"release_id": "r1"}
     assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1"]
     assert reef.requests[0]["headers"]["x-reef-tag-release"] == "r1"
 
@@ -411,7 +411,7 @@ def test_follow_pinned_announces_the_head_and_the_mount_control_applies_it(tmp_p
         missing = serve.request(server.socket_path, {"control": "mount", "release_id": "r9"})
         assert missing["data"]["mounted"] is False and "404" in missing["data"]["error"]
 
-    assert json.loads((dest / HARNESS_RELEASE_SIDECAR).read_text())["parent_release_id"] == "r1"
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text())["parent_release_id"] == "r1"
     assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1", "r2"]
 
 
@@ -445,7 +445,7 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
                 raise outcome
             return str(outcome)
 
-    class _Sink:
+    class _ReleaseListener:
         def __init__(self) -> None:
             self.heads: list[tuple[str, str]] = []
 
@@ -460,11 +460,11 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
 
     busy = ReleaseClientError("GET /reef/harness/releases failed: TimeoutError: timed out", timed_out=True)
     down = ReleaseClientError("GET /reef/harness/releases failed: URLError: Connection refused")
-    sink = _Sink()
-    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), sink, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
+    release_listener = _ReleaseListener()
+    watch = HeadWatch(_Client([busy, busy, busy, down, down, "r2"]), release_listener, _Log(), 0.01, mounted="r1")  # type: ignore[arg-type]
     watch.start()
     try:
-        _wait(lambda: sink.heads == [("r2", "poll")])
+        _wait(lambda: release_listener.heads == [("r2", "poll")])
     finally:
         watch.stop()
     assert [event["type"] for event in events] == ["release/poll-failed"] * 5
@@ -673,7 +673,7 @@ def test_a_trial_mount_tags_its_calls_and_is_unmounted_at_turn_end(
     assert _typed(streamed, "harness/unmount")[0]["try_id"] == tried["try_id"]
     assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None, tried["try_id"], tried["try_id"]]
     assert {r["headers"]["x-reef-tag-release"] for r in reef.requests} == {"r1"}
-    assert json.loads((dest / HARNESS_RELEASE_SIDECAR).read_text()) == {"release_id": "r1"}
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text()) == {"release_id": "r1"}
     # report claims the turn's spool and sends the one receipt that was not a trial's.
     monkeypatch.setenv("REEF_HARNESS_COMPOSE", str(dest / "native"))
     harness_wrapper.report(SCENARIO, "native", 1.0, "tried it")
@@ -1052,7 +1052,7 @@ def test_a_tree_tool_cannot_take_a_self_tool_name_at_admission() -> None:
 
     for name in RESERVED_NAMES:
         config = {**_tool(name)["config"]}
-        with pytest.raises(ValueError, match="reserved for the host plane"):
+        with pytest.raises(ValueError, match="reserved for built-in tools"):
             NODE_KINDS["native_tool"](None, config)
 
 
@@ -1061,7 +1061,7 @@ def test_the_self_tools_run_in_process_when_the_environment_names_bwrap(
 ) -> None:
     fake = tmp_path / "fakebin"
     fake.mkdir()
-    (fake / "bwrap").write_text("#!/bin/sh\necho 'bwrap: must not run for a host plane tool' >&2\nexit 1\n")
+    (fake / "bwrap").write_text("#!/bin/sh\necho 'bwrap: must not run for a built-in tool' >&2\nexit 1\n")
     (fake / "bwrap").chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}{os.pathsep}{os.environ.get('PATH', '')}")
     monkeypatch.setenv("REEF_NATIVE_ENFORCE", "bwrap")

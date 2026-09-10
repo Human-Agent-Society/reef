@@ -24,7 +24,8 @@ class PreparedCommit:
     owned by the processor or backend that produced it; the trainer and commit log
     never interpret it, and the harness manifest republishes it verbatim as
     ``gate``. It rides the commit record because that is the only durable
-    version-keyed store, which is what lets provenance survive to serving.
+    version-keyed store, so training metrics remain available when the
+    resulting version is served.
     """
 
     algorithm_state: Mapping[str, Any]

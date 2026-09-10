@@ -34,7 +34,7 @@ class TrainingJobResult:
     ``metrics`` is backend telemetry carried opaquely, the same contract as
     ``TrainStepResult.metrics``: the backend that produced it owns the schema,
     reef never interprets it, and it reaches the commit record so per-step
-    provenance survives to serving.
+    metrics remain available when the resulting version is served.
     """
 
     outcome: Literal["complete", "checkpoint", "stale", "storage_blocked"]

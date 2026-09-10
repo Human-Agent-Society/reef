@@ -246,8 +246,8 @@ Reef screens what the method promotes. A prompt that carries a credential or
 an instruction override (``ignore the previous instructions``, a forged ``new
 system prompt:``, a chat-template control token) is skipped and counted in
 the step's ``screened_tasks`` metric; one tagged client holds at most
-``evolution.max_promoted_per_client`` promoted tasks and the whole ledger at
-most ``evolution.max_promoted_tasks``. A code-bearing mutation
+``evolution.max_promoted_per_client`` promoted tasks, with at most
+``evolution.max_promoted_tasks`` promoted tasks in total. A code-bearing mutation
 (``code_extension``, ``native_tool``, ``native_hook``) proposed from client
 text belongs behind ``evolution.review_kinds``, so a person reads it before
 it publishes. A ``native_graph`` carries no code, so a loop change can

@@ -44,9 +44,10 @@ How Reef implements it
 skillclaw is a method package on the harness evolution engine
 (``reef/train/cordis_backend/``); `Evolve your harness
 <../evolve-your-harness.rst>`__ describes the mechanism it runs on. The method
-supplies ``propose`` and ``evaluate``; the engine owns render, episodes,
-ledger, and revert. ``propose`` runs the night flow and maps its decisions to
-one composite mutation sequence, so a whole night applies under one snapshot
+supplies ``propose`` and ``evaluate``; the engine renders the harness, runs
+evaluation tasks, records changes, and rolls back rejected changes.
+``propose`` runs the night flow and maps its decisions to one composite
+mutation sequence, so a whole night applies under one snapshot
 and settles under one verdict.
 
 Two choices distinguish it from the tutorial method. ``selection: always``

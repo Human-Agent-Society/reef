@@ -44,8 +44,8 @@ class PolicySample:
       ``runtime_load_id`` (the producing version, from the serving
       ``artifact_ref``) it also gives policy lag.
     * ``turn_count`` — number of ordered inference calls represented by this
-      sample. Values greater than one mark a multi-turn trajectory. This is
-      Reef-side provenance and is not part of the Slime training payload.
+      sample. Values greater than one mark a multi-turn trajectory. Reef
+      records this count, but excludes it from the Slime training payload.
     * ``topk_indices`` / ``topk_log_probs`` — the generation-time top-K vocab
       ids and log-probs per response token, present when the serving backend
       captures them (``capture_topk``). Objectives that compare the rollout

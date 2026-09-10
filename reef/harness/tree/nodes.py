@@ -3,7 +3,7 @@
 A harness composition is a flat compose Entry tree whose entries name one of
 the node kinds below. Each kind's plugin body is its admission gate: it
 validates the entry config at load, so a proposal carrying an invalid node
-lands as a FAILED fiber and never reaches the ledger. Five kinds cover what
+lands as a FAILED fiber and never reaches the commit log. Five kinds cover what
 both surveyed harnesses compose from files alone - one JSON config tree,
 markdown resource directories, and code-valued extension files - and the
 native harness adds kinds only it renders:
@@ -54,7 +54,7 @@ NATIVE_LOOP_DEFAULT_MAX_STEPS = 12
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
-#: Tool names the serve form's host plane owns (``reef.harness.runners.native.selftools``); no tree entry may take one.
+#: Names reserved for built-in tools (``reef.harness.runners.native.selftools``); no tree entry may take one.
 NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
 #: Entry ids of reef's own shipped entries (the update notice, the harness requests extension and its skill): a seed or a
 #: recovered state carries them, and no mutation creates, updates or removes one.
@@ -91,9 +91,9 @@ NATIVE_PATTERN_MAX_LENGTH = 200
 NATIVE_MATCH_WINDOW = 4096
 NATIVE_PATTERN_TIMEOUT_S = 1.0
 _SECRET_NAME = re.compile(r"(?i)(api[_-]?keys?([_-]?env)?|tokens?|secrets?|passwords?)$")
-#: Distinctive credential shapes in free text. A tripwire like _SECRET_NAME:
+#: Distinctive credential shapes in free text, checked like _SECRET_NAME:
 #: prefixes and key blocks that are never legitimate tree content, chosen so
-#: prose about keys (or the tutorial's sk-local placeholder) cannot trip it.
+#: prose about keys (or the tutorial's sk-local placeholder) does not match.
 _SECRET_TEXT = re.compile(
     r"(?:sk-[A-Za-z0-9_-]{16,}"
     r"|ghp_[A-Za-z0-9]{20,}"
@@ -105,7 +105,7 @@ _SECRET_TEXT = re.compile(
 )
 #: Instruction-override shapes in recorded traffic: the phrasings that tell a
 #: reader to drop its instructions, a forged system message, and chat-template
-#: control tokens. A tripwire like _SECRET_TEXT: it matches the directive with
+#: control tokens. Like _SECRET_TEXT, this check matches the directive with
 #: its object, never the topic, so a task about prompts or rules passes.
 _DIRECTIVE_TEXT = re.compile(
     r"(?i)(?:\b(?:ignore|disregard|forget)\s+(?:(?:all|any|the|your|of|every)\s+)*"
@@ -185,9 +185,9 @@ def _reject_inline_secret(data: Any, path: str) -> None:
     ``reef.upstream_api_key`` and is injected at episode render, method
     models declare ``evolution.models.<name>.api_key_env`` - so a secret
     field here has no consumer and only a leak to persist. The name match
-    (singular, plural, string or string list value) is a tripwire, not the
-    boundary; the boundary is that no sanctioned channel puts a credential
-    in the tree. The message names the field path, never its value.
+    (singular, plural, string or string list value) detects common inline
+    credentials; all supported channels keep credentials out of the tree.
+    The message names the field path, never its value.
     """
     if isinstance(data, Mapping):
         for key, value in data.items():
@@ -221,7 +221,7 @@ def config_node(ctx: Any, config: Any) -> None:
 
 
 def secret_shaped(text: str) -> bool:
-    """Whether free text carries a credential-shaped literal; shared by the tree boundary and the task ledger."""
+    """Whether free text carries a credential-shaped literal; shared by tree validation and saved task checks."""
     return _SECRET_TEXT.search(text) is not None
 
 
@@ -231,7 +231,7 @@ def redact_secret_shaped(text: str) -> str:
 
 
 def directive_shaped(text: str) -> bool:
-    """Whether free text carries an instruction-override phrasing or a chat-template control token; the task ledger's second tripwire."""
+    """Whether a saved task contains instruction-override phrasing or a chat-template control token."""
     return _DIRECTIVE_TEXT.search(text) is not None
 
 
@@ -283,7 +283,7 @@ def native_tool_node(ctx: Any, config: Any) -> None:
     name = _require_name(options)
     if name in NATIVE_RESERVED_TOOL_NAMES:
         # The serve form's self tools own these names; a tree that took one would win a gate it could never serve.
-        raise ValueError(f"native_tool node name {name!r} is reserved for the host plane's self tools")
+        raise ValueError(f"native_tool node name {name!r} is reserved for built-in tools")
     _require_text(options, "description")
     if not isinstance(options.get("parameters", {}), Mapping):
         raise ValueError("native_tool node 'parameters' must be an object")

@@ -59,7 +59,7 @@ _JUDGE_SYSTEM_PROMPT = (
     "You are a process reward model (PRM) evaluating an AI assistant.\n"
     "You will see the assistant's output and the subsequent next state.\n"
     "Your task: decide whether the assistant's output **successfully fulfilled** the user's intent "
-    "at that step, using the next state as evidence.\n\n"
+    "at that step, based on the next state.\n\n"
     "## Understanding the next state's role\n"
     "- role='user': A reply from the user.\n"
     "- role='tool': The return value of a tool the assistant invoked. "

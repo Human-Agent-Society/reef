@@ -12,8 +12,8 @@ Bounded stale-sample training without giving up the version fence
    produced its rollouts; anything older is discarded. That fence makes
    version lag zero **by construction**. This RFC adds one shared, bounded
    staleness window: keep the fence's correctness job (serving identity at
-   execution time), stop using it as the admission policy for sample
-   provenance, and let the existing training path own admitted stale data. It
+   execution time), stop using it to decide which sample versions to admit,
+   and let the existing training path own admitted stale data. It
    is implemented as the shared opt-in ``max_staleness`` setting (default ``0``).
 
 .. _1-where-the-gate-lives-today:
@@ -23,11 +23,11 @@ Bounded stale-sample training without giving up the version fence
 
 Three independently reasonable mechanisms combine to produce this behavior:
 
-1. **Provenance becomes the fence.**
+1. **The producing version determines the version check.**
    `executor_runtime.prepare_training_step <../../reef/runtime/adapters/executor_runtime.py>`__
    collects the batch's producing runtime load IDs, requires exactly one, and
-   stamps it as the job's ``expected_runtime_load_id``. The samples' *provenance*
-   is promoted into the job's *identity*.
+   stamps it as the job's ``expected_runtime_load_id``. The version that
+   produced the samples becomes the version required by the job.
 2. **The bridge rejects mismatch.**
    `bridge._run_train_step <../../reef/train/slime_backend/reef_adapters/bridge.py>`__
    compares ``expected_runtime_load_id`` against the currently published serving
@@ -49,7 +49,7 @@ every in-flight rollout becomes ineligible.
 The training path already owns how a sample is consumed. Staleness admission
 should only bound *which* producing versions reach that path; it should not
 inspect the configured recipe or objective, reinterpret the payload, or add
-another importance weight. An unconditional exact-provenance gate wastes
+another importance weight. An unconditional producing-version check wastes
 in-flight work and makes asynchronous rollout generation lockstep.
 
 The exact gate remains the safest default. This RFC separates correctness
@@ -77,18 +77,19 @@ comparison:
 | learn from?"         |                       | enforcement          |
 +----------------------+-----------------------+----------------------+
 
-.. _31-fence-on-serving-identity-not-sample-provenance:
+.. _31-check-serving-version-independently-of-sample-version:
 
-3.1 Fence on serving identity, not sample provenance
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+3.1 Check the serving version independently of the sample version
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 With the window enabled, ``prepare_training_step`` stamps
 ``expected_runtime_load_id`` from the runtime's own ``serving_runtime_load_id()`` at
 preparation time instead of from the samples. The bridge's exact-match check
 still catches the race it exists for (the serving version moved between
 preparation and execution). A parallel ``producing_runtime_load_ids`` list in the
-shared training payload retains each sample's provenance. At ``W = 0``, Reef
-keeps the old producing-version fence and does not add a serving probe.
+shared training payload retains each sample's producing version. At
+``W = 0``, Reef keeps the old producing-version fence and does not add a
+serving probe.
 
 .. _32-a-staleness-window-before-bridge-side-effects:
 
@@ -109,8 +110,9 @@ the same incarnation**:
   (``staleness/samples_dropped``), so the discard rate is observable instead of
   implicit.
 
-Mixed-provenance batches become legal (the "exactly one producing version"
-assertion relaxes to "every version admissible under the window"). Each sample
+Batches containing samples from different versions become legal (the
+"exactly one producing version" assertion relaxes to "every version admissible
+under the window"). Each sample
 is classified independently; if any sample is inadmissible, the reserved batch
 is dropped atomically.
 
@@ -152,7 +154,7 @@ recorded serving token, so lag remains comparable after recovery. A genuinely
 new serving incarnation never compares equal and all
 older samples are dropped as cross-incarnation. The recovery-pair invariant,
 checkpoint retention, and the critic checkpoint are unaffected because none of
-them consume provenance.
+them use sample version information.
 
 .. _43-what-does-not-change:
 

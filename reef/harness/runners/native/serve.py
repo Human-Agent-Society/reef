@@ -34,9 +34,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from reef.harness.adapters import get_adapter
-from reef.harness.client.wrapper import HARNESS_RELEASE_SIDECAR, CaptureProxy, WrapperError
+from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, WrapperError
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.runners.native import SESSION_VERSION, SPILL_DIR, Session, _Loop, binding_from
+from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
 from reef.harness.runners.native.graph import Run, run_graph, run_loop_module
 from reef.harness.runners.native.host import NativeHost
@@ -76,7 +76,7 @@ class EventSink(Protocol):
 
 
 def tree_layout(tree: Path) -> tuple[Path, Path]:
-    """(the pulled tree root, where the sidecar sits; its ``native/`` directory); the native directory itself is accepted."""
+    """(the pulled tree root, where the release file sits; its ``native/`` directory); the native directory itself is accepted."""
     tree = tree.resolve()
     if (tree / "native" / "models.json").is_file():
         return tree, tree / "native"
@@ -128,10 +128,10 @@ def _entries_from_manifest(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     return _parse_tree(text, f"release {manifest.get('release_id')!r} native/{TREE_FILE}")
 
 
-def read_sidecar(dest: Path) -> dict[str, Any]:
-    """The release sidecar beside the tree, or an empty record when there is none or it is unreadable."""
+def read_release_info(dest: Path) -> dict[str, Any]:
+    """The release file beside the tree, or an empty record when there is none or it is unreadable."""
     try:
-        record = json.loads((dest / HARNESS_RELEASE_SIDECAR).read_text(encoding="utf-8"))
+        record = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return dict(record) if isinstance(record, Mapping) else {}
@@ -238,8 +238,8 @@ class EventLog:
         self._own.close()
 
 
-class HostPlaneEnforcer:
-    """A host plane tool runs in process whatever ``REEF_NATIVE_ENFORCE`` says: it is reef's code, not the tree's."""
+class BuiltinToolEnforcer:
+    """A built-in tool runs in process whatever ``REEF_NATIVE_ENFORCE`` says: it is reef's code, not the tree's."""
 
     def __init__(self, inner: Enforcer) -> None:
         self._inner = inner
@@ -247,14 +247,14 @@ class HostPlaneEnforcer:
         self.mode = inner.mode
 
     @staticmethod
-    def _host_plane(tool: Tool | None) -> bool:
-        return bool(getattr(tool, "host_plane", False))
+    def _is_builtin_tool(tool: Tool | None) -> bool:
+        return bool(getattr(tool, "builtin_tool", False))
 
     def describe(self, tool: Tool | None) -> dict[str, Any]:
-        return (self._local if self._host_plane(tool) else self._inner).describe(tool)
+        return (self._local if self._is_builtin_tool(tool) else self._inner).describe(tool)
 
     def run(self, tool: Tool, arguments: dict[str, Any], workdir: Path) -> Any:
-        return (self._local if self._host_plane(tool) else self._inner).run(tool, arguments, workdir)
+        return (self._local if self._is_builtin_tool(tool) else self._inner).run(tool, arguments, workdir)
 
 
 class _ServeLoop(_Loop):
@@ -370,7 +370,7 @@ class Server:
         self._loader: Loader
         self._proxy: CaptureProxy
         self._watch: HeadWatch
-        self._enforcer: HostPlaneEnforcer
+        self._enforcer: BuiltinToolEnforcer
         self._socket_server: _SocketServer | None = None
 
     # -- what the self tools and the status read ---------------------------------------------------------------
@@ -418,12 +418,12 @@ class Server:
         self._log = EventLog(self.sessions_dir / SERVE_LOG)
         self._started = True
         try:
-            self._enforcer = HostPlaneEnforcer(select_enforcer(os.environ))
+            self._enforcer = BuiltinToolEnforcer(select_enforcer(os.environ))
         except ValueError as exc:
             raise ServeError(str(exc)) from exc
-        sidecar = read_sidecar(self.dest)
-        release = str(sidecar["release_id"]) if sidecar.get("release_id") else None
-        parent = str(sidecar["parent_release_id"]) if sidecar.get("parent_release_id") else None
+        release_info = read_release_info(self.dest)
+        release = str(release_info["release_id"]) if release_info.get("release_id") else None
+        parent = str(release_info["parent_release_id"]) if release_info.get("parent_release_id") else None
         self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=release)
         self._proxy = CaptureProxy(
             self.reef_url,
@@ -667,7 +667,7 @@ class Server:
 
     @staticmethod
     def _reserved(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
-        """A tree entry that takes a self tool's name: the host plane owns those names."""
+        """A tree entry that takes a name reserved for built-in tools."""
         failures = []
         for entry in entries:
             config = entry.get("config")
@@ -677,7 +677,7 @@ class Server:
                     (
                         str(entry.get("id")),
                         "native_tool",
-                        f"reserved name {name!r}: the host plane's self tools own it",
+                        f"reserved name {name!r}: built-in tools own it",
                     )
                 )
         return failures
@@ -701,7 +701,7 @@ class Server:
             )
 
     def _install(self, manifest: Mapping[str, Any]) -> None:
-        """What a restart boots from: the mounted release's tree file and the sidecar naming it."""
+        """What a restart boots from: the mounted release's tree file and the release file naming it."""
         files = manifest.get("files") or {}
         text = files.get(f"native/{TREE_FILE}") if isinstance(files, Mapping) else None
         if isinstance(text, str):
@@ -714,10 +714,10 @@ class Server:
             "parent_release_id": manifest.get("parent_release_id"),
             "installed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        (self.dest / HARNESS_RELEASE_SIDECAR).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        (self.dest / HARNESS_RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     def try_mount(self, mutations: Sequence[Mutation], try_id: str) -> dict[str, Any]:
-        """Mount the served entries plus ``mutations`` for the rest of the open turn; the sidecar stays as it is."""
+        """Mount the served entries plus ``mutations`` for the rest of the open turn; the release file stays as it is."""
         if self._current is None:
             return {"error": "no turn is open"}
         if self._trial is not None:
@@ -865,8 +865,8 @@ class Server:
             run.workdir = workdir
             run.messages.append({"role": "user", "content": prompt})
             run.step, run.tool_calls, run.tool_errors, run.step_open, run.last = 0, 0, 0, False, {}
-        # Steps restart at 1 each turn, so the spill files of two turns get directories of their own.
-        loop.SPILL_DIR = f"{SPILL_DIR}/t{run.turn}"
+        # Steps restart at 1 each turn, so each turn gets its own directory for complete tool outputs.
+        loop.TOOL_OUTPUT_DIR = f"{TOOL_OUTPUT_DIR}/t{run.turn}"
         session.write("turn/start", {"turn": run.turn, "prompt": prompt, "cwd": str(workdir)})
         return run
 
@@ -1025,14 +1025,14 @@ __all__ = [
     "MOUNT_DIR",
     "SERVE_LOG",
     "SOCKET_NAME",
+    "BuiltinToolEnforcer",
     "EventLog",
     "EventSink",
-    "HostPlaneEnforcer",
     "ServeError",
     "ServeSession",
     "Server",
     "admit_mutations",
-    "read_sidecar",
+    "read_release_info",
     "read_tree",
     "request",
     "run_command",

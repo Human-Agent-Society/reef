@@ -6,19 +6,19 @@ the script makes no reef callback and carries no token. The binary's bytes
 never come from reef: the script checks the locally installed binary
 against the descriptor's pinned version and, only on absence or mismatch,
 runs the vendor's own install command. Before writing, the script removes
-the files a previous install's sidecar recorded that the new composition
+the files a previous install's release file recorded that the new composition
 lacks, exactly like the stdlib client pull, so installing an older version
 never leaves a newer version's files behind. After writing, the script
 verifies a sha256 over the sorted relative paths, byte lengths, and file
 bytes against the value baked in at render time, and records the pulled
-version in the same sidecar the stdlib client pull writes, plus what the
+version in the same release file the stdlib client pull writes, plus what the
 release requires of the person (``requires``) and the check offs
 ``reef-<adapter> setup`` recorded (``setup``, carried over from the previous
-sidecar). A release with an item the sidecar on disk does not check off is
+release file). A release with an item the release file on disk does not check off is
 refused first of all, before the binary is installed or a directory is
 made, with the setup list and the release that installs on a machine with
 nothing set up as the message; the refusal needs python3 only. Rerunning when everything already matches
-writes nothing at all, not even the sidecar, and says "already current".
+writes nothing at all, not even the release file, and says "already current".
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from reef.train.cordis_backend.requests import parse_requires
 _SHELL_PREFIX_ROOT = DEFAULT_PREFIX_ROOT.replace("~", "$HOME", 1)
 
 #: Client-side bookkeeping file, byte-identical to what the stdlib client
-#: pull writes; must match ``reef_client.client.HARNESS_RELEASE_SIDECAR``.
-HARNESS_RELEASE_SIDECAR = ".reef-harness-release"
+#: pull writes: ``.reef-harness-release`` contains the release id and file list.
+HARNESS_RELEASE_FILE = ".reef-harness-release"
 
 
 def composition_checksum(files: Mapping[str, str]) -> str:
@@ -133,7 +133,7 @@ def _wrapper_lines(
     """The reef-<adapter> wrapper: a capture proxy + report command.
 
     Written inside the install script's ``else`` branch (only when the
-    composition changed), after the checksum verifies and before the sidecar.
+    composition changed), after the checksum verifies and before the release file.
     The wrapper calls ``reef.harness.client.wrapper``, which starts a local
     proxy between the agent binary and Reef — capturing receipts so
     ``reef-<adapter> report`` can report without manual receipt handling.
@@ -276,7 +276,7 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
         "",
         "# The model binding: the adapter's config pointed at the Reef this script was",
         "# fetched from, with the client's own token; written on every run, after the",
-        "# checksum, so the served composition stays what the sidecar records.",
+        "# checksum, so the served composition stays what the release file records.",
         'if [ -z "${REEF_TOKEN:-}" ]; then',
         '    echo "reef: REEF_TOKEN is not set; the harness will reach Reef without a token" >&2',
         "fi",
@@ -341,22 +341,22 @@ def _spinner_lines() -> list[str]:
     ]
 
 
-def _sidecar_tool_lines(wrapper_name: str) -> list[str]:
-    """The ``sidecar_tool`` shell function: the sidecar's ``requires`` bookkeeping in python.
+def _release_info_tool_lines(wrapper_name: str) -> list[str]:
+    """The ``release_info_tool`` shell function: the release file's ``requires`` bookkeeping in python.
 
-    ``static`` hashes the sidecar on disk without its check offs, the text
-    ``SIDECAR_CHECKSUM`` was baked from; ``gate`` refuses, naming the setup
+    ``static`` hashes the release file on disk without its check offs, the text
+    ``RELEASE_FILE_CHECKSUM`` was baked from; ``gate`` refuses, naming the setup
     list and ``FALLBACK``, the release that installs on a machine with
     nothing set up, when an item of ``REQUIRES`` is not checked off there (a
     check off meets an item when it names it and the check it recorded is
-    the item's; one without a recorded check, from an older sidecar, counts
+    the item's; one without a recorded check, from an older release file, counts
     by name); ``carry`` prints the check offs to carry over and ``merge``
-    writes them into the new sidecar. JSON is no job for sed, and python3
+    writes them into the new release file. JSON is no job for sed, and python3
     runs the wrapper anyway."""
     return [
-        f"# The sidecar's requires bookkeeping ({wrapper_name} setup's check offs): JSON is no job for sed.",
-        "sidecar_tool() {",
-        "    python3 - \"$@\" <<'REEF_SIDECAR_TOOL_EOF'",
+        f"# The release file's requires bookkeeping ({wrapper_name} setup's check offs): JSON is no job for sed.",
+        "release_info_tool() {",
+        "    python3 - \"$@\" <<'REEF_RELEASE_INFO_TOOL_EOF'",
         "import hashlib, json, sys",
         "mode, path = sys.argv[1], sys.argv[2]",
         "try:",
@@ -368,13 +368,13 @@ def _sidecar_tool_lines(wrapper_name: str) -> list[str]:
         "    record = {}",
         'setup = [item for item in record.get("setup") or [] if isinstance(item, dict) and item.get("name")]',
         'if mode == "static":',
-        "    # The record without the check offs is what SIDECAR_CHECKSUM was baked from.",
+        "    # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.",
         '    record.pop("setup", None)',
         '    print(hashlib.sha256((json.dumps(record, indent=2) + "\\n").encode("utf-8")).hexdigest())',
         'elif mode == "gate":',
         '    checked = {item["name"]: item for item in setup}',
         "    def met(item):",
-        "        # A check off records the check it stood for; one without it (an older sidecar) counts by name.",
+        "        # A check off records the check it stood for; one without it (an older release file) counts by name.",
         '        record = checked.get(item["name"])',
         '        return record is not None and ("check" not in record or record.get("check") == item.get("check"))',
         "    unmet = [item for item in json.loads(sys.argv[3]) if not met(item)]",
@@ -392,7 +392,7 @@ def _sidecar_tool_lines(wrapper_name: str) -> list[str]:
         '    record["setup"] = json.loads(sys.argv[3])',
         '    with open(path, "w", encoding="utf-8") as handle:',
         '        handle.write(json.dumps(record, indent=2) + "\\n")',
-        "REEF_SIDECAR_TOOL_EOF",
+        "REEF_RELEASE_INFO_TOOL_EOF",
         "}",
     ]
 
@@ -420,9 +420,9 @@ def render_install_script(
     from ``$REEF_TOKEN``. ``requires`` is the manifest's list of what the
     release needs from the person over its chain: the script refuses,
     before it installs or writes anything, while one item is not checked
-    off in the sidecar on disk, naming ``fallback_release_id`` (the newest
+    off in the release file on disk, naming ``fallback_release_id`` (the newest
     release in the chain that requires nothing) as the one to install on a
-    machine with nothing set up, and records the list in the sidecar it
+    machine with nothing set up, and records the list in the release file it
     writes. Raises ``DescriptorError`` when the descriptor declares no
     install section and ``ValueError`` when a composition path is absolute
     or escapes the destination through a ``..`` part, the same rule the
@@ -446,7 +446,7 @@ def render_install_script(
     items = parse_requires(list(requires), limit=None)
     ordered = sorted(files)
     checksum = composition_checksum(files)
-    sidecar_text = (
+    release_info_text = (
         json.dumps(
             {
                 "release_id": release_id,
@@ -458,7 +458,7 @@ def render_install_script(
         )
         + "\n"
     )
-    sidecar_checksum = hashlib.sha256(sidecar_text.encode("utf-8")).hexdigest()
+    release_info_checksum = hashlib.sha256(release_info_text.encode("utf-8")).hexdigest()
     # The composition paths a prune run keeps, as one case alternation; the
     # render charset contains no glob or quote characters, so each quoted
     # path is a literal case pattern. An empty composition keeps nothing.
@@ -479,7 +479,7 @@ def render_install_script(
         f'PREFIX="${{2:-${{{PREFIX_ENV}:-{_SHELL_PREFIX_ROOT}}}/{descriptor.name}}}"',
         f'BINARY="$PREFIX/{_double_quoted(install.binary_path)}"',
         f'CHECKSUM="{checksum}"',
-        f'SIDECAR_CHECKSUM="{sidecar_checksum}"',
+        f'RELEASE_FILE_CHECKSUM="{release_info_checksum}"',
         f"REQUIRES={_single_quoted(json.dumps(items))}",
         f"FALLBACK={_single_quoted(fallback_release_id or '')}",
         "",
@@ -492,13 +492,13 @@ def render_install_script(
         "    exit 1",
         "fi",
         "",
-        *_sidecar_tool_lines(wrapper_name),
+        *_release_info_tool_lines(wrapper_name),
         "",
         *_spinner_lines(),
         "",
         f'echo "reef: harness release {release_id} for {descriptor.name}"',
         f"# The gate runs first of all: nothing is installed or written while an item is not checked off ({wrapper_name} setup).",
-        f'[ "$REQUIRES" = "[]" ] || sidecar_tool gate "$DEST/{HARNESS_RELEASE_SIDECAR}" "$REQUIRES" "$FALLBACK" || exit 1',
+        f'[ "$REQUIRES" = "[]" ] || release_info_tool gate "$DEST/{HARNESS_RELEASE_FILE}" "$REQUIRES" "$FALLBACK" || exit 1',
         "",
         *_ensure_binary_lines(descriptor, install),
         "",
@@ -521,27 +521,27 @@ def render_install_script(
         'mkdir -p "$DEST"',
         *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
         "",
-        "# A rerun on a current machine writes nothing at all, not even the sidecar.",
+        "# A rerun on a current machine writes nothing at all, not even the release file.",
         'current=""',
-        'sidecar=""',
+        'current_release_checksum=""',
         "if "
-        + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_RELEASE_SIDECAR, *ordered))
+        + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_RELEASE_FILE, *ordered))
         + "; then",
         '    current="$(compose_stream | sha256)"',
-        f'    sidecar="$(sidecar_tool static "$DEST/{HARNESS_RELEASE_SIDECAR}")"',
+        f'    current_release_checksum="$(release_info_tool static "$DEST/{HARNESS_RELEASE_FILE}")"',
         "fi",
-        'if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then',
+        'if [ "$current" = "$CHECKSUM" ] && [ "$current_release_checksum" = "$RELEASE_FILE_CHECKSUM" ]; then',
         '    echo "reef: composition already current"',
         "else",
         f'    echo "reef: writing the harness tree ({len(ordered)} file{"" if len(ordered) == 1 else "s"}) to $DEST"',
-        "    # The check offs the sidecar on disk holds, carried into the new sidecar below.",
-        f'    SETUP="$(sidecar_tool carry "$DEST/{HARNESS_RELEASE_SIDECAR}")"',
-        "    # Prune the files a previous install's sidecar recorded that this",
-        "    # composition lacks, exactly like the stdlib client pull. The sidecar",
+        "    # The check offs the release file on disk holds, carried into the new release file below.",
+        f'    SETUP="$(release_info_tool carry "$DEST/{HARNESS_RELEASE_FILE}")"',
+        "    # Prune the files a previous install's release file recorded that this",
+        "    # composition lacks, exactly like the stdlib client pull. The release file",
         "    # is json.dumps at indent 2, so every file entry is one four-space",
         "    # indented quoted line.",
-        f'    if [ -f "$DEST/{HARNESS_RELEASE_SIDECAR}" ]; then',
-        '        sed -n \'s/^    "\\(.*\\)",\\{0,1\\}$/\\1/p\' "$DEST/' + HARNESS_RELEASE_SIDECAR + '" |',
+        f'    if [ -f "$DEST/{HARNESS_RELEASE_FILE}" ]; then',
+        '        sed -n \'s/^    "\\(.*\\)",\\{0,1\\}$/\\1/p\' "$DEST/' + HARNESS_RELEASE_FILE + '" |',
         "            while IFS= read -r old; do",
         '                case "$old" in',
         f"                    {keep}) ;;",
@@ -556,9 +556,9 @@ def render_install_script(
         "        exit 1",
         "    fi",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
-        "    # The same sidecar the stdlib client pull writes, plus requires and the check offs carried over.",
-        _write_file_block(HARNESS_RELEASE_SIDECAR, sidecar_text).rstrip("\n"),
-        f'    sidecar_tool merge "$DEST/{HARNESS_RELEASE_SIDECAR}" "$SETUP"',
+        "    # The same release file the stdlib client pull writes, plus requires and the check offs carried over.",
+        _write_file_block(HARNESS_RELEASE_FILE, release_info_text).rstrip("\n"),
+        f'    release_info_tool merge "$DEST/{HARNESS_RELEASE_FILE}" "$SETUP"',
         "fi",
         *_binding_lines(bindings),
         "",

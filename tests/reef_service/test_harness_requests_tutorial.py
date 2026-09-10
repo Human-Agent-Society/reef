@@ -34,9 +34,8 @@ MEASURE_HEADER = (
     "| Run | Model | Date | Code | Parser | Requests | Answered | Admitted | Won | Published | Skipped | Median (s) |"
 )
 MEASURE_COLUMNS = 12
-#: The words docs/site/scripts/check-doc-contracts.mjs refuses in docs; the tutorial's README keeps to them too.
+#: Additional retired concepts in the tutorial; check-doc-contracts.mjs checks simplified terminology repository-wide.
 DROPPED_WORDS = (
-    r"\bevidence\b",
     r"\blineage\b",
     r"\battribution\b",
     r"\bexecution runtime\b",
@@ -44,7 +43,6 @@ DROPPED_WORDS = (
     r"\bscored records\b",
     r"\bnever stops\b",
     r"\bnever pauses\b",
-    r"\bledger\b",
 )
 
 
