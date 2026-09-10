@@ -43,7 +43,9 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract``            | what this scenario accepts                        |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/learning``            | retained summaries and committed learning links   |
+| ``GET /reef/scenarios/{scenario}/records``             | retained record metadata                          |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/commits``             | paginated committed metadata                      |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/records/{record_id}`` | one retained record and its trace payload         |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -240,7 +242,8 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | release once loaded                         |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
-|                                             | required_request_types}``                   |
+|                                             | required_request_types, training_mode,      |
+|                                             | status}``                                   |
 +---------------------------------------------+---------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
 +---------------------------------------------+---------------------------------------------+
@@ -769,31 +772,45 @@ A connected console acts with the service token's existing permissions. Its
 requests operate directly on this runtime's scenarios, without creating a
 cloud deployment or uploading history as part of the CORS connection.
 
-Learning inspection
--------------------
+Record and commit history
+-------------------------
 
-``GET /reef/scenarios/{scenario}/learning`` reads retained record summaries,
+``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
 including compacted records. ``after_sequence`` defaults to 0 and ``limit``
 defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
-null at the end. This is a page of retained bodies, not a complete historical
-count. The policy object names the live processor, required request types,
-training mode, and processor status. Historical eligibility decisions and
-evaluation thresholds are not exposed.
+null at the end. Each row contains ``sequence``, ``agent_record_id``,
+``request_type``, ``created_at``, ``compacted_at``, ``references``, the recorded
+``artifact_ref``, and the payload's ``score`` field. No record payload or
+learning classification is included.
 
-Each summary includes ``agent_record_id``, ``sequence``, ``request_type``,
-``created_at``, ``compacted_at``, ``references``, ``score``, ``served_by``,
-``learning_state``, ``reason``, and ``learning_steps``. Only commit-log
-``consumed_ids`` establish consumption. Active unconsumed records are
-``awaiting``; compacted unconsumed records have an ``unknown`` decision.
-Consumption does not mean an update was selected or promoted. Candidate
-identifiers are returned only when recorded in selection metrics. A link's
-``release_id`` is the committed artifact, which can be the unchanged current
-release after rejection.
+``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
+and the stored ``payload``. A missing body returns 404: it may have expired or
+never been retained. Reading never reactivates records or changes retention.
 
-``GET /reef/scenarios/{scenario}/records/{record_id}`` returns the same summary
-and its stored ``payload``. The payload can contain sensitive request and
-response content. Both routes use service authentication and return
-``Cache-Control: no-store``. The platform console must bind the scenario to
-the authenticated workspace. Missing bodies return 404: a body may have
-expired or never been retained. Reading never reactivates a record, changes
-retention, or duplicates its payload into another store.
+``GET /reef/scenarios/{scenario}/commits`` reads committed metadata, oldest
+first, with ``after_step`` (default 0), ``limit`` (default 50, range 1–100),
+and ``next_after_step`` (null at the end). Repeat the optional ``record_id``
+query parameter to filter commits whose recorded ``consumed_ids`` contain
+any requested ID (at most 100 IDs of 1–256 characters). This is exact set
+membership, not an eligibility decision. Each row exposes ``step``,
+``operation``, ``operation_verified``, ``recorded_at``, ``artifact_ref``,
+``pending``, ``consumed_ids``, and recorded ``metrics``. Algorithm state and
+private checkpoint recovery data are excluded. Commit metadata remains
+available when trace bodies expire.
+
+The existing ``GET /reef/scenarios/{scenario}/contract`` also reports
+``training_mode`` and processor ``status`` alongside ``processor`` and
+``required_request_types``. These are live runtime facts, not policy versions
+or historical rule decisions.
+
+All these reads require service authentication and return
+``Cache-Control: no-store``. Payloads and recorded metrics can contain request
+content. A platform must bind the upstream scenario to the authenticated
+workspace. Each response is a live read; concurrent training and retention
+can change subsequent pages. Reading commit pages may scan the scenario's
+cached commit log; the response is bounded, not a new persisted index.
+
+Reef does not join these endpoints into learning links or assign learning
+states, human-readable explanations, policy capability flags, or gate
+verdicts. The console owns that interpretation. In particular, compaction
+alone is not proof of consumption, and consumption is not proof of promotion.

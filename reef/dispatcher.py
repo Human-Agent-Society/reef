@@ -279,19 +279,29 @@ class Dispatcher:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()
 
-    def inspect_learning(self, scenario: str, *, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+    def read_records(self, scenario: str, *, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
         """Read retained summaries without changing the training queue."""
-        from reef.scenario.inspection import inspect_learning
+        from reef.scenario.history import read_records
 
         with self._registry.lock_for(scenario):
-            return inspect_learning(self._registry.require(scenario), after_sequence=after_sequence, limit=limit)
+            return read_records(self._registry.require(scenario), after_sequence=after_sequence, limit=limit)
 
-    def inspect_record(self, scenario: str, record_id: str) -> dict[str, Any] | None:
+    def read_record(self, scenario: str, record_id: str) -> dict[str, Any] | None:
         """Read a retained trace within its scenario, including compacted bodies."""
-        from reef.scenario.inspection import inspect_record
+        from reef.scenario.history import read_record
 
         with self._registry.lock_for(scenario):
-            return inspect_record(self._registry.require(scenario), record_id)
+            return read_record(self._registry.require(scenario), record_id)
+
+    def read_commits(
+        self, scenario: str, *, after_step: int = 0, limit: int = 50, record_ids: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        from reef.scenario.history import read_commits
+
+        with self._registry.lock_for(scenario):
+            return read_commits(
+                self._registry.require(scenario), after_step=after_step, limit=limit, record_ids=record_ids
+            )
 
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
@@ -300,6 +310,8 @@ class Dispatcher:
             return {
                 "scenario": scenario,
                 "processor": type(processor).__name__,
+                "training_mode": current.trainer.training_mode,
+                "status": dict(current.trainer.processor_status()),
                 "required_request_types": sorted(rt.value for rt in processor.required_request_types),
             }
 

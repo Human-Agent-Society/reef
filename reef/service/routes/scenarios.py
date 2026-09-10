@@ -88,18 +88,28 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
             }
         )
 
-    async def learning_data(request: web.Request) -> web.Response:
+    async def record_list(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
-            request_service.dispatcher.inspect_learning,
+            request_service.dispatcher.read_records,
             request.match_info["scenario"],
             after_sequence=int(request.query.get("after_sequence", "0")),
             limit=int(request.query.get("limit", "50")),
         )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
+    async def commit_list(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_commits,
+            request.match_info["scenario"],
+            after_step=int(request.query.get("after_step", "0")),
+            limit=int(request.query.get("limit", "50")),
+            record_ids=tuple(request.query.getall("record_id", [])),
+        )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def record_detail(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
-            request_service.dispatcher.inspect_record,
+            request_service.dispatcher.read_record,
             request.match_info["scenario"],
             request.match_info["record_id"],
         )
@@ -113,7 +123,9 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def scenario_contract(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        return web.json_response(request_service.dispatcher.scenario_contract(scenario))
+        return web.json_response(
+            request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
+        )
 
     async def rollback_scenario(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -150,7 +162,8 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
-    app.router.add_get("/reef/scenarios/{scenario}/learning", learning_data)
+    app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
+    app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
     app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
     app.router.add_get("/reef/scenarios/{scenario}/releases", list_releases)
     app.router.add_post("/reef/scenarios/{scenario}/rollback", rollback_scenario)
