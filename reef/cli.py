@@ -2,6 +2,7 @@
 
 Usage:
   reef serve -c path/to/stack.yaml             # start a configured stack
+  reef connect                               # link an existing runtime to the console
 
 `reef serve` reads a config's `services` list and starts every declared
 process in dependency order, including the internal Reef HTTP service.
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"serve"}
+_COMMANDS = {"serve", "connect"}
 
 
 def _help_text():
@@ -24,6 +25,7 @@ def _help_text():
 usage: reef <command> [options]
 
   serve  Start a stack from a config
+  connect  Connect an existing Reef runtime to the API platform
 
   -c CONFIG   Config file (default: reef.yaml or $REEF_CONFIG)
   --version   Print the installed reef version
@@ -31,6 +33,7 @@ usage: reef <command> [options]
 Examples:
   reef serve -c path/to/local-sglang.yaml
   reef serve -c path/to/external-provider.yaml
+  reef connect
 """
 
 
@@ -58,6 +61,12 @@ def main(argv=None):
         print(f"reef: unknown command '{cmd}'\n", file=sys.stderr)
         print(_help_text(), file=sys.stderr)
         sys.exit(2)
+
+    if cmd == "connect":
+        from reef.service.connector import main as _connect_main
+
+        _connect_main(rest)
+        return
 
     from reef.service.deploy import DeployConfigError
     from reef.service.deploy import main as _serve_main

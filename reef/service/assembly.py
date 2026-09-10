@@ -249,6 +249,7 @@ def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = 
         return create_app(
             dispatcher,
             tokens=settings.tokens,
+            console_origins=settings.console_origins,
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
         )

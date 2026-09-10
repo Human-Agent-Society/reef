@@ -32,6 +32,7 @@ from reef.service.deploy.config import (
     PROJECT_ROOT,
     config_value,
     interpolate_config,
+    interpolate_environment,
     load_config,
     recipe_source_root,
     resolve_model_paths,
@@ -369,9 +370,10 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     resolved_config_path = Path(config_path)
     if not resolved_config_path.is_absolute():
         resolved_config_path = PROJECT_ROOT / resolved_config_path
-    config = load_config(resolved_config_path)
+    config = load_config(resolved_config_path, interpolate_env=False)
     if overrides:
         config = _apply_overrides(config, overrides)
+    config = interpolate_environment(config, resolved_config_path)
     # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
     services = validate_services(config, resolved_config_path)
     # Resolved against the operator's config, before any override copy

@@ -1,8 +1,9 @@
-Reef CLI: start a deployment
-============================
+Reef CLI: serve and connect
+==========================
 
-Reef has one command you run. It reads a deployment config and starts every
-process the config declares, in dependency order. (The wheel also installs
+``reef serve`` reads a deployment config and starts every
+process the config declares, in dependency order. ``reef connect`` optionally
+links an existing runtime to your API platform account. (The wheel also installs
 ``reef-native`` and ``reef-terminus``, the loop runners those two harness
 adapters launch per episode; nothing calls them by hand.)
 
@@ -50,3 +51,73 @@ Where it writes
 Each service gets a log and a PID file under ``run_dir``, which defaults to
 ``/tmp/reef-stack``. Reef writes its own state, including records, commit logs,
 and the Git-backed release chain, to the ``reef.*_dir`` paths in the config.
+
+Connect to the API platform
+--------------------------
+
+With Reef already serving, run this in another terminal:
+
+.. code:: bash
+
+   reef connect
+
+Open the printed sign-in link, sign in, and paste the device code from your
+terminal into the page. The code is required and expires after ten minutes.
+The link does not contain the code, and the page never fills it in for you.
+The connector runs in the background after approval. Open **Local Reef** in
+the API platform to view the runtime from another device. No inbound port,
+public endpoint, browser access to localhost, or ``console_origins`` setting
+is required for this connection.
+
+The default runtime URL is ``http://127.0.0.1:8900`` and the default platform
+is ``https://api.reefinfra.ai``. For a different runtime or platform:
+
+.. code:: bash
+
+   reef connect --url http://127.0.0.1:9000 --name workstation
+   reef connect --platform http://localhost:3000 --no-browser --foreground
+
+URLs must use HTTPS except for loopback HTTP. If the existing service requires
+a token, set ``REEF_TOKEN`` in the connector's environment; use
+``--reef-token-env VARIABLE`` to select a different environment variable.
+Do not put tokens in URLs or command-line arguments.
+
+The platform receives scenario names, serving release identifiers, training
+modes and selected numeric evaluation results. It can create a scenario,
+request training, change training mode, promote or roll back a release.
+Local provider credentials, artifact files, and recorded prompts are not
+uploaded. Instructions you submit through the dashboard are stored on the
+platform as commands. Inference continues to use your runtime URL directly.
+
+Lifecycle and local state
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: bash
+
+   reef connect --status
+   reef connect --stop
+   reef connect
+
+Use the same ``--url`` and ``--platform`` options when inspecting, stopping,
+or restarting a non-default connection. Stopping the connector leaves Reef
+serving and retains authorization. **Revoke connection** in the console
+disables the credential; a revoked connector exits and requires a new login.
+
+By default, each platform/runtime URL pair has a private directory under
+``~/.reef/connections/``. It stores an instance UUID, service and connector
+credentials, a SQLite command record, a process lock, and a background log.
+The directory is mode 0700 and credential files are mode 0600 on POSIX systems.
+``--state-dir PATH`` selects an explicit directory. Preserve it to keep the
+same identity; do not share or copy it between running machines.
+
+The connector reconnects after network failures. It does not install an OS
+startup service; use ``--foreground`` with your process supervisor for restart
+after a machine reboot. It reports heartbeats every three seconds and scenario
+summaries about every fifteen seconds. The console marks it offline after
+45 seconds without a heartbeat and retains its last scenario summary.
+
+Commands are delivered once. An interrupted operation is marked **unknown**,
+and is not replayed automatically. Check Reef before submitting it again.
+Completed results are saved locally until the platform acknowledges them;
+cloud command history is retained for 30 days. Closing a browser or revoking a
+connection cannot undo an operation already dispatched to Reef.
