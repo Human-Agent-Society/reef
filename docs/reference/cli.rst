@@ -55,27 +55,34 @@ and the Git-backed release chain, to the ``reef.*_dir`` paths in the config.
 Connect to the API platform
 --------------------------
 
-With Reef already serving, run this in another terminal:
+With Reef already serving, open another terminal in your Reef project directory.
+This example connects the runtime on port 9000 to a local API platform on port 3000:
 
 .. code:: bash
 
-   reef connect
+   uv run reef connect \
+     --url http://127.0.0.1:9000 \
+     --platform http://localhost:3000 \
+     --name workstation \
+     --no-browser --foreground
+
+Set ``--url`` to your running Reef service's address and ``--platform`` to
+your API platform's address. Replace both example addresses to match your setup.
+``--name`` sets the label shown in the console.
 
 Open the printed sign-in link, sign in, and paste the device code from your
 terminal into the page. The code is required and expires after ten minutes.
 The link does not contain the code, and the page never fills it in for you.
-The connector runs in the background after approval. Open **Local Reef** in
+With ``--no-browser``, open the link yourself; ``--foreground`` keeps the
+connector in this terminal, which must remain open. Omit ``--foreground``
+to run it in the background after approval. Open **Local Reef** in
 the API platform to view the runtime from another device. No inbound port,
 public endpoint, browser access to localhost, or ``console_origins`` setting
 is required for this connection.
 
-The default runtime URL is ``http://127.0.0.1:8900`` and the default platform
-is ``https://api.reefinfra.ai``. For a different runtime or platform:
-
-.. code:: bash
-
-   reef connect --url http://127.0.0.1:9000 --name workstation
-   reef connect --platform http://localhost:3000 --no-browser --foreground
+If omitted, ``--url`` defaults to ``http://127.0.0.1:8900`` and
+``--platform`` defaults to ``https://api.reefinfra.ai``. Each invocation
+uses its own arguments; it does not inherit addresses from a previous command.
 
 URLs must use HTTPS except for loopback HTTP. If the existing service requires
 a token, set ``REEF_TOKEN`` in the connector's environment; use
@@ -92,14 +99,9 @@ platform as commands. Inference continues to use your runtime URL directly.
 Lifecycle and local state
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. code:: bash
-
-   reef connect --status
-   reef connect --stop
-   reef connect
-
-Use the same ``--url`` and ``--platform`` options when inspecting, stopping,
-or restarting a non-default connection. Stopping the connector leaves Reef
+Use the same ``--url`` and ``--platform`` options with ``--status`` to
+inspect the connector or ``--stop`` to stop it. Rerun the connection command
+above to restart it. Stopping the connector leaves Reef
 serving and retains authorization. **Revoke connection** in the console
 disables the credential; a revoked connector exits and requires a new login.
 
