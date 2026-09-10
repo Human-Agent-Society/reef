@@ -26,6 +26,14 @@ a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
 
+Use ``${VAR:?}`` for a required environment variable, for example
+``upstream_model: ${REEF_UPSTREAM_MODEL:?}``. If it is unset, empty, or only
+whitespace, Reef reports the missing variable names and their config fields
+before downloading models or starting processes. Command-line overrides are
+applied before this check, so ``--upstream_model <model-id>`` can supply the
+value instead. Plain ``${VAR}`` keeps resolving to an empty string when unset;
+use it for optional values such as an API key for a provider without authentication.
+
 ``REEF_PYTHON`` defaults to the interpreter that launched ``reef serve`` and
 can be overridden in the environment. Use it when a service must share Reef's
 Python environment. A literal ``python`` keeps its normal meaning and is
@@ -73,6 +81,7 @@ The ``reef`` section
    reef.recipe | the recipe this deployment serves. Required.
    reef.host | 0.0.0.0 | bind address
    reef.port | 8900 | bind port
+   reef.console_origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.model_path | a local HF model directory or a repo id, downloaded on start
    reef.upstream_url | the OpenAI-compatible provider, with no ``/v1`` suffix
