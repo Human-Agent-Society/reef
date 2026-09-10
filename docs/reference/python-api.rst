@@ -265,7 +265,7 @@ The HTTP service runs background retention at startup and every 60 seconds.
 It removes bodies older than 7 days, then the oldest remaining bodies to meet
 a shared 20 GiB budget across scenario databases in ``agent_record_dir``,
 including ``archived/``. The budget measures UTF-8 JSON payloads, references,
-and artifact references. Limits are configurable in :doc:`configuration`.
+and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
 
 For embedded Python deployments, use
 ``dispatcher.prune_record_archives(RecordRetention(days=7, max_bytes=20 * 1024**3))``
@@ -280,7 +280,7 @@ still fails. Deletes commit in batches of 256. Concurrent compaction can exceed
 the budget until the next sweep. SQLite may reuse freed pages, but purging does
 not shrink the database file; active records, indexes, and other metadata also
 use disk space. HTTP audit routes remain a separate integration. See
-:doc:`configuration` for migration and rollback constraints.
+`Configuration <configuration.rst>`__ for migration and rollback constraints.
 
 Processor
 ---------

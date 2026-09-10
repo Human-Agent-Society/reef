@@ -129,7 +129,7 @@ This is a retained-body budget, not a hard disk quota. Incoming compaction can
 exceed the budget between sweeps; active records, indexes, hashes, commit logs,
 and WAL files take additional space. SQLite reuses pages freed by cleanup but
 does not automatically shrink the database file. Allow additional disk headroom.
-Standalone Python stores do not start a maintenance task; see :doc:`python-api`
+Standalone Python stores do not start a maintenance task; see `Python API <python-api.rst>`__
 for explicit retention and purge methods.
 
 Existing stores gain ``compacted_at`` and ``body_bytes`` columns when opened.
