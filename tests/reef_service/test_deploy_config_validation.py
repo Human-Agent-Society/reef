@@ -9,7 +9,7 @@ import pytest
 
 import reef.service.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
-from reef.service.deploy.config import PROJECT_ROOT, DeployConfigError, load_config, validate_services
+from reef.service.deploy.config import DeployConfigError, load_config, validate_services
 from reef.service.deploy.process import _command_argv
 
 VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"
@@ -100,7 +100,8 @@ def test_tutorial_missing_environment_fails_before_launch_without_traceback(tuto
 
     monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
     monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
-    path = PROJECT_ROOT / "tutorials" / tutorial / "configs" / "deployment.yaml"
+    # The tutorial belongs to the checkout even when Reef is imported from an installed wheel.
+    path = Path(__file__).resolve().parents[2] / "tutorials" / tutorial / "configs" / "deployment.yaml"
     with pytest.raises(SystemExit) as caught:
         cli_main(["serve", "-c", str(path)])
     assert caught.value.code == 2
