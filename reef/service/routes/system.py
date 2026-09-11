@@ -41,6 +41,15 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
         page = await asyncio.to_thread(request_service.harness_release_page, request.headers, step)
         return web.Response(text=page, content_type="text/html")
 
+    async def harness_step_records(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.harness_step_records,
+            request.headers,
+            int(request.match_info["step"]),
+            request.query.get("path"),
+        )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def harness_proposals(request: web.Request) -> web.Response:
         payload = await read_object(request)
         answer = await asyncio.to_thread(request_service.harness_propose, request.headers, payload)
@@ -79,6 +88,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     app.router.add_get("/reef/harness/releases", harness_releases)
     # One to nine digits: a step that is no number, or longer than any catalog, is no row; the router's own 404 answers it.
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", harness_release_page)
+    app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", harness_step_records)
     app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)

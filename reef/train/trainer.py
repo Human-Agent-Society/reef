@@ -25,7 +25,7 @@ from reef.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import DefaultCandidateEvaluationPlugin
-from reef.train.processors.base import DataProcessor
+from reef.train.processors.base import DataProcessor, InstructionFailure
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
 
 
@@ -145,15 +145,16 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.result is not None or pending.batch.request is None:
                 return False
-            self._processor.mark_request_failed(pending.batch.request.id, error)
+            metadata = {} if self._training_backend is None else self._training_backend.failed_step_metrics()
+            self._processor.mark_request_failed(pending.batch.request.id, error, metadata)
             return True
 
-    def instruction_failures(self) -> Mapping[str, str]:
+    def instruction_failures(self) -> Mapping[str, InstructionFailure]:
         """The failed instructions this trainer still holds, for the trainer that replaces it."""
         with self._lock:
             return self._processor.request_failures()
 
-    def set_instruction_failures(self, failures: Mapping[str, str]) -> None:
+    def set_instruction_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
         """Carry failed instructions into this trainer's processor; a rebuilt scenario starts without them."""
         with self._lock:
             self._processor.set_request_failures(failures)
@@ -309,9 +310,10 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.batch_id != batch.batch_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
+            metadata = dict(self._processor.request_failure_metrics(request.id))
             self._processor.release_batch(batch.batch_id)
             pending.consumed_ids = self._processor.discard_request(request.id)
-        metrics = {"skipped": "instruction failed", "error": error}
+        metrics = {**metadata, "skipped": "instruction failed", "error": error}
         return TrainStepResult(dict(self._state), metrics)
 
     def _evaluate_candidate(self, candidate: UpdateCandidate) -> SelectionDecision:

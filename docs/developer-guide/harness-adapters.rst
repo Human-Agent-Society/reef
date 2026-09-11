@@ -406,7 +406,9 @@ null under a graph), and ``agents``; then ``turn/start``, per step
 ``step/start``, ``request/header`` (the
 rendered system prompt and the tool declarations, logged on the first step so
 the log holds everything the model saw), ``assistant/message`` (``content``,
-``tool_calls``, ``finish``), ``tool/call`` (the raw argument string),
+``tool_calls``, ``finish``, optional ``usage``, and the provider
+``reasoning``, ``reasoning_content``, ``reasoning_details`` and ``thinking``
+fields when present), ``tool/call`` (the raw argument string),
 ``tool/result`` (``content``, ``is_error``, ``enforcement``, and on error a
 closed ``code``: ``UNKNOWN_TOOL``, ``INVALID_ARGS``, ``TOOL_FAILED``,
 ``SANDBOX_FAILED``, ``HOOK_DENIED``, ``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``),

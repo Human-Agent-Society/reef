@@ -8,7 +8,7 @@ computed from traffic).
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
@@ -33,6 +33,14 @@ class RetentionDecision:
         overlap = self.protected_agent_record_ids & self.releasable_agent_record_ids
         if overlap:
             raise ValueError(f"retention decision cannot protect and release the same records: {sorted(overlap)!r}")
+
+
+@dataclass(frozen=True)
+class InstructionFailure:
+    """A failed instruction and the attempt metadata carried through an in-process trainer reload."""
+
+    error: str
+    metrics: Mapping[str, Any] = field(default_factory=dict)
 
 
 class DataProcessor:
@@ -99,7 +107,7 @@ class DataProcessor:
         self._training_requests: dict[str, TrainingRequest] = {}
         self._consumed_requests: set[str] = set()
         # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
-        self._request_failures: dict[str, str] = {}
+        self._request_failures: dict[str, InstructionFailure] = {}
         self._scenario = context.scenario
         # No-update default: retain only ids for retention; never build a batch.
         self._agent_record_ids: set[str] = set()
@@ -139,17 +147,23 @@ class DataProcessor:
 
     def request_failure(self, request_id: str) -> str | None:
         """What the instruction's failed step said, when it failed at all."""
-        return self._request_failures.get(request_id)
+        failure = self._request_failures.get(request_id)
+        return None if failure is None else failure.error
 
-    def request_failures(self) -> Mapping[str, str]:
+    def request_failure_metrics(self, request_id: str) -> Mapping[str, Any]:
+        """The exact failed attempt's metadata, if the backend had produced any."""
+        failure = self._request_failures.get(request_id)
+        return {} if failure is None else failure.metrics
+
+    def request_failures(self) -> Mapping[str, InstructionFailure]:
         """The failed instructions still buffered, by id, with what their step said."""
         return dict(self._request_failures)
 
-    def mark_request_failed(self, request_id: str, error: str) -> None:
+    def mark_request_failed(self, request_id: str, error: str, metrics: Mapping[str, Any] | None = None) -> None:
         """Record that the instruction's step failed; its next batch is consumed with a skip row."""
-        self._request_failures[request_id] = error
+        self._request_failures[request_id] = InstructionFailure(error, dict(metrics or {}))
 
-    def set_request_failures(self, failures: Mapping[str, str]) -> None:
+    def set_request_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
         """Carry the failed instructions of a replaced processor into this one."""
         self._request_failures = dict(failures)
 

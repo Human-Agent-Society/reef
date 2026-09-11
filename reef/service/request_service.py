@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
+class StepRecords(Protocol):
+    """A backend that can read its scenario-scoped retained step files."""
+
+    def read_step_records(self, directory: str, relative: str | None) -> dict[str, Any]: ...
+
+
+@runtime_checkable
 class ProposalGate(Protocol):
     """What the proposals route needs of a scenario's training backend: admission over entries and the inbox."""
 
@@ -552,6 +559,23 @@ class RequestService:
             "scenario": scenario.name,
             "releases": list(reversed(scenario.releases())),
         }
+
+    def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
+        """Raw retained files for a catalog row; presentation belongs to the caller."""
+        scenario = self._file_scenario(headers)
+        rows = list(reversed(scenario.releases()))
+        if not 0 <= step < len(rows):
+            raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
+        directory = (rows[step].get("metrics") or {}).get("step_record")
+        backend = scenario.trainer.training_backend
+        if not directory or not isinstance(backend, StepRecords):
+            return {"status": "not_recorded", "files": []}
+        if not isinstance(directory, str):
+            raise ValueError("invalid step record directory")
+        try:
+            return backend.read_step_records(directory, relative)
+        except FileNotFoundError as error:
+            raise ArtifactNotFound("record file is not retained") from error
 
     def harness_release_page(self, headers: Mapping[str, str], step: int) -> str:
         """One HTML page for the catalog row at ``step``, counted oldest first with the creation row as 0.
