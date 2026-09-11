@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,6 +27,23 @@ from reef.train.cordis_backend.recipe import CordisRecipe
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The profile's proposer lives in the tutorial: the wheel alone (the package job) cannot start it.
 IN_CHECKOUT = (PROJECT_ROOT / "tutorials" / "evolve-your-harness" / "harness" / "evolution.py").is_file()
+
+
+@pytest.fixture
+def isolated_harness_package() -> Iterator[None]:
+    # Examples share this package name, but their modules belong to different
+    # directories. Restore the worker's previous imports after this test.
+    previous = {
+        name: module for name, module in sys.modules.items() if name == "harness" or name.startswith("harness.")
+    }
+    for name in previous:
+        sys.modules.pop(name)
+    try:
+        yield
+    finally:
+        for name in [name for name in sys.modules if name == "harness" or name.startswith("harness.")]:
+            sys.modules.pop(name)
+        sys.modules.update(previous)
 
 
 @pytest.mark.unit
@@ -112,6 +130,7 @@ def test_a_profile_sets_its_directory_and_the_checkout_for_the_service() -> None
 
 @pytest.mark.unit
 @pytest.mark.skipif(not IN_CHECKOUT, reason="the harness-evolve profile runs from a reef checkout")
+@pytest.mark.usefixtures("isolated_harness_package")
 def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_path) -> None:
     """The profile is the stack config and the preset in one file: it validates as a stack, the registry reads it
     back by the name it carries, and the recipe it builds is the tutorial's proposer over pi in hybrid mode."""

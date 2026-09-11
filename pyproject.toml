@@ -25,9 +25,11 @@ classifiers = [
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
     "aiohttp",
+    "alembic>=1.13,<2",
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    "sqlalchemy>=2.0,<3",
     "tomli; python_version < '3.11'",
     "tomli-w",
 ]

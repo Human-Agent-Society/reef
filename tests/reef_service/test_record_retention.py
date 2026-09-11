@@ -8,6 +8,7 @@ from threading import Event
 
 import pytest
 from aiohttp import web
+from sqlalchemy.exc import OperationalError
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
@@ -88,6 +89,19 @@ def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_pa
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["597", "598", "599"]
 
 
+def test_large_finite_retention_days_still_enforce_the_byte_budget(tmp_path, monkeypatch):
+    with RecordStore(tmp_path / "records.sqlite3") as records:
+        for timestamp, record_id in ((1.0, "old"), (2.0, "new")):
+            records.append(trace(record_id))
+            monkeypatch.setattr("reef.records.time.time", lambda timestamp=timestamp: timestamp)
+            records.compact("math", frozenset({record_id}))
+        monkeypatch.setattr("reef.records.time.time", lambda: 3.0)
+
+        # A finite number of days can produce an infinite cutoff in seconds.
+        assert RecordRetention(days=1e308, max_bytes=BODY_BYTES).prune(tmp_path) == 1
+        assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["new"]
+
+
 def test_retention_skips_unmigrated_stores_and_empty_directories(tmp_path):
     assert RecordRetention().prune(tmp_path) == 0
     with sqlite3.connect(tmp_path / "legacy.sqlite3") as connection:
@@ -134,7 +148,9 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
     def flaky(retention):
         attempts.append(retention)
         if len(attempts) == 1:
-            raise sqlite3.OperationalError("temporary storage failure")
+            raise OperationalError(
+                "DELETE FROM agent_record", None, sqlite3.OperationalError("temporary storage failure")
+            )
         return original(retention)
 
     monkeypatch.setattr(dispatcher, "prune_record_archives", flaky)
