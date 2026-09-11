@@ -91,6 +91,18 @@ def _double_quoted(path: str) -> str:
     return path.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
+def _wrapper_quoted(text: str) -> str:
+    """Escape ``text`` for the wrapper body, which travels through an unquoted heredoc.
+
+    The wrapper body is emitted by ``cat <<REEF_WRAPPER_EOF`` in the install script, so it is
+    expanded once by the installing shell before it becomes the wrapper. Double the escaping
+    ``_double_quoted`` adds for the wrapper's own double-quoted context, so the heredoc pass
+    emits the quoted form and the wrapper receives the value byte exact.
+    """
+    quoted = _double_quoted(text)
+    return quoted.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
+
+
 def _single_quoted(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
@@ -164,7 +176,7 @@ def _wrapper_lines(
         "# Runs the python3 the install resolved; rerun the install from another shell to change it.",
         'export REEF_HARNESS_BINARY="$BINARY_ABS"',
         'export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"',
-        f'export REEF_HARNESS_SCENARIO="{_double_quoted(scenario)}"',
+        f'export REEF_HARNESS_SCENARIO="{_wrapper_quoted(scenario)}"',
         f'export REEF_HARNESS_ADAPTER="{_double_quoted(descriptor.name)}"',
         f'export REEF_HARNESS_ENV_VAR="{_double_quoted(env_var)}"',
         'exec "$PYTHON"${SAFE_PATH:+ $SAFE_PATH} -m reef.harness.client.wrapper "\\$@"',
