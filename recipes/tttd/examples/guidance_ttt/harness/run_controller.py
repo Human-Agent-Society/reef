@@ -31,6 +31,10 @@ class GuidanceRunStateError(RuntimeError):
     """The Guidance archive and Reef's durable training state do not align."""
 
 
+class GuidanceTrainingTimeoutError(RuntimeError):
+    """Reef did not commit a Guidance-TTT training step before its deadline."""
+
+
 @dataclass(frozen=True)
 class GuidanceRunIdentity:
     """Settings a resumed run must reproduce exactly."""
@@ -156,7 +160,7 @@ def wait_for_training_step(
                 return last_health
         if poll_interval_s:
             time.sleep(poll_interval_s)
-    raise TimeoutError(
+    raise GuidanceTrainingTimeoutError(
         f"training rollout {expected_rollout_id} did not complete after {timeout_s:g}s: "
         f"bridge={last_health}; reef={last_status}"
     )
@@ -422,6 +426,7 @@ __all__ = [
     "GuidanceRunOutcome",
     "GuidanceRunStateError",
     "GuidanceRunStateStore",
+    "GuidanceTrainingTimeoutError",
     "RayTrainingBridge",
     "atomic_copy",
     "failed_training_step",

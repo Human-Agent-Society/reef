@@ -35,6 +35,7 @@ from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
     GuidanceRunIdentity,
     GuidanceRunStateError,
     GuidanceRunStateStore,
+    GuidanceTrainingTimeoutError,
     RayTrainingBridge,
     read_json,
     require_step_success,
@@ -462,6 +463,31 @@ def test_training_wait_fails_on_reef_training_error() -> None:
             timeout_s=0.01,
             poll_interval_s=0,
         )
+
+
+def test_training_wait_deadline_is_not_a_builtin_timeout(monkeypatch) -> None:
+    monotonic = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(
+        "recipes.tttd.examples.guidance_ttt.harness.run_controller.time.monotonic",
+        lambda: next(monotonic),
+    )
+    blocked_status = _reef_status()["scenarios"]["guidance-run"]
+    blocked_status["checkpoint_storage"] = {
+        "blocked": True,
+        "reasons": ["protected checkpoints plus reservation exceed the managed storage cap"],
+    }
+
+    with pytest.raises(GuidanceTrainingTimeoutError, match="rollout 11 did not complete after 1s") as raised:
+        wait_for_training_step(
+            health=lambda: _bridge_health(completed_train_steps=0, last_train_rollout_id=None),
+            status=lambda: blocked_status,
+            expected_completed_steps=1,
+            expected_rollout_id=11,
+            timeout_s=1,
+            poll_interval_s=0,
+        )
+
+    assert not isinstance(raised.value, TimeoutError)
 
 
 def _reef_status(
