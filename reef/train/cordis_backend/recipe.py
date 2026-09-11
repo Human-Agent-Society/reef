@@ -15,6 +15,7 @@ import importlib
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -365,8 +366,7 @@ class CordisRecipe(Recipe):
         if budgets["min_win_margin"]:
             if selection != "score_comparison":
                 raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
-            margin = budgets["min_win_margin"]
-            candidate_plugin = lambda backend: ScoreComparisonPlugin(backend, min_win_margin=margin)  # noqa: E731
+            candidate_plugin = partial(ScoreComparisonPlugin, min_win_margin=budgets["min_win_margin"])
         publish = evolution.get("publish", "auto")
         if publish not in ("auto", "review"):
             raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
