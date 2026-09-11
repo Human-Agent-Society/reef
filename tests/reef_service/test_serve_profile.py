@@ -12,12 +12,20 @@ import pytest
 
 from reef.records import RecordStore
 from reef.service.deploy.config import DeployConfigError, load_config, validate_services
-from reef.service.deploy.orchestrator import _model_overrides, _prepare_profile, _resolve_config, build_serve_parser
+from reef.service.deploy.orchestrator import (
+    PROJECT_ROOT,
+    _model_overrides,
+    _prepare_profile,
+    _resolve_config,
+    build_serve_parser,
+)
 from reef.service.deploy.settings import build_parser, service_settings_from_config
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 from reef.train.cordis_backend.recipe import CordisRecipe
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+#: The profile's proposer lives in the tutorial: the wheel alone (the package job) cannot start it.
+IN_CHECKOUT = (PROJECT_ROOT / "tutorials" / "evolve-your-harness" / "harness" / "evolution.py").is_file()
 
 
 @pytest.mark.unit
@@ -84,20 +92,26 @@ def test_the_model_flag_fills_the_provider_preset_and_leaves_other_spellings_alo
 
 
 @pytest.mark.unit
-def test_a_profile_needs_the_checkout_and_a_model_before_it_loads(tmp_path, monkeypatch) -> None:
-    env: dict[str, str] = {}
+def test_a_profile_needs_a_model_and_the_checkout_before_it_loads(tmp_path, monkeypatch) -> None:
     with pytest.raises(DeployConfigError, match="pass --model <provider>/<model>"):
-        _prepare_profile("harness-evolve", None, env)
-    _prepare_profile("harness-evolve", "ollama/gemma4:26b", env)
-    assert env == {"REEF_RECIPE_CONFIG_DIR": str(PROFILES_DIR), "REEF_CHECKOUT": str(REPO_ROOT)}
-    env = {"REEF_UPSTREAM_MODEL": "qwen3-8b"}
-    _prepare_profile("harness-evolve", None, env)  # the environment names the model as before
+        _prepare_profile("harness-evolve", None, {})
     monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
     with pytest.raises(DeployConfigError, match="runs from a reef checkout"):
         _prepare_profile("harness-evolve", "ollama/gemma4:26b", {})
 
 
 @pytest.mark.unit
+@pytest.mark.skipif(not IN_CHECKOUT, reason="the harness-evolve profile runs from a reef checkout")
+def test_a_profile_sets_its_directory_and_the_checkout_for_the_service() -> None:
+    env: dict[str, str] = {}
+    _prepare_profile("harness-evolve", "ollama/gemma4:26b", env)
+    assert env == {"REEF_RECIPE_CONFIG_DIR": str(PROFILES_DIR), "REEF_CHECKOUT": str(PROJECT_ROOT)}
+    env = {"REEF_UPSTREAM_MODEL": "qwen3-8b"}
+    _prepare_profile("harness-evolve", None, env)  # the environment names the model as before
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not IN_CHECKOUT, reason="the harness-evolve profile runs from a reef checkout")
 def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_path) -> None:
     """The profile is the stack config and the preset in one file: it validates as a stack, the registry reads it
     back by the name it carries, and the recipe it builds is the tutorial's proposer over pi in hybrid mode."""
@@ -141,7 +155,10 @@ def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_
 
 @pytest.mark.unit
 def test_serve_without_a_config_names_the_recipes_with_a_profile(tmp_path) -> None:
+    # The subprocess runs away from the checkout, so reef must reach it through PYTHONPATH as the suite's own
+    # interpreter has it; in the package job reef is installed and the entry is harmless.
     env = {k: v for k, v in os.environ.items() if k != "REEF_CONFIG"}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO_ROOT), env.get("PYTHONPATH", ""))))
     result = subprocess.run(
         [sys.executable, "-m", "reef.cli", "serve"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60
     )

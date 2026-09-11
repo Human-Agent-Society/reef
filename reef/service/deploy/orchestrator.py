@@ -469,13 +469,13 @@ def _resolve_config(config: str | None, recipe: str | None, environ: Mapping[str
 
 def _prepare_profile(recipe: str, model: str | None, environ: MutableMapping[str, str]) -> None:
     """What a profile needs from the environment before it loads: its own directory, the checkout, a model."""
+    if not model and not environ.get("REEF_UPSTREAM_MODEL", "").strip():
+        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --model <provider>/<model>")
     method = _PROFILE_METHODS.get(recipe)
     if method is not None and not (PROJECT_ROOT / method).is_file():
         raise DeployConfigError(
             f"the {recipe} profile runs from a reef checkout: its proposer is {method}, not found under {PROJECT_ROOT}"
         )
-    if not model and not environ.get("REEF_UPSTREAM_MODEL", "").strip():
-        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --model <provider>/<model>")
     environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
     environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
 
