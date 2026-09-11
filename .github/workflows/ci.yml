@@ -52,7 +52,7 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: python -m pip install mypy aiohttp pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
+      - run: python -m pip install mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
   test:
@@ -84,7 +84,7 @@ jobs:
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
+      - run: python -m pip install pytest pytest-cov aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -195,7 +195,7 @@ jobs:
               for requirement in requirements
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          expected_core = {"aiohttp", "huggingface-hub", "pyyaml", "reef-client", "sqlalchemy", "tomli-w"}
+          expected_core = {"aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "sqlalchemy", "tomli-w"}
           if sys.version_info < (3, 11):
               expected_core.add("tomli")  # the tomllib backport the harness wrapper reads a TOML binding with
           assert core == expected_core, core

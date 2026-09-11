@@ -218,10 +218,12 @@ The same type serves both sides: a producer constructs it and calls
 Record storage and audit
 ------------------------
 
-``RecordStore`` and ``RecordRetention`` use SQLAlchemy Core for record queries,
-with SQLite-specific connection setup and legacy schema upgrades kept in the
-storage implementation. Existing SQLite databases, record encodings, and
-public method signatures remain compatible; no database conversion is required.
+``RecordStore`` and ``RecordRetention`` use SQLAlchemy Core for record queries.
+When opening older SQLite schemas, ``RecordStore`` uses Alembic's operations API
+to add missing columns on the store's existing connection. SQLite-specific
+connection setup remains in the storage implementation. Existing SQLite
+databases, record encodings, and public method signatures remain compatible;
+no database conversion is required.
 
 ``reef.records.RecordStore`` separates the training record set from retained
 trace history. ``compact(scenario, ids)`` sets ``compacted_at`` and keeps the

@@ -15,6 +15,8 @@ from threading import RLock
 from typing import NamedTuple
 from weakref import WeakValueDictionary
 
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy import (
     REAL,
     URL,
@@ -231,24 +233,26 @@ class RecordStore:
                 self._connection.exec_driver_sql("PRAGMA synchronous = FULL")
                 self._connection.commit()
             with self._connection.begin():
-                # SQLite-specific transaction control and legacy ALTERs stay at
-                # this boundary; schema creation and all data queries use Core.
+                # Keep Alembic's column upgrades and the Core backfill in one
+                # SQLite transaction, serialized across concurrent openers.
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 if inspect(self._connection).has_table(_AGENT_RECORD.name):
                     columns = {column["name"] for column in inspect(self._connection).get_columns(_AGENT_RECORD.name)}
-                    if "compacted_at" not in columns:
-                        self._connection.exec_driver_sql("ALTER TABLE agent_record ADD COLUMN compacted_at REAL")
-                    if "body_bytes" not in columns:
-                        self._connection.exec_driver_sql(
-                            "ALTER TABLE agent_record ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0"
-                        )
-                        self._connection.execute(
-                            _AGENT_RECORD.update().values(
-                                body_bytes=func.length(cast(_AGENT_RECORD.c.payload_json, LargeBinary))
-                                + func.length(cast(_AGENT_RECORD.c.references_json, LargeBinary))
-                                + func.coalesce(func.length(cast(_AGENT_RECORD.c.artifact_json, LargeBinary)), 0)
+                    if not {"compacted_at", "body_bytes"} <= columns:
+                        operations = Operations(MigrationContext.configure(self._connection))
+                        if "compacted_at" not in columns:
+                            operations.add_column(_AGENT_RECORD.name, Column("compacted_at", REAL))
+                        if "body_bytes" not in columns:
+                            operations.add_column(
+                                _AGENT_RECORD.name, Column("body_bytes", Integer, nullable=False, server_default="0")
                             )
-                        )
+                            self._connection.execute(
+                                _AGENT_RECORD.update().values(
+                                    body_bytes=func.length(cast(_AGENT_RECORD.c.payload_json, LargeBinary))
+                                    + func.length(cast(_AGENT_RECORD.c.references_json, LargeBinary))
+                                    + func.coalesce(func.length(cast(_AGENT_RECORD.c.artifact_json, LargeBinary)), 0)
+                                )
+                            )
                 _METADATA.create_all(self._connection)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
