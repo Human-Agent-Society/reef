@@ -77,6 +77,9 @@ class RecordStore:
     """
 
     _SQLITE_ID_CHUNK_SIZE = 900
+    #: How long to keep retrying the WAL switch, matching the connection timeout.
+    _WAL_SWITCH_TIMEOUT = 30.0
+    _WAL_RETRY_INTERVAL = 0.01
 
     def __init__(self, database: str | Path | None = None) -> None:
         self._database = ":memory:" if database is None else str(database)
@@ -96,10 +99,42 @@ class RecordStore:
     def database(self) -> str:
         return self._database
 
+    def _enable_wal(self) -> None:
+        """Switch the database to WAL, waiting out a concurrent opener.
+
+        SQLite takes an exclusive lock to change the journal mode and answers
+        SQLITE_BUSY immediately instead of running the busy handler, so the
+        connection timeout does not cover this statement. Openers that race to
+        upgrade a database still in rollback mode therefore have to retry: the
+        first one converts it and the rest read back ``wal`` on a later attempt.
+        A database already in WAL answers on the first try, so the steady state
+        costs nothing.
+        """
+        deadline = time.monotonic() + self._WAL_SWITCH_TIMEOUT
+        observed = None
+        while True:
+            # A contended switch shows up either way: as SQLITE_BUSY, or as the
+            # unchanged mode read back, which SQLite returns instead of raising.
+            try:
+                row = self._connection.execute("PRAGMA journal_mode = WAL").fetchone()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc) and "busy" not in str(exc):
+                    raise
+            else:
+                observed = None if row is None else str(row[0]).lower()
+                if observed == "wal":
+                    return
+            if time.monotonic() >= deadline:
+                raise ReefError(
+                    f"could not switch {self._database} to WAL within {self._WAL_SWITCH_TIMEOUT:g}s; "
+                    f"another connection held the database (journal mode is {observed or 'unknown'})"
+                )
+            time.sleep(self._WAL_RETRY_INTERVAL)
+
     def _initialize(self) -> None:
         with self._lock, self._connection:
             if self._database != ":memory:":
-                self._connection.execute("PRAGMA journal_mode = WAL")
+                self._enable_wal()
                 self._connection.execute("PRAGMA synchronous = FULL")
             # Serialize schema inspection and upgrade across store openers.
             self._connection.execute("BEGIN IMMEDIATE")

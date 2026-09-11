@@ -57,7 +57,13 @@ from reef.train.cordis_backend.strategies import (
     accepts_keyword,
     accepts_manifest,
 )
-from reef.train.evaluation.contracts import CandidateSelector, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.train.evaluation.contracts import (
+    CandidateEvaluationPlugin,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
+from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceBatch, TraceSample, TrainingBatch, TrainStepResult
 
 from .compose import Context, FiberState
@@ -587,12 +593,13 @@ def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDes
     return None
 
 
-class ScoreComparisonSelector(CandidateSelector):
-    """Select a candidate when its wins exceed its losses by more than ``min_win_margin`` (0: plain majority)."""
+class ScoreComparisonMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that selects when wins exceed losses by ``min_win_margin`` (0: plain majority)."""
 
-    def __init__(self, min_win_margin: int = 0) -> None:
+    def __init__(self, *, min_win_margin: int = 0) -> None:
         if isinstance(min_win_margin, bool) or not isinstance(min_win_margin, int) or min_win_margin < 0:
             raise ValueError("min_win_margin must be an integer of at least 0")
+        super().__init__()
         self._min_win_margin = min_win_margin
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
@@ -615,6 +622,14 @@ class ScoreComparisonSelector(CandidateSelector):
             evaluation=evaluation,
             metrics=metrics,
         )
+
+
+class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
+    """Cordis's default evaluation: measure through the backend, decide by score comparison."""
+
+    def __init__(self, backend: Any, *, min_win_margin: int = 0) -> None:
+        super().__init__(min_win_margin=min_win_margin)
+        self._backend = backend
 
 
 def _score_vectors(

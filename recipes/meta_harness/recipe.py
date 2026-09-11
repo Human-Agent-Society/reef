@@ -43,7 +43,7 @@ from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
 from .backend import POPULATION_STATE_KEY, MetaHarnessBackend
-from .method import SEARCH_MODES, MetaHarnessProposer, MetaHarnessSelector
+from .method import SEARCH_MODES, MetaHarnessPlugin, MetaHarnessProposer
 from .population import PopulationStore
 
 
@@ -62,9 +62,11 @@ class _UnboundProposer(Proposer):
         raise RecipeConfigError("the Meta-Harness proposer is bound by MetaHarnessRecipe.build")
 
 
-class _UnboundSelector:
-    def decide(self, candidate: Any, evaluation: Any) -> Any:
-        raise RecipeConfigError("the Meta-Harness selector is bound by MetaHarnessRecipe.build")
+class _UnboundPlugin:
+    """A callable sentinel ``build`` swaps for a plugin factory bound to the population store."""
+
+    def __call__(self, backend: Any) -> Any:
+        raise RecipeConfigError("the Meta-Harness plugin is bound by MetaHarnessRecipe.build")
 
 
 @dataclass(frozen=True)
@@ -109,7 +111,7 @@ class MetaHarnessRecipe(CordisRecipe):
             raise RecipeConfigError("Meta-Harness owns evolution.selection so population and serving commit together")
         supplied = dict(evolution)
         supplied.setdefault("propose", _UnboundProposer())
-        supplied["selection"] = _UnboundSelector()
+        supplied["selection"] = _UnboundPlugin()
         kwargs = super()._recipe_kwargs({**settings, "evolution": supplied}, values)
 
         block = evolution.get("meta_harness")
@@ -175,7 +177,9 @@ class MetaHarnessRecipe(CordisRecipe):
                     max_nodes=self.max_nodes,
                 )
             )
-        bound = dataclasses.replace(self, propose=propose, candidate_selector=MetaHarnessSelector(store))
+        bound = dataclasses.replace(
+            self, propose=propose, candidate_plugin=lambda backend: MetaHarnessPlugin(backend, store)
+        )
         backend = MetaHarnessBackend(population_store=store, **bound._backend_kwargs())
         return bound._build_trainer(
             scenario,

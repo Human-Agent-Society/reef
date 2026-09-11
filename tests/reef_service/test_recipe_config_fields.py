@@ -17,7 +17,7 @@ from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
 from reef.records import RecordStore
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._threshold_processor import ThresholdProcessor
@@ -202,8 +202,8 @@ def test_default_build_uses_declared_processor_and_config_fields() -> None:
 
     assert isinstance(trainer.processor, ThresholdProcessor)
     assert isinstance(trainer.training_backend, SlimeTrainingBackend)
-    assert isinstance(trainer.candidate_evaluator, DefaultCandidateEvaluationPlugin)
-    assert trainer.candidate_evaluator.evaluator is trainer.training_backend
+    assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
+    assert trainer.candidate_evaluator._backend is trainer.training_backend
     assert trainer.training_backend.step_preparer == "sft"
     assert trainer.processor.context.config["batch_size"] == 2
     assert "max_staleness" not in trainer.processor.context.config
