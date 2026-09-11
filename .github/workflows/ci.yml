@@ -49,6 +49,12 @@ jobs:
         run: python .github/scripts/check_python_design.py
       - name: Ban assert and del in Reef source
         run: python .github/scripts/check_python_statements.py
+      # Ensure uv.lock stays in step with pyproject.toml so a PR that adds a
+      # dependency cannot silently leave the lock stale.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+      - name: Check uv.lock is up to date
+        run: uv lock --check
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
