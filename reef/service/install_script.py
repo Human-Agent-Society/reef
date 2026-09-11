@@ -168,7 +168,7 @@ def _wrapper_lines(
         'exec "$PYTHON_ABS" -m reef.harness.client.wrapper "\\$@"',
         "REEF_WRAPPER_EOF",
         "}",
-        f'if [ ! -f {wrapper} ] || [ "$(wrapper_text)" != "$(cat {wrapper})" ]; then',
+        f'if [ ! -x {wrapper} ] || [ "$(wrapper_text)" != "$(cat {wrapper})" ]; then',
         f"    wrapper_text > {wrapper}",
         f"    chmod +x {wrapper}",
         f"    # Symlink into ~/.local/bin so {wrapper_name} is on PATH. The link target",

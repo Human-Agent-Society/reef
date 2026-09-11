@@ -92,7 +92,7 @@ def _make_fake_opencode(tmp_path: Path) -> Path:
 
 
 def _make_compose(tmp_path: Path, reef_port: int) -> str:
-    """A minimal pi composition directory with models.json pointing at reef."""
+    """A minimal pi composition directory with models.json pointing at reef, under the provider name the install renders."""
     compose = tmp_path / "compose"
     compose.mkdir()
     (compose / "AGENTS.md").write_text("be concise\n")
@@ -100,7 +100,7 @@ def _make_compose(tmp_path: Path, reef_port: int) -> str:
         json.dumps(
             {
                 "providers": {
-                    "qwen": {
+                    "reef": {
                         "api": "openai-completions",
                         "apiKey": "dummy",
                         "baseUrl": f"http://127.0.0.1:{reef_port}/v1",
@@ -793,8 +793,8 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
 
 @pytest.mark.unit
 def test_wrapper_takes_the_token_from_the_binding_when_the_shell_has_none(tmp_path, monkeypatch) -> None:
-    """The install wrote the token beside Reef's address, under the template's parent key; a later shell needs no
-    REEF_TOKEN, one that sets it still wins, and an install without a token left nothing to send."""
+    """The install wrote the token at the binding's key path; a later shell needs no REEF_TOKEN, one that sets it
+    still wins, and a second provider's key in the same file is never Reef's, whatever the two are called."""
     from reef.harness.client.wrapper import _reef_token
 
     reef = {"api": "openai-completions", "baseUrl": "http://127.0.0.1:8900/v1", "apiKey": "from-binding"}
@@ -805,9 +805,40 @@ def test_wrapper_takes_the_token_from_the_binding_when_the_shell_has_none(tmp_pa
     monkeypatch.setenv("REEF_TOKEN", "from-shell")
     assert _reef_token("pi", compose) == "from-shell"
     monkeypatch.delenv("REEF_TOKEN")
-    bare = _pi_tree(tmp_path / "bare", {"providers": {"reef": {**reef, "apiKey": ""}}})
-    assert _reef_token("pi", bare) is None
+    # An install without REEF_TOKEN left Reef's key empty: nothing to send, and never the other provider's key.
+    empty = _pi_tree(tmp_path / "empty", {"providers": {"anthropic": other, "reef": {**reef, "apiKey": ""}}})
+    assert _reef_token("pi", empty) is None
     assert _reef_token("pi", "") is None
+    # Reef reached by a host named reef, beside a provider that sorts after it: the key path settles it.
+    docker = _pi_tree(
+        tmp_path / "docker",
+        {"providers": {"reef": {**reef, "baseUrl": "http://reef:8900/v1"}, "zai": {**other, "apiKey": "zk"}}},
+    )
+    assert _reef_token("pi", docker) == "from-binding"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adapter", ["pi", "opencode", "claude", "codex", "dsh", "hermes", "native"])
+def test_wrapper_reads_the_token_back_from_every_adapters_binding(tmp_path, adapter, monkeypatch) -> None:
+    """Every adapter's binding file, in its own format (JSON, TOML, YAML, dotenv), yields the token the install
+    rendered into it, byte for byte, characters a text search would cut at included."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.client.wrapper import _reef_token
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter(adapter)
+    token = "sk-abc,def;g h\"i'j<k>l\\m"
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    for api in descriptor.model_binding:
+        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key=token, api=api)
+        files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
+        root = tmp_path / api
+        for relative, text in files.items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding="utf-8")
+        _, subdir = descriptor.compose_relocation()
+        assert _reef_token(adapter, str(root / subdir)) == token
 
 
 @pytest.mark.unit

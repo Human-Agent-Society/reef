@@ -957,7 +957,7 @@ export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
 exec "$PYTHON_ABS" -m reef.harness.client.wrapper "\$@"
 REEF_WRAPPER_EOF
 }
-if [ ! -f "$DEST/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$DEST/reef-pi")" ]; then
+if [ ! -x "$DEST/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$DEST/reef-pi")" ]; then
     wrapper_text > "$DEST/reef-pi"
     chmod +x "$DEST/reef-pi"
     # Symlink into ~/.local/bin so reef-pi is on PATH. The link target
@@ -1121,6 +1121,11 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     assert third.returncode == 0, third.stderr
     assert "composition already current" in third.stdout
     assert wrapper.read_text(encoding="utf-8") == text
+    assert wrapper.stat().st_mode & 0o111
+    # A wrapper that lost its exec bit is written again on the unchanged tree.
+    wrapper.chmod(0o644)
+    fourth = _run_install(script, dest, prefix, env)
+    assert fourth.returncode == 0, fourth.stderr
     assert wrapper.stat().st_mode & 0o111
     (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
 

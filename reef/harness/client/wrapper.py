@@ -86,7 +86,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -231,24 +237,20 @@ def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Bi
 
 #: A config key and the URL it holds, in JSON, YAML, TOML or dotenv spelling.
 _KEYED_URL = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\"?\s*[:=]\s*[\"']?(?P<url>https?://[^\s\"'`<>\\,;]+)")
-#: A config key and the bare value it holds, the same spellings; the token the install wrote sits under one.
-_KEYED_VALUE = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\"?\s*[:=]\s*[\"']?(?P<value>[^\s\"'`<>\\,;]+)")
 
 
 def _has_key(text: str, key: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(key)}(?![A-Za-z0-9_-])", text) is not None
 
 
-def _locate(
-    text: str, binding: _Binding, pattern: re.Pattern[str] = _KEYED_URL, what: str = "a URL"
-) -> re.Match[str] | None:
-    """The one URL (or, with ``_KEYED_VALUE``, the one value) under the binding's key path.
+def _locate(text: str, binding: _Binding) -> re.Match[str] | None:
+    """The one URL under the binding's key path.
 
     Candidates share the leaf key; when several do, the nearest parent keys
     in the text before each candidate settle it, so a second provider in
     the same file cannot be taken for Reef. The outermost key is the
     container every entry sits in, so it never settles anything."""
-    matches = [m for m in pattern.finditer(text) if m.group("key") == binding.path[-1]]
+    matches = [m for m in _KEYED_URL.finditer(text) if m.group("key") == binding.path[-1]]
     if len(matches) <= 1:
         return matches[0] if matches else None
     starts = [0, *(m.end() for m in matches[:-1])]
@@ -260,7 +262,7 @@ def _locate(
         if narrowed:
             candidates = narrowed
     keys = "/".join(binding.path)
-    raise WrapperError(f"{len(candidates)} entries hold {what} at {keys}; keep one Reef entry there")
+    raise WrapperError(f"{len(candidates)} entries hold a URL at {keys}; keep one Reef entry there")
 
 
 def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
@@ -279,16 +281,41 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
     return None
 
 
+def _parse_binding_file(file: Path) -> Any:
+    """The binding file as the adapter's quirks wrote it: JSON, TOML, YAML or dotenv, by its name."""
+    text = file.read_text(encoding="utf-8")
+    suffix = file.suffix.lower()
+    if suffix == ".json":
+        return json.loads(text)
+    if suffix == ".toml":
+        return tomllib.loads(text)
+    if suffix in {".yaml", ".yml"}:
+        return yaml.safe_load(text)
+    if file.name == ".env" or suffix == ".env":
+        pairs = (line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
+        return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
+    raise WrapperError(f"binding file {file.name!r} is in a format the wrapper does not read")
+
+
 def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
-    """The token the install wrote into the tree, read from where the adapter's binding renders ``{api_key}``."""
+    """The token the install wrote into the tree, at the key path where the adapter's binding renders ``{api_key}``.
+
+    The file is parsed, not searched: a second provider's key in the same
+    file is never taken for Reef's, and a Reef entry the install left empty
+    (no ``REEF_TOKEN`` in the installing shell) yields nothing."""
     descriptor = get_adapter(adapter)
     for binding in _bindings(descriptor, "{api_key}"):
         file = _binding_file(descriptor, compose_dir, binding)
         if not file.is_file():
             continue
-        match = _locate(file.read_text(encoding="utf-8"), binding, _KEYED_VALUE, "a token")
-        if match is not None:
-            return match.group("value")
+        try:
+            value = _parse_binding_file(file)
+        except (ValueError, yaml.YAMLError) as exc:
+            raise WrapperError(f"binding file {file.name!r} does not parse: {exc}") from None
+        for key in binding.path:
+            value = value.get(key) if isinstance(value, Mapping) else None
+        if isinstance(value, str) and value:
+            return value
     return None
 
 
@@ -612,7 +639,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
     if token:
-        env.setdefault("REEF_TOKEN", token)  # the extensions in the agent reach reef with the same token
+        env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -641,6 +668,9 @@ def _reef_headers(scenario: str, token: str | None) -> dict[str, str]:
 
 
 def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt: bool = False) -> None:
+    # Resolved before any claim: a token the tree cannot yield exits without a claim to restore.
+    compose_dir = os.environ.get("REEF_HARNESS_COMPOSE", "")
+    headers = _reef_headers(scenario, _reef_token(adapter, compose_dir))
     while True:
         claim = _claim_captures(scenario)
         if claim is None:
@@ -657,9 +687,6 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
         if receipts:
             break
         captures_file.unlink()
-
-    compose_dir = os.environ.get("REEF_HARNESS_COMPOSE", "")
-    headers = _reef_headers(scenario, _reef_token(adapter, compose_dir))
 
     # One report referencing the whole run batches as one trajectory sample;
     # --per-receipt sends the same score against each receipt on its own.

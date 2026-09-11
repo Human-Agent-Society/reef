@@ -26,7 +26,7 @@ export REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"
 
 TUTORIAL="$PWD"
 REPO="$(cd ../.. && pwd)"
-# The installed reef-pi wrapper runs python3 -m reef.harness.client.wrapper: reef imports from this checkout.
+# The install script's import check and reef serve run from this checkout; the wrapper it writes bakes this interpreter.
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 
 # deployment.yaml listens on 8901; a reef already there would answer for another deployment.
