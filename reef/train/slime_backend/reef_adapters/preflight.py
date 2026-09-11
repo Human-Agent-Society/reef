@@ -53,6 +53,10 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
         # Only a frozen base may stay resident. Full-weight training rewrites
         # the served weights, which is exactly what releasing them is for, and
         # a non-colocated engine never releases anything to begin with.
+        # Spelled out rather than calling megatron_lora_enabled, which would
+        # put torch on this module's import path. It is the same predicate:
+        # start_bridge derives its own `lora` from that helper, and the helper
+        # is this comparison, so the two cannot disagree.
         if int(getattr(args, "megatron_lora_rank", 0) or 0) <= 0:
             raise ValueError("--keep-lora-base-resident requires LoRA training; set --megatron-lora-rank")
         if not colocate:

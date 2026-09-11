@@ -123,3 +123,34 @@ def test_keeping_the_lora_base_resident_needs_lora_and_colocation() -> None:
         validate_bridge_args(args(megatron_lora_rank=0), None)
     with pytest.raises(ValueError, match="colocated training"):
         validate_bridge_args(args(colocate=False, offload_rollout=False), None)
+
+
+@pytest.mark.unit
+def test_the_preflight_and_the_bridge_agree_on_what_a_lora_run_is() -> None:
+    """The preflight spells the predicate out; this pins it to the shared helper."""
+    from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    def args(rank):
+        return SimpleNamespace(
+            num_rollout=1,
+            save_hf="/tmp/hf/checkpoint-{rollout_id}",
+            save="/tmp/megatron",
+            debug_train_only=False,
+            debug_rollout_only=False,
+            rollout_num_gpus=1,
+            rollout_external=False,
+            colocate=True,
+            offload_train=True,
+            offload_rollout=True,
+            megatron_lora_rank=rank,
+            keep_lora_base_resident=True,
+        )
+
+    for rank in (0, 32):
+        refused = False
+        try:
+            validate_bridge_args(args(rank), None)
+        except ValueError as exc:
+            refused = "requires LoRA training" in str(exc)
+        assert refused is not megatron_lora_enabled(args(rank))
