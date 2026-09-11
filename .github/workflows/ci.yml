@@ -172,6 +172,7 @@ jobs:
           python - <<'PY'
           import importlib.util
           import os
+          import sys
           from importlib.metadata import distribution
           from pathlib import Path
 
@@ -187,18 +188,23 @@ jobs:
           client = distribution("reef-client")
           assert not (client.requires or ()), client.requires
           requirements = [Requirement(value) for value in reef.requires or ()]
+          # Core is what installs with no extra on this interpreter: a marker
+          # that only names the Python version is still core.
           core = {
               canonicalize_name(requirement.name)
               for requirement in requirements
-              if requirement.marker is None
+              if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          assert core == {"aiohttp", "huggingface-hub", "pyyaml", "reef-client", "tomli-w"}, core
+          expected_core = {"aiohttp", "huggingface-hub", "pyyaml", "reef-client", "tomli-w"}
+          if sys.version_info < (3, 11):
+              expected_core.add("tomli")  # the tomllib backport the harness wrapper reads a TOML binding with
+          assert core == expected_core, core
           slime = {
               canonicalize_name(requirement.name)
               for requirement in requirements
               if requirement.marker is not None
               and requirement.marker.evaluate({"extra": "slime"})
-          }
+          } - core
           assert slime == {
               "e2b",
               "httpx",
