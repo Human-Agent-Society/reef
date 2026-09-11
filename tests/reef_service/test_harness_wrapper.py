@@ -1534,3 +1534,69 @@ def test_main_passes_release_to_setup_only_when_named(tmp_path) -> None:
         main()
     assert exited.value.code == 0
     assert called == [(("setup-scenario", "pi", str(tmp_path)), {"yes": False, "marks": (), "release": "v4"})]
+
+
+# -- reef-<adapter> doctor: one report of what the install needs ---------------------------------
+
+
+class _DoctorReef:
+    """A reef whose status route checks the bearer and whose catalog names one served head."""
+
+    def __init__(self, token: str, head: str) -> None:
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/reef/status":
+                    ok = self.headers.get("Authorization") == f"Bearer {token}"
+                    code, payload = (200, {"scenarios": {}}) if ok else (401, {"error": "invalid service token"})
+                elif self.path == "/reef/harness/releases":
+                    code, payload = 200, {"releases": [{"release_id": head, "pending": False}]}
+                else:
+                    code, payload = 404, {}
+                raw = json.dumps(payload).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        self.port = self._server.server_address[1]
+
+    def close(self) -> None:
+        self._server.shutdown()
+
+
+@pytest.mark.unit
+def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, capsys, monkeypatch) -> None:
+    from reef.harness.client.wrapper import doctor
+
+    reef = _DoctorReef(token="dummy", head="rel-3")
+    compose, _ = _ask_tree(tmp_path, reef.port)  # models.json binds the token dummy; release file names rel-3
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}" if command == "rg" else None)
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 1  # fd is missing
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("ok  interpreter") and "reef " in line for line in out)
+    assert any(line.startswith("ok  service") and "token accepted" in line for line in out)
+    assert any(line.startswith("ok  binary") and "0.84.2" in line for line in out)
+    assert any(line.startswith("ok  tool") and "rg at /usr/bin/rg" in line for line in out)
+    assert any(line.startswith("!!  tool") and "fd missing: install fd" in line for line in out)
+    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    # A wrong token in the shell wins over the binding's, and the service says so.
+    monkeypatch.setenv("REEF_TOKEN", "wrong")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 1
+    out = capsys.readouterr().out
+    assert "!!  service" in out and "401" in out
+    reef.close()

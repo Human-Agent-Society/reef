@@ -181,6 +181,52 @@ is admitted the same way. It enters the release chain only if
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
 
+What a published adapter contains
+---------------------------------
+
+Every accepted update publishes a directory holding the adapter alone, never a
+merged or full-model checkpoint. This is what makes saving every update
+affordable: a rank-32 adapter is a few megabytes where the base model is
+gigabytes. ``checkpoint_every_n_versions`` can therefore stay at 1, and the
+release chain keeps every revision instead of only some of them.
+
+.. code:: text
+
+   adapter_config.json          standard PEFT config: peft_type, r, lora_alpha,
+                                target_modules, lora_dropout, base_model_name_or_path
+   adapter_model.safetensors    the adapter tensors, and only those
+   reef-adapter.json            Reef's training metadata for this revision
+
+The first two files are a plain Hugging Face PEFT adapter, so a published
+revision loads outside Reef with nothing but ``transformers`` and ``peft``:
+
+.. code:: python
+
+   from peft import PeftModel
+   from transformers import AutoModelForCausalLM
+
+   base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
+   model = PeftModel.from_pretrained(base, "/path/to/checkpoint-4")
+
+``reef-adapter.json`` is what lets you check a revision, not just load it. It
+records:
+
+- the base model, plus a checksum of its tokenizer and chat-template files;
+- the PEFT settings the export wrote;
+- the dtype of the tensors it wrote;
+- the scenario and step that produced it;
+- a SHA-256 for each of the two PEFT files.
+
+PEFT loaders ignore files they do not recognize, so this one does not affect
+loading the adapter elsewhere.
+
+Reef checks this file whenever it is present. A checksum that no longer matches
+its file, a setting that contradicts ``adapter_config.json``, or a listed file
+that is missing all cause Reef to refuse the adapter instead of serving weights
+it cannot account for. Adapters from elsewhere have no such file and are
+accepted without one; a deployment that should serve only its own exports can
+require it.
+
 Connect your agent
 ------------------
 

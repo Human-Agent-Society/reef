@@ -77,8 +77,9 @@ def build_named_recipe(
 
     ``name`` is a YAML preset ``<name>.yaml`` under ``config_directory``
     (defaulting to ``REEF_RECIPE_CONFIG_DIR``), or the reserved core name
-    ``recipe``. Reef bundles no presets — they are deployment data (see
-    ``docs/reference/configuration.rst``). A preset's ``runtime`` section builds the recipe's
+    ``recipe``. Presets are deployment data (see ``docs/reference/configuration.rst``);
+    the one kind reef bundles is a recipe's profile under ``reef.service.profiles``,
+    which ``reef serve --recipe`` points this directory at. A preset's ``runtime`` section builds the recipe's
     runtime; without one the recipe gets ``default_runtime`` and may omit
     ``model.path`` to use that runtime's model. Dotted references are
     not names: they are operator configuration for :func:`build_recipe`, so a

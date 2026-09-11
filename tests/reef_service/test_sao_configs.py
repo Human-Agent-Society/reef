@@ -39,6 +39,7 @@ Slime driver is therefore part of this contract automatically.
 from __future__ import annotations
 
 import argparse
+import importlib.machinery
 import os
 import shlex
 import sys
@@ -198,6 +199,11 @@ def _install_slime_parser_stubs() -> None:
             __import__(name)
         except ImportError:
             module = types.ModuleType(name)
+            # A bare ModuleType has __spec__ set to None, and these stubs
+            # stay in sys.modules after the test that installed them. Later
+            # code that asks the import system about the name then fails:
+            # importing peft reaches accelerate, which looks up wandb this way.
+            module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
             for attr, value in attrs.items():
                 setattr(module, attr, value)
             sys.modules[name] = module
