@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+  UV_INSTALL_DIR: ${{ github.workspace }}/.ci-uv
+
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -24,6 +28,19 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-lint-3.12-${{ hashFiles('pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
@@ -52,7 +69,7 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: python -m pip install mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
+      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
   test:
@@ -80,24 +97,37 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       # huggingface_hub is a declared core dependency (pyproject.toml); the
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: python -m pip install pytest pytest-cov aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
+      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
       # exhausts the runner disk and trips the checkpoint free-space floor.
-      - run: python -m pip install --no-deps --group runtime
+      - run: uv pip install --system --python python --no-deps --group runtime
       # reef-client is a separate distribution (Human-Agent-Society/reef-client);
       # install the submodule pin so coordinated protocol changes are tested
       # before the matching client release reaches PyPI.
-      - run: python -m pip install ./third_party/reef-client
+      - run: uv pip install --system --python python ./third_party/reef-client
       # Exercise the CPU-only Megatron LoRA helpers without making Torch a
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: uv pip install --system --python python torch --index-url https://download.pytorch.org/whl/cpu
       # Directory-driven selection: run everything under tests/ so a new suite
       # cannot be silently dropped from CI. Nothing is ignored today — what
       # genuinely needs Megatron carries its own importorskip and reports as
@@ -120,16 +150,18 @@ jobs:
       # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
       # coverage.xml is uploaded, so the other legs were paying the risk for a
       # report nothing reads.
+      # Four workers share the runner; keep each file together so module fixtures
+      # and expensive imports are reused. All workers contribute to coverage.
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: python -m pytest tests
+        run: python -m pytest tests -n 4 --dist loadfile
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_SYSTEM: /dev/null
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
         run: >
-          python -m pytest tests
+          python -m pytest tests -n 4 --dist loadfile
           --cov=reef --cov-report=term --cov-report=xml
         env:
           GIT_CONFIG_GLOBAL: /dev/null
@@ -158,14 +190,27 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install build twine
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-package-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+      - run: uv pip install --system --python python build twine
       # Full build (sdist, then wheel from the sdist) validates the sdist is
       # complete too; twine check validates the metadata. reef-client is a
       # separate distribution installed from the matching submodule pin below.
       - run: python -m build
       - run: python -m twine check dist/*
-      - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install dist/reef_infra-[0-9]*.whl
+      - run: uv pip install --system --python python ./third_party/reef-client
+      - run: uv pip install --system --python python dist/reef_infra-[0-9]*.whl
       - name: Check distribution and dependency boundaries
         working-directory: ${{ runner.temp }}
         run: |
@@ -292,13 +337,14 @@ jobs:
       # repo so the source tree cannot shadow them. Excluded: tests that
       # import the slime package (the wheel does not bundle it) or Slime's
       # optional dependencies.
-      - run: python -m pip install pytest
+      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0
       # Exercise the repository cookbook as an external consumer of the
       # installed Reef wheel. Linking only recipes/ keeps the source reef/
       # package off sys.path, so it cannot shadow the wheel under test.
       - run: ln -s "${{ github.workspace }}/recipes" "${{ runner.temp }}/recipes"
       - run: >
           python -m pytest ${{ github.workspace }}/tests/reef_service
+          -n 4 --dist loadfile
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py
