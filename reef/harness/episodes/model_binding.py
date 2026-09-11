@@ -223,6 +223,15 @@ class ModelBinding:
         """The tokens the latest ``complete`` reported (``usage_of`` of its response), or None."""
         return getattr(self, "_last_usage", None)
 
+    def last_response(self) -> dict[str, Any] | None:
+        """The latest ``complete`` response, including provider reasoning when returned.
+
+        ``chat`` still returns only assistant text. A recording wrapper can
+        retain this response without making a second call or losing native
+        provider fields. None before a call or after a failed request.
+        """
+        return getattr(self, "_last_response", None)
+
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
@@ -232,6 +241,8 @@ class ModelBinding:
         way. Prefer :meth:`chat` unless the method needs the raw response.
         """
 
+        object.__setattr__(self, "_last_response", None)
+        object.__setattr__(self, "_last_usage", None)
         request_body = {"model": self.model, **body}
         headers = {"content-type": "application/json"}
         if self.api == "anthropic":
@@ -261,6 +272,7 @@ class ModelBinding:
                     result = _fold_stream(response)
             # The tokens this call reported, for a wrapper of ``chat`` that never sees the response body.
             object.__setattr__(self, "_last_usage", usage_of(result))
+            object.__setattr__(self, "_last_response", result)
             return result
         except urllib.error.HTTPError as exc:
             try:
@@ -394,6 +406,34 @@ def _sse_payloads(response: Any) -> Iterator[Any]:
             continue
 
 
+def _merge_reasoning_details(details: list[Any], fragments: Sequence[Any]) -> None:
+    """Join provider detail fragments by index (or id), leaving opaque blocks opaque."""
+    for fragment in fragments:
+        if not isinstance(fragment, Mapping):
+            details.append(fragment)
+            continue
+        key = "index" if fragment.get("index") is not None else "id" if fragment.get("id") is not None else None
+        target = next(
+            (
+                item
+                for item in details
+                if isinstance(item, dict) and key is not None and item.get(key) == fragment[key]
+            ),
+            None,
+        )
+        if target is None:
+            details.append(dict(fragment))
+            continue
+        for name, value in fragment.items():
+            if value is None and target.get(name) is not None:
+                continue
+            if name in ("text", "summary", "signature", "data") and isinstance(value, str):
+                previous = target.get(name)
+                target[name] = (previous if isinstance(previous, str) else "") + value
+            else:
+                target[name] = value
+
+
 def _fold_stream(response: Any) -> dict[str, Any]:
     """Fold an SSE chat-completions stream into one response object."""
 
@@ -402,6 +442,7 @@ def _fold_stream(response: Any) -> dict[str, Any]:
     finish_reason = None
     model = None
     usage: dict[str, Any] | None = None
+    reasoning: dict[str, Any] = {}
     for chunk in _sse_payloads(response):
         model = chunk.get("model", model)
         if isinstance(chunk.get("usage"), Mapping):
@@ -412,6 +453,11 @@ def _fold_stream(response: Any) -> dict[str, Any]:
             content = delta.get("content")
             if isinstance(content, str):
                 pieces.append(content)
+            for key in ("reasoning", "reasoning_content", "thinking"):
+                if isinstance(delta.get(key), str):
+                    reasoning[key] = reasoning.get(key, "") + delta[key]
+            if isinstance(delta.get("reasoning_details"), list):
+                _merge_reasoning_details(reasoning.setdefault("reasoning_details", []), delta["reasoning_details"])
             finish_reason = choice.get("finish_reason", finish_reason)
     folded: dict[str, Any] = {
         "object": "chat.completion",
@@ -419,7 +465,7 @@ def _fold_stream(response: Any) -> dict[str, Any]:
         "choices": [
             {
                 "index": 0,
-                "message": {"role": role, "content": "".join(pieces)},
+                "message": {"role": role, "content": "".join(pieces), **reasoning},
                 "finish_reason": finish_reason,
             }
         ],
@@ -432,7 +478,8 @@ def _fold_stream(response: Any) -> dict[str, Any]:
 def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
     """Fold an SSE messages stream into one response object."""
 
-    pieces: list[str] = []
+    blocks: dict[int, dict[str, Any]] = {}
+    partial_inputs: dict[int, str] = {}
     model = None
     stop_reason = None
     usage: dict[str, Any] = {}
@@ -442,19 +489,37 @@ def _fold_anthropic_stream(response: Any) -> dict[str, Any]:
             model = event.get("message", {}).get("model", model)
             if isinstance(event.get("message", {}).get("usage"), Mapping):
                 usage.update(event["message"]["usage"])
+        elif kind == "content_block_start" and isinstance(event.get("content_block"), Mapping):
+            blocks[event.get("index", 0)] = dict(event["content_block"])
         elif kind == "content_block_delta":
             delta = event.get("delta", {})
-            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
-                pieces.append(delta["text"])
+            fields = {"text_delta": "text", "thinking_delta": "thinking", "signature_delta": "signature"}
+            field_name = fields.get(delta.get("type"))
+            if field_name is not None and isinstance(delta.get(field_name), str):
+                block = blocks.setdefault(
+                    event.get("index", 0), {"type": "text" if field_name == "text" else "thinking"}
+                )
+                block[field_name] = str(block.get(field_name, "")) + delta[field_name]
+            elif delta.get("type") == "input_json_delta" and isinstance(delta.get("partial_json"), str):
+                index = event.get("index", 0)
+                partial_inputs[index] = partial_inputs.get(index, "") + delta["partial_json"]
         elif kind == "message_delta":
             stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
             if isinstance(event.get("usage"), Mapping):
                 usage.update(event["usage"])
+    for index, partial_json in partial_inputs.items():
+        block = blocks.setdefault(index, {"type": "tool_use"})
+        try:
+            block["input"] = json.loads(partial_json)
+        except json.JSONDecodeError:
+            # Preserve an interrupted tool argument as fragments, never the start block's empty input placeholder.
+            block.pop("input", None)
+            block["partial_json"] = partial_json
     folded: dict[str, Any] = {
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [{"type": "text", "text": "".join(pieces)}],
+        "content": [blocks[index] for index in sorted(blocks)],
         "stop_reason": stop_reason,
     }
     if usage:
@@ -466,24 +531,30 @@ def _fold_responses_stream(response: Any) -> dict[str, Any]:
     """Fold an SSE Responses stream into one response object."""
 
     pieces: list[str] = []
+    output: dict[int, dict[str, Any]] = {}
     completed: dict[str, Any] | None = None
     for event in _sse_payloads(response):
         if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
             pieces.append(event["delta"])
+        elif event.get("type") == "response.output_item.done" and isinstance(event.get("item"), dict):
+            output[event.get("output_index", len(output))] = event["item"]
         elif event.get("type") == "response.completed" and isinstance(event.get("response"), dict):
             completed = event["response"]
     if completed is not None:
         return completed
-    return {
-        "object": "response",
-        "status": "completed",
-        "output": [
+    items = [output[index] for index in sorted(output)]
+    if not any(item.get("type") == "message" and item.get("role") == "assistant" for item in items):
+        items.append(
             {
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "".join(pieces)}],
             }
-        ],
+        )
+    return {
+        "object": "response",
+        "status": "completed",
+        "output": items,
     }
 
 

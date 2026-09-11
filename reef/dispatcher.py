@@ -279,6 +279,30 @@ class Dispatcher:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()
 
+    def read_records(self, scenario: str, *, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
+        """Read retained summaries without changing the training queue."""
+        from reef.scenario.history import read_records
+
+        with self._registry.lock_for(scenario):
+            return read_records(self._registry.require(scenario), after_sequence=after_sequence, limit=limit)
+
+    def read_record(self, scenario: str, record_id: str) -> dict[str, Any] | None:
+        """Read a retained trace within its scenario, including compacted bodies."""
+        from reef.scenario.history import read_record
+
+        with self._registry.lock_for(scenario):
+            return read_record(self._registry.require(scenario), record_id)
+
+    def read_commits(
+        self, scenario: str, *, after_step: int = 0, limit: int = 50, record_ids: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        from reef.scenario.history import read_commits
+
+        with self._registry.lock_for(scenario):
+            return read_commits(
+                self._registry.require(scenario), after_step=after_step, limit=limit, record_ids=record_ids
+            )
+
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
         with self._registry.lock_for(scenario):
             current = self._registry.require(scenario)
@@ -286,6 +310,8 @@ class Dispatcher:
             return {
                 "scenario": scenario,
                 "processor": type(processor).__name__,
+                "training_mode": current.trainer.training_mode,
+                "status": dict(current.trainer.processor_status()),
                 "required_request_types": sorted(rt.value for rt in processor.required_request_types),
             }
 

@@ -340,6 +340,12 @@ class Run:
                 "content": message.get("content"),
                 "tool_calls": calls,
                 "finish": "tool-calls" if calls else "stop",
+                # Keep only reasoning the provider returned; absent fields stay absent on older/plain models.
+                **{
+                    key: message[key]
+                    for key in ("reasoning", "reasoning_content", "reasoning_details", "thinking")
+                    if key in message
+                },
                 # The tokens the endpoint counted for this step, when it reported them; the verdict sums them per agent.
                 **({"usage": usage} if usage else {}),
             },
