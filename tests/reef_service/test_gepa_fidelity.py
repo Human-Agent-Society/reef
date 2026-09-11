@@ -22,7 +22,7 @@ gepa = pytest.importorskip("gepa")
 from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import GEPAProposer, GEPASelector
+from recipes.gepa.method import GEPAProposer, GEPASelectorMixin
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
@@ -135,7 +135,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         valset_size=len(VAL),
         episode_runner=ReefEpisodes(),
     )
-    selector = GEPASelector(archive)
+    selector = GEPASelectorMixin(archive)
     served = ModelBinding("http://model.test", "m", api_key="k")
     models = ModelBindings(served=served, named={"reflection": Reflector()})
     text = SEED_TEXT

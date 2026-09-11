@@ -4,7 +4,7 @@ One GEPA iteration is split across the mechanism's step. ``GEPAProposer``
 owns the half GEPA calls the reflective mutation: sample a parent from the
 archive's Pareto front, evaluate it on a minibatch, reflect on one component
 with the feedback that minibatch produced, evaluate the child on the same
-minibatch, and accept only a strict improvement. ``GEPASelector`` owns the
+minibatch, and accept only a strict improvement. ``GEPASelectorMixin`` owns the
 other half, the full validation pass: the mechanism has already run every
 ``evolution.tasks`` prompt on both compositions by the time ``decide`` is
 called, so the per-task scores in its evaluation are exactly GEPA's valset
@@ -37,7 +37,13 @@ from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation
-from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.train.evaluation.contracts import (
+    CandidateEvaluationPlugin,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
+from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceSample
 
 from . import components, reflection
@@ -317,8 +323,8 @@ class GEPAProposer:
             return models.served
 
 
-class GEPASelector:
-    """GEPA's valset pass and Pareto update, as the selection policy.
+class GEPASelectorMixin:
+    """GEPA's valset pass and Pareto update, as a plugin's ``decide()``.
 
     Selection is strict mean improvement over the served composition, which
     keeps the served tree equal to the archive's best candidate - GEPA's
@@ -327,6 +333,7 @@ class GEPASelector:
     """
 
     def __init__(self, archive: Archive) -> None:
+        super().__init__()
         self._archive = archive
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
@@ -377,6 +384,14 @@ class GEPASelector:
                 "metric_calls": archive.metric_calls,
             },
         )
+
+
+class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+    """GEPA's candidate evaluation: measure through the backend, decide by valset mean."""
+
+    def __init__(self, backend: Any, archive: Archive) -> None:
+        super().__init__(archive)
+        self._backend = backend
 
 
 def _scores(values: Any) -> list[float]:

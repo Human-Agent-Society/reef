@@ -16,7 +16,8 @@ from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, T
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.evaluation import (
-    DefaultCandidateEvaluationPlugin,
+    BackendEvaluateMixin,
+    CandidateEvaluationPlugin,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
@@ -31,6 +32,17 @@ from ._grouped_pg import GroupedPolicyProcessor
 from ._threshold_processor import ThresholdProcessor
 
 NUM_GPUS = 0
+
+
+def policy_plugin(backend: object, policy: type) -> CandidateEvaluationPlugin:
+    """A plugin that measures through ``backend`` and decides with ``policy``'s mixin."""
+
+    class _Plugin(policy, BackendEvaluateMixin, CandidateEvaluationPlugin):  # type: ignore[misc, valid-type]
+        pass
+
+    plugin = _Plugin()
+    plugin._backend = backend
+    return plugin
 
 
 class _PreparingBackend(TrainingBackend):
@@ -503,7 +515,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
         training_backend=backend,
-        candidate_evaluator=DefaultCandidateEvaluationPlugin(backend, Policy()),
+        candidate_evaluator=policy_plugin(backend, Policy),
     )
 
     result = trainer.run_once()
@@ -603,7 +615,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
         records,
         processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
         training_backend=backend,
-        candidate_evaluator=DefaultCandidateEvaluationPlugin(backend, BrokenPolicy()),
+        candidate_evaluator=policy_plugin(backend, BrokenPolicy),
     )
 
     with pytest.raises(RuntimeError, match="policy failed"):

@@ -1,4 +1,11 @@
-"""Contracts for evaluating and selecting produced updates."""
+"""Contracts for evaluating and selecting produced updates.
+
+A candidate-evaluation plugin is one class that both measures (``evaluate``)
+and decides (``decide``). The built-in policies are mixins a plugin composes at
+class-definition time — :class:`AlwaysSelectMixin`, :class:`RegressionGateMixin`,
+cordis's :class:`ScoreComparisonMixin` — paired with :class:`BackendEvaluateMixin`
+when the measurement comes from the training backend.
+"""
 
 from __future__ import annotations
 
@@ -6,24 +13,17 @@ import pytest
 
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.train.backend import TrainingBackend
-from reef.train.cordis_backend import ScoreComparisonSelector
+from reef.train.cordis_backend import ScoreComparisonMixin, ScoreComparisonPlugin
 from reef.train.evaluation import (
-    AlwaysSelect,
+    AlwaysSelectMixin,
+    BackendAlwaysSelectPlugin,
+    BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
-    CandidateSelector,
-    DefaultCandidateEvaluationPlugin,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
 )
-
-
-def test_built_ins_explicitly_implement_their_public_contracts() -> None:
-    assert issubclass(AlwaysSelect, CandidateSelector)
-    assert issubclass(ScoreComparisonSelector, CandidateSelector)
-    assert issubclass(TrainingBackend, CandidateEvaluator)
-    assert issubclass(DefaultCandidateEvaluationPlugin, CandidateEvaluationPlugin)
 
 
 def evaluation() -> EvaluationResult:
@@ -34,9 +34,22 @@ def evaluation() -> EvaluationResult:
     )
 
 
+def test_built_ins_explicitly_implement_their_public_contracts() -> None:
+    assert issubclass(TrainingBackend, CandidateEvaluator)
+    # The shipped plugins are whole plugins: they evaluate and decide.
+    for plugin in (BackendAlwaysSelectPlugin, ScoreComparisonPlugin):
+        assert issubclass(plugin, CandidateEvaluationPlugin)
+        assert callable(plugin.evaluate)
+        assert callable(plugin.decide)
+    # The policies are mixins: they supply decide() and nothing else.
+    for mixin in (AlwaysSelectMixin, ScoreComparisonMixin):
+        assert callable(mixin.decide)
+        assert not hasattr(mixin, "evaluate")
+
+
 def test_always_select_returns_an_explainable_structured_decision() -> None:
     candidate = UpdateCandidate("job-7")
-    decision = AlwaysSelect().decide(candidate, evaluation())
+    decision = AlwaysSelectMixin().decide(candidate, evaluation())
 
     assert decision.selected is True
     assert decision.outcome == "select"
@@ -47,15 +60,14 @@ def test_always_select_returns_an_explainable_structured_decision() -> None:
     }
 
 
-def test_default_plugin_composes_evaluator_and_selector() -> None:
+def test_a_plugin_mixes_its_measurement_and_its_decision() -> None:
     calls: list[tuple[str, object]] = []
 
-    class Backend:
+    class DemoPlugin(CandidateEvaluationPlugin):
         def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
             calls.append(("evaluate", candidate))
             return evaluation()
 
-    class Selector:
         def decide(self, candidate: UpdateCandidate, result: EvaluationResult) -> SelectionDecision:
             calls.append(("decide", result))
             return SelectionDecision(
@@ -67,15 +79,15 @@ def test_default_plugin_composes_evaluator_and_selector() -> None:
             )
 
     candidate = UpdateCandidate("job-7")
-    evaluator = DefaultCandidateEvaluationPlugin(Backend(), Selector())
-    result = evaluator.evaluate(candidate)
-    decision = evaluator.decide(candidate, result)
+    plugin = DemoPlugin()
+    result = plugin.evaluate(candidate)
+    decision = plugin.decide(candidate, result)
 
     assert decision.selected is True
     assert calls == [("evaluate", candidate), ("decide", decision.evaluation)]
 
 
-def test_default_plugin_uses_always_select_when_selector_is_omitted() -> None:
+def test_the_backend_always_select_plugin_measures_through_the_backend() -> None:
     calls = []
 
     class Backend:
@@ -85,15 +97,31 @@ def test_default_plugin_uses_always_select_when_selector_is_omitted() -> None:
 
     candidate = UpdateCandidate("job-7")
     backend = Backend()
-    evaluator = DefaultCandidateEvaluationPlugin(backend)
+    plugin = BackendAlwaysSelectPlugin(backend)
 
-    result = evaluator.evaluate(candidate)
-    decision = evaluator.decide(candidate, result)
+    result = plugin.evaluate(candidate)
+    decision = plugin.decide(candidate, result)
 
-    assert evaluator.evaluator is backend
     assert calls == [candidate]
     assert decision.selected is True
     assert decision.policy == "always"
+
+
+def test_a_policy_mixin_pairs_with_the_backend_evaluate_mixin() -> None:
+    class Backend:
+        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+            return EvaluationResult(
+                evaluator="pairs",
+                evaluator_version="1",
+                metrics={"candidate_scores": (1.0, 1.0), "current_scores": (0.0, 0.0)},
+            )
+
+    plugin = ScoreComparisonPlugin(Backend())
+    candidate = UpdateCandidate("job-7")
+    decision = plugin.decide(candidate, plugin.evaluate(candidate))
+
+    assert decision.selected is True
+    assert decision.policy == "score_comparison"
 
 
 def test_rejected_decision_is_not_selected() -> None:
@@ -133,3 +161,19 @@ def test_model_candidate_records_the_unactivated_checkpoint() -> None:
 
     assert candidate.current_runtime_load_id == "inc:6"
     assert ActivatedModel(candidate.candidate_id, "inc:7").runtime_load_id == "inc:7"
+
+
+def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
+    class Backend:
+        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+            return evaluation()
+
+    class Plugin(AlwaysSelectMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+        def __init__(self, backend: object) -> None:
+            super().__init__()
+            self._backend = backend
+
+    candidate = UpdateCandidate("job-7")
+    plugin = Plugin(Backend())
+    assert plugin.evaluate(candidate).evaluator == "held-out-suite"
+    assert plugin.decide(candidate, plugin.evaluate(candidate)).selected is True
