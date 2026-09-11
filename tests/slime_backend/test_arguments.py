@@ -95,3 +95,31 @@ def test_loss_family_projection_uses_public_slime_primitives() -> None:
     neutral = _args(loss_family="sft")
     configure_reef_loss_args(neutral)
     assert not hasattr(neutral, "compute_advantages_and_returns")
+
+
+@pytest.mark.unit
+def test_keeping_the_lora_base_resident_needs_lora_and_colocation() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import validate_bridge_args
+
+    def args(**overrides):
+        values = {
+            "num_rollout": 1,
+            "save_hf": "/tmp/hf/checkpoint-{rollout_id}",
+            "save": "/tmp/megatron",
+            "debug_train_only": False,
+            "debug_rollout_only": False,
+            "rollout_num_gpus": 1,
+            "rollout_external": False,
+            "colocate": True,
+            "offload_train": True,
+            "offload_rollout": True,
+            "megatron_lora_rank": 32,
+            "keep_lora_base_resident": True,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    with pytest.raises(ValueError, match="requires LoRA training"):
+        validate_bridge_args(args(megatron_lora_rank=0), None)
+    with pytest.raises(ValueError, match="colocated training"):
+        validate_bridge_args(args(colocate=False, offload_rollout=False), None)

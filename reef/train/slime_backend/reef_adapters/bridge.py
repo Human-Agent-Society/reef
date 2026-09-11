@@ -372,6 +372,13 @@ class _RolloutAdapterEngine:
                 raise RuntimeError(f"engine kept adapter {name!r}: {result!r}")
 
 
+#: What a training step invalidates when the base model is frozen. SGLang's
+#: release and resume sides take the same tag names, and its resume removes
+#: each tag from the released set, so a tag left out here must also be left
+#: out of the matching onload.
+_KV_AND_GRAPH_TAGS = ("kv_cache", "cuda_graph")
+
+
 class TrainBridgeActorImpl:
     """Named actor holding a slime ``RayTrainGroup`` for a remote reef runtime.
 
@@ -395,6 +402,7 @@ class TrainBridgeActorImpl:
         colocate: bool = False,
         lora: bool = False,
         adapter_capacity: int | None = None,
+        keep_lora_base_resident: bool = False,
         critic_group=None,
         critic_steps_per_actor: int | None = None,
         critic_only_steps: int = 0,
@@ -427,6 +435,11 @@ class TrainBridgeActorImpl:
         # it, and its status is what the serving side reports.
         self._residency = AdapterResidencyManager(adapter_capacity) if lora else None
         self._adapter_engine = _RolloutAdapterEngine(rollout_manager) if lora else None
+        # A LoRA run never rewrites the base, so releasing it copies identical
+        # bytes to the host and back on every step. Opt in and the training
+        # step releases only what it invalidates. Whether the base can stay
+        # resident is a memory question, so this stays off by default.
+        self._release_tags = _KV_AND_GRAPH_TAGS if (lora and colocate and keep_lora_base_resident) else None
         self._generation_paused = False
         if loss_runtime is not None:
             self._algo = loss_runtime
@@ -855,7 +868,11 @@ class TrainBridgeActorImpl:
     def _restore_incumbent_serving(self) -> None:
         if not self._colocate:
             return
-        self._manager_call("onload_weights")
+        # Pairs with the training step's offload: resuming a region that was
+        # never released fails, because SGLang resumes by removing the tag
+        # from the set release added it to.
+        if self._release_tags is None:
+            self._manager_call("onload_weights")
         self._manager_call("onload_kv")
         self._continue_generation()
 
@@ -1006,7 +1023,7 @@ class TrainBridgeActorImpl:
                     # queued and is re-prefilled with the committed model when
                     # generation resumes.
                     self._pause_generation()
-                    self._manager_call("offload")
+                    self._manager_call("offload", self._release_tags)
                 if scenario is not None:
                     # Put this scenario's adapter and optimizer state into the
                     # slot; a first-time scenario starts from the pristine one.
@@ -1095,7 +1112,7 @@ class TrainBridgeActorImpl:
         residency = self._residency if scenario is not None else None
         try:
             self._phase = "publishing"
-            if self._colocate:
+            if self._colocate and self._release_tags is None:
                 self._manager_call("onload_weights")
             if residency is not None and scenario is not None:
                 residency.make_room(scenario, self._adapter_engine, supersede=True)
@@ -1241,6 +1258,7 @@ def start_bridge(
             colocate=colocate,
             lora=lora,
             adapter_capacity=lora_engine_slots(args) if lora else None,
+            keep_lora_base_resident=bool(getattr(args, "keep_lora_base_resident", False)),
             critic_group=critic_group,
             critic_steps_per_actor=getattr(args, "critic_steps_per_actor", None),
             critic_only_steps=getattr(args, "num_critic_only_steps", 0),

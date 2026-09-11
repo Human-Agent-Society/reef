@@ -146,9 +146,22 @@ class SlimeRayRolloutWorker:
             server.engine_parallel_configs,
         )
 
-    def offload(self):
+    def offload(self, tags=None):
         self.health_monitoring_pause()
-        return [server.offload() for server in self.servers.values()]
+        if not tags:
+            return [server.offload() for server in self.servers.values()]
+        # Slime's group offload takes no tags, so a tagged release goes to the
+        # engines directly. The needs_offload skip and the node-0 engine
+        # selection are slime's and are reproduced here on purpose.
+        handles = [
+            engine.release_memory_occupation.remote(tags=list(tags))
+            for server in self.servers.values()
+            for group in server.server_groups
+            if group.needs_offload
+            for engine in group.engines
+            if engine is not None
+        ]
+        return ray.get(handles) if handles else []
 
     def onload(self, tags=None):
         return [server.onload(tags) for server in self.servers.values()]
