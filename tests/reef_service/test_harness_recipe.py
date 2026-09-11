@@ -36,11 +36,11 @@ from reef.train.cordis_backend import (
     Mutation,
     MutationError,
     Promoter,
-    ScoreComparisonSelector,
+    ScoreComparisonPlugin,
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, admit_mutations
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TraceBatch, TraceSample, TrainStepResult
 
@@ -167,7 +167,7 @@ def run_backend_step(
     candidate = prepared.candidate
     assert candidate is not None
     try:
-        evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        evaluator = ScoreComparisonPlugin(backend)
         evaluation = evaluator.evaluate(candidate)
         decision = evaluator.decide(candidate, evaluation)
         return backend.settle_step(prepared, decision)
@@ -984,7 +984,8 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "def accept(candidate, current):\n    return True\n"
+        "def accept(candidate, current):\n    return True\n\n"
+        "not_a_factory = 3\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1000,20 +1001,25 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
 
     with pytest.raises(RecipeConfigError, match=r"evolution\.acceptance was removed"):
         CordisRecipe.from_environment({}, config=config(acceptance="always"))
-    with pytest.raises(RecipeConfigError, match=r"must provide decide"):
-        CordisRecipe.from_environment({}, config=config(selection="demo_method:accept"))
+    # evolution.selection now names a plugin factory, so a reference to
+    # something that cannot be called at all is the misconfiguration.
+    with pytest.raises(RecipeConfigError, match=r"plugin factory"):
+        CordisRecipe.from_environment({}, config=config(selection="demo_method:not_a_factory"))
 
 
-def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
+def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
     module = tmp_path / "demo_selection.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\n"
         "def evaluate(task, result):\n    return 0.0\n\n"
-        "class Policy:\n"
+        "class DemoPlugin:\n"
+        "    def __init__(self, backend):\n"
+        "        self._backend = backend\n\n"
+        "    def evaluate(self, candidate):\n"
+        "        return self._backend.evaluate(candidate)\n\n"
         "    def decide(self, candidate, evaluation):\n"
         "        from reef.train.evaluation import SelectionDecision\n"
-        "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n\n"
-        "policy = Policy()\n"
+        "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1028,16 +1034,16 @@ def test_recipe_resolves_candidate_selector(tmp_path, monkeypatch) -> None:
         }
 
     compared = CordisRecipe.from_environment({}, config=config())
-    assert compared.candidate_selector is not None
-    assert type(compared.candidate_selector).__name__ == "ScoreComparisonSelector"
+    assert compared.candidate_plugin is not None
+    assert type(compared.candidate_plugin(object())).__name__ == "ScoreComparisonPlugin"
 
     named = CordisRecipe.from_environment({}, config=config(selection="always"))
-    assert named.candidate_selector is not None
-    assert type(named.candidate_selector).__name__ == "AlwaysSelect"
+    assert named.candidate_plugin is not None
+    assert named.candidate_plugin is BackendAlwaysSelectPlugin
 
-    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:policy"))
-    assert dotted.candidate_selector is not None
-    assert type(dotted.candidate_selector).__name__ == "Policy"
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoPlugin"))
+    assert dotted.candidate_plugin is not None
+    assert getattr(dotted.candidate_plugin, "__name__", "") == "DemoPlugin"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
         CordisRecipe.from_environment(
@@ -2057,14 +2063,14 @@ def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
     assert candidate is not None
-    evaluator = DefaultCandidateEvaluationPlugin(b, ScoreComparisonSelector(min_win_margin=1))
+    evaluator = ScoreComparisonPlugin(b, min_win_margin=1)
     decision = evaluator.decide(candidate, evaluator.evaluate(candidate))
     result = b.settle_step(prepared, decision)
     assert result.metrics["wins"] == 1 and result.metrics["losses"] == 0
     assert result.metrics["selected"] is False
     assert result.metrics["min_win_margin"] == 1
     with pytest.raises(ValueError, match="min_win_margin must be an integer of at least 0"):
-        ScoreComparisonSelector(min_win_margin=-1)
+        ScoreComparisonPlugin(b, min_win_margin=-1)
 
 
 def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path: Path) -> None:

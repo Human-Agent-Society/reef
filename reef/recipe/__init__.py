@@ -17,7 +17,7 @@ Candidate evaluation is part of this contract, not a separate subsystem:
 every ``Recipe`` carries ``candidate_evaluation``, built from the top-level
 ``evaluation`` section of its config, and the trainer runs it between
 prepare and settle. Its types (``CandidateEvaluator``, ``CandidateSelector``,
-``CandidateEvaluationPlugin``, ``AlwaysSelect``) live in
+``CandidateEvaluationPlugin``, ``AlwaysSelectMixin``) live in
 ``reef.train.evaluation`` because the trainer, backends, and runtime bind to
 them too — the recipe is what chooses and configures them.
 
