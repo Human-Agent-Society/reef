@@ -24,6 +24,14 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-suffix: lint-3.12
+          cache-dependency-glob: |
+            pyproject.toml
+            .github/workflows/ci.yml
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
@@ -52,7 +60,7 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: python -m pip install mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
+      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
   test:
@@ -80,24 +88,33 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-suffix: test-${{ matrix.python-version }}
+          cache-dependency-glob: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
+            .github/workflows/ci.yml
       # huggingface_hub is a declared core dependency (pyproject.toml); the
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: python -m pip install pytest pytest-cov aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
+      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
       # exhausts the runner disk and trips the checkpoint free-space floor.
-      - run: python -m pip install --no-deps --group runtime
+      - run: uv pip install --system --python python --no-deps --group runtime
       # reef-client is a separate distribution (Human-Agent-Society/reef-client);
       # install the submodule pin so coordinated protocol changes are tested
       # before the matching client release reaches PyPI.
-      - run: python -m pip install ./third_party/reef-client
+      - run: uv pip install --system --python python ./third_party/reef-client
       # Exercise the CPU-only Megatron LoRA helpers without making Torch a
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: uv pip install --system --python python torch --index-url https://download.pytorch.org/whl/cpu
       # Directory-driven selection: run everything under tests/ so a new suite
       # cannot be silently dropped from CI. Nothing is ignored today — what
       # genuinely needs Megatron carries its own importorskip and reports as
@@ -120,16 +137,18 @@ jobs:
       # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
       # coverage.xml is uploaded, so the other legs were paying the risk for a
       # report nothing reads.
+      # Two workers share the runner; keep each file together so module fixtures
+      # and expensive imports are reused. Both workers contribute to coverage.
       - name: Run tests
         if: matrix.python-version != '3.12'
-        run: python -m pytest tests
+        run: python -m pytest tests -n 2 --dist loadfile
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_SYSTEM: /dev/null
       - name: Run tests with coverage
         if: matrix.python-version == '3.12'
         run: >
-          python -m pytest tests
+          python -m pytest tests -n 2 --dist loadfile
           --cov=reef --cov-report=term --cov-report=xml
         env:
           GIT_CONFIG_GLOBAL: /dev/null
@@ -158,14 +177,23 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install build twine
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.12.13"
+          enable-cache: true
+          cache-suffix: package-${{ matrix.python-version }}
+          cache-dependency-glob: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
+            .github/workflows/ci.yml
+      - run: uv pip install --system --python python build twine
       # Full build (sdist, then wheel from the sdist) validates the sdist is
       # complete too; twine check validates the metadata. reef-client is a
       # separate distribution installed from the matching submodule pin below.
       - run: python -m build
       - run: python -m twine check dist/*
-      - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install dist/reef_infra-[0-9]*.whl
+      - run: uv pip install --system --python python ./third_party/reef-client
+      - run: uv pip install --system --python python dist/reef_infra-[0-9]*.whl
       - name: Check distribution and dependency boundaries
         working-directory: ${{ runner.temp }}
         run: |
@@ -292,13 +320,14 @@ jobs:
       # repo so the source tree cannot shadow them. Excluded: tests that
       # import the slime package (the wheel does not bundle it) or Slime's
       # optional dependencies.
-      - run: python -m pip install pytest
+      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0
       # Exercise the repository cookbook as an external consumer of the
       # installed Reef wheel. Linking only recipes/ keeps the source reef/
       # package off sys.path, so it cannot shadow the wheel under test.
       - run: ln -s "${{ github.workspace }}/recipes" "${{ runner.temp }}/recipes"
       - run: >
           python -m pytest ${{ github.workspace }}/tests/reef_service
+          -n 2 --dist loadfile
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py

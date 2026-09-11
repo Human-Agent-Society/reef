@@ -17,6 +17,25 @@ Run it in the supported container environment. Many torch-dependent tests use
 collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
+CI runs source and installed-wheel tests on Python 3.10, 3.11, and 3.12 with
+two pytest workers. Tests in the same file stay in one worker, preserving
+module fixture reuse. In an activated development environment, install the same
+test runner plugin and reproduce the parallel run:
+
+.. code:: bash
+
+   uv pip install pytest-xdist==3.8.0
+   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+     pytest tests/ -n 2 --dist loadfile
+
+Use ``-n 0`` for a serial run when diagnosing a failure. Tests in different
+files may run at the same time; use temporary directories and dynamically
+allocated ports for their external resources.
+
+CI installs dependencies with ``uv pip`` and caches downloads and built wheels
+separately for each job and Python version. It still creates a fresh installed
+environment on each runner, including the CPU-only package boundary checks.
+
 Run one area
 ------------
 
@@ -35,13 +54,14 @@ Markers
 Coverage
 --------
 
-CI runs the suite under coverage, and ``[tool.coverage.report] fail_under`` in
+CI measures coverage on Python 3.12, combining both workers' results, and
+``[tool.coverage.report] fail_under`` in
 ``pyproject.toml`` is a gate: the run exits non-zero when total coverage falls
 below the floor. Reproduce it the way CI does:
 
 .. code:: bash
 
-   pytest tests --cov=reef --cov-report=term
+   pytest tests -n 2 --dist loadfile --cov=reef --cov-report=term
 
 ``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
 package, so a partial run reports far less than CI does; measure against the
