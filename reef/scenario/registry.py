@@ -193,6 +193,18 @@ class ScenarioRegistry:
                 self._training_modes[scenario] = training_mode
             return current
 
+    def configure_model(
+        self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
+    ) -> Scenario:
+        with self.lock_for(scenario):
+            exists = self.has(scenario)
+            if not create and not exists:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            # Creating an existing scenario never overwrites its configuration.
+            if not create or not exists:
+                self._scenario_factory.configure_model(scenario, value)
+            return self._resolve(scenario, release_id)
+
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
@@ -228,6 +240,7 @@ class ScenarioRegistry:
             self._training_scenarios = [name for name in self._training_scenarios if name != scenario]
             if self._training_scenario == scenario:
                 self._training_scenario = self._training_scenarios[0] if self._training_scenarios else None
+            self._scenario_factory.forget_model_config(scenario)
             self._training_modes.pop(scenario, None)
             self._preload_errors.pop(scenario, None)
         return dropped

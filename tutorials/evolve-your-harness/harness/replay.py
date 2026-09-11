@@ -6,7 +6,7 @@ resident process's log (mounts, polls) and every session log (turns,
 stages, tool calls), and writes one self contained HTML page: the release
 chain with each step's verdict and the tree diff it made, the loop graph of
 each release with a scrubber that replays a session's stage path over it,
-the tool calls of each session, and the process timeline. No server,
+the event log of each session, and the process timeline. No server,
 no network: the page carries its data inline.
 """
 
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 WORK = Path(__file__).resolve().parent.parent / "work"
-SIDECAR = ".reef-harness-release"
+RELEASE_FILE = ".reef-harness-release"
 
 
 def _lines(path):
@@ -229,8 +229,8 @@ tr.mount td{background:color-mix(in srgb,var(--good) 14%,transparent)}tr.fail td
   <span id="pos" class="t"></span>
 </div>
 <div class="two"><div id="graph"></div><div class="panel" id="detail"><span class="empty">Move the slider to walk the session event by event.</span></div></div>
-<h2>Tool calls of the selected session</h2>
-<div class="wrap"><table id="calls"><thead><tr><th>t (s)</th><th>step</th><th>kind</th><th>what</th></tr></thead><tbody></tbody></table></div>
+<h2>Session events</h2>
+<div class="wrap"><table id="session-events"><thead><tr><th>t (s)</th><th>step</th><th>kind</th><th>what</th></tr></thead><tbody></tbody></table></div>
 <h2>Process timeline</h2>
 <div class="wrap"><table id="proc"><thead><tr><th>t (s)</th><th>event</th><th>detail</th></tr></thead><tbody></tbody></table></div>
 </main>
@@ -343,10 +343,10 @@ function renderDetail() {
   const e = s.events[state.pos];
   el.innerHTML = `<div><span class="tag">${esc(e.type)}</span> <span class="t">t+${sec(e.time)}s</span> step ${esc((e.data||{}).step ?? '')}</div><pre>${esc(describe(e))}</pre>`;
   document.getElementById('pos').textContent = `${state.pos + 1} / ${s.events.length}`;
-  const rows = document.querySelectorAll('#calls tbody tr'); rows.forEach((tr, i) => tr.style.outline = i === state.pos ? '2px solid var(--accent)' : '');
+  const rows = document.querySelectorAll('#session-events tbody tr'); rows.forEach((tr, i) => tr.style.outline = i === state.pos ? '2px solid var(--accent)' : '');
 }
-function renderCalls() {
-  const s = D.sessions[state.session]; const tb = document.querySelector('#calls tbody'); tb.innerHTML = '';
+function renderSessionEvents() {
+  const s = D.sessions[state.session]; const tb = document.querySelector('#session-events tbody'); tb.innerHTML = '';
   if (!s) return;
   s.events.forEach((e, i) => {
     const d = e.data || {}; const tr = document.createElement('tr');
@@ -375,7 +375,7 @@ function renderProcess() {
 }
 function sync() { document.getElementById('scrub').value = state.pos; renderGraph(); renderDetail(); }
 document.getElementById('relsel').onchange = e => { state.release = +e.target.value; renderChain(); renderGraph(); };
-document.getElementById('sessel').onchange = e => { state.session = +e.target.value; state.pos = 0; renderCalls(); sync(); };
+document.getElementById('sessel').onchange = e => { state.session = +e.target.value; state.pos = 0; renderSessionEvents(); sync(); };
 document.getElementById('scrub').oninput = e => { state.pos = +e.target.value; renderGraph(); renderDetail(); };
 document.getElementById('play').onclick = () => {
   const s = D.sessions[state.session]; if (!s) return;
@@ -383,7 +383,7 @@ document.getElementById('play').onclick = () => {
   document.getElementById('play').textContent = 'pause';
   state.timer = setInterval(() => { if (state.pos >= s.events.length - 1) { clearInterval(state.timer); state.timer = null; document.getElementById('play').textContent = 'play'; return; } state.pos += 1; sync(); }, 350);
 };
-renderChain(); renderCalls(); renderProcess(); renderGraph(); renderDetail();
+renderChain(); renderSessionEvents(); renderProcess(); renderGraph(); renderDetail();
 </script>
 """
 

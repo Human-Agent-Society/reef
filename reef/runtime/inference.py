@@ -145,7 +145,7 @@ def provider_request_headers(api_key: str) -> RequestHeadersFactory:
 
     def headers_for(artifact: Artifact, path: str) -> Mapping[str, str]:
         headers = content_identity_headers(artifact)
-        if path == "/v1/messages":
+        if path in ("/v1/messages", "/v1/messages/count_tokens"):
             headers["x-api-key"] = api_key
             headers["anthropic-version"] = "2023-06-01"
         else:

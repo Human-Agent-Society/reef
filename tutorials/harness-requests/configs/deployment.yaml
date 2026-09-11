@@ -80,8 +80,8 @@ reef:
   port: 8901
   recipe: deployment
   token: reef-local
-  upstream_url: ${REEF_UPSTREAM_URL}
-  upstream_model: ${REEF_UPSTREAM_MODEL}
+  upstream_url: ${REEF_UPSTREAM_URL:?}
+  upstream_model: ${REEF_UPSTREAM_MODEL:?}
   upstream_api_key: ${REEF_UPSTREAM_API_KEY}
   agent_record_dir: tutorials/harness-requests/work/deployment/agent-record
   artifact_repository: tutorials/harness-requests/work/deployment/artifacts.git

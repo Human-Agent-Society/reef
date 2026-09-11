@@ -48,7 +48,7 @@ body:
     id: validation
     attributes:
       label: Validation and acceptance criteria
-      description: Explain how CI, a smoke lane, or retained evidence will prove that the documented path still works.
+      description: Explain how CI, smoke tests, or saved test results will show that the documented path still works.
     validations:
       required: true
 

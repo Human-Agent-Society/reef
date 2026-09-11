@@ -657,7 +657,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
-    # Nothing was compacted: the consumed pair is still physically present.
+    # Nothing was compacted: the consumed pair is still visible to training reads.
     assert first.get_or_create_scenario("math").records.get("math", "i1") is not None
 
     second_runtime = RecordingRuntime()

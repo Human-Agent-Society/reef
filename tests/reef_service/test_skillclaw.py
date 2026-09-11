@@ -150,7 +150,7 @@ def night_llm(
         for name, decision in (decisions or {}).items():
             if f"``{name}``" in system:
                 return json.dumps(decision)
-        return json.dumps({"action": "skip", "rationale": "no evidence"})
+        return json.dumps({"action": "skip", "rationale": "no useful session details"})
 
     monkeypatch.setattr(example["evolver"], "chat_client", lambda model: chat)
 
@@ -285,7 +285,7 @@ def test_propose_maps_a_remove_requesting_decision_to_no_remove(skillclaw, examp
     assert all(mutation.op in ("create", "update") for mutation in mutations)
 
 
-def test_the_day_ledger_feeds_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
+def test_the_day_reports_feed_the_digest_and_the_sentinel_means_unscored(skillclaw) -> None:
     sample = TraceSample("ref-1", PAYLOAD_PLAIN, -1.0)
     fallback = skillclaw._fallback_meta(sample)
     assert fallback["score"] is None  # -1.0 is the unscored sentinel, not a grade
@@ -551,7 +551,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
 
         assert service.training_versions() == 0
         step_before = service.training_step()
-        results = driver.run_day(service, client, round_dir, 1, driver.Ledger(run_dir / "ledger.jsonl"))
+        results = driver.run_day(service, client, round_dir, 1, driver.EventLog(run_dir / "events.jsonl"))
         assert driver.category_scores(results) == {"01_Demo": 100.0}  # unscored stays out of the mean
         assert sorted(result["task_id"] for result in results) == ["one", "two"]
 
@@ -576,7 +576,7 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert "## Skills (mandatory)" in system["content"]
         assert catalog_cls.catalog_names(payload) == ("answer-style",)
 
-        # The day ledger the night read is on disk, keyed by the reference.
+        # The day reports read by the night step are on disk, keyed by reference.
         reports = sorted((round_dir / "reports").glob("*.json"))
         assert [json.loads(path.read_text())["task_id"] for path in reports] == ["one", "two"]
 

@@ -4,6 +4,7 @@ import asyncio
 
 from aiohttp import web
 
+from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
@@ -26,11 +27,21 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         if release_id is not None:
             release_id = release_id.strip()
         created = not request_service.dispatcher.has_scenario(name)
-        scenario = request_service.dispatcher.get_or_create_scenario(
-            name,
-            release_id=release_id,
-            allow_implicit_creation=True,
-        )
+        scenario: Scenario | None
+        if "model" in payload:
+            scenario = await asyncio.to_thread(
+                request_service.dispatcher.configure_scenario_model,
+                name,
+                payload["model"],
+                create=True,
+                release_id=release_id,
+            )
+        else:
+            scenario = request_service.dispatcher.get_or_create_scenario(
+                name,
+                release_id=release_id,
+                allow_implicit_creation=True,
+            )
         if scenario is None:
             raise RuntimeError("scenario creation returned no scenario")
         current = scenario.repository.require_current_artifact()
@@ -39,19 +50,28 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
                 "scenario": scenario.name,
                 "release_id": current.release_id,
                 "content_id": current.content_id,
+                "model": scenario.model_config.view(),
             },
             status=201 if created else 200,
         )
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if set(payload) != {"training_mode"} or payload["training_mode"] not in ("auto", "manual", "hybrid"):
+        if not payload or set(payload) - {"training_mode", "model"}:
+            raise ValueError("expected training_mode or model settings")
+        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual", "hybrid"):
             raise ValueError("expected training_mode 'auto', 'manual' or 'hybrid'")
-        result = await asyncio.to_thread(
-            request_service.dispatcher.set_training_mode,
-            request.match_info["scenario"],
-            payload["training_mode"],
-        )
+        name = request.match_info["scenario"]
+        result: dict[str, object] = {"scenario": name}
+        if "model" in payload:
+            scenario = await asyncio.to_thread(
+                request_service.dispatcher.configure_scenario_model, name, payload["model"]
+            )
+            result["model"] = scenario.model_config.view()
+        if "training_mode" in payload:
+            result.update(
+                await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
+            )
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:

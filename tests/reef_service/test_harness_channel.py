@@ -38,7 +38,7 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
 from reef.service.install_script import (
-    HARNESS_RELEASE_SIDECAR,
+    HARNESS_RELEASE_FILE,
     TOKEN_PLACEHOLDER,
     composition_checksum,
     render_install_script,
@@ -94,10 +94,10 @@ class _ReleaseClient(ReefClient):
                 raise ValueError(f"served path {relative!r} escapes the destination")
         root = Path(destination)
         root.mkdir(parents=True, exist_ok=True)
-        sidecar = root / HARNESS_RELEASE_SIDECAR
-        if sidecar.is_file():
+        release_file = root / HARNESS_RELEASE_FILE
+        if release_file.is_file():
             try:
-                previous = json.loads(sidecar.read_text(encoding="utf-8"))
+                previous = json.loads(release_file.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 previous = {}
             for relative in previous.get("files", ()):
@@ -111,7 +111,7 @@ class _ReleaseClient(ReefClient):
             with open(target, "w", encoding="utf-8", newline="") as handle:
                 handle.write(content)
         release_id = str(manifest["release_id"])
-        sidecar.write_text(
+        release_file.write_text(
             json.dumps(
                 {
                     "release_id": release_id,
@@ -364,7 +364,7 @@ def test_pulled_tree_is_byte_identical_to_the_gated_composition(tmp_path) -> Non
             pulled = {
                 str(path.relative_to(destination)): path.read_bytes()
                 for path in sorted(destination.rglob("*"))
-                if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
+                if path.is_file() and path.name != HARNESS_RELEASE_FILE
             }
             assert pulled == {relative: text.encode("utf-8") for relative, text in expected.items()}
         finally:
@@ -534,7 +534,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
 
 @pytest.mark.unit
-def test_client_pull_writes_the_sidecar_outside_the_served_tree(tmp_path) -> None:
+def test_client_pull_writes_the_release_file_outside_the_served_tree(tmp_path) -> None:
     async def run() -> None:
         client = TestClient(
             TestServer(create_app(_dispatcher(tmp_path, MUTATIONS[:1]), inference_backend=_EchoBackend()))
@@ -542,13 +542,13 @@ def test_client_pull_writes_the_sidecar_outside_the_served_tree(tmp_path) -> Non
         await client.start_server()
         try:
             manifest = await _gate_step(client)
-            assert HARNESS_RELEASE_SIDECAR not in manifest["files"]
+            assert HARNESS_RELEASE_FILE not in manifest["files"]
             destination = tmp_path / "pulled"
             puller = _ReleaseClient(str(client.server.make_url("")))
             written = await asyncio.to_thread(puller.harness_pull, "delivery", destination)
-            # The sidecar records the pulled version and file list for later
+            # The release file records the pulled version and file list for later
             # checks and pruning; the served files around it are byte-exact.
-            record = json.loads((destination / HARNESS_RELEASE_SIDECAR).read_text(encoding="utf-8"))
+            record = json.loads((destination / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
             assert record["release_id"] == written
             assert record["files"] == sorted(manifest["files"])
             for relative, text in manifest["files"].items():
@@ -625,7 +625,7 @@ def test_pull_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> N
     on_disk = {
         str(path.relative_to(destination))
         for path in destination.rglob("*")
-        if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
+        if path.is_file() and path.name != HARNESS_RELEASE_FILE
     }
     assert on_disk == {"pi-agent/AGENTS.md"}
     assert (destination / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == "old rules"
@@ -729,7 +729,7 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     }
     assert TOKEN_PLACEHOLDER not in (dest / "pi-agent/models.json").read_text(encoding="utf-8")
     assert _extract_reef_url("pi", dest / "pi-agent") == "http://reef.test:8901"
-    # The composition files and the sidecar are what the manifest served; the binding rides beside them.
+    # The composition files and the release file are what the manifest served; the binding rides beside them.
     assert (dest / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == HOSTILE_FILES["pi-agent/AGENTS.md"]
     # A rerun re-points the tree and exits clean; without a token the script says so and still installs.
     again = _run_install(script, dest, prefix, {k: v for k, v in env.items() if k != "REEF_TOKEN"})
@@ -749,7 +749,7 @@ def test_install_script_golden_structure() -> None:
     """
     files = {"pi-agent/AGENTS.md": "hello\n"}
     # The static record the script writes and hashes; ``setup`` is merged in at install time, outside the hash.
-    sidecar = (
+    release_info_text = (
         json.dumps(
             {"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"], "requires": []},
             indent=2,
@@ -769,7 +769,7 @@ DEST="${1:-./reef-harness}"
 PREFIX="${2:-${REEF_HARNESS_PREFIX:-$HOME/.local/share/reef-harness}/pi}"
 BINARY="$PREFIX/node_modules/.bin/pi"
 CHECKSUM="@CHECKSUM@"
-SIDECAR_CHECKSUM="@SIDECAR_CHECKSUM@"
+RELEASE_FILE_CHECKSUM="@RELEASE_FILE_CHECKSUM@"
 REQUIRES='[]'
 FALLBACK=''
 
@@ -782,9 +782,9 @@ else
     exit 1
 fi
 
-# The sidecar's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
-sidecar_tool() {
-    python3 - "$@" <<'REEF_SIDECAR_TOOL_EOF'
+# The release file's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
+release_info_tool() {
+    python3 - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
 import hashlib, json, sys
 mode, path = sys.argv[1], sys.argv[2]
 try:
@@ -796,13 +796,13 @@ if not isinstance(record, dict):
     record = {}
 setup = [item for item in record.get("setup") or [] if isinstance(item, dict) and item.get("name")]
 if mode == "static":
-    # The record without the check offs is what SIDECAR_CHECKSUM was baked from.
+    # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.
     record.pop("setup", None)
     print(hashlib.sha256((json.dumps(record, indent=2) + "\n").encode("utf-8")).hexdigest())
 elif mode == "gate":
     checked = {item["name"]: item for item in setup}
     def met(item):
-        # A check off records the check it stood for; one without it (an older sidecar) counts by name.
+        # A check off records the check it stood for; one without it (an older release file) counts by name.
         record = checked.get(item["name"])
         return record is not None and ("check" not in record or record.get("check") == item.get("check"))
     unmet = [item for item in json.loads(sys.argv[3]) if not met(item)]
@@ -820,7 +820,7 @@ elif mode == "merge":
     record["setup"] = json.loads(sys.argv[3])
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2) + "\n")
-REEF_SIDECAR_TOOL_EOF
+REEF_RELEASE_INFO_TOOL_EOF
 }
 
 # Run a slow step behind a spinner on a terminal (a static line elsewhere); its output shows only on failure.
@@ -853,7 +853,7 @@ spin() {
 
 echo "reef: harness release v1 for pi"
 # The gate runs first of all: nothing is installed or written while an item is not checked off (reef-pi setup).
-[ "$REQUIRES" = "[]" ] || sidecar_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
+[ "$REQUIRES" = "[]" ] || release_info_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
 
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
 vendor_install() {
@@ -893,21 +893,21 @@ compose_stream() {
 mkdir -p "$DEST"
 mkdir -p "$DEST/pi-agent"
 
-# A rerun on a current machine writes nothing at all, not even the sidecar.
+# A rerun on a current machine writes nothing at all, not even the release file.
 current=""
-sidecar=""
+current_release_checksum=""
 if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
     current="$(compose_stream | sha256)"
-    sidecar="$(sidecar_tool static "$DEST/.reef-harness-release")"
+    current_release_checksum="$(release_info_tool static "$DEST/.reef-harness-release")"
 fi
-if [ "$current" = "$CHECKSUM" ] && [ "$sidecar" = "$SIDECAR_CHECKSUM" ]; then
+if [ "$current" = "$CHECKSUM" ] && [ "$current_release_checksum" = "$RELEASE_FILE_CHECKSUM" ]; then
     echo "reef: composition already current"
 else
     echo "reef: writing the harness tree (1 file) to $DEST"
-    # The check offs the sidecar on disk holds, carried into the new sidecar below.
-    SETUP="$(sidecar_tool carry "$DEST/.reef-harness-release")"
-    # Prune the files a previous install's sidecar recorded that this
-    # composition lacks, exactly like the stdlib client pull. The sidecar
+    # The check offs the release file on disk holds, carried into the new release file below.
+    SETUP="$(release_info_tool carry "$DEST/.reef-harness-release")"
+    # Prune the files a previous install's release file recorded that this
+    # composition lacks, exactly like the stdlib client pull. The release file
     # is json.dumps at indent 2, so every file entry is one four-space
     # indented quoted line.
     if [ -f "$DEST/.reef-harness-release" ]; then
@@ -927,10 +927,10 @@ hello
         echo "reef: composition checksum mismatch: $written != $CHECKSUM" >&2
         exit 1
     fi
-    # The same sidecar the stdlib client pull writes, plus requires and the check offs carried over.
-cat > "$DEST/.reef-harness-release" <<'@SIDECAR_EOF@'
-@SIDECAR_JSON@@SIDECAR_EOF@
-    sidecar_tool merge "$DEST/.reef-harness-release" "$SETUP"
+    # The same release file the stdlib client pull writes, plus requires and the check offs carried over.
+cat > "$DEST/.reef-harness-release" <<'@RELEASE_FILE_EOF@'
+@RELEASE_FILE_JSON@@RELEASE_FILE_EOF@
+    release_info_tool merge "$DEST/.reef-harness-release" "$SETUP"
 fi
 
 # The reef-pi wrapper: capture proxy + report command. Rewritten whenever its text
@@ -979,10 +979,12 @@ echo "binary:  $BINARY"
 echo "harness: $DEST"
 """
     ).replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
-    golden = golden.replace("@SIDECAR_CHECKSUM@", hashlib.sha256(sidecar.encode()).hexdigest())
+    golden = golden.replace("@RELEASE_FILE_CHECKSUM@", hashlib.sha256(release_info_text.encode()).hexdigest())
     golden = golden.replace("@RULES_EOF@", "REEF_EOF_" + hashlib.sha256(b"hello\n").hexdigest()[:12])
-    golden = golden.replace("@SIDECAR_EOF@", "REEF_EOF_" + hashlib.sha256(sidecar.encode()).hexdigest()[:12])
-    golden = golden.replace("@SIDECAR_JSON@", sidecar)
+    golden = golden.replace(
+        "@RELEASE_FILE_EOF@", "REEF_EOF_" + hashlib.sha256(release_info_text.encode()).hexdigest()[:12]
+    )
+    golden = golden.replace("@RELEASE_FILE_JSON@", release_info_text)
     script = render_install_script(
         descriptor=get_adapter("pi"),
         files=files,
@@ -997,7 +999,7 @@ echo "harness: $DEST"
 @pytest.mark.unit
 def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_exact(tmp_path) -> None:
     """Pinned binary present: npm never runs, every file lands byte exact,
-    the sidecar matches the client pull's shape, and a rerun is a no-op."""
+    the release file matches the client pull's shape, and a rerun is a no-op."""
     npm_log = tmp_path / "npm.log"
     script, dest, prefix, env = _install_fixture(
         tmp_path,
@@ -1011,7 +1013,7 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
     assert "already current" not in first.stdout
     for relative, text in HOSTILE_FILES.items():
         assert (dest / relative).read_bytes() == text.encode("utf-8")
-    sidecar = dest / HARNESS_RELEASE_SIDECAR
+    release_file = dest / HARNESS_RELEASE_FILE
     # The client pull's record plus what the release requires (nothing here) and the check offs carried over (none).
     record = {
         "release_id": "v-test",
@@ -1020,17 +1022,17 @@ def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_
         "requires": [],
         "setup": [],
     }
-    assert sidecar.read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    assert release_file.read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
     # Rerun on a current machine: still exit 0, writes nothing at all (the
-    # read-only bits make any write attempt, sidecar included, a hard fail).
+    # read-only bits make any write attempt, release file included, a hard fail).
     for relative in HOSTILE_FILES:
         (dest / relative).chmod(0o444)
-    sidecar.chmod(0o444)
-    before = sidecar.stat().st_mtime_ns
+    release_file.chmod(0o444)
+    before = release_file.stat().st_mtime_ns
     second = _run_install(script, dest, prefix, env)
     assert second.returncode == 0, second.stderr
     assert "already current" in second.stdout
-    assert sidecar.stat().st_mtime_ns == before
+    assert release_file.stat().st_mtime_ns == before
     for relative, text in HOSTILE_FILES.items():
         assert (dest / relative).read_bytes() == text.encode("utf-8")
 
@@ -1209,8 +1211,8 @@ def _render_to(path: Path, files: dict[str, str], release_id: str) -> Path:
 @pytest.mark.unit
 def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> None:
     """Running an older version's script into a DEST holding a newer install
-    removes the files only the newer sidecar recorded, exactly like a repeat
-    client pull, and leaves the older tree with the older sidecar."""
+    removes the files only the newer release file recorded, exactly like a repeat
+    client pull, and leaves the older tree with the older release file."""
     prefix, env = _pinned_env(tmp_path)
     dest = tmp_path / "dest"
     v2 = _render_to(
@@ -1224,9 +1226,7 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
     result = _run_install(v1, dest, prefix, env)
     assert result.returncode == 0, result.stderr
     on_disk = {
-        str(path.relative_to(dest))
-        for path in dest.rglob("*")
-        if path.is_file() and path.name != HARNESS_RELEASE_SIDECAR
+        str(path.relative_to(dest)) for path in dest.rglob("*") if path.is_file() and path.name != HARNESS_RELEASE_FILE
     }
     assert on_disk == {"pi-agent/AGENTS.md", "reef-pi"}
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n"
@@ -1238,7 +1238,7 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
         "requires": [],
         "setup": [],
     }
-    assert (dest / HARNESS_RELEASE_SIDECAR).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
+    assert (dest / HARNESS_RELEASE_FILE).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
 
 
 @pytest.mark.unit
@@ -1261,7 +1261,7 @@ def test_composition_checksum_length_framing_rejects_the_aliasing_pair(tmp_path)
     aliased = {"a": "1", "b": "2b\n3"}
     files = {"a": "1b\n2", "b": "3"}
     assert composition_checksum(aliased) != composition_checksum(files)
-    # Same release on purpose: the two sidecars are then identical,
+    # Same release on purpose: the two release files are then identical,
     # so only the composition checksum can tell the trees apart under sh.
     prefix, env = _pinned_env(tmp_path)
     dest = tmp_path / "dest"
@@ -1729,7 +1729,7 @@ def test_git_install_kind_reinstalls_over_a_checkout_a_failed_install_left_behin
 
 @pytest.mark.unit
 def test_git_install_kind_reinstalls_when_the_binary_carries_no_recorded_pin(tmp_path) -> None:
-    """A binary of unknown provenance is not evidence the pinned ref is checked out."""
+    """An existing binary does not establish that the pinned ref is checked out."""
     script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version="0.21.0", pin=None)
     result = _run_install(script, dest, prefix, env)
     assert result.returncode == 0, result.stderr
@@ -1855,7 +1855,7 @@ def _files_under(dest: Path) -> set[str]:
 @pytest.mark.unit
 def test_install_script_refuses_a_release_whose_requires_are_not_checked_off_and_writes_nothing(tmp_path) -> None:
     """The setup list is the message and no check runs (with no fallback release given the message ends there);
-    the release that requires nothing installs; once the sidecar checks every item off the release installs with
+    the release that requires nothing installs; once the release file checks every item off the release installs with
     ``requires`` and the check offs carried over, and a rerun is current."""
     prefix, env = _pinned_env(tmp_path)
     dest = tmp_path / "dest"
@@ -1885,20 +1885,22 @@ def test_install_script_refuses_a_release_whose_requires_are_not_checked_off_and
     assert _files_under(dest) == set() and not ran.exists()
     # The refusal runs before the first mkdir: a refused run creates no directory at all.
     assert not dest.exists()
-    # The parent requires nothing and installs; its sidecar carries the two empty lists.
+    # The parent requires nothing and installs; its release file carries the two empty lists.
     v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "old rules\n"}, "v1")
     assert _run_install(v1, dest, prefix, env).returncode == 0
-    sidecar = dest / HARNESS_RELEASE_SIDECAR
-    assert json.loads(sidecar.read_text())["requires"] == [] and json.loads(sidecar.read_text())["setup"] == []
+    release_file = dest / HARNESS_RELEASE_FILE
+    assert (
+        json.loads(release_file.read_text())["requires"] == [] and json.loads(release_file.read_text())["setup"] == []
+    )
     # One item checked off: the refusal names only the other, and the parent's tree stays.
-    record = json.loads(sidecar.read_text(encoding="utf-8"))
-    sidecar.write_text(json.dumps({**record, "setup": _checked("TWILIO_SID")}, indent=2) + "\n", encoding="utf-8")
+    record = json.loads(release_file.read_text(encoding="utf-8"))
+    release_file.write_text(json.dumps({**record, "setup": _checked("TWILIO_SID")}, indent=2) + "\n", encoding="utf-8")
     result = _run_install(v2, dest, prefix, env)
     assert result.returncode == 1
     assert "TWILIO_SID" not in result.stderr and f"    notify (permission): touch {ran}" in result.stderr
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n" and not ran.exists()
     # Every item checked off (plus one no release named): the install writes the tree and carries them all over.
-    sidecar.write_text(
+    release_file.write_text(
         json.dumps({**record, "setup": _checked("TWILIO_SID", "notify", "old")}, indent=2) + "\n", encoding="utf-8"
     )
     result = _run_install(v2, dest, prefix, env)
@@ -1911,16 +1913,16 @@ def test_install_script_refuses_a_release_whose_requires_are_not_checked_off_and
         "requires": requires,
         "setup": _checked("TWILIO_SID", "notify", "old"),
     }
-    assert sidecar.read_bytes() == (json.dumps(written, indent=2) + "\n").encode("utf-8")
+    assert release_file.read_bytes() == (json.dumps(written, indent=2) + "\n").encode("utf-8")
     # A rerun sees the check offs outside the hash and writes nothing.
-    sidecar.chmod(0o444)
+    release_file.chmod(0o444)
     again = _run_install(v2, dest, prefix, env)
     assert again.returncode == 0, again.stderr
     assert "already current" in again.stdout
-    sidecar.chmod(0o644)
+    release_file.chmod(0o644)
     # Back to the parent: the check offs survive a release that requires nothing.
     assert _run_install(v1, dest, prefix, env).returncode == 0
-    record = json.loads(sidecar.read_text(encoding="utf-8"))
+    record = json.loads(release_file.read_text(encoding="utf-8"))
     assert record["release_id"] == "v1" and record["requires"] == []
     assert record["setup"] == _checked("TWILIO_SID", "notify", "old")
 
@@ -1986,18 +1988,18 @@ def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_an
     # The binary in place, the check off decides: another recorded check is unmet, the same or none is met.
     _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
     dest.mkdir()
-    sidecar = dest / HARNESS_RELEASE_SIDECAR
+    release_file = dest / HARNESS_RELEASE_FILE
     for record, installs in (
         ({"name": "notify", "checked_at": 1.0, "check": "false"}, False),
         ({"name": "notify", "checked_at": 1.0, "check": "true"}, True),
         ({"name": "notify", "checked_at": 1.0}, True),
     ):
-        sidecar.write_text(json.dumps({"release_id": "v1", "setup": [record]}, indent=2) + "\n", encoding="utf-8")
+        release_file.write_text(json.dumps({"release_id": "v1", "setup": [record]}, indent=2) + "\n", encoding="utf-8")
         result = _run_install(v2, dest, prefix, env)
         assert (result.returncode == 0) is installs, result.stderr
         if installs:
             assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"new rules\n"
-            assert json.loads(sidecar.read_text(encoding="utf-8"))["setup"] == [record]
+            assert json.loads(release_file.read_text(encoding="utf-8"))["setup"] == [record]
         else:
-            assert "    notify (permission): true" in result.stderr and _files_under(dest) == {sidecar.name}
+            assert "    notify (permission): true" in result.stderr and _files_under(dest) == {release_file.name}
     assert not npm_log.exists()

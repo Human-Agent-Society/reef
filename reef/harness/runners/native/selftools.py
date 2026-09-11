@@ -1,6 +1,6 @@
 """The self referential tools of the serve form: inspect the harness, try a change on this process, propose it to Reef.
 
-Three host plane tools, built in code and registered only by ``reef-native
+Three built-in tools, built in code and registered only by ``reef-native
 serve --self-tools``; the episode form never sees them, so a candidate cannot
 win the gate by calling them, and a tree entry cannot take their names. They
 run in process whatever ``REEF_NATIVE_ENFORCE`` says, since they are reef's
@@ -23,7 +23,7 @@ from reef.harness.runners.native.seed import SEED_GRAPH
 from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS, NATIVE_RESERVED_TOOL_NAMES, flat_entry_refusal
 from reef.train.cordis_backend.strategies import Mutation, MutationError
 
-#: The names the host plane owns; a tree entry that takes one fails to mount.
+#: The names reserved for built-in tools; a tree entry that takes one fails to mount.
 RESERVED_NAMES = NATIVE_RESERVED_TOOL_NAMES
 #: How many catalog rows ``harness_inspect("verdicts")`` returns, newest first.
 VERDICT_ROWS = 20
@@ -91,10 +91,10 @@ class ServeState(Protocol):
 
 
 class HostTool(ToolModule):
-    """A tool of the host plane: built in code, run in process whatever the enforcer, its name reserved."""
+    """A built-in tool: run in process whatever the enforcer, with a reserved name."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
-        kwargs["host_plane"] = True
+        kwargs["builtin_tool"] = True
         super().__init__(*args, **kwargs)
 
 
@@ -198,7 +198,7 @@ class SelfTools:
 
 
 def self_tools(state: ServeState) -> list[HostTool]:
-    """The three host plane tools over ``state``, in the order the model should read them."""
+    """The three built-in tools over ``state``, in the order the model should read them."""
     tools = SelfTools(state)
     return [
         HostTool(

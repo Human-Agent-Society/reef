@@ -37,8 +37,8 @@ evolve-your-harness/
                  samples the native proposer over one failing task and
                  counts what admission lets through, by kind
     replay.py    writes work/replay.html from a run's files: the release
-                 chain, the loop graph replayed from a session, the tool
-                 calls and the process timeline
+                 chain, the loop graph replayed from a session, the session
+                 event log and the process timeline
   pyproject.toml makes harness/ an installable package
 ```
 
@@ -60,7 +60,7 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 ./run.sh self     # the same, and the model proposes the change itself through its self tools
 ```
 
-Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session's tool calls and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
+Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session event log and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
 
 serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
@@ -166,7 +166,7 @@ The recorded pass is identical, so the two variants are comparable on the same t
 
 ## Self tools variant
 
-`./run.sh self` is the native variant with `reef-native serve --self-tools`: the served model gets `harness_inspect`, `harness_try` and `harness_propose`, the host plane tools of the resident process. `python3 run.py self` sends one turn that tells the model it runs on a harness it can read and change and asks it to inspect the tree, propose one change through `harness_propose` that makes its answers end with the integer alone on the last line, and then answer the sieve task. The route admits the proposal into the scenario's inbox; the turn's answer is graded and reported, and the failing report opens a step that claims the proposal before it asks the method. A win publishes, the process mounts the release the model proposed (the commit's `proposal` names the proposal and the session that made it), and the first task runs again on the mounted tree. The prompt names the goal and the shape of a rules entry, not the rule's text: what the model writes is what the gate judges.
+`./run.sh self` is the native variant with `reef-native serve --self-tools`: the served model gets `harness_inspect`, `harness_try` and `harness_propose`, the built-in tools of the resident process. `python3 run.py self` sends one turn that tells the model it runs on a harness it can read and change and asks it to inspect the tree, propose one change through `harness_propose` that makes its answers end with the integer alone on the last line, and then answer the sieve task. The route admits the proposal into the scenario's inbox; the turn's answer is graded and reported, and the failing report opens a step that claims the proposal before it asks the method. A win publishes, the process mounts the release the model proposed (the commit's `proposal` names the proposal and the session that made it), and the first task runs again on the mounted tree. The prompt names the goal and the shape of a rules entry, not the rule's text: what the model writes is what the gate judges.
 
 ## Results
 

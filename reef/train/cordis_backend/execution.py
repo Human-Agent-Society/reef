@@ -6,6 +6,7 @@ import logging
 from dataclasses import replace
 from threading import Lock
 
+from reef.harness.episodes.model_binding import ModelBindings
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import (
     ExecutorSelection,
@@ -30,7 +31,7 @@ class EvaluationWorkerPool:
         self._lock = Lock()
         self._closed = False
 
-    def evaluate(self, pairings):
+    def evaluate(self, pairings, *, models: ModelBindings | None = None):
         # Drain a batch before admitting the next, including ordinary scorer errors.
         with self._lock:
             if self._closed:
@@ -50,7 +51,13 @@ class EvaluationWorkerPool:
             try:
                 for index, pairing in enumerate(pairings):
                     pending.append(
-                        self._executor.rpc(index % self._requirements.workers, "run", args=pairing, non_block=True)
+                        self._executor.rpc(
+                            index % self._requirements.workers,
+                            "run",
+                            args=pairing,
+                            kwargs={} if models is None else {"models": models},
+                            non_block=True,
+                        )
                     )
             except BaseException:
                 # Partial submission cannot be replayed safely. Retire the pool.

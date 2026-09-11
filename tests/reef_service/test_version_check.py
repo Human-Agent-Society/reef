@@ -174,8 +174,8 @@ console.log(JSON.stringify(events));
         assert events[3]["message"] == "Reef harness updated. Restart reef-pi to load it."
 
 
-def _notice(tmp_path: Path, releases: object, sidecar: object, *, headless: bool = False) -> tuple[list, str]:
-    """The UI events and stderr of one session start of the notice against ``releases`` with ``sidecar`` on disk."""
+def _notice(tmp_path: Path, releases: object, release_info: object, *, headless: bool = False) -> tuple[list, str]:
+    """The UI events and stderr of one session start of the notice against ``releases`` with ``release_info`` on disk."""
     module = tmp_path / "version_check.mjs"
     module.write_text(ASSET.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "pi-agent").mkdir(exist_ok=True)
@@ -210,7 +210,7 @@ console.log(JSON.stringify(events));
 """.strip(),
         encoding="utf-8",
     )
-    (tmp_path / ".reef-harness-release").write_text(json.dumps(sidecar), encoding="utf-8")
+    (tmp_path / ".reef-harness-release").write_text(json.dumps(release_info), encoding="utf-8")
     env = {
         **os.environ,
         "PI_CODING_AGENT_DIR": str(tmp_path / "pi-agent"),
@@ -226,7 +226,7 @@ console.log(JSON.stringify(events));
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is_unmet(tmp_path: Path) -> None:
-    """While the head's ``training_request.requires`` has an item the sidecar's ``setup`` does not check off,
+    """While the head's ``training_request.requires`` has an item the release file's ``setup`` does not check off,
     the notice prints the setup list and never offers the install."""
     requires = [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}, {"name": "notify", "kind": "permission"}]
     releases = [
@@ -328,18 +328,18 @@ def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
     offers is the newest row that is not pending: a pending tail behind the
     pinned head is silence, a newer row that is not pending is still offered,
     and a trial install of the pending release gets no offer until its promote."""
-    sidecar = {"release_id": "v1"}
+    release_info = {"release_id": "v1"}
     pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
-    assert _notice(tmp_path, pending_tail, sidecar) == ([], "")
-    assert _notice(tmp_path, pending_tail, sidecar, headless=True) == ([], "")
+    assert _notice(tmp_path, pending_tail, release_info) == ([], "")
+    assert _notice(tmp_path, pending_tail, release_info, headless=True) == ([], "")
     # A catalog whose every row is pending has no head to offer.
-    assert _notice(tmp_path, [{"release_id": "v2", "pending": True}], sidecar) == ([], "")
+    assert _notice(tmp_path, [{"release_id": "v2", "pending": True}], release_info) == ([], "")
     promoted_then_pending = [{"release_id": "v1"}, {"release_id": "v2"}, {"release_id": "v3", "pending": True}]
-    events, stderr = _notice(tmp_path, promoted_then_pending, sidecar)
+    events, stderr = _notice(tmp_path, promoted_then_pending, release_info)
     assert [event["kind"] for event in events] == ["select"] and stderr == ""
     assert "Current: v1" in events[0]["title"] and "Latest:  v2" in events[0]["title"]
     assert "v3" not in events[0]["title"]
-    events, stderr = _notice(tmp_path, promoted_then_pending, sidecar, headless=True)
+    events, stderr = _notice(tmp_path, promoted_then_pending, release_info, headless=True)
     assert events == [] and "Latest:  v2" in stderr and "v3" not in stderr
     # A trial install of the pending release by id (?release_id=v3) is the person's choice: no offer to move back.
     trial = {"release_id": "v3"}
@@ -350,7 +350,7 @@ def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
     events, _ = _notice(tmp_path, promoted, trial)
     assert [event["kind"] for event in events] == ["select"]
     assert "Current: v3" in events[0]["title"] and "Latest:  v4" in events[0]["title"]
-    # A null row is skipped, never an error; a sidecar that is not a record is silence.
-    events, _ = _notice(tmp_path, [{"release_id": "v1"}, None, {"release_id": "v2"}], sidecar)
+    # A null row is skipped, never an error; a release file that is not a record is silence.
+    events, _ = _notice(tmp_path, [{"release_id": "v1"}, None, {"release_id": "v2"}], release_info)
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
     assert _notice(tmp_path, promoted_then_pending, None) == ([], "")

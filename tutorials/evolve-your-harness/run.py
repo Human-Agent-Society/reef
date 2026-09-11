@@ -62,7 +62,7 @@ TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
 TREE_DIR = WORK / "tree"
 SCRATCH_DIR = WORK / "scratch"
-SIDECAR = ".reef-harness-release"
+RELEASE_FILE = ".reef-harness-release"
 
 
 def main():
@@ -197,7 +197,7 @@ def _manifest(client):
 
 
 def pull():
-    """Write the served tree under work/tree, the sidecar naming its release, and the model binding at this Reef."""
+    """Write the served tree, its release metadata, and the model binding under work/tree."""
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     manifest = _manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
@@ -205,12 +205,12 @@ def pull():
         target = TREE_DIR / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-    sidecar = {
+    release_info = {
         "release_id": manifest["release_id"],
         "content_id": manifest["content_id"],
         "files": sorted(manifest["files"]),
     }
-    (TREE_DIR / SIDECAR).write_text(json.dumps(sidecar, indent=2) + "\n", encoding="utf-8")
+    (TREE_DIR / RELEASE_FILE).write_text(json.dumps(release_info, indent=2) + "\n", encoding="utf-8")
     binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN, "model": MODEL}
     (TREE_DIR / "native" / "models.json").write_text(
         json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -278,7 +278,7 @@ def _mount_events(release_id):
 def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    seed = json.loads((TREE_DIR / SIDECAR).read_text())["release_id"]
+    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["release_id"]
 
     before = _steps_before(client)
     # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
@@ -366,7 +366,7 @@ def self_main():
     report opens the step, which claims that proposal before it asks the method; the process mounts a win."""
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    seed = json.loads((TREE_DIR / SIDECAR).read_text())["release_id"]
+    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["release_id"]
     task = tasks[0]
     before = _steps_before(client)
 

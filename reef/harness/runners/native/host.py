@@ -1,4 +1,4 @@
-"""The host plane's registries: what the native loop consumes, filled once from files or live by the node plugins.
+"""The native host's registries: what the loop consumes, filled once from files or live by the node plugins.
 
 The interpreter reads a ``NativeHost`` at every use instead of holding the
 tools, hooks, agents, graphs, loop and prompt it was built with, so a change to the

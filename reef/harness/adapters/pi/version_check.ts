@@ -46,17 +46,17 @@ export default function versionCheck(pi) {
     const scenario = process.env.REEF_SCENARIO;
     if (!agentDir || !serviceUrl || !scenario) return;
     // The wrapper relocates the agent into a temp copy and exports the true
-    // install root; a directly-run tree falls back to the sidecar beside it.
+    // install root; a directly-run tree falls back to the release file beside it.
     const destDir = process.env.REEF_HARNESS_DEST || join(agentDir, "..");
-    let sidecar;
+    let releaseInfo;
     try {
-      // harness_pull and the install script write the sidecar at the tree root.
-      sidecar = JSON.parse(readFileSync(join(destDir, ".reef-harness-release"), "utf8"));
+      // harness_pull and the install script write the release file at the tree root.
+      releaseInfo = JSON.parse(readFileSync(join(destDir, ".reef-harness-release"), "utf8"));
     } catch {
-      return; // no sidecar: this tree did not come through the channel
+      return; // no release file: this tree did not come through the channel
     }
-    if (!sidecar || typeof sidecar !== "object") return; // a sidecar that is not a record pins nothing
-    const pinned = sidecar.release_id;
+    if (!releaseInfo || typeof releaseInfo !== "object") return; // a release file that is not a record pins nothing
+    const pinned = releaseInfo.release_id;
     let response;
     const token = process.env.REEF_TOKEN;
     try {
@@ -80,10 +80,10 @@ export default function versionCheck(pi) {
     if (pinnedRow && pinnedRow.pending && !releases.some((row) => row && row.rollback_target_release_id === pinned)) return;
 
     const checkedOff = new Map();
-    for (const item of Array.isArray(sidecar.setup) ? sidecar.setup : []) {
+    for (const item of Array.isArray(releaseInfo.setup) ? releaseInfo.setup : []) {
       if (item && typeof item.name === "string") checkedOff.set(item.name, item);
     }
-    // A check off records the check it stood for; one without it (an older sidecar) counts by name.
+    // A check off records the check it stood for; one without it (an older release file) counts by name.
     const met = (item) => {
       const record = checkedOff.get(item.name);
       return record !== undefined && (!("check" in record) || (record.check ?? null) === (item.check ?? null));

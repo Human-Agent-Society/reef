@@ -308,7 +308,7 @@ def test_empty_sequence_is_no_proposal(tmp_path: Path) -> None:
 
 def test_composite_proposal_settles_under_one_selection_decision(tmp_path: Path) -> None:
     """A sequence is one proposal: both mutations publish together under a
-    single verdict, and the ledger lists the whole set."""
+    single verdict, and the commit record lists the whole set."""
 
     def propose(nodes, samples, model):
         del nodes, samples
@@ -534,7 +534,7 @@ def test_entries_and_load_round_trip(tmp_path: Path) -> None:
     assert b._entries() == entries and b._nodes() == _nodes(entries)
 
 
-# -- revert exactness and ledger hygiene ----------------------------------
+# -- revert exactness and commit record validity --------------------------
 
 
 def seeded_state() -> dict:
@@ -600,7 +600,7 @@ def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     result = run_backend_step(b, batch(), b.initial_state())
     assert result.metrics["episode_failures"] == 2  # both sides, one task
     assert result.metrics["published"] is False  # both failed: a tie, reverted
-    json.loads(json.dumps(result.metrics, allow_nan=False))  # ledger-legal
+    json.loads(json.dumps(result.metrics, allow_nan=False))  # valid commit record data
 
 
 def test_non_finite_episode_score_raises_and_reverts(tmp_path: Path) -> None:
@@ -865,7 +865,7 @@ def test_disabled_seed_with_an_inline_key_refuses_boot(tmp_path: Path) -> None:
 
 
 def test_admission_refuses_plural_and_list_valued_key_fields(tmp_path: Path) -> None:
-    """The tripwire matches plural credential names and list values too."""
+    """The credential check matches plural names and list values too."""
     for data in ({"apiKeys": ["sk-476-list"]}, {"providers": {"a": {"tokens": ["sk-476-plural"]}}}):
         keyed = {"id": "models", "name": "config", "config": {"target": "models", "data": data}}
         with pytest.raises(ValueError, match="inline credential"):
@@ -1469,7 +1469,7 @@ def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
     assert "task one" in seen and "real request A" in seen
     assert result.metrics["gate_tasks"] == 2
     assert result.metrics["promoted_tasks"] == 1
-    # The ledger persists in the committed state.
+    # The promoted tasks persist in the committed state.
     assert result.state["promoted_tasks"] == ["real request A"]
 
 
@@ -1489,13 +1489,13 @@ def test_promoted_tasks_are_deduped_capped_and_persist(tmp_path: Path) -> None:
     first = run_backend_step(b, _traced_batch("A", "B", "C"), b.initial_state())
     # Cap of 2 admits only the first two distinct prompts.
     assert first.state["promoted_tasks"] == ["A", "B"]
-    # A later batch dedupes against the ledger and the seed; nothing new fits.
+    # A later batch dedupes against the promoted tasks and the seed; nothing new fits.
     second = run_backend_step(b, _traced_batch("A", "task one", "B"), first.state)
     assert second.state["promoted_tasks"] == ["A", "B"]
 
 
 def test_secret_shaped_prompts_are_never_promoted(tmp_path: Path) -> None:
-    """A traffic prompt meets the tree's credential tripwire before it can
+    """A traffic prompt passes the tree's credential check before it can
     become a persisted, re-run gate task; the clean prompt beside it still
     promotes and the step does not fail."""
     key = "sk-476-PROMOTED-KEY-0123456789abcdef"
@@ -2068,7 +2068,7 @@ def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 
 def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path: Path) -> None:
-    """A rejection lands in a bounded ledger; the next step hands it to a
+    """A rejection lands in a bounded history; the next step hands it to a
     proposer whose signature names ``rejected``, and a three-argument
     proposer keeps running without it."""
     seen: list[tuple] = []

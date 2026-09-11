@@ -59,7 +59,7 @@ ANSWERS = {
 
 
 def _report_index() -> dict[str, dict[str, Any]]:
-    """The day ledger: report metadata keyed by the referenced record id."""
+    """The day reports: metadata keyed by the referenced record id."""
     index: dict[str, dict[str, Any]] = {}
     for path in sorted((WORKDIR / RUN).glob("round-*/reports/*.json")):
         try:
@@ -76,12 +76,12 @@ def _report_index() -> dict[str, dict[str, Any]]:
 
 def _fallback_meta(sample: TraceSampleLike) -> dict[str, Any]:
     """Task metadata derived from the trace alone, for a sample without a
-    ledger entry. The -1.0 sentinel is the unscored report, never a grade.
+    saved report. The -1.0 sentinel is the unscored report, never a grade.
 
     The wire prompt is the composed one (preamble, optional hint, task
     text); the digest wants the task text, so the fixed preamble is
     stripped back off. Success cannot check the no-error rule here: the
-    error channel only exists in the ledger this sample is missing."""
+    error information only exists in the saved report this sample is missing."""
     score: float | None = None if sample.score == UNSCORED_SENTINEL else float(sample.score)
     prompt = ""
     for message in sample.payload.get("messages") or []:

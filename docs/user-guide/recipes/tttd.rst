@@ -352,7 +352,7 @@ programs stored in the search archives.
 The `circle-packing overview
 <../../../recipes/tttd/examples/tttd/results/formal-8x64-v3-packing/README.md>`__
 contains the combined W&B history, verified configurations, generated programs,
-milestone summaries, and provenance records.
+milestone summaries, and records of how the results were produced.
 
 Enable W&B tracking
 -------------------

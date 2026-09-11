@@ -667,10 +667,17 @@ class RequestService:
         if not host or not model or not entries:
             return {}
         scheme = normalized.get("x-forwarded-proto") or "http"
-        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER)
+        api = "openai"
+        client_models = () if info is None else info.client_models
+        override = scenario.model_config.runtime
+        if override is not None:
+            selected = ModelBinding.from_runtime(override)
+            model, api = selected.model, selected.api
+            client_models = ()
+        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER, api=api)
         nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
         try:
-            bound = binding.compose_nodes(descriptor, models=() if info is None else info.client_models)
+            bound = binding.compose_nodes(descriptor, models=client_models)
             files = render_composition((*nodes, *bound), descriptor)
         except (ModelBindingError, RenderError, KeyError, TypeError):
             return {}

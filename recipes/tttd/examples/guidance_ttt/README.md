@@ -141,7 +141,7 @@ rather than variance across random seeds. For TriMul, the repeat measurement
 is the stable latency result; the lower search-time value is retained to show
 how the archive evolved.
 
-The compact records, per-update trajectories, provenance hashes, and one
+The compact records, per-update trajectories, source file hashes, and one
 guidance-to-candidate case from each task are in [`results/`](results/). The
 Polyomino case changes piece selection from a fixed order to a skyline-aware
 decision. The TriMul case removes a global-memory round trip by reusing one

@@ -153,7 +153,7 @@ class AdapterResidencyManager:
       degradation is visible rather than hidden.
 
     Residency bounds what the engine can serve *now*; it says nothing about
-    which recorded evidence a training job may still use. Those are separate
+    which recorded samples a training job may still use. Those are separate
     by construction — a sample carries its own log probabilities and producing
     runtime load ID — so evicting a revision never narrows the staleness
     window, and widening the staleness window never demands more slots.

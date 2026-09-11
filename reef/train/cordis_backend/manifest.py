@@ -5,7 +5,7 @@ it commits fail: which task, at which stage, and why. ``advance`` folds the
 step's observations into the previous step's manifest and classes every
 fingerprint as new, persisting, or fixed. The manifest travels in the
 algorithm state through the commit log, so the next step's proposer reads
-structured evidence of what actually failed instead of prose.
+structured failure details instead of prose.
 
 Causes are normalized before fingerprinting because episode errors embed
 volatile absolute paths and line numbers; a fingerprint must survive a

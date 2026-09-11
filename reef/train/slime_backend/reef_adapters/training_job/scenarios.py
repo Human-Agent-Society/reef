@@ -1,4 +1,4 @@
-"""Durable per-scenario ledger for a bridge that trains several adapters.
+"""Durable per-scenario history for a bridge that trains several adapters.
 
 The bridge's marker records one job at a time. When several scenarios share
 the training group, each also needs its own publication history — the
@@ -15,15 +15,15 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.runtime.names import SCENARIO_LEDGER_FILENAME
+from reef.runtime.names import SCENARIO_HISTORY_FILENAME
 from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json, write_json
 
-LEDGER_FILENAME = SCENARIO_LEDGER_FILENAME
-LEDGER_FORMAT = 1
+HISTORY_FILENAME = SCENARIO_HISTORY_FILENAME
+HISTORY_FORMAT = 1
 
 
-class ScenarioLedger:
+class ScenarioHistory:
     """Publication history and latest checkpoint per training scenario."""
 
     def __init__(self, path: Path) -> None:
@@ -32,17 +32,17 @@ class ScenarioLedger:
         value = read_json(path)
         if value is None:
             return
-        if not isinstance(value, Mapping) or value.get("format") != LEDGER_FORMAT:
-            raise RuntimeError(f"invalid scenario ledger: {path}")
+        if not isinstance(value, Mapping) or value.get("format") != HISTORY_FORMAT:
+            raise RuntimeError(f"invalid scenario history: {path}")
         scenarios = value.get("scenarios")
         if not isinstance(scenarios, Mapping):
-            raise RuntimeError(f"invalid scenario ledger: {path}")
+            raise RuntimeError(f"invalid scenario history: {path}")
         for scenario, entry in scenarios.items():
             if not isinstance(scenario, str) or not scenario or not isinstance(entry, Mapping):
-                raise RuntimeError(f"invalid scenario ledger entry: {path}")
+                raise RuntimeError(f"invalid scenario history entry: {path}")
             publications = entry.get("publications", [])
             if not isinstance(publications, list) or not all(isinstance(item, str) for item in publications):
-                raise RuntimeError(f"invalid scenario ledger publications: {path}")
+                raise RuntimeError(f"invalid scenario history publications: {path}")
             self._entries[scenario] = {
                 "publications": list(publications),
                 "adapter": entry.get("adapter"),
@@ -132,12 +132,12 @@ class ScenarioLedger:
         }
 
     def _write(self) -> None:
-        write_json(self._path, {"format": LEDGER_FORMAT, "scenarios": self._entries})
+        write_json(self._path, {"format": HISTORY_FORMAT, "scenarios": self._entries})
 
 
-def ledger_path(hf_template: str) -> Path:
-    """The ledger sits beside the job marker, in the HF checkpoint directory."""
-    return Path(hf_template.format(rollout_id=0)).expanduser().parent / LEDGER_FILENAME
+def history_path(hf_template: str) -> Path:
+    """The history sits beside the job marker, in the HF checkpoint directory."""
+    return Path(hf_template.format(rollout_id=0)).expanduser().parent / HISTORY_FILENAME
 
 
-__all__ = ["LEDGER_FILENAME", "LEDGER_FORMAT", "ScenarioLedger", "ledger_path"]
+__all__ = ["HISTORY_FILENAME", "HISTORY_FORMAT", "ScenarioHistory", "history_path"]

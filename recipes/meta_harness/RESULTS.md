@@ -19,8 +19,9 @@ selector and upstream's own `update_frontier`. All eight candidate decisions
 agreed, including Reef's tie. This verifies the overall selection rule given
 identical observations; independent proposals and scores can differ.
 
-The [selected Reef harness](results/reef_harness.py) is the exact iteration 1
-output, with SHA-256
+The [selected Reef harness](results/reef_harness.py) preserves the iteration 1
+code and completion prompt; only its class docstring wording has been simplified.
+The measurements below used the original file, whose SHA-256 was
 `abe8e8b703bd31baaf9ec063fd44596c890f6faebc8804867c98989241d04b89`.
 
 Evaluating the chosen harnesses again, with two fresh repeats on the same tasks,
@@ -47,6 +48,6 @@ The campaign scripts, raw histories, and audit records remain internal.
 These measurements used the local experiment runner, before the shared
 Terminus adapter supported Python extensions. They validate the search method;
 they are not benchmark measurements of the updated adapter. A focused contract
-test now loads the exact selected harness as a `code_extension` through the
+test now loads the checked-in harness as a `code_extension` through the
 shared recipe, episode lifecycle, Terminus runner, and publication path, with
 process launch and the remote trial replaced by test doubles.

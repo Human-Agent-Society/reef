@@ -306,12 +306,12 @@ class TestCheckpointStorage:
             pass
 
     def test_lora_control_files_are_owned_not_unknown(self, tmp_path: Path) -> None:
-        """The scenario ledger and adapter-slot snapshots live in the managed roots by design."""
-        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_LEDGER_FILENAME
+        """The scenario history and adapter-slot snapshots live in the managed roots by design."""
+        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_HISTORY_FILENAME
 
         storage = _storage(tmp_path)
         _complete(storage, 0)
-        (storage.hf_root / SCENARIO_LEDGER_FILENAME).write_text("{}", encoding="utf-8")
+        (storage.hf_root / SCENARIO_HISTORY_FILENAME).write_text("{}", encoding="utf-8")
         _write_bytes(storage.megatron_root / ADAPTER_SLOTS_DIRNAME / "bWF0aA" / "rank_00000.pt", 5)
 
         plan = _storage(tmp_path).validate_capacity(active_rollouts={0})

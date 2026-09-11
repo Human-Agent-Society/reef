@@ -92,15 +92,29 @@ Headers
 |                                   | to correlate on. Reef never reads a value.              |
 +-----------------------------------+---------------------------------------------------------+
 
+Scenario model settings
+-----------------------
+
+``POST /reef/scenarios`` accepts an optional ``model`` object with ``url``,
+``model``, ``api`` and ``api_key``. It applies only when creating a new
+scenario. Existing scenarios retain their settings on repeated creation.
+``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
+existing ``training_mode`` field. Send ``model: null`` to restore deployment
+defaults. Responses redact the API key and report ``has_api_key`` instead.
+
+See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
+protocols, persistence and model bindings used throughout evolution.
+
 Manual training
 ---------------
 
 ``POST /reef/train`` queues one training instruction for a scenario in
 ``data.training_mode: manual`` or ``hybrid`` (harness evolution with a
 proposer that accepts ``requests``). It takes the user's ``text``,
-originating ``session`` and ``release_id``. The latter two are provenance,
-not a request to restore an old release. The backend operates on the
-current committed state. The API requires no inference receipts or score.
+originating ``session`` and ``release_id``. These fields identify the session
+and release the request came from. The backend operates on the current
+committed state; it does not restore the originating release. The API
+requires no inference receipts or score.
 
 A request may also carry ``requires``: what the change needs from the
 person's machine, at most 8 ``{name, kind, check}`` items, default none.
@@ -244,7 +258,7 @@ For a scenario that trains weights the deletion is Reef-side: the training
 backend is told to retire the scenario, and the Slime backend does not yet
 act on it, so the scenario's adapter stays resident in the serving engine
 until it is evicted or the training group restarts, and the training job's
-per-scenario ledger keeps its entry until then.
+per-scenario history keeps its entry until then.
 
 Scenario updates
 ~~~~~~~~~~~~~~~~
@@ -402,6 +416,16 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
+Training compaction retires records without deleting their original payloads.
+Reef's explicit Python audit reads can inspect retained requests, responses,
+references, and compaction timestamps; ordinary training reads exclude retired
+records. There is no new HTTP record-query endpoint. Separate background
+retention limits compacted bodies to 7 days and a shared 20 GiB by default;
+see `Configuration <configuration.rst>`__ for scope and `Python API <python-api.rst>`__
+for audit and purge methods. A compaction timestamp alone does not prove that a record was
+used for learning: per-step ``consumed_ids`` in the commit log identifies that
+relationship.
+
 Receiving an update
 -------------------
 
@@ -469,14 +493,14 @@ copied; a releases row carries its own step's list alone. The install
 script embeds the list (the union of a chain is not bounded by one
 request's cap of 8) and refuses, before it installs the binary or makes a
 directory, while an item is not checked off in the ``.reef-harness-release``
-sidecar on disk: it prints the setup list and the newest release in the
+release metadata file on disk: it prints the setup list and the newest release in the
 chain that requires nothing, the one that installs on a machine with
 nothing set up (``?release_id=<id>``), and exits 1. ``reef-<adapter> setup``
 records the check offs; ``--release <id>`` names a pending release so its
-items are checked off before its promote. The sidecar the script writes
+items are checked off before its promote. The release metadata file the script writes
 carries ``requires`` (the list) and ``setup`` (the check offs, ``{name,
-checked_at, check}``, carried over from the previous sidecar by name; an
-item whose check is not the recorded one counts as unmet); a sidecar the
+checked_at, check}``, carried over from the previous release metadata file by name; an
+item whose check is not the recorded one counts as unmet); a release metadata file the
 stdlib client pull wrote carries neither, which reads as nothing required.
 
 Use ``?release_id=`` on the manifest or install route to request a specific
@@ -709,3 +733,34 @@ Status codes
 Reef relays upstream 4xx failures with the provider's original message; the
 common client statuses (400, 401, 403, 404, 408, 409, 422, 429) keep their
 status code, and any other upstream 4xx comes back as 400.
+
+Browser consoles
+----------------
+
+The service can opt in to direct browser access with ``reef.console_origins``
+in the serve YAML. List each trusted console origin explicitly, with no path,
+trailing slash, credentials, or wildcard:
+
+.. code-block:: yaml
+
+   reef:
+     console_origins:
+       - "https://api.reefinfra.ai"
+       - "http://localhost:3000"
+
+Restart the service after changing the configuration. Without this option, Reef
+does not add CORS headers. With it, unlisted browser origins are rejected before
+a route runs. CORS preflight requests from listed origins do not need a service
+token; actual requests retain the configured Bearer authentication. Browser
+requests may use GET, POST or DELETE with Authorization, Content-Type and
+x-reef-scenario headers. Cookies are not enabled through CORS.
+
+CORS headers also cover errors and streamed responses, exposing
+``x-reef-agent-record-id``, ``x-reef-release-id`` and ``x-reef-artifact-version``
+to the browser. Clients without an Origin header keep their existing behavior.
+A browser may additionally require local network permission or HTTPS; allowing
+an origin in Reef does not override browser policy.
+
+A connected console acts with the service token's existing permissions. Its
+requests operate directly on this runtime's scenarios, without creating a
+cloud deployment or uploading history as part of the CORS connection.

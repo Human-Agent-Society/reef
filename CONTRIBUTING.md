@@ -27,7 +27,7 @@ Use the structured template that matches the work:
 - **Feature proposal** for a concrete user problem whose scope does not yet
   require a durable architecture decision.
 - **Experiment** for a paper reproduction, benchmark, or empirical question
-  with pinned models, workloads, baselines, metrics, and retained evidence.
+  with pinned models, workloads, baselines, metrics, and saved results.
 - **Example** for a runnable user-facing recipe or reference deployment with a
   documented setup and expected result.
 - **RFC proposal** when the change may affect public interfaces,

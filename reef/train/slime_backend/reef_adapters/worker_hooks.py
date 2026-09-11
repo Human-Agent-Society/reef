@@ -157,7 +157,7 @@ def _install_rollout_logging() -> None:
     current = data.log_rollout_data
     if getattr(current, "_reef_external_fields", False):
         return
-    # The shared wire layer attaches these provenance fields for every loss
+    # The shared wire layer attaches these source fields for every loss
     # family, but Slime's rollout logger only aggregates numeric values. Loss
     # families hide their own fields through their declared
     # ``rollout_log_skip_keys``.

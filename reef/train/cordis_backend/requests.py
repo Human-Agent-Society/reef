@@ -125,7 +125,7 @@ def ancestor_requiring_nothing(rows: Sequence[Mapping[str, Any]], release_id: st
     """The newest release before ``release_id`` in its chain that requires nothing over its own chain.
 
     The one a machine with nothing set up installs: every later release
-    in the chain needs an item, and the sidecar there checks nothing off.
+    in the chain needs an item, and the local release file records no completed setup.
     The creation row always qualifies; ``None`` when ``release_id`` has no
     ancestor in ``rows``."""
     ancestors = list(reversed(_chain(rows, release_id)))[:-1]

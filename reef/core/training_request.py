@@ -12,7 +12,7 @@ class TrainingRequest:
     """A training instruction, independent of inference batches and feedback.
 
     ``id`` is filled from the enclosing AgentRecord when it becomes a batch.
-    Session and release are provenance; they do not select an inference batch.
+    Session and release identify the request's source; they do not select an inference batch.
     ``requires`` is what the change needs from the person's machine, at most
     ``MAX_REQUIRES`` ``{name, kind, check}`` items of the shape
     ``reef.train.cordis_backend.requests.parse_requires`` admits; default none.

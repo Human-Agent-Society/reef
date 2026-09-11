@@ -468,7 +468,7 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
    reef-pi harness "run the tests before you report a fix as done"
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
-from the sidecar and the oldest pending session's id, or a fresh session id
+from the release metadata file and the oldest pending session's id, or a fresh session id
 when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
@@ -521,7 +521,7 @@ nothing, the one that installs on a machine with nothing set up
 newest release's items with each check as written, asks ``run it? [y/N]``
 before running a command (``--yes`` answers for scripts), reads a variable
 from your environment without asking, records what passed in the
-``.reef-harness-release`` sidecar under ``setup`` with the check it stood
+``.reef-harness-release`` release metadata file under ``setup`` with the check it stood
 for, and exits 0 once every item is met; ``reef-pi setup --mark <name>``
 checks an item off by hand, and ``reef-pi setup --release <id>`` reads a
 pending release's items, so you check them off before you promote it. An
@@ -621,7 +621,7 @@ or at once when no turn is open. No reinstall, no restart.
    python3 -m reef.harness.client.wrapper report --score 1 --feedback "fixed"
 
 ``--tree`` names the pulled tree, the directory that holds ``native/`` and
-the release sidecar. The process boots from ``native/tree.json``, the
+the ``.reef-harness-release`` metadata file. The process boots from ``native/tree.json``, the
 entries list Reef renders into every native release (a tree pulled before
 that file existed runs in the episode form only). It reads the Reef URL and
 the token from ``native/models.json``; ``--reef-url`` and ``REEF_TOKEN``
@@ -658,7 +658,7 @@ module binds no ``run`` at its top level, a hook whose code does not
 import, a kind this reef has no plugin for, a name a self tool owns) is
 rolled back whole before the next step: ``harness/mount-failed`` names the
 release, the entry and the error, and the previous composition keeps
-serving. On success the sidecar and ``native/tree.json`` name the new
+serving. On success the release metadata file and ``native/tree.json`` name the new
 release, so a restart boots from it with ``source: boot``.
 
 With ``--follow pinned`` the process logs ``release/available`` with the
@@ -675,7 +675,7 @@ logs ``harness/mount-failed`` and is retried by the next poll that names
 the head, so a release published between two steps mounts once the steps
 are over.
 
-``--self-tools`` gives the model three host plane tools. The tree cannot
+``--self-tools`` gives the model three built-in tools. The tree cannot
 remove them or take their names, and they are absent in the episode form,
 so a candidate cannot win the gate by calling them:
 
@@ -750,3 +750,8 @@ the model calls. The bundled descriptors cover these agents:
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.
+
+.. seealso::
+
+   `Scenario model configuration <scenario-models.rst>`__ explains scenario-specific custom providers for the entire
+   harness evolve model pipeline through Reef API Platform.

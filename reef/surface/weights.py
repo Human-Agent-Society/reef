@@ -243,8 +243,8 @@ def reported_runtime_load_id(response: Mapping[str, Any]) -> str | None:
                 version = meta_info.get("runtime_load_id")
                 if version is not None:
                     return str(version)
-    # Token-native provider facades keep engine provenance in the private
-    # training block so OpenAI and Anthropic client envelopes can stay
+    # Token-native provider facades keep the producing engine version in the
+    # private training block so OpenAI and Anthropic client envelopes can stay
     # provider-compatible. A multi-version response has no single training
     # runtime_load_id; in that case the final exact span is authoritative.
     training = response.get("training")

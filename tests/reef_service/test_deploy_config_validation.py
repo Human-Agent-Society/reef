@@ -42,6 +42,78 @@ def test_empty_file_loads_as_an_empty_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("value", [None, "", " \t "])
+def test_required_environment_variables_report_all_missing_fields(tmp_path: Path, monkeypatch, value) -> None:
+    for name in ("REEF_TEST_URL", "REEF_TEST_MODEL"):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+    monkeypatch.setenv("REEF_TEST_KEY", "secret-value-must-not-appear")
+    path = _write(
+        tmp_path,
+        "reef:\n"
+        "  upstream_url: ${REEF_TEST_URL:?}\n"
+        "  upstream_model: ${REEF_TEST_MODEL:?}\n"
+        "  upstream_api_key: ${REEF_TEST_KEY}\n"
+        "services:\n"
+        "  - env:\n"
+        "      MODEL: ${REEF_TEST_MODEL:?}\n",
+    )
+    with pytest.raises(DeployConfigError, match="missing or empty required environment variables") as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert str(path) in message
+    assert "REEF_TEST_URL (reef.upstream_url)" in message
+    assert "REEF_TEST_MODEL (reef.upstream_model, services[0].env.MODEL)" in message
+    assert "secret-value-must-not-appear" not in message
+
+
+@pytest.mark.unit
+def test_required_environment_values_resolve_and_optional_values_can_be_empty(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("REEF_TEST_MODEL", "provider/model")
+    monkeypatch.delenv("REEF_TEST_KEY", raising=False)
+    config = load_config(
+        _write(
+            tmp_path,
+            "reef:\n"
+            "  upstream_model: ${REEF_TEST_MODEL:?}\n"
+            "  upstream_api_key: ${REEF_TEST_KEY}\n"
+            "  endpoint: http://127.0.0.1:${reef.port}\n",
+        )
+    )
+    assert config["reef"] == {
+        "upstream_model": "provider/model",
+        "upstream_api_key": "",
+        "endpoint": "http://127.0.0.1:${reef.port}",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "harness-requests"])
+def test_tutorial_missing_environment_fails_before_launch_without_traceback(tutorial, monkeypatch, capsys) -> None:
+    for name in ("REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+    def must_not_run(*args, **kwargs):
+        pytest.fail("missing environment variables must fail before model downloads or processes")
+
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
+    monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
+    # The tutorial belongs to the checkout even when Reef is imported from an installed wheel.
+    path = Path(__file__).resolve().parents[2] / "tutorials" / tutorial / "configs" / "deployment.yaml"
+    with pytest.raises(SystemExit) as caught:
+        cli_main(["serve", "-c", str(path)])
+    assert caught.value.code == 2
+    output = capsys.readouterr()
+    assert not output.out
+    assert "REEF_UPSTREAM_URL (reef.upstream_url)" in output.err
+    assert "REEF_UPSTREAM_MODEL (reef.upstream_model)" in output.err
+    assert "REEF_UPSTREAM_API_KEY" not in output.err
+    assert "Traceback" not in output.err
+
+
+@pytest.mark.unit
 def test_reef_python_defaults_to_the_launching_interpreter(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv("REEF_PYTHON", raising=False)
     config = load_config(
@@ -140,7 +212,8 @@ def test_invalid_stack_never_downloads_or_launches(tmp_path: Path, monkeypatch) 
 
 
 @pytest.mark.unit
-def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("override_required_env", [False, True])
+def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeypatch, override_required_env) -> None:
     captured: dict[str, object] = {}
 
     class StackStub:
@@ -148,6 +221,8 @@ def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeyp
 
         def __init__(self, config, services, run_dir, ready_timeout_default, config_path, source_root=None):
             captured["services"] = services
+            captured["config"] = config
+            captured["child_config"] = load_config(config_path)
 
         def start(self):
             pass
@@ -160,11 +235,17 @@ def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(orchestrator, "_Stack", StackStub)
     monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
+    monkeypatch.delenv("REEF_TEST_URL", raising=False)
+    monkeypatch.delenv("REEF_TEST_MODEL", raising=False)
+    upstream_fields = (
+        "  upstream_url: ${REEF_TEST_URL:?}\n  upstream_model: ${REEF_TEST_MODEL:?}\n" if override_required_env else ""
+    )
     path = _write(
         tmp_path,
         f"run_dir: {tmp_path / 'run'}\n"
         "reef:\n"
         "  recipe: recipe\n"
+        f"{upstream_fields}"
         "services:\n"
         "  - name: model\n"
         "    command: model-server\n"
@@ -173,7 +254,16 @@ def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeyp
         "    depends_on: [model]\n",
     )
 
-    assert orchestrator._run_orchestrator(str(path)) == 0
+    overrides = (
+        {"reef.upstream_url": "http://127.0.0.1:8000/v1", "upstream_model": "provider/model"}
+        if override_required_env
+        else None
+    )
+    assert orchestrator._run_orchestrator(str(path), overrides) == 0
+    if override_required_env:
+        for key in ("config", "child_config"):
+            assert captured[key]["reef"]["upstream_url"] == "http://127.0.0.1:8000/v1"
+            assert captured[key]["reef"]["upstream_model"] == "provider/model"
     services = captured["services"]
     assert isinstance(services, list)
     assert services == [

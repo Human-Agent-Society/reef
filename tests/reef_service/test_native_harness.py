@@ -26,7 +26,7 @@ from reef.harness.runners.native import (
     _DEFAULTS,
     MAX_COMPLETION_TOKENS,
     MAX_RESULT_CHARS,
-    SPILL_TAIL_CHARS,
+    TOOL_OUTPUT_TAIL_CHARS,
     HookModule,
     LoadError,
     ToolModule,
@@ -372,13 +372,20 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
     assert ok["meta"]["truncated"] is False
     long = _invoke(tools, "shout", '{"text": "long"}', tmp_path)
     assert len(long["content"]) == MAX_RESULT_CHARS and long["meta"]["truncated"] is True
-    # With a spill path the whole result lands on disk and the model reads head, marker, and tail within the cap.
-    spilled = _invoke(tools, "shout", '{"text": "long"}', tmp_path, spill=tmp_path / ".reef" / "spill" / "1-c1.txt")
-    assert (tmp_path / ".reef" / "spill" / "1-c1.txt").read_text() == "x" * (MAX_RESULT_CHARS + 5)
-    assert spilled["meta"]["truncated"] is True and spilled["meta"]["spill"] == ".reef/spill/1-c1.txt"
-    assert len(spilled["content"]) <= MAX_RESULT_CHARS
-    assert "[5 characters omitted; the full result is in .reef/spill/1-c1.txt]" in spilled["content"]
-    assert spilled["content"].startswith("x" * 100) and spilled["content"].endswith("x" * SPILL_TAIL_CHARS)
+    # With a full output path the whole result lands on disk and the model reads head, marker, and tail within the cap.
+    saved_output = _invoke(
+        tools, "shout", '{"text": "long"}', tmp_path, full_output_path=tmp_path / ".reef" / "tool-output" / "1-c1.txt"
+    )
+    assert (tmp_path / ".reef" / "tool-output" / "1-c1.txt").read_text() == "x" * (MAX_RESULT_CHARS + 5)
+    assert (
+        saved_output["meta"]["truncated"] is True
+        and saved_output["meta"]["output_file"] == ".reef/tool-output/1-c1.txt"
+    )
+    assert len(saved_output["content"]) <= MAX_RESULT_CHARS
+    assert "[5 characters omitted; the full result is in .reef/tool-output/1-c1.txt]" in saved_output["content"]
+    assert saved_output["content"].startswith("x" * 100) and saved_output["content"].endswith(
+        "x" * TOOL_OUTPUT_TAIL_CHARS
+    )
 
 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
@@ -570,7 +577,7 @@ class _DumpModel(_FakeModel):
         return _reply(content="READY")
 
 
-def test_a_long_tool_result_is_spilled_under_the_workspace(tmp_path: Path) -> None:
+def test_a_long_tool_result_is_saved_under_the_workspace(tmp_path: Path) -> None:
     dump = (
         "native_tool",
         {
@@ -587,9 +594,9 @@ def test_a_long_tool_result_is_spilled_under_the_workspace(tmp_path: Path) -> No
         model.server_close()
     assert result.exit_code == 0
     logged = _events(result.trajectory, "tool/result")[0]["data"]
-    assert logged["meta"]["spill"] == ".reef/spill/1-c1.txt" and logged["meta"]["truncated"] is True
+    assert logged["meta"]["output_file"] == ".reef/tool-output/1-c1.txt" and logged["meta"]["truncated"] is True
     assert len(logged["content"]) <= MAX_RESULT_CHARS
-    assert "[5000 characters omitted; the full result is in .reef/spill/1-c1.txt]" in logged["content"]
+    assert "[5000 characters omitted; the full result is in .reef/tool-output/1-c1.txt]" in logged["content"]
     # The clipped content is what the model read on its next request.
     assert model.requests[1]["messages"][-1] == {"role": "tool", "tool_call_id": "c1", "content": logged["content"]}
 
@@ -2034,20 +2041,20 @@ def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path
     assert result.trajectory[-1]["data"]["reason"] == {"kind": "completed"} and len(model.requests) == 3
 
 
-def test_a_host_plane_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:
+def test_a_builtin_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Path) -> None:
     tools = {
-        "harness_inspect": ToolModule("harness_inspect", "reef's own", {}, lambda a, w: "tree", host_plane=True),
+        "harness_inspect": ToolModule("harness_inspect", "reef's own", {}, lambda a, w: "tree", builtin_tool=True),
         "shout": ToolModule("shout", "the tree's", {}, lambda a, w: "loud"),
     }
     jailed = BwrapEnforcer()
-    assert tools["harness_inspect"].host_plane is True and tools["shout"].host_plane is False
+    assert tools["harness_inspect"].builtin_tool is True and tools["shout"].builtin_tool is False
     assert (
         enforcer_for(tools["harness_inspect"], jailed).mode == "none"
         and enforcer_for(tools["shout"], jailed) is jailed
     )
     assert enforcer_for(tools["shout"], None).mode == "none"
     assert _invoke(tools, "harness_inspect", "{}", tmp_path, enforcer=jailed)["content"] == "tree"
-    # A tree tool built in code has no module file for the jail to import: only the host plane flag bypasses it.
+    # A tree tool built in code has no module file for the jail to import: only the builtin_tool flag bypasses it.
     denied = _invoke(tools, "shout", "{}", tmp_path, enforcer=jailed)
     assert denied["error"]["code"] == "SANDBOX_FAILED" and "no module file" in denied["error"]["message"]
 
