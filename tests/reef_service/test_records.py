@@ -6,6 +6,7 @@ from contextlib import closing
 from dataclasses import replace
 
 import pytest
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from reef.artifact import ArtifactRef, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -110,6 +111,49 @@ def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
         assert second.get("math", "persisted") == original
         assert second.replay("math") == (original,)
         assert second.count("math") == 1
+
+
+@pytest.mark.unit
+def test_in_memory_store_shares_records_across_threads() -> None:
+    with RecordStore() as records:
+        records.append(item("seed", "math"))
+
+        def append_record(index: int) -> None:
+            assert records.get("math", "seed") == item("seed", "math")
+            assert records.append_result(item(f"worker-{index}", "math")).inserted
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            tuple(executor.map(append_record, range(32)))
+
+        assert {record.agent_record_id for record in records.replay("math")} == {
+            "seed",
+            *(f"worker-{index}" for index in range(32)),
+        }
+
+
+@pytest.mark.unit
+def test_reads_and_retries_leave_store_ready_for_external_and_local_writes(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    original = item("a", "math")
+    with RecordStore(database) as first, RecordStore(database) as second:
+        first.append(original)
+        assert first.get("math", "a") == original
+        assert first.count("math") == 1
+
+        second.append(item("b", "math"))
+        assert [record.agent_record_id for record in first.replay("math")] == ["a", "b"]
+        assert first.existing_receipt(original) == original
+        assert first.append_result(original).inserted is False
+        with pytest.raises(RecordConflict):
+            first.append(replace(original, payload={"value": "changed"}))
+
+        second.compact("math", frozenset({"a"}))
+        assert first.get("math", "a") is None
+        first.append(item("c", "math"))
+        assert [record.agent_record_id for record in second.replay("math")] == ["b", "c"]
+
+    with RecordStore(database) as recovered:
+        assert [record.agent_record_id for record in recovered.replay("math")] == ["b", "c"]
 
 
 @pytest.mark.unit
@@ -440,6 +484,23 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
 
 
 @pytest.mark.unit
+def test_failed_append_does_not_include_record_payload_in_error_text(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    private_text = "synthetic-private-transcript-marker"
+    with RecordStore(database) as records:
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TRIGGER reject_append BEFORE INSERT ON agent_record "
+                "BEGIN SELECT RAISE(ABORT, 'injected append failure'); END"
+            )
+        with pytest.raises(IntegrityError, match="injected append failure") as failure:
+            records.append(replace(item("private", "math"), payload={"text": private_text}))
+
+        assert private_text not in str(failure.value)
+        assert records.count("math") == 0
+
+
+@pytest.mark.unit
 def test_compaction_failure_rolls_back_body_state_hashes_and_receipt(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
     with RecordStore(database) as records:
@@ -449,7 +510,7 @@ def test_compaction_failure_rolls_back_body_state_hashes_and_receipt(tmp_path) -
                 "CREATE TRIGGER reject_compaction BEFORE UPDATE OF compacted_at ON agent_record "
                 "BEGIN SELECT RAISE(ABORT, 'injected compaction failure'); END"
             )
-        with pytest.raises(sqlite3.IntegrityError, match="injected compaction failure"):
+        with pytest.raises(IntegrityError, match="injected compaction failure"):
             records.compact("math", frozenset({"a"}), receipt_id="batch", receipt_metadata={"outcome": "stale"})
         assert records.get("math", "a") is not None
         assert records.get_for_audit("math", "a").compacted_at is None
@@ -494,6 +555,25 @@ def test_purge_is_bounded_scoped_and_preserves_retry_and_receipt_contracts(tmp_p
         assert records.get_for_audit("math", "a") is None
         assert records.compaction_receipts("math")[0]["receipt_id"] == "batch"
         assert records.count("math") == 1
+
+
+@pytest.mark.unit
+def test_append_sequence_is_not_reused_after_every_body_is_purged(tmp_path, monkeypatch) -> None:
+    database = tmp_path / "records.sqlite3"
+    with RecordStore(database) as records:
+        records.append(item("old", "math"))
+        old_sequence = records.replay_page("math")[0][0]
+        monkeypatch.setattr("reef.records.time.time", lambda: 100.0)
+        records.compact("math", frozenset({"old"}))
+        assert records.purge_compacted("math", before=101.0) == 1
+        assert records.audit_page("math") == ()
+
+    with RecordStore(database) as records:
+        records.append(item("new", "math"))
+        page = records.replay_page("math", after_sequence=old_sequence)
+        assert len(page) == 1
+        assert page[0][0] > old_sequence
+        assert page[0][1].agent_record_id == "new"
 
 
 @pytest.mark.unit
@@ -554,11 +634,11 @@ class SwitchReplies:
         self._replies = list(replies)
         self.calls = 0
 
-    def execute(self, statement: str) -> SwitchCursor:
+    def exec_driver_sql(self, statement: str) -> SwitchCursor:
         self.calls += 1
         reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
         if reply == "busy":
-            raise sqlite3.OperationalError("database is locked")
+            raise OperationalError(statement, None, sqlite3.OperationalError("database is locked"))
         return SwitchCursor((reply,))
 
 

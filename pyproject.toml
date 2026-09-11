@@ -28,6 +28,7 @@ dependencies = [
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    "sqlalchemy>=2.0,<3",
     "tomli; python_version < '3.11'",
     "tomli-w",
 ]
