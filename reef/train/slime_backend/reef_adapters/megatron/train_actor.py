@@ -260,6 +260,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             if force_sync and self.args.async_save:
                 maybe_finalize_async_save(blocking=True)
 
+            slots = self.adapter_slots
             if self.args.save_hf is not None and self.role == "actor":
                 output_dir = Path(self.args.save_hf.format(rollout_id=rollout_id))
                 context = torch_memory_saver.disable() if self.args.offload_train else nullcontext()
@@ -268,8 +269,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                         self.args,
                         output_dir,
                         self.weight_updater.export_lora_adapter_tensors(),
+                        scenario=None if slots is None else slots.active,
+                        scenario_step=rollout_id,
                     )
-            slots = self.adapter_slots
             if slots is not None and slots.active is not None:
                 # The Megatron checkpoint above holds only the active slot;
                 # every scenario's state must survive a restart on its own.
