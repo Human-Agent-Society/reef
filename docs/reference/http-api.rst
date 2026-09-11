@@ -64,6 +64,8 @@ Routes
 | ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, what         |
 |                                                        | changed, verdict, setup, chain                    |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/install``                          | a shell script that installs the tree             |

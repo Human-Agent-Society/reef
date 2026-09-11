@@ -474,6 +474,37 @@ def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path:
     ]
 
 
+def test_native_loop_records_provider_reasoning_without_changing_reply_or_tool_replay(tmp_path: Path) -> None:
+    reasoning = {
+        "reasoning": "Read the file after writing it.",
+        "reasoning_content": "Use the available tools.",
+        "reasoning_details": [{"type": "reasoning.text", "text": "Check the result."}],
+        "thinking": "Plan the next action.",
+    }
+
+    class ThinkingModel(_FakeModel):
+        def script(self, body: dict) -> dict:
+            response = super().script(body)
+            if len(self.requests) == 1:
+                response["choices"][0]["message"].update(reasoning)
+            return response
+
+    model = ThinkingModel()
+    try:
+        result = _episode(tmp_path, model, _seed_nodes())
+        messages = [event["data"] for event in _events(result.trajectory, "assistant/message")]
+        assert result.exit_code == 0
+        assert {key: messages[0][key] for key in reasoning} == reasoning
+        assert messages[0]["content"] is None and messages[0]["tool_calls"][0]["id"] == "c1"
+        assert all(key not in messages[1] for key in reasoning)
+        replayed = next(message for message in model.requests[1]["messages"] if message["role"] == "assistant")
+        assert {key: replayed[key] for key in reasoning} == reasoning
+        assert messages[-1]["content"] == "The file says: hello"
+    finally:
+        model.shutdown()
+        model.server_close()
+
+
 def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     model = _FlakyModel()
     try:

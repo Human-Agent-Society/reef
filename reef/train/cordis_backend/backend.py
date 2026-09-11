@@ -322,7 +322,7 @@ class _BudgetedBinding(ModelBinding):
     shared counter is a mutable one-element list so every binding in the set
     decrements the same budget; a cap of 0 is no budget. The record is the
     step's list: one entry per call with the model, the request, the reply
-    or the error, the seconds it took and, when the endpoint reported it, the
+    or the error, the provider response when available, the seconds it took and the
     ``usage`` (input and output tokens), every text cut at the record cap.
     """
 
@@ -355,25 +355,30 @@ class _BudgetedBinding(ModelBinding):
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
         entry: dict[str, Any] = {"model": self.model, "messages": _bounded(messages), "params": _bounded(kwargs)}
-        # ``chat`` returns text only; the binding keeps its latest response's usage for the record to read.
+        # ``chat`` returns text only; keep the provider response too, including any reasoning it exposed.
         if isinstance(self._inner, ModelBinding):
             object.__setattr__(self._inner, "_last_usage", None)
+            object.__setattr__(self._inner, "_last_response", None)
         started = time.monotonic()
         try:
             reply = self._inner.chat(messages, **kwargs)
         except BaseException as exc:
             # The failed call is the step's decision too: the record keeps it before the error propagates.
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
-            entry["seconds"] = round(time.monotonic() - started, 3)
-            self._record.append(entry)
             raise
-        entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
-        entry["seconds"] = round(time.monotonic() - started, 3)
-        usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
-        if usage is not None:
-            entry["usage"] = usage
-        self._record.append(entry)
-        return reply
+        else:
+            entry["reply"] = _clip(reply) if isinstance(reply, str) else _bounded(reply)
+            return reply
+        finally:
+            # A provider may spend its budget on reasoning and return no final text; retain that response on error too.
+            response = self._inner.last_response() if isinstance(self._inner, ModelBinding) else None
+            if response is not None:
+                entry["response"] = _bounded(response)
+            entry["seconds"] = round(time.monotonic() - started, 3)
+            usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
+            if usage is not None:
+                entry["usage"] = usage
+            self._record.append(entry)
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
@@ -767,6 +772,7 @@ class CordisBackend(TrainingBackend):
         self.proposals = None if proposals_dir is None else ProposalInbox(Path(proposals_dir), max_pending_proposals)
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
+        self._current_step_record: Path | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -849,6 +855,7 @@ class CordisBackend(TrainingBackend):
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
+        self._current_step_record = None
         if not isinstance(batch, TraceBatch):
             raise TypeError(f"harness evolution requires TraceBatch, got {type(batch).__name__}")
         if self._model_resolver is not None:
@@ -946,6 +953,7 @@ class CordisBackend(TrainingBackend):
             metrics["gate_tasks"] = len(gate_tasks)
             metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
         step_dir = self._claim_step_dir(steps)
+        self._current_step_record = step_dir
         if step_dir is not None:
             metrics["step_record"] = str(step_dir)
         # Re-gate the last-good tree against the published one on cadence or when the served model changed.
@@ -1263,6 +1271,10 @@ class CordisBackend(TrainingBackend):
         from reef.train.cordis_backend.record_history import read_step_records
 
         return read_step_records(self._step_record_dir, directory, relative)
+
+    def failed_step_metrics(self) -> Mapping[str, Any]:
+        """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload."""
+        return {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
 
     def _claim_step_dir(self, step: int) -> Path | None:
         """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
