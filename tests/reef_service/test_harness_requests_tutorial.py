@@ -20,7 +20,7 @@ from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
 from reef.train.cordis_backend import CordisRecipe
-from reef.train.evaluation.evaluators import AlwaysSelect
+from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "harness-requests"
@@ -109,7 +109,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     assert built.review_kinds == ("code_extension",)
     # Manual mode needs a proposer that names requests, which the other tutorial's does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
-    assert isinstance(built.candidate_selector, AlwaysSelect)
+    assert built.candidate_plugin is BackendAlwaysSelectPlugin
     assert built.model_binding().model == "provider/model-a"
     assert [entry["id"] for entry in built.seed] == [
         "answer-style",

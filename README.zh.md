@@ -187,39 +187,28 @@ reef.post(
 
 使用模型 API 改进 harness 技能，无需 GPU。
 
-通过 `REEF_UPSTREAM_MODEL` 在启动时传入模型，无需编辑 YAML。
-[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) 的推理和评估
-共用这个变量。在 Reef 源码目录及已激活的 Python 环境中运行，
-将下面的模型 ID 和 API key 替换为提供商对应的值：
+harness 进化 recipe 自带 profile，你只需要指定模型。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
-export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
-export REEF_UPSTREAM_MODEL="REPLACE_WITH_YOUR_PROVIDER_MODEL_ID"
-export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
+reef serve --recipe harness-evolve --model ollama/gemma4:26b
 ```
 
-请填写提供商接受的完整模型 ID，不要使用上面的占位符。
-如果未设置 `REEF_UPSTREAM_MODEL` 或其值为空，启动时会报错提示。
+`ollama/` 和 `openai/` 前缀会自动填入端点和密钥（`openai/` 读取
+`REEF_UPSTREAM_API_KEY`）；其他写法按原样作为模型 ID，端点来自 `REEF_UPSTREAM_URL`。
+该 profile 监听 `127.0.0.1:8900`，不设 token，状态保存在 `.reef/harness-evolve/`。
+需要修改其他内容时，复制[该 profile](reef/service/profiles/harness-evolve.yaml) 并用 `-c` 传入你的副本。
 
-如使用其他模型提供商，请填写对应的基础 URL、模型名称和 API key。此配置在 `8901`
-端口部署 Reef，并使用 `reef-local` 作为访问 token。
-
-在另一个终端中安装 harness 并运行任务：
+在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`）安装 harness 并运行任务：
 
 ```bash
-export REEF_TOKEN="reef-local"   # the script writes it into the installed harness's
-                                 # model binding, where reef-pi reads it back
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
-  'http://localhost:8901/reef/harness/install?adapter=pi' | bash
+curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
 reef-pi -p "fix the failing test in auth.py"
 
 # After running your tests, report the actual result:
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
 
-如果已经使用 `your-model-name` 安装了 harness，请先设置 `REEF_UPSTREAM_MODEL`，停止服务并用上面的
-命令重新启动 `reef serve`，再重新执行 harness 安装命令，最后重试 `reef-pi`。
+要更换模型，用另一个 `--model` 重启 `reef serve`，并在 `reef-pi` 之前重新执行安装命令：
 安装过程会将模型 ID 写入本地 harness 配置。
 
 失败报告会触发候选技能更新。Reef 会在教程的三个编程任务上对候选技能和当前 harness

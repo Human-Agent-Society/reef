@@ -26,7 +26,13 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend.strategies import Mutation, Proposer
-from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.train.evaluation.contracts import (
+    CandidateEvaluationPlugin,
+    EvaluationResult,
+    SelectionDecision,
+    UpdateCandidate,
+)
+from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceSample
 
 from .population import Population, PopulationStore, normalize_entries
@@ -322,10 +328,11 @@ class MetaHarnessProposer(Proposer):
         )
 
 
-class MetaHarnessSelector:
-    """Retain every candidate and serve strict mean-score improvements."""
+class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that serves strict mean-score improvements."""
 
     def __init__(self, store: PopulationStore) -> None:
+        super().__init__()
         self._store = store
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
@@ -371,6 +378,14 @@ class MetaHarnessSelector:
                 "target_episode_calls": population.episode_calls,
             },
         )
+
+
+class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin):
+    """Meta-Harness's candidate evaluation: measure through the backend, decide on the population frontier."""
+
+    def __init__(self, backend: Any, store: PopulationStore) -> None:
+        super().__init__(store)
+        self._backend = backend
 
 
 def _adapter_kinds(descriptor: AdapterDescriptor) -> tuple[str, ...]:
@@ -427,4 +442,4 @@ def _evaluation_scores(values: Any) -> tuple[float, ...]:
     return scores
 
 
-__all__ = ["SEARCH_MODES", "MetaHarnessProposer", "MetaHarnessSelector", "mutations_between"]
+__all__ = ["SEARCH_MODES", "MetaHarnessPlugin", "MetaHarnessProposer", "MetaHarnessSelectorMixin", "mutations_between"]

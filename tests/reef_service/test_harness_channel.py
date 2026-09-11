@@ -699,6 +699,10 @@ def _source_env(shim: Path, home: Path) -> dict:
     the suite out of the developer's, where a test's link would replace the
     reef-pi they use."""
     repo_root = str(Path(__file__).resolve().parents[2])
+    # The script's python3 is the interpreter running the tests, never the machine's: a fixture that
+    # writes its own shim keeps it, the others get this one.
+    if not (shim / "python3").exists():
+        _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
     return {
         **os.environ,
         "HOME": str(home),
@@ -813,6 +817,14 @@ if "$PYTHON" -P -c '' 2>/dev/null; then
     SAFE_PATH="-P"
 fi
 
+# reef-client (the capture proxy) and reef (the wrapper) must import in $PYTHON, which reef-pi runs.
+if ! "$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null; then
+    echo "reef: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there:" >&2
+    echo "    \"$PYTHON\" -m pip install reef-client \"reef-infra @ git+https://github.com/Human-Agent-Society/reef.git\"" >&2
+    echo "or rerun this script from a shell whose python3 has them" >&2
+    exit 1
+fi
+
 # The release file's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
 release_info_tool() {
     "$PYTHON" - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
@@ -905,10 +917,6 @@ case " $installed " in
         ;;
 esac
 
-# Ensure reef-client (capture proxy) and reef (harness wrapper) are importable by $PYTHON, the
-# interpreter reef-pi runs.
-"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for $PYTHON" "$PYTHON" -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
-"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there, or rerun this script from a shell whose python3 has them" >&2
 command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
 command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
@@ -977,7 +985,7 @@ wrapper_text() {
 # Usage: reef-pi -p "fix the bug"     # run the agent (receipts captured)
 #        reef-pi report --score 0 --feedback "..."  # report last run's receipts
 #        reef-pi harness "what the harness should do"  # ask reef for a change
-#        reef-pi setup  # check off what the newest release requires of you
+#        reef-pi doctor  # check the install: interpreter, service, binary, tools, release
 # Runs the python3 the install resolved; rerun the install from another shell to change it.
 export REEF_HARNESS_BINARY="$BINARY_ABS"
 export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
@@ -1185,6 +1193,32 @@ def test_install_refuses_a_python3_that_prints_at_startup_instead_of_baking_garb
     assert result.returncode == 1
     assert "reef: python3 did not name its interpreter" in result.stderr
     assert not (dest / "reef-pi").exists()
+
+
+@pytest.mark.unit
+def test_install_refuses_an_interpreter_without_reef_and_installs_nothing_on_its_own(tmp_path) -> None:
+    """The import check runs before the gate and the vendor install: an interpreter that cannot import reef and
+    reef-client stops the script with the line that installs them there, and nothing is written or run."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version=None, npm='#!/bin/sh\necho npm >> "$0.log"\nexit 0\n', scenario="code-repair"
+    )
+    _write_executable(
+        tmp_path / "shim" / "python3",
+        '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = pip ]; then echo "pip called" >&2; exit 1; fi\n'
+        # It names itself as the interpreter, so every later call still goes through it.
+        'if [ "$1" = "-c" ] && [ "$2" = "import sys; print(sys.executable)" ]; then printf \'%s\\n\' "$0"; exit 0; fi\n'
+        'case "$*" in *reef_client.serve*) exit 1;; esac\n'
+        f'exec "{sys.executable}" "$@"\n',
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 1
+    assert "reef: reef-client and reef-infra are not importable by" in result.stderr
+    assert (
+        '-m pip install reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git"'
+        in result.stderr
+    )
+    assert "pip called" not in result.stderr
+    assert not dest.exists() and not (tmp_path / "shim" / "npm.log").exists()
 
 
 @pytest.mark.unit
@@ -1769,11 +1803,12 @@ def test_git_install_kind_clones_the_pinned_ref_into_a_venv_when_the_binary_is_a
     script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version=None)
     result = _run_install(script, dest, prefix, env)
     assert result.returncode == 0, result.stderr
-    # The first two python3 calls are the install's: the sys.executable resolution of the interpreter it
-    # pins, then the -P probe of it; the vendor steps follow.
-    resolve, probe, *calls = log.read_text().splitlines()
+    # The first three python3 calls are the install's: the sys.executable resolution of the interpreter it
+    # pins, the -P probe of it, then the import check; the vendor steps follow.
+    resolve, probe, check, *calls = log.read_text().splitlines()
     assert resolve == "python3 -c import sys; print(sys.executable)"
     assert probe == "python3 -P -c "
+    assert check == "python3 -P -c import reef_client.serve, reef.harness.client.wrapper"
     assert calls[0] == (
         f"git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent {prefix}/src"
     )
@@ -2040,7 +2075,7 @@ def test_install_script_embeds_requires_with_hostile_text_and_refuses_a_bad_list
     expected = json.dumps([{"name": "notify", "kind": "permission", "check": check}])
     assert f"REQUIRES='{expected.replace(chr(39), chr(39) + chr(92) + chr(39) * 2)}'" in script
     assert '"requires": [' in script and '"extra"' not in script
-    assert "reef-pi setup  # check off what the newest release requires of you" in script
+    assert "reef-pi doctor  # check the install: interpreter, service, binary, tools, release" in script
     with pytest.raises(ValueError, match=r"requires\[0\]\.kind must be one of"):
         render_install_script(
             descriptor=get_adapter("pi"),

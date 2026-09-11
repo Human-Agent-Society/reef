@@ -27,6 +27,14 @@ When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are bloc
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics.
 
+When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
+
+  Prints one line per thing an install needs and exits 0 when they all hold:
+  the interpreter behind the wrapper and whether it imports reef and
+  reef-client, the service address and whether the token is accepted, the
+  agent binary and its version, the tools the adapter wants on PATH, and the
+  installed release against the served head.
+
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``):
 
@@ -916,6 +924,90 @@ def setup(
     return 0
 
 
+def _doctor_row(ok: bool, label: str, value: str) -> str:
+    return f"{'ok' if ok else '!!'}  {label:<12} {value}"
+
+
+def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
+    """One line per thing an install needs; 0 when every line holds, 1 otherwise.
+
+    Every check exists somewhere already (an install warning, a run time
+    warning, a route error); this is the one place that runs them all and
+    says which failed."""
+    rows: list[tuple[bool, str, str]] = []
+    try:
+        import reef
+
+        rows.append((True, "interpreter", f"{sys.executable} (reef {reef.__version__}, reef-client importable)"))
+    except Exception as exc:  # pragma: no cover - the wrapper itself imports both
+        rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
+    try:
+        upstream = _extract_reef_url(adapter, Path(compose_dir))
+    except WrapperError as exc:
+        upstream = None
+        rows.append((False, "service", f"binding unreadable: {exc}"))
+    if upstream is None:
+        rows.append((False, "service", "no Reef URL in the tree's model binding files"))
+    else:
+        upstream = _strip_v1(upstream)
+        token = _reef_token(adapter, compose_dir)
+        req = urllib.request.Request(f"{upstream}/reef/status", headers=_reef_headers(scenario, token))
+        try:
+            with urllib.request.urlopen(req, timeout=10):
+                rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
+        except urllib.error.HTTPError as exc:
+            rows.append(
+                (False, "service", f"{upstream} answered {exc.code}: {exc.read().decode(errors='replace')[:120]}")
+            )
+        except OSError as exc:
+            rows.append((False, "service", f"{upstream} unreachable: {exc}"))
+    if Path(binary).is_file():
+        try:
+            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            first = (version.stdout or version.stderr).strip().splitlines()
+            rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            rows.append((False, "binary", f"{binary} did not run: {exc}"))
+    else:
+        rows.append((False, "binary", f"{binary} missing; rerun the install"))
+    for command, package in get_adapter(adapter).client_tools:
+        found = shutil.which(command)
+        rows.append(
+            (found is not None, "tool", f"{command} {'at ' + found if found else 'missing: install ' + package}")
+        )
+    installed = _installed_release(compose_dir)
+    if installed is None:
+        rows.append(
+            (
+                False,
+                "release",
+                f"no {HARNESS_RELEASE_FILE} beside the tree; this tree did not come through the install",
+            )
+        )
+    elif upstream is not None and rows[1][0]:
+        try:
+            catalog = _catalog(upstream, scenario, adapter, _reef_token(adapter, compose_dir))
+        except SystemExit as exc:
+            rows.append((False, "release", f"installed {installed[:8]}; catalog unreadable: {exc.code}"))
+        else:
+            head = next((row.get("release_id") for row in reversed(catalog) if not row.get("pending")), None)
+            if head == installed:
+                rows.append((True, "release", f"{installed[:8]} installed, the served head"))
+            else:
+                rows.append(
+                    (
+                        True,
+                        "release",
+                        f"{installed[:8]} installed; served head {str(head)[:8]}, the next session offers it",
+                    )
+                )
+    else:
+        rows.append((True, "release", f"{installed[:8]} installed"))
+    for ok, label, value in rows:
+        print(_doctor_row(ok, label, value))
+    return 0 if all(ok for ok, _, _ in rows) else 1
+
+
 def main() -> None:
     binary = os.environ.get("REEF_HARNESS_BINARY")
     compose = os.environ.get("REEF_HARNESS_COMPOSE")
@@ -945,6 +1037,9 @@ def main() -> None:
         parser.add_argument("request", nargs=argparse.REMAINDER, help="what the harness should do, in plain words")
         ns = parser.parse_args(args[1:])
         harness(scenario, adapter, compose, " ".join(ns.request))
+    elif args and args[0] == "doctor":
+        argparse.ArgumentParser(prog=f"reef-{adapter} doctor").parse_args(args[1:])
+        sys.exit(doctor(scenario, adapter, compose, binary))
     elif args and args[0] == "setup":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} setup")
         parser.add_argument("--yes", action="store_true", help="run every check without asking (for scripts)")

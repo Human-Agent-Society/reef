@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 
 import pytest
 
 from reef.artifact import ArtifactRef, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.errors import ReefError
 from reef.records import RecordConflict, RecordRetention, RecordStore
 
 
@@ -513,3 +515,97 @@ def test_purge_rejects_invalid_limits(limit) -> None:
 def test_audit_page_rejects_invalid_bounds(options) -> None:
     with RecordStore() as records, pytest.raises(ValueError):
         records.audit_page("math", **options)
+
+
+def legacy_database(path) -> None:
+    """A record database still in SQLite's rollback journal mode."""
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE agent_record (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_record_id TEXT NOT NULL UNIQUE, scenario TEXT NOT NULL,
+                request_type TEXT NOT NULL, payload_json TEXT NOT NULL,
+                created_at REAL NOT NULL, references_json TEXT NOT NULL, artifact_json TEXT
+            )
+            """
+        )
+        connection.commit()
+
+
+class SwitchCursor:
+    def __init__(self, row) -> None:
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class SwitchReplies:
+    """A connection whose journal-mode switch answers the way SQLite would.
+
+    Replies are played in order and the last one repeats: ``"busy"`` raises
+    SQLITE_BUSY, the way a contended switch does; any other value is returned as
+    the resulting journal mode, which is how SQLite reports a switch it declined
+    to make.
+    """
+
+    def __init__(self, *replies: str) -> None:
+        self._replies = list(replies)
+        self.calls = 0
+
+    def execute(self, statement: str) -> SwitchCursor:
+        self.calls += 1
+        reply = self._replies.pop(0) if len(self._replies) > 1 else self._replies[0]
+        if reply == "busy":
+            raise sqlite3.OperationalError("database is locked")
+        return SwitchCursor((reply,))
+
+
+@pytest.mark.unit
+def test_a_contended_journal_mode_switch_is_retried_until_the_database_is_wal(tmp_path, monkeypatch) -> None:
+    """SQLite answers a contended journal-mode switch with SQLITE_BUSY without
+    running the busy handler, so the connection timeout does not cover it. Both
+    that and a declined switch (the unchanged mode, returned rather than raised)
+    have to be retried, or a racing opener fails outright."""
+    monkeypatch.setattr(RecordStore, "_WAL_RETRY_INTERVAL", 0.0)
+    with RecordStore(tmp_path / "records.sqlite3") as store:
+        real, replies = store._connection, SwitchReplies("busy", "delete", "busy", "wal")
+        try:
+            store._connection = replies
+            store._enable_wal()
+        finally:
+            store._connection = real
+    assert replies.calls == 4  # three contended answers, then the switch lands
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reply, reported", [("busy", "unknown"), ("delete", "delete")])
+def test_a_switch_that_never_lands_names_the_database_and_the_wait(tmp_path, monkeypatch, reply, reported) -> None:
+    monkeypatch.setattr(RecordStore, "_WAL_SWITCH_TIMEOUT", 0.02)
+    monkeypatch.setattr(RecordStore, "_WAL_RETRY_INTERVAL", 0.0)
+    with RecordStore(tmp_path / "records.sqlite3") as store:
+        real = store._connection
+        try:
+            store._connection = SwitchReplies(reply)
+            with pytest.raises(ReefError, match=f"could not switch .* to WAL within .*journal mode is {reported}"):
+                store._enable_wal()
+        finally:
+            store._connection = real
+
+
+@pytest.mark.unit
+def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> None:
+    """The race as it reaches CI: several stores opening one legacy database at
+    once, each trying to convert it to WAL. Repeated because the loser of the
+    race is timing-dependent; a single round misses the regression most times."""
+
+    def open_store(_: int) -> None:
+        with RecordStore(database):
+            pass
+
+    for attempt in range(60):
+        database = tmp_path / f"legacy-{attempt}.sqlite3"
+        legacy_database(database)
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            tuple(executor.map(open_store, range(12)))  # raises if any opener saw "database is locked"

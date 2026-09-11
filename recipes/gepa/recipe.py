@@ -49,14 +49,14 @@ from reef.recipe.errors import RecipeConfigError
 from reef.records import RecordStore
 from reef.train.cordis_backend import CordisRecipe
 from reef.train.cordis_backend.strategies import Mutation, Proposer, resolve_proposer
-from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.train.evaluation.contracts import CandidateEvaluationPlugin
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
 from .archive import Archive
 from .backend import ARCHIVE_STATE_KEY, GEPABackend
 from .components import EVOLVABLE_KINDS
-from .method import Feedback, GEPAProposer, GEPASelector, default_feedback
+from .method import Feedback, GEPAPlugin, GEPAProposer, default_feedback
 
 #: Node kinds a deployment evolves unless ``gepa.components`` says otherwise.
 #: Rules and skills are the instruction surface both surveyed harnesses
@@ -84,11 +84,15 @@ class _UnboundProposer(Proposer):
         raise RecipeConfigError("the GEPA proposer is bound by GEPARecipe.build; this recipe was not built")
 
 
-class _UnboundSelector:
-    """The placeholder ``build`` swaps for a selector bound to the archive."""
+class _UnboundPlugin:
+    """The placeholder ``build`` swaps for a plugin factory bound to the archive.
 
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        raise RecipeConfigError("the GEPA selector is bound by GEPARecipe.build; this recipe was not built")
+    A callable sentinel so it passes the recipe's ``candidate_plugin`` check;
+    calling it before ``GEPARecipe.build`` binds the archive is the error.
+    """
+
+    def __call__(self, backend: Any) -> CandidateEvaluationPlugin:
+        raise RecipeConfigError("the GEPA plugin is bound by GEPARecipe.build; this recipe was not built")
 
 
 @dataclass(frozen=True)
@@ -123,7 +127,7 @@ class GEPARecipe(CordisRecipe):
         # satisfied and tell build() which of them it may still bind.
         supplied = dict(evolution)
         supplied.setdefault("propose", _UnboundProposer())
-        supplied.setdefault("selection", _UnboundSelector())
+        supplied.setdefault("selection", _UnboundPlugin())
         kwargs = super()._recipe_kwargs({**settings, "evolution": supplied}, values)
         _check_seed_ids(kwargs["seed"])
 
@@ -190,10 +194,14 @@ class GEPARecipe(CordisRecipe):
                     valset_size=len(self.tasks),
                 )
             )
-        selector = self.candidate_selector
-        if isinstance(selector, _UnboundSelector):
-            selector = GEPASelector(archive)
-        bound = dataclasses.replace(self, propose=propose, candidate_selector=selector)
+
+        def bind_archive(backend: Any) -> CandidateEvaluationPlugin:
+            return GEPAPlugin(backend, archive)
+
+        candidate_plugin = self.candidate_plugin
+        if isinstance(candidate_plugin, _UnboundPlugin):
+            candidate_plugin = bind_archive
+        bound = dataclasses.replace(self, propose=propose, candidate_plugin=candidate_plugin)
         training_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
         return bound._build_trainer(
             scenario,

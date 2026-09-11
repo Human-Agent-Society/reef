@@ -1,10 +1,33 @@
 import type { Metadata } from "next";
+import { DM_Mono, DM_Sans, Source_Serif_4 } from "next/font/google";
 import { Header } from "@/components/header";
 import { RouteFocus } from "@/components/route-focus";
 import { ThemeSync } from "@/components/theme-sync";
 import { getSearchDocuments, navigation } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
+
+const dmSans = DM_Sans({
+  weight: ["400", "500", "600", "800"],
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-dm-sans",
+});
+
+const sourceSerif = Source_Serif_4({
+  // Keep optical sizing available across the site's heading sizes.
+  axes: ["opsz"],
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-source-serif",
+});
+
+const dmMono = DM_Mono({
+  weight: ["400", "500"],
+  subsets: ["latin"],
+  display: "swap",
+  variable: "--font-dm-mono",
+});
 
 export const metadata: Metadata = {
   title: { default: siteConfig.title, template: `%s | Reef Docs` },
@@ -32,13 +55,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   const searchDocuments = getSearchDocuments();
 
   return (
-    <html lang="en" suppressHydrationWarning>
-      <head>
-        {/* Linked here, not imported from the stylesheet, so the browser fetches the fonts in parallel with the CSS. */}
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;800&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap" />
-      </head>
+    <html lang="en" className={`${dmSans.variable} ${sourceSerif.variable} ${dmMono.variable}`} suppressHydrationWarning>
       <body>
         {/* Inline so it runs at parse time, before first paint. */}
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />

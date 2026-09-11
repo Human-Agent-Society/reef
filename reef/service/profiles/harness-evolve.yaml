@@ -1,0 +1,80 @@
+# The harness evolve recipe's profile: what `reef serve --recipe harness-evolve --model <provider>/<model>`
+# starts. One file in two roles: the stack config reef serve reads, and the preset the recipe registry
+# reads back by name. The person decides the model; everything else here is the same for every
+# deployment of this recipe, and a deployment that outgrows it copies this file and passes it with -c.
+#
+# The proposer and the evaluator are the tutorial's (tutorials/evolve-your-harness/harness/evolution.py):
+# reef serve puts that package on the service's PYTHONPATH from the checkout it runs in, so this profile
+# runs from a reef checkout.
+implementation: reef.train.cordis_backend.recipe:CordisRecipe
+
+evolution:
+  adapter: pi
+  propose: harness.evolution:propose
+  evaluate: harness.evolution:evaluate
+  # A person asks for a change with /reef-harness; the next session is offered the install.
+  requests: true
+  version_check: true
+  # An evolved extension runs in pi's process with the person's privileges: held until promoted.
+  review_kinds: [code_extension]
+  # A workflow change does not move the seed tasks, so a candidate that does not lose is published.
+  selection: always
+  step_record_dir: .reef/harness-evolve/steps
+  proposals_dir: .reef/harness-evolve/proposals
+  tasks:
+    - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000?
+      Reply with the count as a plain integer alone on the last line.'
+    - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not
+      approximate). Reply with the value as a plain integer alone on the last line.'
+    - '[csv] Compute the median of the value column in this csv:
+      id,value
+      1,12
+      2,47
+      3,3
+      4,88
+      5,21
+      6,56
+      7,9
+      8,74
+      9,30
+      Reply with the median as a plain integer alone on the last line.'
+  seed:
+    - id: answer-style
+      name: skill
+      config:
+        name: answer-style
+        text: '# answer-style
+          Starter skill. The evolution loop replaces this placeholder with
+          concrete guidance learned from failing tasks.
+          '
+
+data:
+  batch_size: 1
+  max_score: 0.0
+  # Failure reports and asks both start steps.
+  training_mode: hybrid
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  recipe: harness-evolve
+  # No token: the service listens on loopback only. Add one here in a copy of this file for anything else.
+  upstream_url: ${REEF_UPSTREAM_URL:?}
+  upstream_model: ${REEF_UPSTREAM_MODEL:?}
+  upstream_api_key: ${REEF_UPSTREAM_API_KEY}
+  agent_record_dir: .reef/harness-evolve/agent-record
+  artifact_repository: .reef/harness-evolve/artifacts.git
+  artifact_work_dir: .reef/harness-evolve/artifact-work
+  artifact_cache_dir: .reef/harness-evolve/artifact-cache
+
+run_dir: .reef/harness-evolve/stack
+
+services:
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    env:
+      # reef serve sets both when it starts a profile: the registry reads this file back from here,
+      # and the tutorial's method package imports from the checkout.
+      REEF_RECIPE_CONFIG_DIR: "${REEF_RECIPE_CONFIG_DIR}"
+      PYTHONPATH: "${REEF_CHECKOUT}/tutorials/evolve-your-harness:${REEF_CHECKOUT}"
+    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
