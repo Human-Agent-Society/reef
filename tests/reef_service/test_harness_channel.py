@@ -688,19 +688,29 @@ def _install_fixture(
 
 
 def _source_env(shim: Path) -> dict:
-    """The test's environment with ``shim`` first on PATH and the checkout on PYTHONPATH.
+    """The test's environment with ``shim`` first on PATH, the checkout on PYTHONPATH and a private HOME.
 
     CI runs the suite against the source tree rather than an installed
     reef-infra, and the install's import check runs under ``-P``, so the
     checkout must reach the interpreter through PYTHONPATH: without it the
     check fails and the script's pip branch installs reef-infra from GitHub
-    into the user site, which every later test then sees."""
+    into the user site, which every later test then sees. HOME is a directory
+    beside the shim: the script links the wrapper into ~/.local/bin, and the
+    suite must never move the developer's own reef-pi."""
     repo_root = str(Path(__file__).resolve().parents[2])
+    home = shim.parent / "home"
+    home.mkdir(exist_ok=True)
     return {
         **os.environ,
+        "HOME": str(home),
         "PATH": f"{shim}:{os.environ['PATH']}",
         "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
     }
+
+
+def _home_link(env: dict) -> Path:
+    """The wrapper link the script writes under the environment's HOME."""
+    return Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
 
 
 def _run_install(
@@ -986,13 +996,16 @@ REEF_WRAPPER_EOF
 if [ ! -x "$DEST/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$DEST/reef-pi")" ]; then
     wrapper_text > "$DEST/reef-pi"
     chmod +x "$DEST/reef-pi"
-    # Symlink into ~/.local/bin so reef-pi is on PATH. The link target
-    # must be absolute: DEST defaults to the relative ./reef-harness, and a
-    # relative target resolves against the link's own directory, so the link
-    # dangles and reef-pi is not runnable from anywhere.
-    DEST_ABS="$(cd "$DEST" && pwd)"
+fi
+# Symlink into ~/.local/bin so reef-pi is on PATH, on every run: a link an earlier install left
+# moved or dangling is repaired on an unchanged tree, and a link already right is left alone. The
+# target must be absolute: DEST defaults to the relative ./reef-harness, and a relative target
+# resolves against the link's own directory, so the link dangles and reef-pi runs from nowhere.
+DEST_ABS="$(cd "$DEST" && pwd)"
+LINK="$HOME/.local/bin/reef-pi"
+if [ "$(readlink "$LINK" 2>/dev/null || true)" != "$DEST_ABS/reef-pi" ]; then
     mkdir -p "$HOME/.local/bin"
-    ln -sf "$DEST_ABS/reef-pi" "$HOME/.local/bin/reef-pi"
+    ln -sf "$DEST_ABS/reef-pi" "$LINK"
     case ":$PATH:" in
         *":$HOME/.local/bin:"*) ;;
         *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
@@ -1117,14 +1130,12 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     # binary path is baked as an absolute path
     binary_abs = str(prefix / "node_modules" / ".bin" / "pi")
     assert binary_abs in text
-    # symlinked onto PATH
-    link = Path.home() / ".local" / "bin" / "reef-pi"
+    # symlinked onto PATH, under the test's own HOME
+    link = _home_link(env)
     assert link.is_symlink()
     assert link.resolve() == wrapper.resolve()
     assert "run:" in result.stdout
     assert "reef-pi" in result.stdout
-    # clean up the symlink so it doesn't leak between tests
-    link.unlink(missing_ok=True)
 
 
 @pytest.mark.unit
@@ -1157,7 +1168,19 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     fourth = _run_install(script, dest, prefix, env)
     assert fourth.returncode == 0, fourth.stderr
     assert wrapper.stat().st_mode & 0o111
-    (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
+    # The link is checked on every run: one moved elsewhere comes back on the unchanged tree, and the PATH
+    # notice prints only then, never on a run that leaves a right link alone.
+    link = _home_link(env)
+    assert link.resolve() == wrapper.resolve()
+    assert "add '" not in fourth.stderr
+    link.unlink()
+    link.symlink_to(tmp_path / "elsewhere" / "reef-pi")
+    untouched = wrapper.stat().st_mtime_ns
+    fifth = _run_install(script, dest, prefix, env)
+    assert fifth.returncode == 0, fifth.stderr
+    assert "composition already current" in fifth.stdout
+    assert link.resolve() == wrapper.resolve()
+    assert wrapper.stat().st_mtime_ns == untouched
 
 
 @pytest.mark.unit
@@ -1204,7 +1227,6 @@ def test_install_and_wrapper_ignore_a_reef_directory_in_the_working_directory(tm
     run = subprocess.run([str(dest / "reef-pi")], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
     assert run.returncode == 1
     assert "reef-pi: no Reef URL in the tree's model binding files" in run.stderr
-    (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
 
 
 @pytest.mark.unit
@@ -1229,14 +1251,11 @@ def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -
     )
     assert result.returncode == 0, result.stderr
     assert "not importable by python3" not in result.stderr  # the bootstrap short-circuited
-    link = Path.home() / ".local" / "bin" / "reef-pi"
-    try:
-        assert link.is_symlink()
-        assert Path(os.readlink(link)).is_absolute()
-        assert link.resolve() == (workdir / "reef-harness" / "reef-pi").resolve()
-        assert link.exists()  # not dangling
-    finally:
-        link.unlink(missing_ok=True)
+    link = _home_link(env)
+    assert link.is_symlink()
+    assert Path(os.readlink(link)).is_absolute()
+    assert link.resolve() == (workdir / "reef-harness" / "reef-pi").resolve()
+    assert link.exists()  # not dangling
 
 
 @pytest.mark.unit
@@ -1753,8 +1772,7 @@ def _git_install_fixture(
         '    chmod +x "$3/bin/python"\n'
         "fi\n",
     )
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
-    return script, tmp_path / "dest", prefix, env, log
+    return script, tmp_path / "dest", prefix, _source_env(shim), log
 
 
 @pytest.mark.unit
