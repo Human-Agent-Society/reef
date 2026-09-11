@@ -34,9 +34,9 @@
   --callout-warn-ink: #7a1f1a;
   --shadow-sm: 0 1px 1px rgba(20, 17, 14, .03);
   --shadow-lg: 0 24px 64px rgba(20, 17, 14, .07);
-  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
-  --font-mono: "DM Mono", ui-monospace, monospace;
+  --font-sans: var(--font-dm-sans), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-serif: var(--font-source-serif), Georgia, "Times New Roman", serif;
+  --font-mono: var(--font-dm-mono), ui-monospace, monospace;
 }
 
 html { color-scheme: light; scroll-padding-top: 128px; } /* auto scroll: smooth raced the late-mounting diagrams and landed deep links hundreds of px off */
