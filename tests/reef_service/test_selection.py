@@ -1,10 +1,12 @@
 """Contracts for evaluating and selecting produced updates.
 
 A candidate-evaluation plugin is one class that both measures (``evaluate``)
-and decides (``decide``). The built-in policies are mixins a plugin composes at
-class-definition time — :class:`AlwaysSelectMixin`, :class:`RegressionGateMixin`,
-cordis's :class:`ScoreComparisonMixin` — paired with :class:`BackendEvaluateMixin`
-when the measurement comes from the training backend.
+and decides (``decide``). The built-in policies are abstract mixins a plugin
+composes at class-definition time — :class:`AlwaysSelectMixin`,
+:class:`RegressionGateMixin`, cordis's :class:`ScoreComparisonMixin` — paired
+with :class:`BackendEvaluateMixin` when the measurement comes from the training
+backend. Each implements one half of the contract and leaves the other
+abstract, so only the pairing is instantiable.
 """
 
 from __future__ import annotations
@@ -21,9 +23,17 @@ from reef.train.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     EvaluationResult,
+    RegressionGateMixin,
     SelectionDecision,
     UpdateCandidate,
 )
+
+
+class DecideOnlyBackend:
+    """Stands in for the training backend: these cases exercise ``decide`` only."""
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        raise AssertionError("this case exercises decide(), not evaluate()")
 
 
 def evaluation() -> EvaluationResult:
@@ -41,15 +51,19 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
         assert issubclass(plugin, CandidateEvaluationPlugin)
         assert callable(plugin.evaluate)
         assert callable(plugin.decide)
-    # The policies are mixins: they supply decide() and nothing else.
-    for mixin in (AlwaysSelectMixin, ScoreComparisonMixin):
+    # The policies are mixins: they supply decide() and stay abstract on the half
+    # they do not implement, so a mixin cannot stand up as a plugin on its own.
+    for mixin in (AlwaysSelectMixin, RegressionGateMixin, ScoreComparisonMixin):
         assert callable(mixin.decide)
-        assert not hasattr(mixin, "evaluate")
+        assert mixin.__abstractmethods__ == frozenset({"evaluate"})
+    assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})
+    with pytest.raises(TypeError, match="abstract"):
+        AlwaysSelectMixin()  # type: ignore[abstract]
 
 
 def test_always_select_returns_an_explainable_structured_decision() -> None:
     candidate = UpdateCandidate("job-7")
-    decision = AlwaysSelectMixin().decide(candidate, evaluation())
+    decision = BackendAlwaysSelectPlugin(DecideOnlyBackend()).decide(candidate, evaluation())
 
     assert decision.selected is True
     assert decision.outcome == "select"

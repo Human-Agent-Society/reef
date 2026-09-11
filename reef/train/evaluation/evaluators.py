@@ -8,13 +8,17 @@ selector object, a plugin mixes in the methods it needs: a *decide* mixin
 measurement comes from the training backend rather than the plugin's own code,
 the :class:`BackendEvaluateMixin`.
 
-    class MyPlugin(RegressionGateMixin, CandidateEvaluationPlugin):
+Every mixin inherits the plugin contract and implements one half of it, so the
+other half stays abstract: a mixin cannot be instantiated on its own, and a
+plugin is only concrete once both halves are supplied.
+
+    class MyPlugin(RegressionGateMixin):
         def __init__(self, ...):
             super().__init__(metric="clean_rate", margin=0.17)
             ...
         def evaluate(self, candidate): ...   # its own measurement
 
-    class BackendScored(ScoreMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+    class BackendScored(ScoreMixin, BackendEvaluateMixin):
         def __init__(self, backend, **kw):
             super().__init__(**kw)           # the decide mixin's config
             self._backend = backend          # BackendEvaluateMixin reads this
@@ -32,8 +36,12 @@ from reef.train.evaluation.contracts import (
 )
 
 
-class AlwaysSelectMixin:
-    """Give a plugin a ``decide()`` that publishes every evaluated candidate."""
+class AlwaysSelectMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that publishes every evaluated candidate.
+
+    Abstract on its own: ``evaluate`` is inherited unimplemented, so this
+    mixes into a plugin rather than standing up as one.
+    """
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         return SelectionDecision(
@@ -45,7 +53,7 @@ class AlwaysSelectMixin:
         )
 
 
-class RegressionGateMixin:
+class RegressionGateMixin(CandidateEvaluationPlugin):
     """Give a plugin a best-checkpoint ``decide()`` over one scalar metric.
 
     Where :class:`AlwaysSelectMixin` publishes every evaluated candidate, this
@@ -113,7 +121,7 @@ class RegressionGateMixin:
         )
 
 
-class BackendEvaluateMixin:
+class BackendEvaluateMixin(CandidateEvaluationPlugin):
     """Give a plugin an ``evaluate()`` that delegates to ``self._backend``.
 
     For methods whose measurement is the training backend's own candidate
@@ -127,7 +135,7 @@ class BackendEvaluateMixin:
         return self._backend.evaluate(candidate)
 
 
-class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
     """The default plugin: evaluate via the training backend, publish every candidate.
 
     What a weight-training deployment gets when it configures no evaluation — the

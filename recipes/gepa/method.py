@@ -323,7 +323,7 @@ class GEPAProposer:
             return models.served
 
 
-class GEPASelectorMixin:
+class GEPASelectorMixin(CandidateEvaluationPlugin):
     """GEPA's valset pass and Pareto update, as a plugin's ``decide()``.
 
     Selection is strict mean improvement over the served composition, which
@@ -386,7 +386,7 @@ class GEPASelectorMixin:
         )
 
 
-class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin):
     """GEPA's candidate evaluation: measure through the backend, decide by valset mean."""
 
     def __init__(self, backend: Any, archive: Archive) -> None:

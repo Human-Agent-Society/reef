@@ -36,7 +36,6 @@ from reef.train.cordis_backend import (
     Mutation,
     MutationError,
     Promoter,
-    ScoreComparisonMixin,
     ScoreComparisonPlugin,
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, admit_mutations
@@ -2071,7 +2070,7 @@ def test_min_win_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     assert result.metrics["selected"] is False
     assert result.metrics["min_win_margin"] == 1
     with pytest.raises(ValueError, match="min_win_margin must be an integer of at least 0"):
-        ScoreComparisonMixin(min_win_margin=-1)
+        ScoreComparisonPlugin(b, min_win_margin=-1)
 
 
 def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path: Path) -> None:

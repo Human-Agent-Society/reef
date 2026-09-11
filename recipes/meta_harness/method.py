@@ -328,7 +328,7 @@ class MetaHarnessProposer(Proposer):
         )
 
 
-class MetaHarnessSelectorMixin:
+class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
     """Give a plugin a ``decide()`` that serves strict mean-score improvements."""
 
     def __init__(self, store: PopulationStore) -> None:
@@ -380,7 +380,7 @@ class MetaHarnessSelectorMixin:
         )
 
 
-class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin):
     """Meta-Harness's candidate evaluation: measure through the backend, decide on the population frontier."""
 
     def __init__(self, backend: Any, store: PopulationStore) -> None:

@@ -16,7 +16,7 @@ import pytest
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
 from recipes.gepa.backend import ARCHIVE_STATE_KEY
-from recipes.gepa.method import GEPAProposer, GEPASelectorMixin, default_feedback
+from recipes.gepa.method import GEPAPlugin, GEPAProposer, default_feedback
 from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -552,6 +552,13 @@ def evaluation(candidate: tuple, current: tuple) -> EvaluationResult:
     )
 
 
+class DecideOnlyBackend:
+    """Stands in for the training backend: these cases exercise ``decide`` only."""
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        raise AssertionError("this case exercises decide(), not evaluate()")
+
+
 def pending_archive(tmp_path: Path) -> Archive:
     archive = Archive(tmp_path / "archive.json")
     archive.seed({"rules": SEED_TEXT})
@@ -561,7 +568,9 @@ def pending_archive(tmp_path: Path) -> Archive:
 
 def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    decision = GEPASelectorMixin(archive).decide(UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0)))
+    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
+        UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0))
+    )
 
     assert decision.selected
     assert (decision.policy, decision.policy_version) == ("gepa", "1")
@@ -581,7 +590,9 @@ def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_pat
 
 def test_a_candidate_that_does_not_beat_the_served_mean_is_rejected(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    decision = GEPASelectorMixin(archive).decide(UpdateCandidate("c1"), evaluation((1.0, 0.0), (0.0, 1.0)))
+    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
+        UpdateCandidate("c1"), evaluation((1.0, 0.0), (0.0, 1.0))
+    )
 
     assert not decision.selected  # equal means are not an improvement
     assert (archive.served, archive.pending) == (0, None)
@@ -591,7 +602,7 @@ def test_a_candidate_that_does_not_beat_the_served_mean_is_rejected(tmp_path: Pa
 
 def test_the_seed_is_validated_once(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    selector = GEPASelectorMixin(archive)
+    selector = GEPAPlugin(DecideOnlyBackend(), archive)
     selector.decide(UpdateCandidate("c1"), evaluation((0.0, 0.0), (1.0, 1.0)))
     archive.add({"rules": "third"}, 0, [1.0])
     selector.decide(UpdateCandidate("c2"), evaluation((0.0, 0.0), (1.0, 1.0)))

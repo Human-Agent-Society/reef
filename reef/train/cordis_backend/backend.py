@@ -593,7 +593,7 @@ def _native_refusal(entries: Sequence[Mapping[str, Any]], descriptor: AdapterDes
     return None
 
 
-class ScoreComparisonMixin:
+class ScoreComparisonMixin(CandidateEvaluationPlugin):
     """Give a plugin a ``decide()`` that selects when wins exceed losses by ``min_win_margin`` (0: plain majority)."""
 
     def __init__(self, *, min_win_margin: int = 0) -> None:
@@ -624,7 +624,7 @@ class ScoreComparisonMixin:
         )
 
 
-class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
+class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
     """Cordis's default evaluation: measure through the backend, decide by score comparison."""
 
     def __init__(self, backend: Any, *, min_win_margin: int = 0) -> None:
