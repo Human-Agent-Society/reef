@@ -156,6 +156,10 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Non-secret backend identity/config attached to experiment runs."""
         return {}
 
+    def failed_step_metrics(self) -> Mapping[str, Any]:
+        """Metadata to retain when the current instruction fails before producing a result."""
+        return {}
+
     @abstractmethod
     def prepare_step(
         self,

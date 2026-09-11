@@ -297,7 +297,8 @@ The commit log holds the verdict; the step record holds what decided it.
 absolute at build, under which each scenario's steps write
 ``<scenario>/<step>/proposer.json``, one entry per model call the proposer
 made: the ``model``, the ``messages`` and ``params`` of a ``chat`` or the
-``body`` of a ``complete``, then the ``reply`` or ``response`` or the
+``body`` of a ``complete``, then the ``reply`` and provider ``response``
+for a built-in ``chat`` binding, the ``response`` for ``complete``, or the
 ``error``, and the ``seconds`` it took; ``<scenario>/<step>/mutations.json``,
 the parsed proposal with its options, written before admission so a refused
 proposal is on file; and ``<scenario>/<step>/episodes/<side>-<task index>/``,
@@ -309,7 +310,19 @@ stderr, the residue, the score, the failure and the stage path, so a scorer
 can be replayed from the record alone. Long text is clipped with a marker
 naming what was dropped, and a credential shaped literal anywhere in the
 record is replaced by ``[redacted credential]``: the record holds what the
-tree boundary has not seen yet. A recheck step asks the proposer nothing, so
+tree boundary has not seen yet. Provider reasoning remains separate from
+the final reply: Chat Completions responses keep ``reasoning``,
+``reasoning_content`` and ``reasoning_details`` as returned; Messages keeps
+thinking content blocks, and Responses keeps reasoning output items.
+Streaming responses retain these fields too. Opaque encrypted blocks and
+signatures are retained as provider data, not converted into readable
+thinking. A provider that returns no reasoning, an older record, or a custom
+text-only binding has none to display; Reef does not reconstruct it.
+A proposer failure keeps its ``step_record`` directory on the instruction's
+failed commit, including after the trainer reloads. A later retry points to
+its own directory. Older failed commits that did not record this link are
+not matched to files by directory order or timestamps.
+A recheck step asks the proposer nothing, so
 it writes ``episodes/`` only and counts zero proposer calls; a step skipped
 on the step cap or the failure streak writes nothing and names no
 ``step_record``. A step directory is never reused: a step retried after a

@@ -190,6 +190,218 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
     assert record[0]["usage"] == {"input_tokens": 9, "output_tokens": 2} and "usage" not in record[1]
 
 
+def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
+    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding
+
+    response = {
+        "id": "response-1",
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "the answer",
+                    "reasoning": "a" * (RECORD_TEXT_CAP + 3),
+                    "reasoning_details": [{"type": "reasoning.text", "text": "sk-test-0123456789abcdefghijklmnop"}],
+                }
+            }
+        ],
+    }
+    record: list[dict[str, Any]] = []
+    inner = ModelBinding("http://up", "m")
+    budgeted = _BudgetedBinding(inner, [0], 0, record)
+    _capture(monkeypatch, response)
+    assert budgeted.chat([]) == "the answer"
+    assert record[0]["reply"] == "the answer"
+    captured = record[0]["response"]["choices"][0]["message"]
+    assert captured["reasoning"].endswith("[clipped 3 chars]")
+    assert captured["reasoning_details"][0]["text"] == "[redacted credential]"
+    # Capturing is a copy: clipping and redaction must not alter the live provider response.
+    assert inner.last_response() == response
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "plain"}}]})
+    assert budgeted.chat([]) == "plain"
+    assert "reasoning" not in record[1]["response"]["choices"][0]["message"]
+
+
+def test_stream_keeps_reasoning_fields_and_merges_detail_fragments(monkeypatch) -> None:
+    chunks = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "role": "assistant",
+                        "reasoning": "first ",
+                        "reasoning_content": "one ",
+                        "reasoning_details": [{"index": 0, "type": "reasoning.text", "text": "step "}],
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "reasoning": "second",
+                        "reasoning_content": "two",
+                        "reasoning_details": [
+                            {"index": 0, "text": "by step"},
+                            {"index": 1, "type": "reasoning.encrypted", "data": "opaque"},
+                        ],
+                    }
+                }
+            ]
+        },
+        {"choices": [{"delta": {"content": "answer"}, "finish_reason": "stop"}]},
+    ]
+    _capture(monkeypatch, "".join(f"data: {json.dumps(chunk)}\n" for chunk in chunks).encode())
+    binding = ModelBinding("http://up", "m")
+    assert binding.chat([], stream=True) == "answer"
+    message = binding.last_response()["choices"][0]["message"]
+    assert message["reasoning"] == "first second"
+    assert message["reasoning_content"] == "one two"
+    assert message["reasoning_details"] == [
+        {"index": 0, "type": "reasoning.text", "text": "step by step"},
+        {"index": 1, "type": "reasoning.encrypted", "data": "opaque"},
+    ]
+
+
+def test_anthropic_stream_keeps_thinking_and_signature_blocks(monkeypatch) -> None:
+    events = [
+        {"type": "message_start", "message": {"model": "claude"}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "consider "}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "this"}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "signed"}},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "redacted_thinking", "data": "opaque"}},
+        {"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "answer"}},
+    ]
+    _capture(monkeypatch, "".join(f"data: {json.dumps(event)}\n" for event in events).encode())
+    binding = ModelBinding("http://up", "claude", api="anthropic")
+    assert binding.chat([], stream=True) == "answer"
+    assert binding.last_response()["content"] == [
+        {"type": "thinking", "thinking": "consider this", "signature": "signed"},
+        {"type": "redacted_thinking", "data": "opaque"},
+        {"type": "text", "text": "answer"},
+    ]
+
+
+def test_responses_stream_keeps_reasoning_output_items(monkeypatch) -> None:
+    output = [
+        {"id": "reason-1", "type": "reasoning", "summary": [{"type": "summary_text", "text": "Consider this."}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+    ]
+    events = [
+        {"type": "response.output_item.done", "output_index": index, "item": item} for index, item in enumerate(output)
+    ]
+    _capture(monkeypatch, "".join(f"data: {json.dumps(event)}\n" for event in events).encode())
+    binding = ModelBinding("http://up", "m", api="responses")
+    assert binding.chat([], stream=True) == "answer"
+    assert binding.last_response()["output"] == output
+    # A stream ending after text deltas must retain that text alongside the completed reasoning item.
+    events[-1] = {"type": "response.output_text.delta", "delta": "answer"}
+    _capture(monkeypatch, "".join(f"data: {json.dumps(event)}\n" for event in events).encode())
+    assert binding.chat([], stream=True) == "answer"
+    assert binding.last_response()["output"] == output
+
+
+def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text(monkeypatch) -> None:
+    from reef.train.cordis_backend.backend import _BudgetedBinding
+
+    class CustomChat(ModelBinding):
+        def chat(self, messages, **params):
+            return "custom text"
+
+    inner = CustomChat("http://up", "m")
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "previous", "reasoning": "old"}}]})
+    inner.complete({"messages": []})
+    assert inner.last_response() is not None
+    record: list[dict[str, Any]] = []
+    assert _BudgetedBinding(inner, [0], 0, record).chat([]) == "custom text"
+    assert "response" not in record[0]
+
+
+def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
+    from reef.harness.episodes.model_binding import ModelBindingError
+
+    binding = ModelBinding("http://up", "m")
+    _capture(monkeypatch, {"choices": [{"message": {"role": "assistant", "content": "answer", "reasoning": "old"}}]})
+    binding.chat([])
+    _capture(monkeypatch, b"invalid json")
+    with pytest.raises(ModelBindingError):
+        binding.chat([])
+    assert binding.last_response() is None
+
+
+def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
+    from reef.harness.episodes.model_binding import ModelBindingError
+    from reef.train.cordis_backend.backend import _BudgetedBinding
+
+    record: list[dict[str, Any]] = []
+    response = {
+        "choices": [
+            {
+                "message": {"role": "assistant", "content": None, "reasoning": "Still considering."},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 20},
+    }
+    _capture(monkeypatch, response)
+    with pytest.raises(ModelBindingError, match="non-text"):
+        _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record).chat([])
+    assert "error" in record[0] and "reply" not in record[0]
+    assert record[0]["response"] == response
+    assert record[0]["usage"] == {"input_tokens": 3, "output_tokens": 20}
+
+
+def test_reasoning_fragments_do_not_merge_unidentified_blocks_or_stringify_null_signatures() -> None:
+    from reef.harness.episodes.model_binding import _merge_reasoning_details
+
+    details: list[Any] = []
+    _merge_reasoning_details(details, [{"type": "reasoning.text", "index": 0, "text": "step", "signature": None}])
+    _merge_reasoning_details(details, [{"index": 0, "signature": "signed"}])
+    _merge_reasoning_details(details, [{"index": 0, "signature": None, "text": None}])
+    _merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "one"}])
+    _merge_reasoning_details(details, [{"type": "reasoning.text", "id": None, "text": "two"}])
+    assert details == [
+        {"type": "reasoning.text", "index": 0, "text": "step", "signature": "signed"},
+        {"type": "reasoning.text", "id": None, "text": "one"},
+        {"type": "reasoning.text", "id": None, "text": "two"},
+    ]
+
+
+@pytest.mark.parametrize("partial_json", ['{"path":"app.py"}', '{"path":'])
+def test_anthropic_stream_preserves_tool_input_or_its_incomplete_fragments(monkeypatch, partial_json) -> None:
+    events = [
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "read-1", "name": "read_file", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": partial_json[:4]},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": partial_json[4:]},
+        },
+        {"type": "content_block_stop", "index": 0},
+    ]
+    _capture(monkeypatch, "".join(f"data: {json.dumps(event)}\n" for event in events).encode())
+    response = ModelBinding("http://up", "claude", api="anthropic").complete({"messages": [], "stream": True})
+    block = response["content"][0]
+    assert block["id"] == "read-1" and block["name"] == "read_file"
+    if partial_json.endswith("}"):
+        assert block["input"] == {"path": "app.py"}
+        assert "partial_json" not in block
+    else:
+        assert "input" not in block
+        assert block["partial_json"] == partial_json
+
+
 def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> None:
     """With client models, the provider block lists them all, the served one first
     and still the default; a template with no such list is unchanged."""
