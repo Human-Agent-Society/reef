@@ -291,6 +291,9 @@ class _Stack:
             self.shutdown()
             raise
         _log(f"stack up. logs: {self.run_dir}/*.log")
+        hint = install_hint(self.config)
+        if hint is not None:
+            _log(f"install the harness in another terminal: {hint}")
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -364,6 +367,29 @@ class _Stack:
     @property
     def exit_code(self) -> int:
         return int(self._unexpected_exit.is_set())
+
+
+def install_hint(config: Mapping[str, Any]) -> str | None:
+    """The one line that installs a harness evolution deployment's harness, or None for a deployment without one.
+
+    Printed when the stack is up so nobody copies it from a README: the
+    address the service listens on (loopback when it binds every interface),
+    the adapter the deployment evolves, and the token the config holds."""
+    evolution = config.get("evolution")
+    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
+    if not isinstance(adapter, str) or not adapter:
+        return None
+    host = str(config_value(config, "reef", "host", default="127.0.0.1"))
+    if host in ("0.0.0.0", "::", ""):
+        host = "127.0.0.1"
+    port = config_value(config, "reef", "port", default="8900")
+    token = config_value(config, "reef", "token", default=None)
+    if token is None:
+        tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
+        if isinstance(tokens, list) and tokens:
+            token = str(tokens[0])
+    header = f"-H 'Authorization: Bearer {token}' " if token else ""
+    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
 
 
 def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None) -> int:

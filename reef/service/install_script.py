@@ -160,7 +160,7 @@ def _wrapper_lines(
         f'# Usage: {wrapper_name} -p "fix the bug"     # run the agent (receipts captured)',
         f'#        {wrapper_name} report --score 0 --feedback "..."  # report last run\'s receipts',
         f'#        {wrapper_name} harness "what the harness should do"  # ask reef for a change',
-        f"#        {wrapper_name} setup  # check off what the newest release requires of you",
+        f"#        {wrapper_name} doctor  # check the install: interpreter, service, binary, tools, release",
         "# Runs the python3 the install resolved; rerun the install from another shell to change it.",
         'export REEF_HARNESS_BINARY="$BINARY_ABS"',
         'export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"',
@@ -189,9 +189,28 @@ def _wrapper_lines(
     ]
 
 
+def _import_check_lines(wrapper_name: str) -> list[str]:
+    """Refuse, before anything is installed or written, an interpreter that cannot import what the wrapper runs.
+
+    The check takes ``$SAFE_PATH`` so the working directory cannot stand in
+    for an installed package: run from a checkout, it would pass for an
+    interpreter that has no reef at all. Nothing is installed on the person's
+    behalf: the one line that would is printed for them to run. The
+    distribution is ``reef-infra``; the import package is ``reef``.
+    """
+    return [
+        f"# reef-client (the capture proxy) and reef (the wrapper) must import in $PYTHON, which {wrapper_name} runs.",
+        "if ! \"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null; then",
+        f'    echo "reef: reef-client and reef-infra are not importable by $PYTHON, which {wrapper_name} runs; install them there:" >&2',
+        '    echo "    \\"$PYTHON\\" -m pip install reef-client \\"reef-infra @ git+https://github.com/Human-Agent-Society/reef.git\\"" >&2',
+        '    echo "or rerun this script from a shell whose python3 has them" >&2',
+        "    exit 1",
+        "fi",
+    ]
+
+
 def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) -> list[str]:
     """The vendor-delegating install step: check the pin, else install through the vendor's channel."""
-    wrapper_name = f"reef-{descriptor.name}"
     prelude: list[str] = []
     # Extra condition the "already installed" gate ands onto the binary check.
     gate = ""
@@ -255,27 +274,6 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "        ;;",
         "esac",
         "",
-        "# Ensure reef-client (capture proxy) and reef (harness wrapper) are importable by $PYTHON, the",
-        f"# interpreter {wrapper_name} runs.",
-        # The distribution is `reef-infra`; naming it `reef` here makes pip
-        # reject the requirement ("produced metadata for project name
-        # reef-infra") on every run. The install stays best effort - a managed
-        # interpreter (PEP 668) refuses it too - so the import is rechecked
-        # after and the wrapper's own failure is named here rather than
-        # surfacing later as a bare ModuleNotFoundError from the launcher.
-        # The check takes $SAFE_PATH so the working directory cannot stand in
-        # for an installed package: run from a checkout, it would pass for an
-        # interpreter that has no reef at all.
-        (
-            "\"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
-            'spin "installing reef-client and reef-infra for $PYTHON" '
-            '"$PYTHON" -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true'
-        ),
-        (
-            "\"$PYTHON\" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || "
-            f'echo "reef: warning: reef-client and reef-infra are not importable by $PYTHON, which {wrapper_name} runs; '
-            'install them there, or rerun this script from a shell whose python3 has them" >&2'
-        ),
         *(
             f'command -v {command} >/dev/null 2>&1 || echo "reef: warning: {descriptor.binary} wants {package} '
             f"({command}) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; "
@@ -551,6 +549,8 @@ def render_install_script(
         "fi",
         "",
         *_python_lines(),
+        "",
+        *_import_check_lines(wrapper_name),
         "",
         *_release_info_tool_lines(wrapper_name),
         "",
