@@ -8,6 +8,7 @@ lives in :mod:`reef.service.deploy.settings` and :mod:`reef.service.assembly`.
 
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import os
@@ -16,7 +17,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from types import FrameType
@@ -30,6 +31,7 @@ from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 from reef.service.deploy.config import (
     PROJECT_ROOT,
+    DeployConfigError,
     config_value,
     interpolate_config,
     interpolate_environment,
@@ -40,6 +42,7 @@ from reef.service.deploy.config import (
 )
 from reef.service.deploy.execution import service_executor_config, service_executor_selection
 from reef.service.deploy.settings import build_parser
+from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -441,12 +444,99 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     return stack.exit_code
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+#: ``--model <provider>/<model>``: the upstream URL and the key a provider prefix stands for. A key of None
+#: comes from ``REEF_UPSTREAM_API_KEY`` and is required; ollama ignores its key, so any word will do.
+_PROVIDERS: dict[str, tuple[str, str | None]] = {
+    "ollama": ("http://127.0.0.1:11434", "ollama"),
+    "openai": ("https://api.openai.com", None),
+}
+
+#: The tutorial method the harness-evolve profile points at; the profile runs from the checkout that holds it.
+_PROFILE_METHODS = {"harness-evolve": Path("tutorials/evolve-your-harness/harness/evolution.py")}
+
+
+def _model_overrides(spec: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """The ``reef.*`` overrides ``--model`` stands for.
+
+    A known provider prefix fills the URL and the key; any other spelling,
+    a prefix of another kind included (``Qwen/Qwen3-8B``), is the model id
+    alone and the URL comes from the config or the environment."""
+    provider, _, model = spec.partition("/")
+    if provider not in _PROVIDERS or not model:
+        return {"upstream_model": spec}
+    url, key = _PROVIDERS[provider]
+    if key is None:
+        key = environ.get("REEF_UPSTREAM_API_KEY", "").strip()
+        if not key:
+            raise DeployConfigError(f"--model {spec}: set REEF_UPSTREAM_API_KEY to the {provider} key")
+    return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
+
+
+def _resolve_config(config: str | None, recipe: str | None, environ: Mapping[str, str]) -> str:
+    """The config ``reef serve`` runs: ``-c`` or ``--recipe``, else ``REEF_CONFIG``, else ``reef.yaml``."""
+    if config and recipe:
+        raise DeployConfigError("pass -c <file> or --recipe <name>, not both")
+    if config:
+        return config
+    if recipe:
+        try:
+            return str(profile_path(recipe))
+        except UnknownProfileError as exc:
+            raise DeployConfigError(str(exc)) from exc
+    if environ.get("REEF_CONFIG"):
+        return environ["REEF_CONFIG"]
+    if (PROJECT_ROOT / "reef.yaml").is_file():
+        return "reef.yaml"
+    raise DeployConfigError(
+        "no config: pass one with -c <file>, or start a recipe's profile with --recipe <name>; "
+        f"recipes with a profile: {', '.join(profile_names())}"
+    )
+
+
+def _prepare_profile(recipe: str, model: str | None, environ: MutableMapping[str, str]) -> None:
+    """What a profile needs from the environment before it loads: its own directory, the checkout, a model."""
+    if not model and not environ.get("REEF_UPSTREAM_MODEL", "").strip():
+        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --model <provider>/<model>")
+    method = _PROFILE_METHODS.get(recipe)
+    if method is not None and not (PROJECT_ROOT / method).is_file():
+        raise DeployConfigError(
+            f"the {recipe} profile runs from a reef checkout: its proposer is {method}, not found under {PROJECT_ROOT}"
+        )
+    environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
+    environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
+
+
+def build_serve_parser() -> argparse.ArgumentParser:
+    """``reef serve``'s own arguments: the service child's parser plus the profile and model flags.
+
+    Only the launcher takes them; ``python -m reef.service`` still refuses ``--recipe``."""
     parser = build_parser()
+    parser.add_argument(
+        "--recipe",
+        default=None,
+        metavar="NAME",
+        help="Start a built in recipe's profile instead of a config file (harness-evolve).",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        metavar="[PROVIDER/]MODEL",
+        help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = build_serve_parser()
     args, extras = parser.parse_known_args(argv)
-    config_path = args.config or os.environ.get("REEF_CONFIG", "reef.yaml")
     try:
         overrides = _parse_overrides(extras)
+        if args.model:
+            # An explicit --key beats what the provider prefix fills in.
+            overrides = {**_model_overrides(args.model, os.environ), **overrides}
+        config_path = _resolve_config(args.config, args.recipe, os.environ)
+        if args.recipe:
+            _prepare_profile(args.recipe, args.model, os.environ)
         exit_code = _run_orchestrator(config_path, overrides)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
