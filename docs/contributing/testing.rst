@@ -18,7 +18,7 @@ collection. Without the training dependencies, pytest cannot collect the full
 suite.
 
 CI runs source and installed-wheel tests on Python 3.10, 3.11, and 3.12 with
-two pytest workers. Tests in the same file stay in one worker, preserving
+four pytest workers. Tests in the same file stay in one worker, preserving
 module fixture reuse. In an activated development environment, install the same
 test runner plugin and reproduce the parallel run:
 
@@ -26,7 +26,7 @@ test runner plugin and reproduce the parallel run:
 
    uv pip install pytest-xdist==3.8.0
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     pytest tests/ -n 2 --dist loadfile
+     pytest tests/ -n 4 --dist loadfile
 
 Use ``-n 0`` for a serial run when diagnosing a failure. Tests in different
 files may run at the same time; use temporary directories and dynamically
@@ -54,14 +54,14 @@ Markers
 Coverage
 --------
 
-CI measures coverage on Python 3.12, combining both workers' results, and
+CI measures coverage on Python 3.12, combining all workers' results, and
 ``[tool.coverage.report] fail_under`` in
 ``pyproject.toml`` is a gate: the run exits non-zero when total coverage falls
 below the floor. Reproduce it the way CI does:
 
 .. code:: bash
 
-   pytest tests -n 2 --dist loadfile --cov=reef --cov-report=term
+   pytest tests -n 4 --dist loadfile --cov=reef --cov-report=term
 
 ``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
 package, so a partial run reports far less than CI does; measure against the
