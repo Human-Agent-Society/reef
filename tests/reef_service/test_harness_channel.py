@@ -684,22 +684,30 @@ def _install_fixture(
     # reef-infra into user site-packages and change what every later
     # subprocess reports as the reef version.
     _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
-    # ... and the checkout on its path, so the bootstrap's import check passes
-    # from any cwd. CI runs the suite against the source tree rather than an
-    # installed reef-infra, so without this a test that runs the script from a
-    # temp cwd reaches the pip branch.
+    return script, tmp_path / "dest", prefix, _source_env(shim)
+
+
+def _source_env(shim: Path) -> dict:
+    """The test's environment with ``shim`` first on PATH and the checkout on PYTHONPATH.
+
+    CI runs the suite against the source tree rather than an installed
+    reef-infra, and the install's import check runs under ``-P``, so the
+    checkout must reach the interpreter through PYTHONPATH: without it the
+    check fails and the script's pip branch installs reef-infra from GitHub
+    into the user site, which every later test then sees."""
     repo_root = str(Path(__file__).resolve().parents[2])
-    env = {
+    return {
         **os.environ,
         "PATH": f"{shim}:{os.environ['PATH']}",
         "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
     }
-    return script, tmp_path / "dest", prefix, env
 
 
-def _run_install(script: Path, dest: Path, prefix: Path, env: dict) -> subprocess.CompletedProcess:
+def _run_install(
+    script: Path, dest: Path, prefix: Path, env: dict, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["sh", str(script), str(dest), str(prefix)], env=env, capture_output=True, text=True, timeout=60
+        ["sh", str(script), str(dest), str(prefix)], env=env, cwd=cwd, capture_output=True, text=True, timeout=60
     )
 
 
@@ -782,9 +790,28 @@ else
     exit 1
 fi
 
+# One interpreter for the install and the wrapper it writes: the python3 this shell resolves,
+# followed through to the interpreter behind it (a version manager's shim would re-decide it at
+# every run), by absolute path. -P (Python 3.11 and newer) keeps the working directory off sys.path.
+PYTHON="$(command -v python3 || true)"
+if [ -z "$PYTHON" ]; then
+    echo 'reef: python3 not found on PATH' >&2
+    exit 1
+fi
+PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
+# A python3 that prints at startup (a sitecustomize, a banner) would name nothing runnable.
+if [ ! -x "$PYTHON" ]; then
+    echo "reef: python3 did not name its interpreter (sys.executable read '$PYTHON'); rerun from a shell whose python3 prints nothing at startup" >&2
+    exit 1
+fi
+SAFE_PATH=""
+if "$PYTHON" -P -c '' 2>/dev/null; then
+    SAFE_PATH="-P"
+fi
+
 # The release file's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
 release_info_tool() {
-    python3 - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
+    "$PYTHON" - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
 import hashlib, json, sys
 mode, path = sys.argv[1], sys.argv[2]
 try:
@@ -874,9 +901,10 @@ case " $installed " in
         ;;
 esac
 
-# Ensure reef-client (capture proxy) and reef (harness wrapper) are installed.
-python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for python3" python3 -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
-python3 -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by python3; install them into the environment that runs the wrapper" >&2
+# Ensure reef-client (capture proxy) and reef (harness wrapper) are importable by $PYTHON, the
+# interpreter reef-pi runs.
+"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || spin "installing reef-client and reef-infra for $PYTHON" "$PYTHON" -m pip install --quiet --user reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git" || true
+"$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null || echo "reef: warning: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there, or rerun this script from a shell whose python3 has them" >&2
 command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
 command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
@@ -937,9 +965,6 @@ fi
 # differs: it depends on this machine (binary, interpreter), not on the composition.
 BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
 COMPOSE_ABS="$(mkdir -p "$DEST/pi-agent" && cd "$DEST/pi-agent" && pwd)"
-# The interpreter that imports reef now, by absolute path: the shell that runs the wrapper later
-# need not have it on PATH.
-PYTHON_ABS="$(python3 -c 'import sys; print(sys.executable)')"
 wrapper_text() {
     cat <<REEF_WRAPPER_EOF
 #!/bin/sh
@@ -949,12 +974,13 @@ wrapper_text() {
 #        reef-pi report --score 0 --feedback "..."  # report last run's receipts
 #        reef-pi harness "what the harness should do"  # ask reef for a change
 #        reef-pi setup  # check off what the newest release requires of you
+# Runs the python3 the install resolved; rerun the install from another shell to change it.
 export REEF_HARNESS_BINARY="$BINARY_ABS"
 export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
 export REEF_HARNESS_SCENARIO="code-repair"
 export REEF_HARNESS_ADAPTER="pi"
 export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
-exec "$PYTHON_ABS" -m reef.harness.client.wrapper "\$@"
+exec "$PYTHON"${SAFE_PATH:+ $SAFE_PATH} -m reef.harness.client.wrapper "\$@"
 REEF_WRAPPER_EOF
 }
 if [ ! -x "$DEST/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$DEST/reef-pi")" ]; then
@@ -1081,8 +1107,10 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
     assert "code-repair" in text
     assert '"pi"' in text
     assert "PI_CODING_AGENT_DIR" in text
-    # the interpreter that imported reef at install time, by absolute path, not python3 from a later PATH
-    assert f'exec "{sys.executable}" -m reef.harness.client.wrapper "$@"' in text
+    # the interpreter behind the python3 the install resolved (the shim execs sys.executable), by absolute
+    # path, with -P where it exists; never python3 from a later PATH
+    safe_path = " -P" if sys.version_info >= (3, 11) else ""
+    assert f'exec "{sys.executable}"{safe_path} -m reef.harness.client.wrapper "$@"' in text
     # compose dir is baked as an absolute path (resolved at install time)
     assert "$COMPOSE_ABS" not in text
     assert str(dest / "pi-agent") in text
@@ -1116,7 +1144,9 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     assert "composition already current" in second.stdout
     assert wrapper.stat().st_mtime_ns == before
     # An older install's wrapper ran python3 from PATH; the rerun replaces it on the unchanged tree.
-    wrapper.write_text(text.replace(f'exec "{sys.executable}"', "exec python3"), encoding="utf-8")
+    stale = text.replace(f'exec "{sys.executable}"', "exec python3")
+    assert stale != text
+    wrapper.write_text(stale, encoding="utf-8")
     third = _run_install(script, dest, prefix, env)
     assert third.returncode == 0, third.stderr
     assert "composition already current" in third.stdout
@@ -1127,6 +1157,53 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     fourth = _run_install(script, dest, prefix, env)
     assert fourth.returncode == 0, fourth.stderr
     assert wrapper.stat().st_mode & 0o111
+    (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
+
+
+@pytest.mark.unit
+def test_install_refuses_a_python3_that_prints_at_startup_instead_of_baking_garbage(tmp_path) -> None:
+    """A python3 that writes to stdout before running -c (a sitecustomize, a version manager banner) would leave
+    the resolved path unrunnable; the install says so and writes nothing rather than dying later in a python step."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", scenario="code-repair"
+    )
+    _write_executable(
+        tmp_path / "shim" / "python3", f'#!/bin/sh\necho "python shim v1"\nexec "{sys.executable}" "$@"\n'
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 1
+    assert "reef: python3 did not name its interpreter" in result.stderr
+    assert not (dest / "reef-pi").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(sys.version_info < (3, 11), reason="-P exists from Python 3.11")
+def test_install_and_wrapper_ignore_a_reef_directory_in_the_working_directory(tmp_path) -> None:
+    """A directory named ``reef`` in the working directory (a checkout's parent, for one) shadows
+    the package for a bare ``python3 -c`` or ``-m``. The import check runs with ``-P`` and sees
+    the interpreter's real state, so it neither installs from GitHub nor warns; the wrapper
+    takes the same flag and runs from that directory."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", scenario="code-repair"
+    )
+    # The pip branch would install reef-infra from GitHub into user site-packages: refuse it, loudly.
+    _write_executable(
+        tmp_path / "shim" / "python3",
+        '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = pip ]; then echo "pip called" >&2; exit 1; fi\n'
+        f'exec "{sys.executable}" "$@"\n',
+    )
+    cwd = tmp_path / "cwd"
+    (cwd / "reef").mkdir(parents=True)
+    (cwd / "reef" / "__init__.py").write_text("")
+    result = _run_install(script, dest, prefix, env, cwd=cwd)
+    assert result.returncode == 0, result.stderr
+    assert "pip called" not in result.stderr
+    assert "not importable" not in result.stderr
+    # The wrapper reaches its own code from the shadowing directory: the tree has no binding file, and
+    # that is the wrapper module's complaint, not the launcher's ModuleNotFoundError.
+    run = subprocess.run([str(dest / "reef-pi")], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+    assert run.returncode == 1
+    assert "reef-pi: no Reef URL in the tree's model binding files" in run.stderr
     (Path.home() / ".local" / "bin" / "reef-pi").unlink(missing_ok=True)
 
 
@@ -1200,8 +1277,7 @@ def _pinned_env(tmp_path: Path) -> tuple[Path, dict]:
     _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
     shim = tmp_path / "shim"
     _write_executable(shim / "npm", "#!/bin/sh\nexit 0\n")
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
-    return prefix, env
+    return prefix, _source_env(shim)
 
 
 def _render_to(path: Path, files: dict[str, str], release_id: str) -> Path:
@@ -1660,10 +1736,16 @@ def _git_install_fixture(
         'mkdir -p "$last/.git"\nprintf \'%s\\n\' "$ref" > "$last/REF"\n',
     )
     # python3 -m venv DIR makes DIR/bin/python, whose -m pip install then drops the binary the pin expects.
+    # The install resolves python3 through sys.executable first: the shim names itself, so every later call
+    # still goes through it and lands in the log.
     _write_executable(
         shim / "python3",
         "#!/bin/sh\n"
         f'printf \'python3 %s\\n\' "$*" >> "{log}"\n'
+        'if [ "$1" = "-c" ] && [ "$2" = "import sys; print(sys.executable)" ]; then\n'
+        "    printf '%s\\n' \"$0\"\n"
+        "    exit 0\n"
+        "fi\n"
         'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
         '    mkdir -p "$3/bin"\n'
         f'    printf \'#!/bin/sh\\nprintf "python %%s\\\\n" "$*" >> "{log}"\\nmkdir -p "$(dirname "$0")"\\n'
@@ -1680,7 +1762,11 @@ def test_git_install_kind_clones_the_pinned_ref_into_a_venv_when_the_binary_is_a
     script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version=None)
     result = _run_install(script, dest, prefix, env)
     assert result.returncode == 0, result.stderr
-    calls = log.read_text().splitlines()
+    # The first two python3 calls are the install's: the sys.executable resolution of the interpreter it
+    # pins, then the -P probe of it; the vendor steps follow.
+    resolve, probe, *calls = log.read_text().splitlines()
+    assert resolve == "python3 -c import sys; print(sys.executable)"
+    assert probe == "python3 -P -c "
     assert calls[0] == (
         f"git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent {prefix}/src"
     )
@@ -1967,7 +2053,7 @@ def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_an
     shim = tmp_path / "shim"
     npm_log = tmp_path / "npm.log"
     _write_executable(shim / "npm", f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\nexit 0\n')
-    env = {**os.environ, "PATH": f"{shim}:{os.environ['PATH']}"}
+    env = _source_env(shim)
     dest = tmp_path / "dest"
     v2 = tmp_path / "install-v2.sh"
     v2.write_text(
