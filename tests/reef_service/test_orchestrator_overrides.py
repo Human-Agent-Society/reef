@@ -104,3 +104,22 @@ def test_cli_exits_with_status_2_before_starting_services_for_an_invalid_path(tm
 
     assert excinfo.value.code == 2
     assert "reef.artifact_dir" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness() -> None:
+    """Printed once the stack is up: the loopback address when the service binds every interface, the adapter the
+    deployment evolves, and the token the config holds; a deployment without a harness gets no line."""
+    from reef.service.deploy.orchestrator import install_hint
+
+    config = {"evolution": {"adapter": "pi"}, "reef": {"host": "0.0.0.0", "port": 8901, "token": "reef-local"}}
+    assert install_hint(config) == (
+        "curl -fsS -H 'Authorization: Bearer reef-local' 'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash"
+    )
+    assert install_hint({"evolution": {"adapter": "opencode"}, "reef": {"tokens": ["a", "b"]}}) == (
+        "curl -fsS -H 'Authorization: Bearer a' 'http://127.0.0.1:8900/reef/harness/install?adapter=opencode' | bash"
+    )
+    assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"host": "127.0.0.1", "port": 8900}}) == (
+        "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
+    )
+    assert install_hint({"reef": {"recipe": "recipe"}}) is None

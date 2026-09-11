@@ -475,7 +475,10 @@ no endpoint or credential, and the binding takes its token from
 through the interpreter that imported reef when the script ran and reads the
 token back from the binding, so the shell that runs it later needs neither
 on its own. The wrapper keeps
-the receipts from a run, so ``report`` only needs the result. Pinning,
+the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
+(the interpreter and its imports, the service and its token, the binary,
+the tools on PATH, the installed release against the served head) and exits
+0 when they all hold. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
