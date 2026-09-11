@@ -446,7 +446,10 @@ gateway is the gateway's (Reef reads ``x-forwarded-host`` and
 ``x-forwarded-proto`` when a proxy sets them); the served tree itself carries
 no endpoint or credential, and the binding takes its token from
 ``REEF_TOKEN`` in your shell when the script runs. It also puts a
-``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH. The wrapper keeps
+``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH; the wrapper runs
+through the interpreter that imported reef when the script ran and reads the
+token back from the binding, so the shell that runs it later needs neither
+on its own. The wrapper keeps
 the receipts from a run, so ``report`` only needs the result. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.

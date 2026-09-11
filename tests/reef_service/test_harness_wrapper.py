@@ -792,6 +792,25 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
 
 
 @pytest.mark.unit
+def test_wrapper_takes_the_token_from_the_binding_when_the_shell_has_none(tmp_path, monkeypatch) -> None:
+    """The install wrote the token beside Reef's address, under the template's parent key; a later shell needs no
+    REEF_TOKEN, one that sets it still wins, and an install without a token left nothing to send."""
+    from reef.harness.client.wrapper import _reef_token
+
+    reef = {"api": "openai-completions", "baseUrl": "http://127.0.0.1:8900/v1", "apiKey": "from-binding"}
+    other = {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "other"}
+    compose = _pi_tree(tmp_path, {"providers": {"anthropic": other, "reef": reef}})
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    assert _reef_token("pi", compose) == "from-binding"
+    monkeypatch.setenv("REEF_TOKEN", "from-shell")
+    assert _reef_token("pi", compose) == "from-shell"
+    monkeypatch.delenv("REEF_TOKEN")
+    bare = _pi_tree(tmp_path / "bare", {"providers": {"reef": {**reef, "apiKey": ""}}})
+    assert _reef_token("pi", bare) is None
+    assert _reef_token("pi", "") is None
+
+
+@pytest.mark.unit
 def test_wrapper_refuses_a_binding_file_that_leaves_the_composition(tmp_path, monkeypatch) -> None:
     from dataclasses import replace
 
@@ -982,10 +1001,24 @@ def test_harness_without_spooled_receipts_submits_training(tmp_path, capsys) -> 
     assert request["path"] == "/reef/train"
     assert request["body"]["text"] == "read papers first"
     assert request["body"]["release_id"] == "rel-3"
-    assert "authorization" not in request["headers"]
+    assert request["headers"]["authorization"] == "Bearer dummy"  # no REEF_TOKEN in the shell: models.json's apiKey
     out = capsys.readouterr().out
     assert "reef-pi: training request q-2 accepted" in out
     uuid.UUID(request["body"]["session"])
+
+
+@pytest.mark.unit
+def test_run_agent_reaches_reef_with_the_bindings_token_when_the_shell_has_none(tmp_path) -> None:
+    """The proxy and the agent's own extensions carry the token the install wrote, so a plain shell runs the tree."""
+    reef = _FakeReef({"agent_record_id": "q-3", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    binary = _make_fake_pi(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+    reef.close()
+
+    (call,) = [seen for seen in reef.seen if seen["path"].startswith("/v1/chat/completions")]
+    assert call["headers"]["authorization"] == "Bearer dummy"  # models.json's apiKey, written by the install
 
 
 @pytest.mark.unit

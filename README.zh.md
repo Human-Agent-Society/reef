@@ -209,7 +209,7 @@ reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 
 ```bash
 export REEF_TOKEN="reef-local"   # the script writes it into the installed harness's
-                                 # model binding; keep it exported for `report`
+                                 # model binding, where reef-pi reads it back
 curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
   'http://localhost:8901/reef/harness/install?adapter=pi' | bash
 reef-pi -p "fix the failing test in auth.py"

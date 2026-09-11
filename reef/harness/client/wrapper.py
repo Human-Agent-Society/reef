@@ -60,7 +60,8 @@ Env vars (baked into the wrapper at install time):
 
 Optional:
 
-  ``REEF_TOKEN``  bearer token for the reef service (if auth is enabled)
+  ``REEF_TOKEN``  bearer token for the reef service (if auth is enabled); unset, the wrapper
+                  uses the token the install wrote into the tree's model binding
 """
 
 from __future__ import annotations
@@ -201,7 +202,8 @@ class _Binding:
         return self.template.split("{base_url}", 1)[1]
 
 
-def _bindings(descriptor: AdapterDescriptor) -> list[_Binding]:
+def _bindings(descriptor: AdapterDescriptor, placeholder: str = "{base_url}") -> list[_Binding]:
+    """The places the adapter's model binding renders ``placeholder``: Reef's address, or with ``{api_key}`` its token."""
     found: dict[tuple[str, tuple[str, ...]], _Binding] = {}
     for templates in descriptor.model_binding.values():
         for node in templates:
@@ -211,7 +213,7 @@ def _bindings(descriptor: AdapterDescriptor) -> list[_Binding]:
                 path, value = stack.pop()
                 if isinstance(value, Mapping):
                     stack.extend(((*path, str(key)), item) for key, item in value.items())
-                elif isinstance(value, str) and "{base_url}" in value:
+                elif isinstance(value, str) and placeholder in value:
                     found.setdefault((target, path), _Binding(target, path, value))
     return list(found.values())
 
@@ -229,20 +231,24 @@ def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Bi
 
 #: A config key and the URL it holds, in JSON, YAML, TOML or dotenv spelling.
 _KEYED_URL = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\"?\s*[:=]\s*[\"']?(?P<url>https?://[^\s\"'`<>\\,;]+)")
+#: A config key and the bare value it holds, the same spellings; the token the install wrote sits under one.
+_KEYED_VALUE = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)\"?\s*[:=]\s*[\"']?(?P<value>[^\s\"'`<>\\,;]+)")
 
 
 def _has_key(text: str, key: str) -> bool:
     return re.search(rf"(?<![A-Za-z0-9_-]){re.escape(key)}(?![A-Za-z0-9_-])", text) is not None
 
 
-def _locate(text: str, binding: _Binding) -> re.Match[str] | None:
-    """The one URL under the binding's key path.
+def _locate(
+    text: str, binding: _Binding, pattern: re.Pattern[str] = _KEYED_URL, what: str = "a URL"
+) -> re.Match[str] | None:
+    """The one URL (or, with ``_KEYED_VALUE``, the one value) under the binding's key path.
 
     Candidates share the leaf key; when several do, the nearest parent keys
     in the text before each candidate settle it, so a second provider in
     the same file cannot be taken for Reef. The outermost key is the
     container every entry sits in, so it never settles anything."""
-    matches = [m for m in _KEYED_URL.finditer(text) if m.group("key") == binding.path[-1]]
+    matches = [m for m in pattern.finditer(text) if m.group("key") == binding.path[-1]]
     if len(matches) <= 1:
         return matches[0] if matches else None
     starts = [0, *(m.end() for m in matches[:-1])]
@@ -254,7 +260,7 @@ def _locate(text: str, binding: _Binding) -> re.Match[str] | None:
         if narrowed:
             candidates = narrowed
     keys = "/".join(binding.path)
-    raise WrapperError(f"{len(candidates)} entries hold a URL at {keys}; keep one Reef entry there")
+    raise WrapperError(f"{len(candidates)} entries hold {what} at {keys}; keep one Reef entry there")
 
 
 def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
@@ -271,6 +277,30 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
         suffix = binding.suffix.rstrip("/")
         return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
+
+
+def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
+    """The token the install wrote into the tree, read from where the adapter's binding renders ``{api_key}``."""
+    descriptor = get_adapter(adapter)
+    for binding in _bindings(descriptor, "{api_key}"):
+        file = _binding_file(descriptor, compose_dir, binding)
+        if not file.is_file():
+            continue
+        match = _locate(file.read_text(encoding="utf-8"), binding, _KEYED_VALUE, "a token")
+        if match is not None:
+            return match.group("value")
+    return None
+
+
+def _reef_token(adapter: str, compose_dir: str) -> str | None:
+    """The bearer token: ``REEF_TOKEN`` when set, else the one the install wrote into the tree's model binding."""
+    token = os.environ.get("REEF_TOKEN")
+    if token or not compose_dir:
+        return token or None
+    try:
+        return _extract_reef_token(adapter, Path(compose_dir))
+    except WrapperError as exc:
+        sys.exit(f"reef-{adapter}: {exc}")
 
 
 def _strip_v1(url: str) -> str:
@@ -563,7 +593,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             print(f"  {_item_line(item)}", file=sys.stderr)
     # Every call carries the session as a tag, so the spool and the agent records name the session an ask refers to.
     tags = {"session": str(uuid.uuid4()), **({"release": release} if release else {})}
-    proxy = CaptureProxy(upstream, scenario, os.environ.get("REEF_TOKEN"), tags=tags)
+    token = _reef_token(adapter, compose_dir)
+    proxy = CaptureProxy(upstream, scenario, token, tags=tags)
     try:
         proxy.start()
     except WrapperError as exc:
@@ -580,6 +611,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
+    if token:
+        env.setdefault("REEF_TOKEN", token)  # the extensions in the agent reach reef with the same token
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -599,10 +632,9 @@ def _reportable(turn: Mapping[str, Any]) -> bool:
     return bool(turn.get("receipt")) and "trial" not in (turn.get("tags") or {})
 
 
-def _reef_headers(scenario: str) -> dict[str, str]:
+def _reef_headers(scenario: str, token: str | None) -> dict[str, str]:
     """Scenario and authentication headers for Reef's record routes."""
     headers = {"Content-Type": "application/json", "x-reef-scenario": scenario}
-    token = os.environ.get("REEF_TOKEN")
     if token:
         headers["authorization"] = f"Bearer {token}"
     return headers
@@ -626,18 +658,13 @@ def report(scenario: str, adapter: str, score: float, feedback: str, per_receipt
             break
         captures_file.unlink()
 
-    headers: dict[str, str] = {
-        "Content-Type": "application/json",
-        "x-reef-scenario": scenario,
-    }
-    token = os.environ.get("REEF_TOKEN")
-    if token:
-        headers["authorization"] = f"Bearer {token}"
+    compose_dir = os.environ.get("REEF_HARNESS_COMPOSE", "")
+    headers = _reef_headers(scenario, _reef_token(adapter, compose_dir))
 
     # One report referencing the whole run batches as one trajectory sample;
     # --per-receipt sends the same score against each receipt on its own.
     reference_lists = [[receipt] for receipt in receipts] if per_receipt else [receipts]
-    release = _installed_release(os.environ.get("REEF_HARNESS_COMPOSE", ""))
+    release = _installed_release(compose_dir)
     metadata = {"client_release": release} if release else {}
 
     def restore_unsent(sent: int) -> None:
@@ -717,7 +744,7 @@ def harness(scenario: str, adapter: str, compose_dir: str, text: str) -> None:
     req = urllib.request.Request(
         f"{upstream}/reef/train",
         data=json.dumps(body).encode(),
-        headers=_reef_headers(scenario),
+        headers=_reef_headers(scenario, _reef_token(adapter, compose_dir)),
         method="POST",
     )
     try:
@@ -746,9 +773,9 @@ def _reef_url_of(adapter: str, compose_dir: str) -> str:
     return _strip_v1(reef_url)
 
 
-def _catalog(upstream: str, scenario: str, adapter: str) -> list[dict[str, Any]]:
+def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> list[dict[str, Any]]:
     """The release catalog as ``GET /reef/harness/releases`` lists it, oldest first."""
-    req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario))
+    req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             catalog = json.loads(response.read())
@@ -813,7 +840,7 @@ def setup(
             "tree did not come through reef's install channel, so there is nowhere to record a check off"
         )
     upstream = _reef_url_of(adapter, compose_dir)
-    rows = _catalog(upstream, scenario, adapter)
+    rows = _catalog(upstream, scenario, adapter, _reef_token(adapter, compose_dir))
     row = _release_to_set_up(rows, release)
     if row is None:
         if release is not None:
