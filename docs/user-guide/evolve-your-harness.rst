@@ -368,6 +368,18 @@ From a Reef checkout:
    cd tutorials/evolve-your-harness
    ./run.sh
 
+To run the same recipe as a plain deployment, without the example's driver,
+start its profile and name the model:
+
+.. code:: bash
+
+   reef serve --recipe harness-evolve --model ollama/gemma4:26b
+
+The profile is the harness evolve recipe's own default (loopback, port 8900,
+no token, state under ``.reef/harness-evolve/``); it points at this
+tutorial's proposer and evaluator, so it runs from a reef checkout. `The CLI
+reference <../reference/cli.rst>`__ has the ``--model`` spellings.
+
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
 them there to point at your own. The model name appears twice, as
