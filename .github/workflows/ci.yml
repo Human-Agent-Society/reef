@@ -10,7 +10,8 @@ permissions:
   contents: read
 
 env:
-  UV_CACHE_DIR: ${{ runner.temp }}/uv-cache
+  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+  UV_INSTALL_DIR: ${{ github.workspace }}/.ci-uv
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -27,13 +28,19 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # Use GitHub-owned actions to comply with the repository allowlist.
-      - name: Install uv
-        run: python -m pip install uv==0.12.13
+      # Cache uv itself as well as packages; only a cold cache needs pip.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
         with:
-          path: ${{ env.UV_CACHE_DIR }}
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
           key: uv-${{ runner.os }}-${{ runner.arch }}-lint-3.12-${{ hashFiles('pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
@@ -90,13 +97,19 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      # Use GitHub-owned actions to comply with the repository allowlist.
-      - name: Install uv
-        run: python -m pip install uv==0.12.13
+      # Cache uv itself as well as packages; only a cold cache needs pip.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
         with:
-          path: ${{ env.UV_CACHE_DIR }}
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
           key: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       # huggingface_hub is a declared core dependency (pyproject.toml); the
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
@@ -177,13 +190,19 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      # Use GitHub-owned actions to comply with the repository allowlist.
-      - name: Install uv
-        run: python -m pip install uv==0.12.13
+      # Cache uv itself as well as packages; only a cold cache needs pip.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
         with:
-          path: ${{ env.UV_CACHE_DIR }}
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
           key: uv-${{ runner.os }}-${{ runner.arch }}-package-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       - run: uv pip install --system --python python build twine
       # Full build (sdist, then wheel from the sdist) validates the sdist is
       # complete too; twine check validates the metadata. reef-client is a
