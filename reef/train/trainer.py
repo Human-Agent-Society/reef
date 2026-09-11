@@ -5,7 +5,7 @@ through its bound backend. Dispatched backends reserve the batch first so
 long-running work happens outside scenario locks.
 Backends expose prepare/evaluate/settle phases; the trainer executes one
 configured candidate evaluator between preparation and settlement, defaulting
-to backend evaluation plus ``AlwaysSelect``. Commit and compaction are split
+to backend evaluation plus ``AlwaysSelectMixin``. Commit and compaction are split
 so the scenario commit protocol can make the commit record durable before any
 row is deleted.
 """
@@ -24,7 +24,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.train.evaluation.evaluators import DefaultCandidateEvaluationPlugin
+from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.processors.base import DataProcessor, InstructionFailure
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult
 
@@ -110,7 +110,7 @@ class Trainer:
         elif candidate_evaluator is not None:
             self._candidate_evaluator = candidate_evaluator
         else:
-            self._candidate_evaluator = DefaultCandidateEvaluationPlugin(training_backend)
+            self._candidate_evaluator = BackendAlwaysSelectPlugin(training_backend)
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0

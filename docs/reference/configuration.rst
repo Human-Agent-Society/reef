@@ -215,6 +215,10 @@ set the variable outright.
 
 ``REEF_RECIPE_CONFIG_DIR`` is the directory preset YAML is read from, and it has
 **no default**: a bare recipe name resolves to a preset only when it is set.
+The one kind of preset reef bundles is a recipe's profile under
+``reef/service/profiles/``: ``reef serve --recipe <name>`` points this
+variable at that directory and reads the profile as both the deployment
+config and the preset (see `the CLI reference <cli.rst>`__).
 
 A preset is read as-is. ``${VAR}`` interpolates in a deployment config, never
 in a preset. A preset carries its own ``implementation``, ``model``, and

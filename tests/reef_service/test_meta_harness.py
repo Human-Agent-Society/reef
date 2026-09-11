@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
-from recipes.meta_harness.method import MetaHarnessProposer, MetaHarnessSelector, mutations_between
+from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
 from recipes.meta_harness.population import Population, PopulationStore, content_id
 from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_path
 from reef.artifact import InMemoryRepositoryBackend
@@ -82,6 +82,13 @@ def reply(parent_id: str, entries: tuple[dict[str, Any], ...], *, hypothesis: st
             "entries": entries,
         }
     )
+
+
+class DecideOnlyBackend:
+    """Stands in for the training backend: these cases exercise ``decide`` only."""
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        raise AssertionError("this case exercises decide(), not evaluate()")
 
 
 def evaluation(candidate=(1.0,), current=(0.0,)) -> EvaluationResult:
@@ -371,7 +378,7 @@ def test_selector_judges_against_the_frontier_the_incumbent_was_admitted_on(tmp_
     store.restore_committed(population.to_dict())
     store.begin(population.to_dict())
 
-    decision = MetaHarnessSelector(store).decide(
+    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
         UpdateCandidate("backend-candidate"),
         evaluation(candidate=(0.7,), current=(0.1,)),
     )
@@ -392,7 +399,7 @@ def test_selector_retains_a_non_winner_as_a_future_parent(tmp_path: Path) -> Non
     store.restore_committed(population.to_dict())
     store.begin(population.to_dict())
 
-    decision = MetaHarnessSelector(store).decide(
+    decision = MetaHarnessPlugin(DecideOnlyBackend(), store).decide(
         UpdateCandidate("backend-candidate"),
         evaluation(candidate=(0.2,), current=(0.6,)),
     )
