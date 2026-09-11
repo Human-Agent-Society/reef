@@ -80,6 +80,13 @@ def _install_updater_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
     http_utils.is_port_available = lambda _port: True  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "slime.utils.http_utils", http_utils)
 
+    # Recovery tests must provide their own CPU-only transport imports rather
+    # than inherit a LoRA test's cached module in the same pytest worker.
+    sglang = types.ModuleType("slime.backends.megatron_utils.sglang")
+    sglang.FlattenedTensorBucket = object  # type: ignore[attr-defined]
+    sglang.MultiprocessingSerializer = object  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.sglang", sglang)
+
     megatron_to_hf = types.ModuleType("slime.backends.megatron_utils.megatron_to_hf")
     megatron_to_hf.convert_to_hf = lambda *_args, **_kwargs: []  # type: ignore[attr-defined]
     monkeypatch.setitem(
@@ -165,6 +172,13 @@ def _load_module(monkeypatch: pytest.MonkeyPatch, filename: str):
     base = importlib.util.module_from_spec(base_spec)
     monkeypatch.setitem(sys.modules, base_name, base)
     base_spec.loader.exec_module(base)
+
+    transport_name = f"{package}.lora_transport"
+    transport_spec = importlib.util.spec_from_file_location(transport_name, root / "lora_transport.py")
+    assert transport_spec is not None and transport_spec.loader is not None
+    transport = importlib.util.module_from_spec(transport_spec)
+    monkeypatch.setitem(sys.modules, transport_name, transport)
+    transport_spec.loader.exec_module(transport)
 
     distributed_name = f"{package}.distributed"
     distributed_spec = importlib.util.spec_from_file_location(distributed_name, root / "distributed.py")
