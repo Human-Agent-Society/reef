@@ -17,7 +17,7 @@ from reef_service._training_deployment import LocalDeployment
 
 from reef.runtime.registry import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
-from reef.service.deploy import training_backend
+from reef.service.deploy import training
 from reef.service.deploy.config import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.provider import command_line_config
@@ -90,16 +90,16 @@ def test_in_process_backend_rejects_other_topologies(tmp_path, overrides):
 
 def test_installed_backend_name_and_dotted_reference_resolve_the_same_definition(monkeypatch):
     point = EntryPoint(name="test-mlx", value=BACKEND, group="reef.training_backends")
-    monkeypatch.setattr(training_backend, "entry_points", lambda **kwargs: (point,))
-    assert isinstance(training_backend.training_deployment_for("test-mlx"), LocalDeployment)
-    assert isinstance(training_backend.training_deployment_for(BACKEND), LocalDeployment)
+    monkeypatch.setattr(training, "entry_points", lambda **kwargs: (point,))
+    assert isinstance(training.training_deployment_for("test-mlx"), LocalDeployment)
+    assert isinstance(training.training_deployment_for(BACKEND), LocalDeployment)
 
 
 @pytest.mark.parametrize("points", [(), (1, 2)])
 def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, points):
-    monkeypatch.setattr(training_backend, "entry_points", lambda **kwargs: points)
+    monkeypatch.setattr(training, "entry_points", lambda **kwargs: points)
     with pytest.raises(DeployConfigError, match=r"unknown|ambiguous"):
-        training_backend.training_deployment_for("unavailable")
+        training.training_deployment_for("unavailable")
 
 
 def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):

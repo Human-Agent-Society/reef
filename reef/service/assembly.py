@@ -27,7 +27,7 @@ from reef.runtime.registry import RuntimeRegistry
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.settings import ServiceSettings, service_owned_keys
-from reef.service.deploy.training_backend import training_deployment_for
+from reef.service.deploy.training import training_deployment_for
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
