@@ -408,9 +408,10 @@ def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
 @pytest.mark.parametrize("selector", ["role", "worker"])
 def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypatch, tmp_path, filename, selector):
     materializer = _method(monkeypatch, "materialize_recipe")
+    monkeypatch.syspath_prepend(str(EXAMPLE_DIR.parents[1]))
     config = yaml.safe_load((EXAMPLE_DIR / "configs" / filename).read_text())
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2, "resources": {"cpus_per_worker": 2}}}
-    config["execution"] = {"services": "local", "evolution": "cpu-pool"}
+    config["execution"] = {"evolution": "cpu-pool"}
     if selector == "worker":
         config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"  # The explicit worker profile must win.

@@ -9,6 +9,9 @@ reef:
 
 recipe:
   implementation: recipe
+inference:
+  upstream-url: http://127.0.0.1:1
+  upstream-model: package-smoke
 storage:
   artifact-repository: .reef/artifacts.git
   artifact-work-dir: .reef/artifact-work

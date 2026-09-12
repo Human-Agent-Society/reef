@@ -54,6 +54,8 @@ def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
         raise RecipeConfigError(
             "schema-version 2 does not accept service/services; use reef settings and automatic assembly"
         )
+    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
+        raise RecipeConfigError("execution.services belongs to legacy process stacks")
     recipe = config.get("recipe")
     if not isinstance(recipe, Mapping) or not isinstance(recipe.get("implementation"), str):
         raise RecipeConfigError("recipe.implementation must name a recipe class")

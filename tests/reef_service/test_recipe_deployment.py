@@ -39,6 +39,15 @@ def test_versioned_config_rejects_process_sections_even_when_empty(tmp_path, sec
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
 
 
+def test_standalone_recipe_cannot_reintroduce_process_execution():
+    from reef.recipe.config import recipe_config_from_mapping
+    from reef.recipe.errors import RecipeConfigError
+
+    raw = {**method_config(), "execution": {"services": "ray"}}
+    with pytest.raises(RecipeConfigError, match="legacy process stacks"):
+        recipe_config_from_mapping(raw)
+
+
 @pytest.mark.parametrize("flag", ["service.port", "services", "execution.services.backend"])
 @pytest.mark.parametrize("from_file", [False, True])
 def test_cli_cannot_reintroduce_process_configuration(tmp_path, flag, from_file):
