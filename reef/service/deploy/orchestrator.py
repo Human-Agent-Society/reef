@@ -662,7 +662,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         overrides = _parse_overrides(extras)
         if args.model:
             # An explicit --key beats what the provider prefix fills in.
-            overrides = {**_model_overrides(args.model, os.environ, overrides), **overrides}
+            model_defaults = _model_overrides(args.model, os.environ, overrides)
+            for key, value in overrides.items():
+                model_defaults.pop(key, None)
+                model_defaults[key] = value
+            overrides = model_defaults
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ)

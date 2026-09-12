@@ -142,6 +142,15 @@ def test_model_shorthand_accepts_explicit_provider_key(captured_stack):
 
 
 @pytest.mark.usefixtures("provider_environment")
+@pytest.mark.parametrize("field", ["upstream_model", "upstream_api_key"])
+def test_model_defaults_preserve_the_last_explicit_alias(captured_stack, field):
+    with pytest.raises(SystemExit) as result:
+        main(["serve", "--model", "ollama/demo", f"--{field.replace('_', '-')}", "first", f"--{field}", "last"])
+    assert result.value.code == 0
+    assert captured_stack["config"]["reef"][field] == "last"
+
+
+@pytest.mark.usefixtures("provider_environment")
 def test_provider_temp_config_is_removed_if_stack_preparation_fails(tmp_path, monkeypatch):
     written = []
     original_write = orchestrator._write_override_config
