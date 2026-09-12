@@ -479,7 +479,12 @@ def test_a_manifest_fetch_that_times_out_is_retried_by_the_next_poll(tmp_path: P
         log = server.sessions_dir / serve.SERVE_LOG
         reef.hang_manifest_s = 0.6
         reef.release("r2", [_tool("one"), _tool("two")], parent="r1")
-        _wait(lambda: server.status()["release_id"] == "r2", timeout_s=10.0)
+        # The release ID changes before installation and the mount log write finish.
+        _wait(
+            lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")),
+            timeout_s=10.0,
+        )
+        assert server.status()["release_id"] == "r2"
         failed = _typed(_events(log), "harness/mount-failed")
         assert [f["release_id"] for f in failed] == ["r2"] and "timed out" in failed[0]["error"]
         assert [m["release_id"] for m in _typed(_events(log), "harness/mount")] == ["r1", "r2"]
