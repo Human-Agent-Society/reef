@@ -62,7 +62,7 @@ three fixed coding tasks rather than a standard benchmark.
 |---|---|---|---|---|
 | SAO | model weights | [`sao/`](sao/) | [guide](../docs/user-guide/recipes/sao.rst) | [`sao/examples/sao/`](sao/examples/sao/README.md) · [results](sao/examples/sao/README.md#results) |
 | GEPA | harness tree: rules, skills, and agent commands | [`gepa/`](gepa/) | [guide](../docs/user-guide/recipes/gepa.rst) | [`gepa/examples/aime/`](gepa/examples/aime/README.md) · [results](gepa/examples/aime/README.md#the-validation-contract) |
-| Meta-Harness | harness: complete compositions | [`meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [results](meta_harness/RESULTS.md) |
+| Meta-Harness | harness: complete compositions | [`meta_harness/`](meta_harness/) | [guide](meta_harness/README.md) | [results](meta_harness/RESULTS.md) |
 | Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) with the [`reefine.yaml`](../reef/service/profiles/reefine.yaml) profile | [guide](../docs/user-guide/recipes/reefine.rst) | [`tutorials/reefine/`](../tutorials/reefine/README.md) · [results](../tutorials/reefine/README.md#runs) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
@@ -96,14 +96,6 @@ promote before they run. `reef serve --recipe reefine` starts its profile
 without a checkout; the [Reefine tutorial](../tutorials/reefine/README.md)
 records a bug-fix flow, a research loop, and a measurement of which requests
 won the gate.
-
-The [evolve-your-harness quickstart](../tutorials/evolve-your-harness/README.md) runs the same
-proposer and evaluator through the failure-driven `harness-evolve` profile:
-the served model proposes one skill mutation over its own failing traffic,
-gated real episodes on three exact-answer coding tasks decide it, and the
-winning composition publishes for client pull via `GET /reef/harness`. Setup
-here is just `pip install reef-client`: the loop drives `reef_client`
-directly, no Harbor task or reef-eval.
 
 ## Learning from usage
 
