@@ -116,7 +116,7 @@ def test_the_model_flag_fills_the_provider_preset_and_leaves_other_spellings_alo
 
 @pytest.mark.unit
 def test_a_profile_needs_a_model_and_the_checkout_before_it_loads(tmp_path, monkeypatch) -> None:
-    with pytest.raises(DeployConfigError, match="pass --model <provider>/<model>"):
+    with pytest.raises(DeployConfigError, match=r"pass --inference\.upstream-model MODEL"):
         _prepare_profile("harness-evolve", None, {})
     monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
     with pytest.raises(DeployConfigError, match="runs from a reef checkout"):
@@ -199,4 +199,12 @@ def test_serve_without_a_config_names_the_recipes_with_a_profile(tmp_path) -> No
         timeout=60,
     )
     assert result.returncode == 2
-    assert "pass --model <provider>/<model>" in result.stderr
+    assert "pass --inference.upstream-model MODEL" in result.stderr
+
+
+@pytest.mark.unit
+def test_explicit_empty_profile_model_does_not_fall_back_to_the_environment():
+    with pytest.raises(DeployConfigError, match=r"pass --inference\.upstream-model MODEL"):
+        _prepare_profile(
+            "harness-evolve", None, {"REEF_UPSTREAM_MODEL": "env-model"}, {"inference.upstream-model": ""}
+        )

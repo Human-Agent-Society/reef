@@ -59,7 +59,9 @@ def captured_stack(monkeypatch):
 
 
 @pytest.mark.usefixtures("provider_environment")
-@pytest.mark.parametrize("spelling", ["--upstream-model", "--upstream_model", "--reef.upstream-model"])
+@pytest.mark.parametrize(
+    "spelling", ["--inference.upstream-model", "--upstream-model", "--upstream_model", "--reef.upstream-model"]
+)
 def test_provider_settings_use_shared_types_and_reach_the_child(tmp_path, monkeypatch, captured_stack, spelling):
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "env-model")
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "test-provider-secret")
@@ -68,14 +70,14 @@ def test_provider_settings_use_shared_types_and_reach_the_child(tmp_path, monkey
         main(
             [
                 "serve",
-                "--upstream-url",
+                "--inference.upstream-url",
                 "http://localhost:8000",
                 spelling,
                 "00123",
-                "--port",
+                "--service.port",
                 "9001",
-                "--no-allow-implicit-scenario-creation",
-                "--tokens",
+                "--no-service.allow-implicit-scenario-creation",
+                "--service.tokens",
                 "[]",
             ]
         )
@@ -177,9 +179,9 @@ def test_invalid_readiness_commands_are_rejected(ready):
 @pytest.mark.parametrize(
     "options,match",
     [
-        ([], "requires --upstream-url"),
-        (["--upstream-url", "http://localhost:8000"], "requires --upstream-url"),
-        (["--model", "bare-model"], "requires --upstream-url"),
+        ([], "requires --inference.upstream-url"),
+        (["--upstream-url", "http://localhost:8000"], "requires --inference.upstream-url"),
+        (["--model", "bare-model"], "requires --inference.upstream-url"),
         (["--model", "ollama/demo", "--upstream-url", "file:///private/provider-secret"], "HTTP\\(S\\)"),
         (["--model", "ollama/demo", "--port", "0"], "between 1 and 65535"),
         (["--model", "ollama/demo", "--port", "nope"], "reef.port"),
@@ -267,13 +269,13 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
                     "-m",
                     "reef.cli",
                     "serve",
-                    "--upstream-url",
+                    "--inference.upstream-url",
                     f"http://127.0.0.1:{provider.server_port}",
-                    "--upstream-model",
+                    "--inference.upstream-model",
                     "demo",
-                    "--port",
+                    "--service.port",
                     str(port),
-                    "--token",
+                    "--service.token",
                     "test-token",
                 ],
                 cwd=tmp_path,
@@ -325,3 +327,28 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
     assert "test-upstream-key" not in log_path.read_text()
     with socket.socket() as sock:
         assert sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+@pytest.mark.usefixtures("provider_environment")
+@pytest.mark.parametrize("model_flag", ["--inference.upstream-model", "--upstream_model"])
+def test_profile_accepts_explicit_provider_fields_without_model_shorthand(monkeypatch, captured_stack, model_flag):
+    monkeypatch.setattr(orchestrator, "PROJECT_ROOT", Path(__file__).resolve().parents[2])
+    with pytest.raises(SystemExit) as result:
+        main(
+            [
+                "serve",
+                "--recipe",
+                "harness-evolve",
+                "--inference.upstream-url",
+                "http://127.0.0.1:11434",
+                model_flag,
+                "gemma4:26b",
+            ]
+        )
+    assert result.value.code == 0
+    config = captured_stack["config"]["reef"]
+    assert config["upstream_url"] == "http://127.0.0.1:11434"
+    assert config["upstream_model"] == "gemma4:26b"
+    assert config["recipe"] == "reef.recipe.cordis:CordisRecipe"
+    assert config["data"]["training_mode"] == "hybrid"
+    assert captured_stack["started"] and captured_stack["stopped"]

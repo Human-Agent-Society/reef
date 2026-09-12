@@ -193,14 +193,17 @@ reef.post(
 
 使用模型 API 改进 harness 技能，无需 GPU。
 
-harness 进化 recipe 自带 profile，你只需要指定模型。在 Reef checkout 和已激活的 Python 环境中：
+harness 进化 recipe 自带 profile，只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
-reef serve --recipe harness-evolve --model ollama/gemma4:26b
+reef serve --recipe harness-evolve \
+  --inference.upstream-url http://127.0.0.1:11434 \
+  --inference.upstream-model gemma4:26b
 ```
 
-`ollama/` 和 `openai/` 前缀会自动填入端点和密钥（`openai/` 读取
-`REEF_UPSTREAM_API_KEY`）；其他写法按原样作为模型 ID，端点来自 `REEF_UPSTREAM_URL`。
+该示例连接本地 Ollama 服务。使用其他 provider 时，修改
+`--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
+`REEF_UPSTREAM_API_KEY`。
 该 profile 监听 `127.0.0.1:8900`，不设 token，状态保存在 `.reef/harness-evolve/`。
 需要修改其他内容时，复制[该 profile](reef/service/profiles/harness-evolve.yaml) 并用 `-c` 传入你的副本。
 
@@ -214,7 +217,7 @@ reef-pi -p "fix the failing test in auth.py"
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
 
-要更换模型，用另一个 `--model` 重启 `reef serve`，并在 `reef-pi` 之前重新执行安装命令：
+要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve`，并在 `reef-pi` 之前重新执行安装命令：
 安装过程会将模型 ID 写入本地 harness 配置。
 
 失败报告会触发候选技能更新。Reef 会在教程的三个编程任务上对候选技能和当前 harness

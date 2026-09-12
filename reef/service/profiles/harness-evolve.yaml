@@ -1,6 +1,7 @@
-# The harness evolve recipe's profile: what `reef serve --recipe harness-evolve --model <provider>/<model>`
-# starts. One file in two roles: the stack config reef serve reads, and the preset the recipe registry
-# reads back by name. The person decides the model; everything else here is the same for every
+# The harness evolve recipe's profile, selected with `reef serve --recipe harness-evolve`.
+# Set --inference.upstream-url URL and --inference.upstream-model MODEL.
+# One file in two roles: the stack config reef serve reads, and the preset
+# the recipe registry reads back by name. The person decides the model; everything else here is the same for every
 # deployment of this recipe, and a deployment that outgrows it copies this file and passes it with -c.
 #
 # The proposer and the evaluator are the tutorial's (tutorials/evolve-your-harness/harness/evolution.py):

@@ -28,10 +28,10 @@ from reef.storage.records import RecordRetention
 
 _DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
 
-With no selected config, --upstream-url and --upstream-model start Reef's
+With no selected config, --inference.upstream-url and --inference.upstream-model start Reef's
 record-only recipe on 127.0.0.1:8900. YAML and a services list are optional.
-Alternatively, --model-path starts managed SGLang inference and Reef;
---tensor-parallel-size selects the visible GPU count (default: 1).
+Alternatively, --inference.model-path starts managed SGLang inference and Reef;
+--inference.tensor-parallel-size selects the visible GPU count (default: 1).
 Config files are selected explicitly with -c; REEF_CONFIG and ./reef.yaml
 are not discovered by the launcher.
 
@@ -46,18 +46,18 @@ The Reef HTTP child receives the effective configuration from the launcher.
 Config overrides:
   Public settings below share type conversion with YAML. Explicit CLI
   values override YAML; omitted settings use the dataclass defaults.
-  Both --upstream-model and legacy --upstream_model spellings work.
+  Use the full public namespace; legacy aliases remain accepted.
   Lists and objects take one quoted JSON/YAML value, including [] or {}.
   Selected recipe/runtime fields share these rules; use -c <file> --help
-  to inspect their definitions. Undeclared custom-stack keys retain YAML
-  coercion; bare keys target ``reef``, dotted keys target other sections.
+  to inspect their definitions. Versioned files reject unknown public
+  fields; legacy custom-stack keys retain their compatibility parsing.
 
   Examples:
-    reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve --upstream-url http://localhost:8000 --upstream-model my-model
-    reef serve -c stack.yaml --model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve -c path/to/local-sglang.yaml --port 9000
-    reef serve -c stack.yaml --training.checkpoint_dir /tmp/ckpt
+    reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+    reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
+    reef serve -c stack.yaml --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+    reef serve -c path/to/local-sglang.yaml --service.port 9000
+    reef serve -c stack.yaml --training.config.checkpoint_dir /tmp/ckpt
 """
 
 

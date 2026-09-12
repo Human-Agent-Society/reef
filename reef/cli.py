@@ -1,7 +1,7 @@
 """reef CLI: entry point for reef.
 
 Usage:
-  reef serve --upstream-url URL --upstream-model MODEL  # connect a provider
+  reef serve --inference.upstream-url URL --inference.upstream-model MODEL  # connect a provider
   reef serve -c path/to/stack.yaml             # start a configured stack
   reef connect                               # link an existing runtime to the console
 
@@ -32,7 +32,7 @@ usage: reef <command> [options]
   --version   Print the installed reef version
 
 Examples:
-  reef serve --upstream-url http://localhost:8000 --upstream-model my-model
+  reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
   reef serve -c path/to/local-sglang.yaml
   reef serve -c path/to/external-provider.yaml
   reef connect

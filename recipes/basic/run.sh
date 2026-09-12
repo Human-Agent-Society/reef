@@ -7,15 +7,15 @@ mkdir -p work
 
 # Start Reef from the external-provider stack, with the local example's
 # credential and state directory overriding the deployment defaults
-# (`reef serve -c <stack> --<reef.key> <value>`); stop it again when this
+# (`reef serve -c <stack> --<section.field> <value>`); stop it again when this
 # script exits. REEF_UPSTREAM_URL and REEF_UPSTREAM_API_KEY come from your
 # environment.
 export REEF_TOKEN=reef-local
 PYTHONPATH=../.. python3 -m reef serve -c "$PWD/external-provider.yaml" \
-    --agent_record_dir work/agent-record \
-    --artifact_repository work/artifacts.git \
-    --artifact_work_dir work/artifact-work \
-    --artifact_cache_dir work/artifact-cache \
+    --storage.agent-record-dir work/agent-record \
+    --storage.artifact-repository work/artifacts.git \
+    --storage.artifact-work-dir work/artifact-work \
+    --storage.artifact-cache-dir work/artifact-cache \
     > work/reef.log 2>&1 &
 reef_pid=$!
 trap 'kill "$reef_pid" 2>/dev/null || true; wait "$reef_pid" 2>/dev/null || true' EXIT

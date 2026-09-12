@@ -31,11 +31,11 @@ An external-provider deployment also needs no YAML file:
 
 .. code:: bash
 
-   reef serve --upstream-url http://localhost:8000 --upstream-model my-model
+   reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
 
 Reef starts its core record-only recipe, listens on ``127.0.0.1:8900``, and
 stores state under ``.reef/`` in the launch directory. It records inference
-and feedback without training weights. Use ``--host`` or ``--port`` to change
+and feedback without training weights. Use ``--service.host`` or ``--service.port`` to change
 the bind address. Logs live under ``.reef/run/``. Reef checks its own HTTP
 readiness, runs in the foreground, and cleans up its process on Ctrl-C;
 it does not launch or stop the upstream provider. Readiness does not verify
@@ -186,10 +186,11 @@ service's working directory.
        ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 
 Values interpolate from the environment with ``${VAR}`` and from the config
-itself with ``${dotted.path}``. Any value can be overridden on the command line:
-a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
-``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
-log under ``/tmp/reef-stack/`` for a configured stack; set ``run_dir`` to move it.
+itself with ``${dotted.path}``. Use full public paths for command-line overrides,
+including legacy files: ``--inference.model-path /models/demo`` or
+``--training.config.checkpoint_dir /tmp/ckpt``. Legacy files default to
+``/tmp/reef-stack/`` logs; version 2 uses ``.reef/run/``. Set ``service.run-dir``
+in version 2 (legacy ``run_dir``) to move them.
 
 Configuration-free startup accepts public serving flags and native inference
 options. Unknown public flags and settings for training or custom runtimes require an
@@ -200,28 +201,28 @@ config, removed when the launcher exits. No user YAML file is created.
 Public service settings use the same argument parser for YAML and CLI values.
 Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
-Run ``reef serve --help`` to see these options. Hyphenated names such as
-``--upstream-model`` and existing underscore names such as ``--upstream_model``
-are aliases, as are their dotted ``--reef.upstream_model`` forms. The last
+Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
+as the canonical spelling. Compatibility aliases include ``--upstream-model``,
+``--upstream_model`` and ``--reef.upstream_model``. The last
 explicit CLI spelling of a setting wins. ``--recipe`` still selects a launcher
-profile; ``--reef.recipe`` overrides the deployment's recipe setting.
+profile; ``--recipe.implementation`` overrides the deployment's recipe setting.
 
-String settings retain their text: ``--upstream-model 00123`` remains ``00123``.
+String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;
 invalid values fail before model downloads or process startup. Booleans accept
 an explicit value or a bare flag; a negative flag can disable a YAML setting:
 
 .. code:: bash
 
-   reef serve -c stack.yaml --port 9000 --no-allow-implicit-scenario-creation
+   reef serve -c stack.yaml --service.port 9000 --no-service.allow-implicit-scenario-creation
 
 List and object options take one quoted JSON/YAML value. Empty lists and
 objects are preserved, and an explicit container replaces the YAML value:
 
 .. code:: bash
 
-   reef serve -c stack.yaml --tokens '[]' \
-     --inference-backend-config '{"tool_call_parser": "qwen25"}'
+   reef serve -c stack.yaml --service.tokens '[]' \
+     --inference.backend-config '{"tool_call_parser": "qwen25"}'
 
 The parsed public values are also supplied to service commands and the HTTP
 child's config. Existing empty/null service values retain their defaulting
@@ -245,8 +246,8 @@ After selecting ``recipe.implementation`` (legacy ``reef.recipe``), Reef loads t
 constructing the recipe. A dotted weight-training recipe exposes its fields
 as ``--recipe.config.batch-size``, with legacy aliases
 ``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
-recipes use their structured ``data`` section, such as
-``--reef.data.batch-size``. ``reef serve -c stack.yaml --help`` includes the
+recipes use the same ``--recipe.config.*`` namespace; their internal ``data``
+section and ``--reef.data.*`` spellings remain compatibility details. ``reef serve -c stack.yaml --help`` includes the
 selected component's flags; basic ``reef serve --help`` does not load a recipe.
 The selected package must be importable in the launcher and child environments.
 When a profile file also declares its recipe ``implementation``, its fields
@@ -281,9 +282,9 @@ role; it does not modify the shared profile. Backend ``options`` objects
 remain owned by the selected backend. Slime's native model/optimizer flags
 continue through Slime's own parser; Reef does not duplicate that schema.
 
-A non-weight dotted recipe can supply ``reef.runtime`` to select a registered
+A non-weight dotted recipe can supply ``recipe.runtime`` to select a registered
 or dotted runtime factory. Its declared fields use names such as
-``--reef.runtime.timeout-s``. Inference proxy, Ray training, and executor
+``--recipe.runtime.timeout-s``. Inference proxy, Ray training, and executor
 training adapters declare their connection settings. Custom ``RuntimeFactory``
 implementations can opt in with ``config_type()``; legacy callable factories
 keep receiving their existing mapping. Unknown fields in a declared component
@@ -309,7 +310,7 @@ Use ``${VAR:?}`` for a required environment variable, for example
 ``upstream_model: ${REEF_UPSTREAM_MODEL:?}``. If it is unset, empty, or only
 whitespace, Reef reports the missing variable names and their config fields
 before downloading models or starting processes. Command-line overrides are
-applied before this check, so ``--upstream_model <model-id>`` can supply the
+applied before this check, so ``--inference.upstream-model <model-id>`` can supply the
 value instead. Plain ``${VAR}`` keeps resolving to an empty string when unset;
 use it for optional values such as an API key for a provider without authentication.
 

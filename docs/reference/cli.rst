@@ -18,7 +18,7 @@ unexpectedly.
 
 .. config::
 
-   -c, --config | the config file. Defaults to ``reef.yaml``, or ``$REEF_CONFIG``.
+   -c, --config | optional config file. No file is loaded unless explicitly selected.
    --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``harness-evolve``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --help | the command list
@@ -33,17 +33,20 @@ without a file of your own:
 
 .. code:: bash
 
-   reef serve --recipe harness-evolve --model ollama/gemma4:26b
+   reef serve --recipe harness-evolve \
+     --inference.upstream-url http://127.0.0.1:11434 \
+     --inference.upstream-model gemma4:26b
 
-The config is chosen in this order: ``-c`` or ``--recipe`` (one of the two),
-else ``$REEF_CONFIG``, else ``reef.yaml`` in the checkout; with none of them,
-``reef serve`` names the recipes that carry a profile and stops. This is a
-default of the recipe, not of reef: nothing starts without a recipe or a
-config named. ``ollama/`` fills ``http://127.0.0.1:11434`` and a placeholder
-key; ``openai/`` fills ``https://api.openai.com`` and reads the key from
-``REEF_UPSTREAM_API_KEY``; a spelling with another prefix (``Qwen/Qwen3-8B``)
-or none is the model ID as is, with the endpoint from ``REEF_UPSTREAM_URL``.
-An explicit ``--upstream_url`` or ``--upstream_api_key`` override wins over
+Select a file with ``-c`` or a built-in profile with ``--recipe``. With neither,
+Reef uses CLI inference settings and does not discover ``$REEF_CONFIG`` or
+``reef.yaml``. The profile selector is a launcher option; configuration values
+use their full public namespaces as shown above.
+
+The optional ``--model`` shorthand remains supported: ``ollama/`` fills
+``http://127.0.0.1:11434`` and a placeholder key; ``openai/`` fills
+``https://api.openai.com`` and reads ``REEF_UPSTREAM_API_KEY``. Other prefixes
+and bare values are model IDs and need an upstream URL.
+An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
 the prefix. The ``harness-evolve`` profile points at the tutorial's proposer
 and evaluator, so it runs from a reef checkout; it listens on
 ``127.0.0.1:8900`` with no token and keeps its state under

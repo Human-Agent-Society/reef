@@ -53,9 +53,9 @@ def provider_config(overrides: Mapping[str, str], environ: Mapping[str, str]) ->
             raise DeployConfigError(f"unknown option --{key} for provider startup; use -c for a custom stack")
         argument, _ = declared
         if argument.name == "host" and not value.strip():
-            raise DeployConfigError("--host must be non-empty")
+            raise DeployConfigError("--service.host must be non-empty")
         if argument.name == "model_path" and not value.strip():
-            raise DeployConfigError("--model-path must be non-empty")
+            raise DeployConfigError("--inference.model-path must be non-empty")
         if argument.name in _CONFIGURED_FIELDS:
             raise DeployConfigError(f"--{key} requires a configured stack (-c); provider startup uses an upstream")
         if argument.name == "recipe" and value != "recipe":
@@ -79,7 +79,9 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
     if settings.model_path:
         # Validate the public bind and timeout before checking GPU dependencies.
         if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
-            raise DeployConfigError("local inference requires a valid --port and positive --inference-timeout-s")
+            raise DeployConfigError(
+                "local inference requires a valid --service.port and positive --inference.timeout-s"
+            )
         local_service = prepare_inference(config, settings)
         settings = service_settings_from_config(config)
     elif (
@@ -87,12 +89,15 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         or settings.tensor_parallel_size is not None
         or settings.inference_options
     ):
-        raise DeployConfigError("--inference-backend and --tensor-parallel-size require --model-path")
+        raise DeployConfigError(
+            "--inference.backend and --inference.tensor-parallel-size require --inference.model-path"
+        )
     if not settings.upstream_url or not settings.upstream_model:
         raise DeployConfigError(
-            "provider startup requires --upstream-url and --upstream-model (or their REEF_UPSTREAM_* variables).\n"
-            "  Example: reef serve --upstream-url http://localhost:8000 --upstream-model my-model\n"
-            "  Or start local inference: reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct\n"
+            "provider startup requires --inference.upstream-url and --inference.upstream-model "
+            "(or their REEF_UPSTREAM_* variables).\n"
+            "  Example: reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model\n"
+            "  Or start local inference: reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct\n"
             f"  Alternatively pass -c <file> or --recipe <name>; recipes with a profile: {', '.join(profile_names())}"
         )
     try:
@@ -103,13 +108,15 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
     except ValueError:
         valid_url = False
     if not valid_url:
-        raise DeployConfigError("--upstream-url must be an HTTP(S) URL with a valid host and port")
+        raise DeployConfigError("--inference.upstream-url must be an HTTP(S) URL with a valid host and port")
     if not settings.host or not 1 <= settings.port <= 65535:
-        raise DeployConfigError("provider startup requires a non-empty --host and --port between 1 and 65535")
+        raise DeployConfigError(
+            "provider startup requires a non-empty --service.host and --service.port between 1 and 65535"
+        )
     if settings.upstream_api not in PROVIDER_APIS:
-        raise DeployConfigError("--upstream-api must be openai, responses, or anthropic")
+        raise DeployConfigError("--inference.upstream-api must be openai, responses, or anthropic")
     if settings.inference_timeout_s <= 0:
-        raise DeployConfigError("--inference-timeout-s must be positive")
+        raise DeployConfigError("--inference.timeout-s must be positive")
     host = settings.host
     if host == "0.0.0.0":
         host = "127.0.0.1"

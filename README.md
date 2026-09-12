@@ -201,17 +201,19 @@ current version without restarting Reef.
 
 Improve harness skills using a model API instead of GPUs.
 
-The harness evolve recipe carries its own profile, so the model is the one thing
-you name. From your Reef checkout and activated Python environment:
+The harness evolve recipe carries its own profile; specify the provider URL
+and model. From your Reef checkout and activated Python environment:
 
 ```bash
-reef serve --recipe harness-evolve --model ollama/gemma4:26b
+reef serve --recipe harness-evolve \
+  --inference.upstream-url http://127.0.0.1:11434 \
+  --inference.upstream-model gemma4:26b
 ```
 
-`ollama/` and `openai/` prefixes fill the endpoint and the key (`openai/` reads
-`REEF_UPSTREAM_API_KEY`); any other spelling is the model ID as is, with the
-endpoint from `REEF_UPSTREAM_URL`. The profile listens on `127.0.0.1:8900` with
-no token and keeps its state under `.reef/harness-evolve/`. To change anything
+The example connects to a local Ollama server. For another provider, change
+`--inference.upstream-url` and `--inference.upstream-model`, and set
+`REEF_UPSTREAM_API_KEY` if authentication is required. The profile listens on
+`127.0.0.1:8900` with no token and keeps its state under `.reef/harness-evolve/`. To change anything
 else, copy [the profile](reef/service/profiles/harness-evolve.yaml) and pass
 your copy with `-c`.
 
@@ -226,8 +228,8 @@ reef-pi -p "fix the failing test in auth.py"
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
 
-To change the model, restart `reef serve` with another `--model` and rerun the
-install command before `reef-pi`: installation writes the model ID into the
+To change the model, restart `reef serve` with another `--inference.upstream-model`
+and rerun the install command before `reef-pi`: installation writes the model ID into the
 local harness configuration.
 
 Failed reports trigger a candidate skill update. Reef evaluates it against the

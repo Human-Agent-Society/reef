@@ -78,9 +78,9 @@ def prepare_inference(config: dict[str, Any], settings: ServiceSettings) -> dict
         raise DeployConfigError(f"managed local inference supports: {', '.join(sorted(INFERENCE_BACKENDS))}")
     parallel_size = settings.tensor_parallel_size if settings.tensor_parallel_size is not None else 1
     if parallel_size < 1:
-        raise DeployConfigError("--tensor-parallel-size must be positive")
+        raise DeployConfigError("--inference.tensor-parallel-size must be positive")
     if settings.upstream_url or settings.upstream_model or settings.upstream_api != "openai":
-        raise DeployConfigError("--model-path cannot be combined with upstream provider selection")
+        raise DeployConfigError("--inference.model-path cannot be combined with upstream provider selection")
     reserved = {token[2:] for token in definition.command if token.startswith("--")}
     extra_args = native_arguments(settings.inference_options, reserved=reserved | set(definition.reserved_options))
     python = os.environ.get("REEF_PYTHON", sys.executable)

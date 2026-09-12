@@ -142,7 +142,7 @@ def test_sao_recipe_reads_reef_side_config() -> None:
 def test_sao_recipe_rejects_backend_objective_config() -> None:
     from reef.recipe.errors import RecipeConfigError
 
-    with pytest.raises(RecipeConfigError, match=r"training\.slime_flags"):
+    with pytest.raises(RecipeConfigError, match=r"training\.options"):
         SAORecipe.from_environment(
             {},
             config={"optimization": {"eps_low": 0.8}},

@@ -652,7 +652,7 @@ def _model_overrides(
                 key = value.strip()
         if not key:
             raise DeployConfigError(
-                f"--model {spec}: set REEF_UPSTREAM_API_KEY to the {provider} key or pass --upstream-api-key"
+                f"--model {spec}: set REEF_UPSTREAM_API_KEY to the {provider} key or pass --inference.upstream-api-key"
             )
     return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
 
@@ -673,10 +673,20 @@ def _resolve_config(config: str | None, recipe: str | None) -> str | None:
     return None
 
 
-def _prepare_profile(recipe: str, model: str | None, environ: MutableMapping[str, str]) -> None:
+def _prepare_profile(
+    recipe: str,
+    model: str | None,
+    environ: MutableMapping[str, str],
+    overrides: Mapping[str, str] | None = None,
+) -> None:
     """What a profile needs from the environment before it loads: its own directory, the checkout, a model."""
-    if not model and not environ.get("REEF_UPSTREAM_MODEL", "").strip():
-        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --model <provider>/<model>")
+    selected_model = model or environ.get("REEF_UPSTREAM_MODEL", "")
+    for key, value in (overrides or {}).items():
+        declared = service_override(key, value)
+        if declared is not None and declared[0].name == "upstream_model":
+            selected_model = value
+    if not selected_model.strip():
+        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --inference.upstream-model MODEL")
     method = _PROFILE_METHODS.get(recipe)
     if method is not None and not (PROJECT_ROOT / method).is_file():
         raise DeployConfigError(
@@ -748,7 +758,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             overrides = model_defaults
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
-            _prepare_profile(args.recipe, args.model, os.environ)
+            _prepare_profile(args.recipe, args.model, os.environ, overrides)
         exit_code = _run_orchestrator(config_path, overrides)
     except InvalidOverrideError as exc:
         parser.error(str(exc))

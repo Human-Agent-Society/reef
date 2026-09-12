@@ -60,8 +60,8 @@ with no GPU.
          export REEF_UPSTREAM_API_KEY=sk-...
 
          reef serve \
-           --upstream-url https://api.openai.com \
-           --upstream-model gpt-4o
+           --inference.upstream-url https://api.openai.com \
+           --inference.upstream-model gpt-4o
 
       Reef listens on ``127.0.0.1:8900`` and writes state under ``.reef/`` in
       the directory where you run it. The upstream key and Reef token come
