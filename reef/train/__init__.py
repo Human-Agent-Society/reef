@@ -24,6 +24,10 @@ for service-facing contracts, with runnable examples owned by their method
 packages.
 """
 
+# Registers the ``mlx`` runtime kind. The module imports no MLX at module
+# scope, so this costs a CUDA deployment nothing; reef.runtime cannot do the
+# import itself without pointing runtime back at train.
+from reef.train import mlx_backend as _mlx_backend  # noqa: F401
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.trainer import Trainer

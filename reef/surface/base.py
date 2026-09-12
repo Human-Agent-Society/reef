@@ -45,6 +45,18 @@ class WeightRuntime(ServingRuntime, Protocol):
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
 
 
+@runtime_checkable
+class RecoveryRestorer(Protocol):
+    """Optional loader capability: reload a recovered head at startup.
+
+    Separate from ``ArtifactActivator`` because that also runs after every
+    publication and rollback, where the weights are already resident and the
+    signature gives no way to tell the callers apart.
+    """
+
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None: ...
+
+
 class ArtifactLoader(Protocol):
     """Runtime-backed artifact loading and startup recovery."""
 
@@ -137,6 +149,7 @@ __all__ = [
     "InferenceHooks",
     "InferenceLease",
     "LeasingInferenceHooks",
+    "RecoveryRestorer",
     "ServingRuntime",
     "Surface",
     "WeightRuntime",

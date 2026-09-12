@@ -24,7 +24,10 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
     )
 
     assert isinstance(proxy, InferenceProxyRuntime)
-    assert repository.names == ("executor_training", "inference_proxy", "ray_training")
+    # Every bundled kind, sorted. Each one's adapter module must import
+    # without its execution dependency (Ray, MLX), or importing Reef would
+    # require them.
+    assert repository.names == ("executor_training", "inference_proxy", "mlx", "ray_training")
 
 
 @pytest.mark.unit

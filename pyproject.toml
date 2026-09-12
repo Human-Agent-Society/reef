@@ -44,6 +44,15 @@ terminus = [
 wandb = [
     "wandb>=0.29.0",
 ]
+# Apple Silicon serving and training (`reef.train.mlx_backend`). MLX wheels are
+# arm64 macOS builds, so this extra is only installable there; the adapter
+# package itself imports without them, and only the `mlx` runtime kind pulls
+# them in. Keep the pair pinned together: mlx-lm tracks mlx closely, and an
+# upstream API change is a capability change, not a silent behaviour change.
+mlx = [
+    "mlx>=0.32,<0.33",
+    "mlx-lm>=0.31,<0.32",
+]
 # Python-side dependencies used by the Slime backend. The runtime source pin
 # lives in the `runtime` dependency group below.
 # torch / SGLang / Megatron-Core / FlashAttention remain supplied by the

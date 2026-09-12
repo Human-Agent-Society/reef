@@ -1,0 +1,116 @@
+# The OpenClaw-RL GSM8K stream, with everything but the policy hosted.
+#
+# The reference stack needs seven GPUs: Megatron on four, the rollout engine,
+# the PRM, and a 32B playing the student. Here the policy both serves and
+# trains in this process on MLX, and the two roles that only ever need text —
+# the PRM's votes and the student's reactions — go to GLM-5.3 over OpenRouter.
+
+run_dir: work/stack
+ready_timeout: 1800
+
+reef:
+  host: 127.0.0.1
+  port: 8904
+  model_path: mlx-community/Qwen3.5-9B-MLX-4bit
+  recipe: recipes.openclawrl.recipe:OpenClawRLRecipe
+  token: reef-local
+
+  # Judged turns per optimizer step; upstream uses 16 (= slime's
+  # --global-batch-size). Halved to 8 so the stream still produces enough steps
+  # to see movement, at the cost of a noisier gradient than the reference's.
+  # Each turn is still its own rollout — this batches the accumulation, not the
+  # sampling.
+  batch_size: 8
+  # A session's last turn has no next message to be judged by, so it only
+  # trains once the session has been idle this long.
+  session_ttl_s: 45
+  checkpoint_every_n_versions: 1
+
+  prm_url: https://openrouter.ai/api/v1/chat/completions
+  prm_api: openai
+  prm_model: z-ai/glm-5.3
+  prm_api_key_env: OPENROUTER_API_KEY
+  prm_m: 3
+  # GLM-5.3 cannot have reasoning disabled, and reasoning is billed against
+  # this budget. Too small and the vote comes back with a null content — a
+  # silent failure, not an error — so leave the judge room to think.
+  prm_max_tokens: 16384
+  # The policy's own tokenizer: the teacher renders hint-enhanced prompts with
+  # it whatever dialect the judge happens to speak.
+  prm_tokenizer_path: mlx-community/Qwen3.5-9B-MLX-4bit
+
+  runtime_type: mlx
+  runtime_config:
+    checkpoint_dir: work/checkpoints
+    # Every layer trains. The 9B is 32 layers, 24 of them GatedDeltaNet, whose
+    # kernel has no vjp; the engine runs that recurrence chunkwise in training
+    # mode (reef.train.mlx_backend.gated_delta) and, with checkpoint_layers,
+    # recomputes each layer's forward in the backward, so the gradient crosses
+    # all 32. `lora_layers: 32` is therefore the whole model.
+    lora_layers: 32
+    # The adapter and its Adam state are what fill memory at high rank; 64 keeps
+    # them modest across all 32 layers.
+    lora_rank: 64
+    checkpoint_layers: true
+    # k_proj and v_proj are adapted here, which rules out a cached prompt
+    # prefill (it would freeze tensors that depend on trained weights).
+    # in_proj_qkv is the GatedDeltaNet layers' own projection: without it those
+    # layers would only be crossed, never trained.
+    lora_keys:
+      - mlp.gate_proj
+      - mlp.up_proj
+      - mlp.down_proj
+      - self_attn.q_proj
+      - self_attn.k_proj
+      - self_attn.v_proj
+      - self_attn.o_proj
+      - linear_attn.in_proj_qkv
+    learning_rate: 3.0e-5
+    max_tokens: 2048
+    # Chunk the [response, vocab] head so a long response's backward fits, so
+    # head cost is set by the chunk, not the response length. See
+    # _chunked_row_gradients / _chunked_gradients.
+    log_probs_chunk_size: 512
+    # The reference samples rollouts at 0.6. At 1.0 this model emitted several
+    # tool-call syntaxes and collapsed into tool loops.
+    temperature: 0.6
+    micro_batch_size: 1
+    capture_topk: 20
+    # 0 leaves MLX's buffer pool unbounded; the engine's per-step clear_cache
+    # is what returns the decode pool between the widening training steps.
+    cache_limit_gib: 0
+    seed: 0
+    # Qwen3's template opens a `<think>` block unless told otherwise, and those
+    # are response tokens: they would train, and they would reach the style
+    # criterion that decides this benchmark's reward.
+    chat_template_kwargs:
+      enable_thinking: false
+
+    # slime sets weight decay to 0.1 where MLX defaults to 0.01. Same job as
+    # the KL term below: hold the weights nothing is actively steering.
+    weight_decay: 0.1
+
+    openclawrl:
+      w_rl: 1.0
+      w_opd: 1.0
+      # The frozen-base k3 KL term. At kl_coef 0 the untargeted tokens sank and
+      # the policy collapsed into one repeated tool call; 0.05 prices 5% of a
+      # unit advantage per nat of drift.
+      kl_coef: 0.05
+
+  inference_timeout_s: 1800
+  train_timeout_s: 3600
+  artifact_repository: work/artifacts.git
+  artifact_work_dir: work/artifact-work
+  artifact_cache_dir: work/artifact-cache
+  agent_record_dir: work/agent-record
+
+observability:
+  wandb:
+    enabled: false
+
+services:
+  - name: reef
+    command: ["${REEF_PYTHON}", "-m", "reef.service"]
+    ready: curl -sf http://127.0.0.1:8904/healthz
+    ready_timeout: 1800

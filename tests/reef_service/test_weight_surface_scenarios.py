@@ -77,3 +77,132 @@ def test_recovery_checks_the_scenario_adapter_not_the_global_version() -> None:
     assert WeightLoader("code").recover(current, checkpoint_ref, Runtime()) == checkpoint_ref
     surface = create_weight_surface(scenario="math")
     assert isinstance(surface.loader, WeightLoader) and isinstance(surface.inference, WeightInferenceHooks)
+
+
+def test_a_restarted_engine_gets_the_recovered_head_loaded_back(tmp_path: Path) -> None:
+    """Recovery decides; activation has to act on the decision.
+
+    A runtime that keeps its weights inside the Reef process loses them when
+    that process exits. `recover` already spots that — the engine reports a
+    runtime load ID from a new incarnation — and falls serving back to the
+    checkpoint. Before this, nothing then put the checkpoint into the engine:
+    the scenario reported its full step count and kept training from the bare
+    base model, with no record anywhere that it had.
+    """
+    restored: list[str] = []
+
+    class Runtime(StubTrainingRuntime):
+        def serving_runtime_load_id(self):
+            return "mlx-222-1"  # a fresh process: counter back at one
+
+        def restore_checkpoint(self, artifact):
+            restored.append(str(artifact.local_path))
+            return "mlx-222-2"
+
+    current = LiveWeightArtifactRef(
+        content_id="live:x", release_id="live:p:40", parent_release_id=None, runtime_load_id="mlx-111-40"
+    )
+    ckpt = checkpoint(tmp_path, "mlx-111-40")
+    loader = WeightLoader()
+
+    assert loader.recover(current, ckpt.ref, Runtime()) == ckpt.ref
+    assert loader.restore_recovered(ckpt, Runtime()) == "mlx-222-2"
+    assert restored == [str(ckpt.local_path)]
+
+    # A runtime that now serves it needs nothing more.
+    class Loaded(Runtime):
+        def serving_runtime_load_id(self):
+            return "mlx-111-40"
+
+    assert loader.restore_recovered(ckpt, Loaded()) is None
+    assert len(restored) == 1
+
+
+def test_an_artifact_with_no_recorded_version_is_left_alone(tmp_path: Path) -> None:
+    # An unknown published version is not a sign of a stale engine, and a
+    # runtime that reports none of its own cannot be compared against.
+    class Runtime(StubTrainingRuntime):
+        def serving_runtime_load_id(self):
+            return "mlx-111-40"
+
+        def restore_checkpoint(self, artifact):  # pragma: no cover - must not run
+            raise AssertionError("a publication must not reload weights from disk")
+
+    assert WeightLoader().restore_recovered(checkpoint(tmp_path, None), Runtime()) is None
+
+
+def test_a_matching_engine_keeps_serving_the_live_head(tmp_path: Path) -> None:
+    # Same process, same weights: recovery leaves the live head in place and
+    # activation stays out of the way.
+    class Runtime(StubTrainingRuntime):
+        def serving_runtime_load_id(self):
+            return "mlx-111-40"
+
+        def restore_checkpoint(self, artifact):  # pragma: no cover - must not run
+            raise AssertionError("an unchanged engine must not be reloaded")
+
+    current = LiveWeightArtifactRef(
+        content_id="live:x", release_id="live:p:40", parent_release_id=None, runtime_load_id="mlx-111-40"
+    )
+    loader = WeightLoader()
+    assert loader.recover(current, ArtifactRef("ckpt", "c0", None), Runtime()) == current
+    assert loader.restore_recovered(checkpoint(tmp_path, "mlx-111-40"), Runtime()) is None
+
+
+def test_a_head_that_is_its_own_checkpoint_still_gets_restored(tmp_path: Path) -> None:
+    """`checkpoint_every_n_versions: 1` makes every publication a checkpoint.
+
+    The head's release id then equals the checkpoint's, and recovery used to
+    return on that alone — before asking whether the engine still held those
+    weights. That is not an edge case: for any deployment checkpointing every
+    version it is the only case, and it silently served the bare base model
+    after every restart while reporting the full step count.
+    """
+    restored: list[str] = []
+
+    class Runtime(StubTrainingRuntime):
+        def serving_runtime_load_id(self):
+            return "mlx-222-1"
+
+        def restore_checkpoint(self, artifact):
+            restored.append(str(artifact.local_path))
+            return "mlx-222-2"
+
+    same_release = "live:p:40"
+    current = LiveWeightArtifactRef(
+        content_id="live:x", release_id=same_release, parent_release_id=None, runtime_load_id="mlx-111-40"
+    )
+    ckpt = checkpoint(tmp_path, "mlx-111-40")
+    loader = WeightLoader()
+
+    # Head and checkpoint are one release, so `recover` short-circuits...
+    assert loader.recover(current, ArtifactRef("ckpt", same_release, None), Runtime()).release_id == same_release
+    # ...but the question it short-circuits past has already been answered.
+    assert loader.restore_recovered(ckpt, Runtime()) == "mlx-222-2"
+    assert restored == [str(ckpt.local_path)]
+
+
+def test_a_materialized_artifact_carries_the_version_it_was_published_under(tmp_path: Path) -> None:
+    """Materializing checks out the manifest beside the bytes; returning only
+    the bytes made every caller that needed the record see an empty mapping.
+
+    Restoration after a restart depends entirely on this: with no recorded
+    version there is nothing to compare the engine against, so the check
+    passes vacuously and the stale engine keeps serving.
+    """
+    import json
+
+    from reef.artifact.git_lfs import _cached_metadata
+
+    destination = tmp_path / "cached"
+    destination.mkdir()
+    (destination / "reef-artifact.json").write_text(
+        json.dumps({"content_id": "c", "metadata": {"runtime_load_id": "mlx-111-40"}})
+    )
+    assert _cached_metadata(destination) == {"runtime_load_id": "mlx-111-40"}
+
+    # A directory with no manifest, or an unreadable one, is not an error:
+    # older caches predate it and the caller treats absence as "unknown".
+    assert _cached_metadata(tmp_path / "missing") == {}
+    (destination / "reef-artifact.json").write_text("{not json")
+    assert _cached_metadata(destination) == {}

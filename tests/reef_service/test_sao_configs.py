@@ -350,6 +350,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/coral/examples/coral_demo/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
+        "recipes/openclawrl/examples/openclawrl/results/2026-09-10-gsm8k-stream-qwen3.5-9b-mlx/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
         "tutorials/harness-requests/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/deployment.yaml",
