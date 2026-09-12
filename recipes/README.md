@@ -51,7 +51,6 @@ learns from each score before the next task arrives.
 | SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
 | Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [Meta-Harness on Terminal-Bench](meta_harness/README.md) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
@@ -76,13 +75,6 @@ using all retained candidates and scores. It selects strict mean-score
 improvements and commits the population with Reef's serving state. See the
 [Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
 
-[Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
-turns a plain-language request into a harness update. The served model
-proposes the change and the gate scores it, and code extensions wait for a
-promote before they run. `reef serve --recipe reefine` starts its profile
-without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
-records a bug-fix flow, a research loop, and which requests won the gate.
-
 ## Learning from usage
 
 Real interaction where no one reports a score or the feedback arrives late, so
@@ -92,6 +84,7 @@ the recipe reads the signal out of the traffic it already serves.
 |---|---|---|---|---|
 | OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
 | SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings
@@ -114,6 +107,13 @@ criterion carried verbatim from the sealed campaign. Its `harbor/` is one
 WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
 one-episode reef-eval smoke over it.
+
+[Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
+turns a plain-language request into a harness update. The served model
+proposes the change and the gate scores it, and code extensions wait for a
+promote before they run. `reef serve --recipe reefine` starts its profile
+without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
+records a bug-fix flow, a research loop, and which requests won the gate.
 
 ## Basic
 
