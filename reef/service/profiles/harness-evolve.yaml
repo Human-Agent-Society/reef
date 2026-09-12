@@ -17,7 +17,7 @@ evolution:
   version_check: true
   # An evolved extension runs in pi's process with the person's privileges: held until promoted.
   review_kinds: [code_extension]
-  # A workflow change does not move the seed tasks, so a candidate that does not lose is published.
+  # Every candidate whose evaluation ran is published; the gate scores are recorded for the step page, not enforced.
   selection: always
   step_record_dir: .reef/harness-evolve/steps
   proposals_dir: .reef/harness-evolve/proposals
