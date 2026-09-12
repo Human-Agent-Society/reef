@@ -1392,6 +1392,40 @@ def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: P
 
 
 @pytest.mark.unit
+def test_managed_native_arguments_expand_config_references() -> None:
+    """The deploy layer leaves ``${reef.model_path}`` in the managed options.
+
+    ``SlimeDeployment.prepare`` rewrites ``hf-checkpoint`` to that reference so
+    the model resolves once at startup; the runtime config the driver reads
+    carries it verbatim, and an unexpanded reference reaches Megatron as a
+    literal path (observed as ``Repo id must use alphanumeric chars ...
+    '${reef.model_path}'`` on every Slime stack).
+    """
+    from reef.service.slime_driver import managed_native_arguments
+
+    config = {
+        "reef": {
+            "model_path": "/models/Qwen3-4B-Thinking-2507",
+            "training_backend_options": {
+                "hf-checkpoint": "${reef.model_path}",
+                "save-hf": "${training.config.checkpoint_dir}/hf/{rollout_id}",
+                "lr": "1e-6",
+                "use-critic": True,
+            },
+        },
+        "training": {"config": {"checkpoint_dir": "/var/lib/reef/checkpoints"}},
+    }
+
+    assert managed_native_arguments(config) == [
+        "--hf-checkpoint=/models/Qwen3-4B-Thinking-2507",
+        "--save-hf=/var/lib/reef/checkpoints/hf/{rollout_id}",
+        "--lr=1e-6",
+        "--use-critic",
+    ]
+    assert managed_native_arguments({"reef": {}}) == []
+
+
+@pytest.mark.unit
 def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path: Path) -> None:
     from reef.service.slime_driver import READY_MARKER, _driver_options, _retention_options, _write_ready_file
 

@@ -45,7 +45,7 @@ from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.service.deploy.config_utils import config_value, load_config
+from reef.service.deploy.config_utils import config_value, interpolate_config_values, load_config
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
@@ -190,6 +190,19 @@ def _apply_bridge_resume_fallback(args) -> None:
     args.start_rollout_id = 0
 
 
+def managed_native_arguments(config: Mapping[str, Any]) -> list[str]:
+    """The managed ``training.options`` as Slime flags, config references expanded.
+
+    The deploy layer keeps references such as ``${reef.model_path}`` in the
+    managed options so the model path resolves once, at startup, for both
+    the HTTP service and this driver; the runtime config carries them
+    verbatim, so they are expanded here against that config before they
+    become flags.
+    """
+    options = config.get("reef", {}).get("training_backend_options", {})
+    return native_arguments(interpolate_config_values(config, options))
+
+
 def _driver_options(arguments: Sequence[str]) -> tuple[Path, list[str]]:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     parser.add_argument(
@@ -307,7 +320,7 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     config = load_config(_required_environment("REEF_CONFIG"))
     loss_family, recipe, spec = _resolve_training_recipe(config)
     combined_args = [
-        *native_arguments(config.get("reef", {}).get("training_backend_options", {})),
+        *managed_native_arguments(config),
         *(load_args_file(args_file) if args_file else []),
         *direct_args,
     ]
