@@ -145,11 +145,10 @@ paths must mean the same thing to the host docker daemon.
 ./run.sh
 ```
 
-The launcher waits up to 3600 seconds for Reef, with a timeout on each HTTP
-probe. Set `REEF_STARTUP_TIMEOUT_S` to a positive integer to change the wait.
-If the stack exits or the deadline expires, it prints the reason and the last
-100 lines of `work/reef.log`, stops its Reef process, and exits without starting
-the workload. Normal completion and interruption also stop the Reef process.
+The launcher waits for Reef's health endpoint and stops waiting if Reef
+exits. Configure service startup deadlines with `ready_timeout` in
+`serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
+the script also stops its Reef process.
 
 `run.sh` starts `reef serve -c serve.yaml` with its state under `./work`,
 waits for `/healthz`, and runs `run.py`. `serve.yaml` describes a two-GPU

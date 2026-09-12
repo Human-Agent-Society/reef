@@ -42,12 +42,12 @@ startup failures exit with status 1; invalid configuration exits with status
 Interrupting startup with SIGINT or SIGTERM also stops the services already
 launched, including when they are still loading a model.
 
-The basic and SAO example ``run.sh`` launchers also bound their HTTP readiness
-waits and stop when the Reef process exits. Their defaults are 300 seconds
-and 3600 seconds respectively; set ``REEF_STARTUP_TIMEOUT_S`` to a positive
-integer to change the wait. On failure they print the last 100 lines of
-``work/reef.log`` and stop the process they started. Each HTTP probe has a
-timeout, so a stalled endpoint cannot leave the script waiting indefinitely.
+The basic and SAO example ``run.sh`` launchers wait for the HTTP health
+endpoint and stop waiting if Reef exits. Startup deadlines are configured
+through the deployment YAML's ``ready_timeout``; the scripts do not add a
+second deadline. Each HTTP probe has a five-second timeout. Startup errors
+are recorded in ``work/reef.log``, and exiting the script stops the Reef
+process it started.
 
 Use ``${VAR:?}`` for a required environment variable, for example
 ``upstream_model: ${REEF_UPSTREAM_MODEL:?}``. If it is unset, empty, or only
