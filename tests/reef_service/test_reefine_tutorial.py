@@ -18,6 +18,7 @@ from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
+from reef.recipe import reefine
 from reef.recipe.reefine import ReefineRecipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -80,9 +81,11 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     assert section["tasks"] == load_config(METHOD_ROOT / "configs" / "deployment.yaml")["evolution"]["tasks"]
     assert [service["name"] for service in config["services"]] == ["reef"]
     module_name = section["propose"].partition(":")[0]
+    assert module_name == "reef.recipe.reefine.evolution"
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
-    assert Path(spec.origin).resolve() == (REPO_ROOT / "reef" / "recipe" / "reefine" / "evolution.py").resolve()
+    # The selected module belongs to the active Reef installation, including a wheel outside the checkout.
+    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("evolution.py").resolve()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/reefine/work/")
     assert config["run_dir"].startswith("tutorials/reefine/work/")
