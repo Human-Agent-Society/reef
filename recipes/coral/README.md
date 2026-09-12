@@ -87,6 +87,47 @@ Real attempts, in their first terminal state, exactly once. CORAL's
 `tune` attempts (config sweeps CORAL itself excludes from budgets) are
 skipped; archived attempts are ignored.
 
+## How a training step works
+
+The training side treats CORAL's attempt tree as the grouping structure for
+grouped relative-reward training. Every attempt names the commit it started
+from (`parent_hash`), so the scored siblings of one parent are a set of
+rollouts that began from the same code and diverged, which is exactly the
+comparison set a relative-reward step needs. First-generation attempts have no parent
+and are grouped together: they all diverged from the task seed.
+
+From a report to a gradient:
+
+1. **Grouping.** `CoralProcessor` files each report under its `parent_hash`.
+   A group releases once `group_size` scored siblings accrue (`serve.yaml`
+   sets 2 for the demo; the default is 4). Parents that never accrue enough
+   scored children never train, the barrier is a recipe setting, not a CORAL
+   invariant.
+2. **Sample assembly.** The report's ordered inference references are
+   materialized back into tokens, loss mask, and the rollout-time log
+   probabilities reef stored with each INFERENCE record. An attempt is a
+   multi-call trajectory, so multi-turn assembly is on by default.
+3. **Version guards.** An attempt whose calls span a weight update is
+   rejected: its rollout log probs belong to two policies and cannot support
+   one importance ratio. A group whose members trained on different
+   revisions is discarded whole, because relative rewards only compare
+   fairly within one policy version. Both outcomes are visible in the
+   processor's `status()` (`never_reasons`, `discarded_groups`).
+4. **The step.** A released group becomes one training unit. The recipe
+   reuses the `tttd` step preparer (grouped leave-one-out advantages) and
+   the `tttd` Slime loss family, CORAL sibling groups have the same shape
+   as TTT-Discover steps, so the recipe adds only the group barrier. A group
+   where every sibling scored the same still trains as a well-defined
+   zero-gradient step rather than starving the barrier.
+5. **The loop closes.** The step updates the served LoRA (the demo:
+   Qwen3-8B, rank-32 LoRA on `linear_qkv`/`linear_proj`, trained with the
+   rollout log probs and a KL term against the base model, see
+   `examples/coral_demo/serve.yaml`). Reef serves the new revision, and
+   later attempts both run on it and are attributed to it.
+
+The design rationale lives next to the code: `processor.py` (grouping and
+guards), `recipe.py` (why `tttd` is reused), `serve.yaml` (deployment knobs).
+
 ## The task
 
 `task/` is an ordinary CORAL task — `coral validate task/` accepts it. The
