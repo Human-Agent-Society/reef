@@ -189,7 +189,12 @@ reservations. Non-colocated full-weight training borrows Reef-owned inference;
 LoRA and colocated modes use the new config fields with their existing combined
 lifecycle. The separate inference control actor requires one additional Ray
 CPU and zero GPUs. The HTTP endpoint is still discovered through the training
-bridge; independently restarting inference and training remains future work.
+bridge. Managed separate full-weight deployments automatically rebuild both
+components after failure, rerun checkpoint recovery and rediscover the endpoint
+without restarting the HTTP service. Explicit gateway URLs stay fixed. This
+recovery does not replay ambiguous optimizer steps and stops if old resources
+cannot be confirmed retired. See `Worker executors <../developer-guide/executors.rst>`__ for the
+recovery policy and compatibility limits.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;

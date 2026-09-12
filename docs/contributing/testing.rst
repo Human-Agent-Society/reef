@@ -15,6 +15,19 @@ CI supplies PostgreSQL 16 and runs these cases on all supported Python versions.
 Run the full suite
 ------------------
 
+Managed deployment recovery also has opt-in CPU tests using real Ray processes:
+
+.. code:: bash
+
+   REEF_TEST_RAY=1 PYTHONPATH="$PWD:$PWD/tests" NO_PROXY='*' \
+     .venv/bin/python -m pytest tests/reef_service/test_training_restart.py \
+       tests/reef_service/test_model_supervision_ray.py -q
+
+Install the Python dependencies from ``.[slime]`` first. These tests use private
+local Ray clusters and fake CPU weights. They inject process death and check
+durable publication, readiness, child cleanup and HTTP endpoint reconnection;
+they do not validate Slime's real GPU checkpoint or collective transport.
+
 .. code:: bash
 
    pytest tests/

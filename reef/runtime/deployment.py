@@ -1,6 +1,6 @@
 """Backend-neutral component contracts for model deployment ownership.
 
-These contracts describe startup and cleanup only. Training steps, weight
+These contracts describe startup, health observation and cleanup. Training steps, weight
 transport and commit-gated activation keep their existing runtime contracts.
 Concrete integrations keep framework arguments and allocation handles private.
 """
@@ -21,6 +21,20 @@ class DeploymentResources(Protocol):
 
     def close(self) -> None:
         """Release owned reservations and connections, idempotently."""
+
+
+class DeploymentHealth(Protocol):
+    """Nonblocking observation of an already started deployment."""
+
+    def poll(self) -> None:
+        """Raise on failure; an outstanding probe is not a failed component."""
+
+
+class ModelPlanSource(Protocol):
+    """Rebuild components and rerun durable recovery preflight for each attempt."""
+
+    def create(self) -> ModelDeploymentPlan:
+        """Return a fresh, unallocated plan from the original configuration."""
 
 
 @dataclass(frozen=True)
@@ -82,6 +96,7 @@ class ModelDeploymentPlan:
     resources: DeploymentResources
     inference: InferenceService | None
     training: TrainingService
+    health: DeploymentHealth | None = None
 
     def validate(self) -> None:
         required = self.training.inference_protocol

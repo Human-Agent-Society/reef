@@ -48,6 +48,7 @@ def resource_runtime(monkeypatch):
     monkeypatch.setattr(resources.ray, "is_initialized", lambda: state.initialized)
     monkeypatch.setattr(resources.ray, "init", connect)
     monkeypatch.setattr(resources.ray, "shutdown", disconnect)
+    monkeypatch.setattr(resources.ray, "nodes", list)
     placement_module = importlib.import_module("ray.util.placement_group")
     monkeypatch.setattr(placement_module, "remove_placement_group", lambda pg: event("release-" + pg.id))
 
@@ -110,7 +111,10 @@ def test_deployment_allocates_once_and_closes_training_inference_then_reservatio
     assert resource_runtime.ray_options == {
         "address": "external",
         "namespace": "test",
-        "runtime_env": {"env_vars": {"PYTHONPATH": "/repo"}},
+        "runtime_env": {
+            "env_vars": {"PYTHONPATH": "/repo", resources.DEPLOYMENT_ENV: plan.resources._process_lease},
+            "worker_process_setup_hook": "reef.runtime.executor.process_guard.install",
+        },
     }
     owner.close()
     owner.close()
@@ -129,7 +133,7 @@ def test_deployment_allocates_once_and_closes_training_inference_then_reservatio
     ]
 
 
-@pytest.mark.parametrize("failure", ["allocate", "create-inference", "check_health", "shutdown", "release-shared"])
+@pytest.mark.parametrize("failure", ["allocate", "create-inference", "check_health", "release-shared"])
 def test_partial_failure_always_disconnects_the_owned_ray_job(resource_runtime, failure):
     resource_runtime.failure = failure
     owner = ModelDeployment(plan_for(resource_runtime))
@@ -149,6 +153,47 @@ def test_existing_client_session_is_not_disconnected(resource_runtime):
         owner.start()
     assert resource_runtime.events == []
     assert resource_runtime.initialized is True
+
+
+@pytest.mark.parametrize("confirmed", [True, False])
+def test_failed_component_shutdown_requires_process_retirement(resource_runtime, monkeypatch, confirmed):
+    plan = plan_for(resource_runtime)
+    owner = ModelDeployment(plan)
+    owner.start()
+    resource_runtime.failure = "shutdown"
+    plan.resources._nodes = ["node"]
+
+    def retire():
+        resource_runtime.events.append("retire-processes")
+        if not confirmed:
+            raise RuntimeError("process cleanup unconfirmed")
+
+    monkeypatch.setattr(plan.resources, "_retire_processes", retire)
+    if confirmed:
+        owner.close()
+    else:
+        with pytest.raises(RuntimeError, match="unconfirmed"):
+            owner.close()
+    assert resource_runtime.events[-2:] == ["retire-processes", "disconnect"]
+
+
+def test_training_worker_loss_fails_health_without_waiting_for_another_job():
+    from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
+    from reef.train.slime_backend.training import SlimeTrainingService
+
+    service = SlimeTrainingService(
+        SimpleNamespace(),
+        preparation=SimpleNamespace(),
+        loss_family_config=None,
+        actor_name="bridge",
+        namespace="test",
+        separate_inference=True,
+    )
+    service.on_executor_failure(ExecutorFailure("test", "worker died", rank=1))
+    with pytest.raises(ExecutorFailedError, match="worker died"):
+        service.check_health()
+    with pytest.raises(ExecutorFailedError, match="worker died"):
+        service.poll()
 
 
 @pytest.mark.parametrize("separate", [False, True])
@@ -205,7 +250,7 @@ def test_training_adapter_attaches_without_allocating_or_closing_inference(
             service.check_health()
     else:
         service.check_health()
-    if failure == "shutdown":
+    if failure == "shutdown" and not separate:
         with pytest.raises(RuntimeError, match="shutdown failed"):
             service.close()
     else:

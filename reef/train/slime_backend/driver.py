@@ -213,7 +213,11 @@ def create_model_plan(
     _stamp_loss_family_reference(args, loss_family)
     from reef.train.slime_backend.reef_adapters.bridge import prepare_bridge
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
-    from reef.train.slime_backend.resources import SlimeDeploymentResources, SlimeInferenceService
+    from reef.train.slime_backend.resources import (
+        SlimeDeploymentHealth,
+        SlimeDeploymentResources,
+        SlimeInferenceService,
+    )
     from reef.train.slime_backend.training import SlimeTrainingService
 
     configure_reef_loss_args(args)
@@ -221,6 +225,15 @@ def create_model_plan(
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
     separate = (
         not prepared.lora and not getattr(args, "colocate", False) and not getattr(args, "rollout_external", False)
+    )
+    inference = SlimeInferenceService(args) if separate else None
+    training = SlimeTrainingService(
+        args,
+        preparation=prepared,
+        loss_family_config=loss_family_config,
+        actor_name=actor_name,
+        namespace=namespace,
+        separate_inference=separate,
     )
     return ModelDeploymentPlan(
         resources=SlimeDeploymentResources(
@@ -230,13 +243,7 @@ def create_model_plan(
             runtime_env=_job_runtime_env(),
             allocate_models=separate,
         ),
-        inference=SlimeInferenceService(args) if separate else None,
-        training=SlimeTrainingService(
-            args,
-            preparation=prepared,
-            loss_family_config=loss_family_config,
-            actor_name=actor_name,
-            namespace=namespace,
-            separate_inference=separate,
-        ),
+        inference=inference,
+        training=training,
+        health=SlimeDeploymentHealth(inference, training) if inference is not None else None,
     )

@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import ray
 
 from reef.runtime.deployment import DeploymentResources, InferenceConnection
+from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
 from reef.train.slime_backend.reef_adapters.bridge import BridgePreparation, start_bridge
-from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, SlimeDeploymentResources
+from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, RayHealthProbe, SlimeDeploymentResources
 
 
 class SlimeTrainingService:
@@ -33,6 +35,8 @@ class SlimeTrainingService:
         self._bridge: Any = None
         self._started = False
         self._closed = False
+        self._probe = RayHealthProbe()
+        self._worker_failure: ExecutorFailure | None = None
 
     def start(self, resources: DeploymentResources, inference: InferenceConnection | None) -> None:
         if self._started or self._closed:
@@ -57,9 +61,12 @@ class SlimeTrainingService:
             preparation=self.preparation,
             serving=serving,
             placement_groups=placement_groups,
+            failure_listener=self if self.inference_protocol is not None else None,
         )
 
     def check_health(self) -> None:
+        if self._worker_failure is not None:
+            raise ExecutorFailedError(self._worker_failure)
         if self._bridge is None or self._closed:
             raise RuntimeError("training service is not running")
         # Actor construction can restore checkpoints and republish weights.
@@ -76,5 +83,19 @@ class SlimeTrainingService:
         if self._bridge is not None:
             try:
                 ray.get(self._bridge.shutdown.remote(), timeout=90)
+            except Exception:
+                if self.inference_protocol is None:
+                    raise
+                logging.getLogger(__name__).exception("Bridge shutdown failed; retiring its owned process groups")
             finally:
                 ray.kill(self._bridge, no_restart=True)
+
+    def poll(self) -> None:
+        if self._worker_failure is not None:
+            raise ExecutorFailedError(self._worker_failure)
+        if self._bridge is None or self._closed:
+            raise RuntimeError("training service is not running")
+        self._probe.poll(self._bridge, "health")
+
+    def on_executor_failure(self, failure: ExecutorFailure) -> None:
+        self._worker_failure = failure

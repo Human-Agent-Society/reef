@@ -55,6 +55,7 @@ slime = [
     "omegaconf",
     "peft",
     "pillow",
+    "psutil>=5.9",
     "pylatexenc",
     "qwen_vl_utils",
     "ray[default]",

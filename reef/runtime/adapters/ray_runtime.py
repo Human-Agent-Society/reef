@@ -7,6 +7,8 @@ worker control RPC lives in RayExecutor.
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +16,7 @@ from typing import Any
 from reef.core.config import config_option
 from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
 from reef.runtime.base import TrainingRuntime
+from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
@@ -47,6 +50,62 @@ class RemoteRayTrainGroupHandle(ExecutorTrainGroupHandle):
         )
 
 
+class NamedRayTrainGroupHandle(RemoteRayTrainGroupHandle):
+    """Discover the current coordinator before each RPC, without replaying writes.
+
+    A missing name is retried within the operation's timeout. Once an RPC is
+    submitted, a write's error reaches the caller even if a replacement appears.
+    Only liveness/version reads retry actor loss. Durable training reconciliation
+    decides whether a training operation is replayable.
+    """
+
+    reconnects = True
+
+    def __init__(
+        self, actor_name: str, namespace: str, *, timeout_s: float = 300, health_timeout_s: float = 300
+    ) -> None:
+        if (
+            isinstance(health_timeout_s, bool)
+            or not isinstance(health_timeout_s, (int, float))
+            or not math.isfinite(health_timeout_s)
+            or health_timeout_s <= 0
+        ):
+            raise TrainingRuntimeError("health timeout must be a positive finite number")
+        super().__init__(_require_ray().get_actor(actor_name, namespace=namespace), timeout_s=timeout_s)
+        self._actor_name = actor_name
+        self._namespace = namespace
+        self._closed = False
+        self._health_timeout_s = min(health_timeout_s, timeout_s)
+
+    def _rpc(self, method: str, *args: Any) -> Any:
+        ray = _require_ray()
+        timeout = self._health_timeout_s if method in {"health", "serving_runtime_load_id"} else self._timeout_s
+        deadline = time.monotonic() + timeout
+        while not self._closed:
+            try:
+                actor = ray.get_actor(self._actor_name, namespace=self._namespace)
+            except ValueError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TrainingRuntimeError("training coordinator is unavailable during recovery") from exc
+                time.sleep(min(0.1, remaining))
+                continue
+            executor = RayExecutor.from_workers((actor,), owned=False)
+            try:
+                return executor.rpc(0, method, args=args, timeout=max(0.001, deadline - time.monotonic()))
+            except (ray.exceptions.RayActorError, ExecutorFailedError):
+                if method not in {"health", "serving_runtime_load_id"} or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+            finally:
+                executor.shutdown()
+        raise TrainingRuntimeError("training coordinator connection is closed")
+
+    def shutdown(self) -> None:
+        self._closed = True
+        super().shutdown()
+
+
 def connect_ray_runtime(
     *,
     inference_url: str | None = None,
@@ -69,11 +128,13 @@ def connect_ray_runtime(
     ray = _require_ray()
     if not ray.is_initialized():
         ray.init(address=ray_address or "auto", namespace=namespace)
-    train_group_actor = ray.get_actor(actor_name, namespace=namespace)
     # A training step legitimately outlasts an inference request.
     return RayRuntime(
-        train_group_handle=RemoteRayTrainGroupHandle(
-            train_group_actor, timeout_s=train_timeout_s if train_timeout_s is not None else inference_timeout_s
+        train_group_handle=NamedRayTrainGroupHandle(
+            actor_name,
+            namespace,
+            timeout_s=train_timeout_s if train_timeout_s is not None else inference_timeout_s,
+            health_timeout_s=inference_timeout_s,
         ),
         inference_url=inference_url,
         model_path=model_path,

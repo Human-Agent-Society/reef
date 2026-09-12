@@ -440,8 +440,9 @@ Reef owner.
 Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
 Checkpoint production and backend-specific startup recovery remain in the
-Slime adapters. Independent component restarts, native inference launch/attachment
-adapters and validation of additional real backend combinations remain in
+Slime adapters. Managed process recovery is described below. Independent
+replacement that preserves surviving components, native inference launch/attachment
+adapters and validation of additional backend combinations remain in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 
 Inference recovery and reconnect
@@ -477,8 +478,9 @@ updaters use the same lock methods and continue transferring directly between
 workers and engines. There is no tensor relay through the shared controller.
 
 This extraction does not make the Slime launch helper or attachment tuple a
-universal inference API. Complete controller-process restart/reconnection,
-backend-neutral engine launch and real GPU combinations remain separate work.
+universal inference API. Backend-neutral engine launch and real GPU combinations
+remain separate work. A failed managed controller uses deployment reconstruction
+as described below.
 
 Standalone serving republication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -504,8 +506,8 @@ may contain a candidate rather than the incumbent, so those states must use
 their existing training-job recovery path. Republication never runs an optimizer
 step, increments training counters or creates a new publication version.
 Slime retains tensor transfer and restoration of other scenarios' adapters.
-This is in-process engine recovery; independent controller-process restart and
-GPU validation remain separate work.
+This is in-process engine recovery. Controller-process failure uses the managed
+deployment recovery path below; GPU validation remains separate work.
 
 Training-coordinator restart attachment
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -536,10 +538,61 @@ transfer starts. Persisted marker formats do not change.
 Real Ray CPU tests replace the training coordinator process while preserving
 inference, restore checkpoint values and version identity, retain pending commit
 barriers and keep serving paused after a damaged-checkpoint restart. These tests
-use CPU backend fixtures; they do not validate GPU checkpoint loading. Automatic
-process supervision, reconnecting a running HTTP service to a replacement named
-bridge, and recreating an inference controller with surviving engine handles are
-still separate work. The CLI does not gain an automatic component-restart mode.
+use CPU backend fixtures; they do not validate GPU checkpoint loading.
+
+Managed deployment recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The managed driver automatically supervises separate full-weight inference and
+training plans. A plan supplies a nonblocking ``DeploymentHealth.poll()`` and a
+``ModelPlanSource`` rebuilds components from the original resolved configuration.
+Slime probes retain one outstanding health RPC per component. An operation that
+queues behind a long weight transfer is not treated as a dead actor. Training
+executor failures also notify the owner, including idle worker loss.
+
+On component failure, Reef removes readiness, closes training and inference,
+confirms process cleanup and releases the old allocation. It reruns checkpoint
+preflight, allocates a fresh plan and reconstructs both components. Readiness
+returns only after checkpoint restoration, publication recovery and component
+health checks. The policy allows three restarts within five minutes, with
+interruptible one-, two- and four-second delays. Cleanup failure, invalid
+recovery state or replacement startup failure stops the driver and leaves
+readiness absent. An ambiguous ``RUNNING`` optimizer step is never replayed.
+
+This is a cold rebuild of the model deployment. It recreates the inference
+controller, routers, engines and training workers; it does not attach a new
+controller to surviving engine handles. The external Ray cluster and HTTP
+service remain running. LoRA, colocated, external-engine and explicit legacy
+process stacks keep their existing compatibility lifecycle.
+
+Owned Ray jobs install a POSIX process lease before model workers initialize.
+A watchdog retires a worker's process group after owner loss, including native
+children, and records completion. Cleanup workers on the deployment's nodes
+confirm completion before a replacement can reserve GPUs. Workers starting
+after cleanup begins are rejected. Node loss or an unconfirmed guard stops
+automatic recovery. Model children must remain in their parent's process group;
+custom launchers that detach processes must provide equivalent owned cleanup.
+The driver does not stop the cluster or clean unrelated jobs.
+
+``connect_ray_runtime`` now discovers the current named coordinator before each
+operation. Discovery and read-only liveness calls tolerate replacement within
+the configured timeout. Submitted training operations are never automatically
+replayed: durable reconciliation retains that decision. A request verifies
+serving health before admission, while the existing publication gate retains
+control of reopening admissions. Pending commits stay blocked across recovery.
+
+When the endpoint is discovered from coordinator health, the existing inference
+backend follows a replacement URL through ``InferenceBackend.reconnect``. HTTP
+and native SGLang chat backends preserve headers, capture configuration and
+provider payloads. Explicit gateway URLs remain fixed. Custom backends must
+implement endpoint replacement to support discovery across address changes.
+Already submitted requests and streams can fail during a crash and are not
+replayed by this mechanism.
+
+The real-Ray CPU recovery tests kill coordinator and controller processes while
+retaining the same HTTP runtime, verify native child retirement and recover the
+same checkpoint identity. CUDA/NCCL transport, GPU memory release and real
+checkpoint performance still require the supported GPU environment.
 
 Engine health monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~

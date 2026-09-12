@@ -31,6 +31,7 @@ from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import Executor, resolve
+from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.training_job.execution import (
@@ -1113,6 +1114,7 @@ def start_bridge(
     serving: Executor | None = None,
     placement_groups: Mapping[str, Any] | None = None,
     preparation: BridgePreparation | None = None,
+    failure_listener: ExecutorFailureListener | None = None,
 ):
     """Boot the slime training stack and publish it as a named bridge actor.
 
@@ -1160,6 +1162,10 @@ def start_bridge(
         # so keeping the group here is what wires the value model into the bridge
         # schedule rather than leaving it uninitialized.
         actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
+        if failure_listener is not None:
+            for group in (actor_group, critic_group):
+                if group is not None:
+                    group.executor.register_failure_listener(failure_listener)
         return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
             actor_group,
             rollout_manager,

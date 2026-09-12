@@ -24,6 +24,8 @@ class TrainingGroupHandle(ABC):
     handle. ``ExecutorTrainingRuntime`` depends only on this contract.
     """
 
+    reconnects = False
+
     def serving_runtime_load_id(self) -> str | None:
         """Return the serving version, or ``None`` when unavailable."""
         return None

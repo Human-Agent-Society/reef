@@ -1,4 +1,4 @@
-"""Reef-owned startup and shutdown of inference and training components.
+"""Reef-owned startup, supervision and shutdown of model components.
 
 Backend definitions provide configured components, without allocating them.
 This entrypoint validates compatibility, starts shared resources, inference
@@ -13,6 +13,8 @@ import logging
 import os
 import signal
 import threading
+import time
+from collections import deque
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -20,7 +22,7 @@ from typing import Any
 from reef.core.config import config_value
 from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.deployment import ModelDeploymentPlan
+from reef.runtime.deployment import ModelDeploymentPlan, ModelPlanSource
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.training import training_deployment_for
 
@@ -119,7 +121,74 @@ def _write_ready_file(path: Path, marker: str = READY_MARKER) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def run_deployment(plan: ModelDeploymentPlan, ready_file: Path, *, marker: str = READY_MARKER) -> int:
+class ConfiguredModelPlanSource:
+    """Reparse the resolved configuration and inspect current checkpoints."""
+
+    def __init__(self, config: Mapping[str, Any], loss_family: str) -> None:
+        self.config = config
+        self.loss_family = loss_family
+
+    def create(self) -> ModelDeploymentPlan:
+        backend = training_deployment_for(self.config.get("reef", {}).get("training_backend"))
+        return backend.create_model_plan(self.config, loss_family=self.loss_family)
+
+
+def supervise_deployment(
+    deployment: ModelDeployment,
+    source: ModelPlanSource,
+    ready_file: Path,
+    stopping: threading.Event,
+    *,
+    marker: str = READY_MARKER,
+) -> ModelDeployment:
+    """Cold-rebuild failed components, with at most three restarts per five minutes.
+
+    Cleanup and recovery preflight must succeed before replacing any component.
+    In particular, an ambiguous optimizer step is never retried by supervision.
+    """
+    restarts: deque[float] = deque()
+    try:
+        while not stopping.wait(1):
+            health = deployment.plan.health
+            if health is None:
+                continue
+            try:
+                health.poll()
+            except Exception as failure:
+                ready_file.unlink(missing_ok=True)
+                _logger.exception("Model component failed; retiring deployment before recovery")
+                deployment.close()
+                now = time.monotonic()
+                while restarts and now - restarts[0] >= 300:
+                    restarts.popleft()
+                if len(restarts) >= 3:
+                    raise RuntimeError("model deployment exceeded three restarts in five minutes") from failure
+                restarts.append(now)
+                if stopping.wait(2 ** (len(restarts) - 1)):
+                    break
+                # Reusing the old plan would reuse its initial checkpoint load
+                # arguments and miss training jobs committed since startup.
+                deployment = ModelDeployment(source.create())
+                deployment.start()
+                if not stopping.is_set():
+                    _write_ready_file(ready_file, marker)
+                    _logger.info("Model deployment recovered and ready")
+        return deployment
+    except BaseException:
+        try:
+            deployment.close()
+        except Exception:
+            _logger.exception("Failed to close replacement deployment")
+        raise
+
+
+def run_deployment(
+    plan: ModelDeploymentPlan,
+    ready_file: Path,
+    *,
+    marker: str = READY_MARKER,
+    source: ModelPlanSource | None = None,
+) -> int:
     ready_file.unlink(missing_ok=True)
     stopping = threading.Event()
 
@@ -133,7 +202,10 @@ def run_deployment(plan: ModelDeploymentPlan, ready_file: Path, *, marker: str =
         if not stopping.is_set():
             _write_ready_file(ready_file, marker)
             print(marker, flush=True)
-            stopping.wait()
+            if source is not None and plan.health is not None:
+                deployment = supervise_deployment(deployment, source, ready_file, stopping, marker=marker)
+            else:
+                stopping.wait()
         return 0
     except BaseException:
         try:
@@ -180,10 +252,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if remaining:
         raise ValueError("managed drivers read resolved configuration; pass options through reef serve")
     config = load_config(_required_environment("REEF_CONFIG"))
-    backend = training_deployment_for(config.get("reef", {}).get("training_backend"))
     loss_family, _ = _resolve_training_recipe(config)
-    plan = backend.create_model_plan(config, loss_family=loss_family)
-    return run_deployment(plan, ready_file)
+    source = ConfiguredModelPlanSource(config, loss_family)
+    return run_deployment(source.create(), ready_file, source=source)
 
 
 if __name__ == "__main__":

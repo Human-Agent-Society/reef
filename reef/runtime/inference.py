@@ -35,6 +35,10 @@ class UpstreamStatusError(ReefError):
 class InferenceBackend(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
+    def reconnect(self, upstream_url: str) -> None:
+        """Retarget a managed endpoint, preserving backend-specific configuration."""
+        raise RuntimeError(f"{type(self).__name__} does not support inference endpoint replacement")
+
     @abstractmethod
     async def inference(
         self,
@@ -180,6 +184,11 @@ class HttpInferenceBackend(InferenceBackend):
         self._request_headers = request_headers
         self._timeout_s = timeout_s
         self._error_label = error_label
+
+    def reconnect(self, upstream_url: str) -> None:
+        if not isinstance(upstream_url, str) or not upstream_url.startswith(("http://", "https://")):
+            raise ValueError("inference endpoint must be an HTTP URL")
+        self._upstream_url = upstream_url.rstrip("/")
 
     async def inference(
         self,

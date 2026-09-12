@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Any
 from reef.core.batches import TrainingBatch, policy_samples
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime.base import InferenceAdmissionHandle, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.inference import InferenceBackend, InferenceBackendFactory, build_http_inference_backend
@@ -40,6 +41,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         self._train_group_handle = train_group_handle
+        self._discover_inference_url = not inference_url
         if not inference_url:
             # The training backend started the serving engines, so it is the
             # authority on where they listen; a deployment only overrides
@@ -83,6 +85,31 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     @property
     def inference_backend(self) -> InferenceBackend:
         return self._inference_backend
+
+    async def acquire_inference(self) -> InferenceAdmissionHandle:
+        if not self._train_group_handle.reconnects:
+            return await super().acquire_inference()
+        # Admission stays owned by training/commit reconciliation. A request
+        # may verify or wait for serving, but must never reopen a gate that a
+        # concurrent publication closed after this health snapshot was read.
+        deadline = asyncio.get_running_loop().time() + self.inference_timeout_s
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TrainingRuntimeError("inference is unavailable during model recovery")
+            status = await asyncio.wait_for(asyncio.to_thread(self._training_job_status), timeout=remaining)
+            state = status["status"]
+            available = status["serving_healthy"] and (
+                state in {"IDLE", "REJECTED"}
+                or (state == "COMPLETE" and status.get("commit_acknowledged") is True)
+                or (state in {"RUNNING", "CHECKPOINT"} and not self._colocated)
+            )
+            if available:
+                try:
+                    return await asyncio.wait_for(super().acquire_inference(), timeout=min(0.25, remaining))
+                except asyncio.TimeoutError:
+                    continue
+            await asyncio.sleep(min(0.25, remaining))
 
     def serving_adapter_name(self) -> str | None:
         return self._serving_adapter_name
@@ -387,6 +414,13 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             phase = health.get("phase")
             detail = f" in phase {phase!r}" if isinstance(phase, str) and phase else ""
             raise TrainingRuntimeError(f"train group is unhealthy{detail}")
+        if self._discover_inference_url:
+            reported = health.get("inference_url")
+            if not isinstance(reported, str) or not reported:
+                raise TrainingRuntimeError("training coordinator stopped reporting its inference endpoint")
+            if reported.rstrip("/") != self.base_url:
+                self._inference_backend.reconnect(reported)
+                self._base_url = reported.rstrip("/")
         status = health.get("training_job")
         if not isinstance(status, Mapping):
             raise TrainingRuntimeError("train group health is missing training_job status")
@@ -425,6 +459,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             raise TrainingRuntimeError(f"train group returned unknown training-job status: {state!r}")
         return {
             **dict(status),
+            "serving_healthy": healthy is not False and health.get("phase") != "recovering",
             "colocate": colocate,
             "lora_adapter": lora_adapter,
             "lora_mode": lora_mode,
