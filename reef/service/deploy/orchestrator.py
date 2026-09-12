@@ -26,10 +26,14 @@ from typing import Any
 
 import yaml
 
+from reef.core.config import ConfigArgument
+from reef.recipe.errors import RecipeConfigError
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
+from reef.runtime.registry import RuntimeConfigError
+from reef.service.deploy.components import component_config_arguments, normalize_component_config
 from reef.service.deploy.config import (
     PROJECT_ROOT,
     DeployConfigError,
@@ -61,6 +65,10 @@ class DeployStartupError(RuntimeError):
     """A deployment failed to start; includes its reason and local log location."""
 
 
+class _ImplicitOverride(str):
+    """A valueless flag, retained until the selected component schema is known."""
+
+
 def _parse_overrides(extras: list[str]) -> dict[str, str]:
     """Parse leftover ``--key value`` / ``--key=value`` pairs from ``parse_known_args``.
 
@@ -84,7 +92,7 @@ def _parse_overrides(extras: list[str]) -> dict[str, str]:
             value = extras[i + 1]
             i += 2
         else:
-            value = "true"
+            value = _ImplicitOverride("true")
             has_value = False
             i += 1
         if not key:
@@ -111,7 +119,9 @@ def _coerce_value(raw: str) -> Any:
         return raw
 
 
-def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[str, Any]:
+def _apply_overrides(
+    config: dict[str, Any], overrides: dict[str, str], *, arguments: tuple[ConfigArgument, ...] = ()
+) -> dict[str, Any]:
     """Merge CLI overrides into a copy of the config dict.
 
     Bare keys (no dot) target the ``reef`` section; dotted keys traverse
@@ -120,6 +130,17 @@ def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[
     config = copy.deepcopy(config)
     for key, raw_value in overrides.items():
         declared = service_override(key, raw_value)
+        if declared is None:
+            for candidate in arguments:
+                if f"--{key}" in (*candidate.flags, *candidate.negative_flags):
+                    if isinstance(raw_value, _ImplicitOverride) and candidate.kind != "bool":
+                        raise InvalidOverrideError(f"argument --{key} requires a value")
+                    if f"--{key}" in candidate.negative_flags:
+                        if not isinstance(raw_value, _ImplicitOverride):
+                            raise InvalidOverrideError(f"argument --{key} does not take a value")
+                        raw_value = "false"
+                    declared = candidate, raw_value
+                    break
         if declared is not None:
             argument, raw_value = declared
             key = ".".join(argument.path)
@@ -131,13 +152,19 @@ def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[
             if part not in node:
                 node[part] = {}
             existing = node[part]
+            if parts[0] == "execution" and index == 1 and isinstance(existing, str):
+                profiles = config.get("executors", {})
+                if not isinstance(profiles, Mapping):
+                    raise InvalidOverrideError("executors must be an object")
+                existing = copy.deepcopy(profiles.get(existing, {"backend": existing}))
+                node[part] = existing
             if not isinstance(existing, dict):
                 prefix = ".".join(parts[: index + 1])
                 raise InvalidOverrideError(f"override path {prefix!r} is not a section")
             node = existing
         # Public fields are converted by argparse, just like YAML values.
         # Keep generic recipe/custom-stack overrides on their legacy path.
-        node[parts[-1]] = raw_value if declared is not None else _coerce_value(raw_value)
+        node[parts[-1]] = str(raw_value) if declared is not None else _coerce_value(raw_value)
     return config
 
 
@@ -424,32 +451,54 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
     return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
 
 
+def _component_selection(
+    config: dict[str, Any], overrides: dict[str, str], config_path: Path
+) -> tuple[dict[str, Any], Path | None]:
+    """Resolve only selection inputs before loading component definitions."""
+    selected = _apply_overrides(config, overrides)
+    reef = selected.get("reef", {})
+    if not isinstance(reef, Mapping):
+        raise DeployConfigError("reef must be an object")
+    selected_reference = interpolate_environment({"reef": {"recipe": reef.get("recipe")}}, config_path)
+    reference = selected_reference["reef"]["recipe"]
+    if reference is not None and not isinstance(reference, str):
+        raise DeployConfigError("reef.recipe must be a string")
+    selected.setdefault("reef", {})["recipe"] = interpolate_config(selected, reference) if reference else reference
+    if isinstance(selected.get("implementation"), str):
+        selected["implementation"] = interpolate_environment(
+            {"implementation": selected["implementation"]}, config_path
+        )["implementation"]
+    runtime = (
+        selected.get("runtime")
+        if selected.get("implementation") and ":" not in (reference or "")
+        else selected["reef"].get("runtime")
+    )
+    if isinstance(runtime, dict) and isinstance(runtime.get("type"), str):
+        runtime["type"] = interpolate_config(
+            selected, interpolate_environment({"type": runtime["type"]}, config_path)["type"]
+        )
+    source_root = recipe_source_root(selected, config_path)
+    if source_root is not None and str(source_root) not in sys.path:
+        sys.path.append(str(source_root))
+    return selected, source_root
+
+
 def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve()
     config = load_config(resolved_config_path, interpolate_env=False)
-    if overrides:
-        config = _apply_overrides(config, overrides)
-    config = interpolate_environment(config, resolved_config_path)
-    cli_paths = frozenset(
-        declared[0].path
-        for key, value in (overrides or {}).items()
-        if (declared := service_override(key, value)) is not None
-    )
+    selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
+    if source_root is not None:
+        _log(f"recipe package resolves from {source_root}")
     try:
-        normalized_config = normalize_service_config(config, cli_paths=cli_paths)
-    except ValueError as exc:
+        arguments = component_config_arguments(selected)
+        config = _apply_overrides(config, overrides or {}, arguments=arguments)
+        config = interpolate_environment(config, resolved_config_path)
+        normalized_config = normalize_component_config(normalize_service_config(config), arguments)
+    except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     settings_changed = normalized_config != config
     config = normalized_config
-    # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
     services = validate_services(config, resolved_config_path)
-    # Resolved against the operator's config, before any override copy
-    # relocates the path the services read.
-    source_root = recipe_source_root(config, resolved_config_path)
-    if source_root is not None:
-        _log(f"recipe package resolves from {source_root}")
-        if str(source_root) not in sys.path:
-            sys.path.append(str(source_root))
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     if overrides or paths_changed or settings_changed:
@@ -554,11 +603,16 @@ def _prepare_profile(recipe: str, model: str | None, environ: MutableMapping[str
     environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
 
 
-def build_serve_parser(*, service_arguments: bool = True) -> argparse.ArgumentParser:
+def build_serve_parser(
+    *, service_arguments: bool = True, config: Mapping[str, Any] | None = None
+) -> argparse.ArgumentParser:
     """``reef serve``'s own arguments: the service child's parser plus the profile and model flags.
 
     Only the launcher takes them; ``python -m reef.service`` still refuses ``--recipe``."""
     parser = build_parser(service_arguments=service_arguments)
+    if config is not None:
+        for argument in component_config_arguments(config):
+            argument.add_to(parser)
     parser.add_argument(
         "--recipe",
         default=None,
@@ -577,7 +631,14 @@ def build_serve_parser(*, service_arguments: bool = True) -> argparse.ArgumentPa
 def main(argv: Sequence[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--help" in argv or "-h" in argv:
-        build_serve_parser().parse_args(argv)
+        bootstrap = build_serve_parser(service_arguments=False)
+        selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
+        help_config = None
+        if selection.config or selection.recipe or any(arg.startswith("--reef.recipe") for arg in extras):
+            path = Path(selection.config or (profile_path(selection.recipe) if selection.recipe else "reef.yaml"))
+            config = load_config(path, interpolate_env=False) if selection.config or selection.recipe else {}
+            help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
+        build_serve_parser(config=help_config).parse_args(argv)
     # Discover the file/profile without applying defaults or converting
     # public values before YAML and environment references are available.
     parser = build_serve_parser(service_arguments=False)

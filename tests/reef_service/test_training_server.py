@@ -98,7 +98,7 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     # default lives with its recipe.
     assert not hasattr(args, "batch_size")
     assert not hasattr(args, "groups_per_step")
-    assert args.recipe_settings["batch_size"] == "4"
+    assert args.recipe_settings["batch_size"] == 4
     assert "groups_per_step" not in args.recipe_settings
     assert args.inference_backend_factory is None
     assert args.inference_backend_config == {}

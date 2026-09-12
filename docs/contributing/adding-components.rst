@@ -113,6 +113,13 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef/runtime/adapters/``. Subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
   and import its module from ``reef/runtime/adapters/__init__.py``.
+- A ``RuntimeFactory`` can expose ``config_type()`` returning a settings
+  dataclass whose fields use ``reef.core.config.config_option``. The registry
+  parses that selected schema with the shared CLI/YAML rules and runs the
+  dataclass's validation before calling the factory. Keep schema imports
+  lightweight. Factories without a schema retain their mapping contract.
+  Opaque backend payloads must be declared as object fields and validated by
+  the adapter; do not enumerate backend-native flags in the service layer.
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import a concrete training backend from ``reef/runtime/``.
 - Test registered and dotted resolution in

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from reef.core.config import config_arguments, config_metadata, config_option, parse_config_values
 from reef.runtime.executor.requirements import ExecutionRequirements
 
 
@@ -15,8 +16,8 @@ from reef.runtime.executor.requirements import ExecutionRequirements
 class WorkerResources:
     """Optional per-worker requests; None preserves component defaults."""
 
-    cpus_per_worker: float | None = None
-    gpus_per_worker: float | None = None
+    cpus_per_worker: float | None = config_option(None, help="CPU allocation per worker.")
+    gpus_per_worker: float | None = config_option(None, help="GPU allocation per worker.")
 
     def __post_init__(self) -> None:
         ExecutionRequirements(
@@ -27,9 +28,11 @@ class WorkerResources:
 
 @dataclass(frozen=True)
 class ExecutorSettings:
-    backend: str = "auto"
-    options: Mapping[str, Any] = field(default_factory=dict)
-    workers: int | None = None
+    backend: str = config_option("auto", help="Built-in executor, import path, or named profile.")
+    options: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Backend-owned executor options.")
+    )
+    workers: int | None = config_option(None, help="Number of workers; omitted uses the component requirement.")
     resources: WorkerResources = field(default_factory=WorkerResources)
 
     def __post_init__(self) -> None:
@@ -196,27 +199,22 @@ def executor_settings(config: Mapping[str, Any], selection: Any) -> ExecutorSett
         raise ValueError("executor.backend must be a non-empty string")
     if not isinstance(options, Mapping):
         raise ValueError("executor.options must be an object")
-    workers = selection.get("workers")
-    if isinstance(workers, str) and workers.strip().isdigit():
-        workers = int(workers)
-    if "workers" in selection and workers is None:
+    if "workers" in selection and selection["workers"] is None:
         raise ValueError("execution workers must be a positive integer")
     resources = selection.get("resources", {})
     if not isinstance(resources, Mapping) or set(resources) - {"cpus_per_worker", "gpus_per_worker"}:
         raise ValueError("executor.resources accepts only cpus_per_worker and gpus_per_worker")
-    parsed = {}
     for name, value in resources.items():
-        if isinstance(value, str):
-            try:
-                value = float(value)
-            except ValueError:
-                raise ValueError(f"{name} must be a finite nonnegative number") from None
         if value is None:
             raise ValueError(f"{name} must be a finite nonnegative number")
-        parsed[name] = value
-    return ExecutorSettings(
-        backend=backend, options=dict(options), workers=workers, resources=WorkerResources(**parsed)
+    parsed_resources = parse_config_values(
+        config_arguments(WorkerResources, prefix=("executor", "resources")), resources
     )
+    parsed = parse_config_values(
+        config_arguments(ExecutorSettings, prefix=("executor",)),
+        {key: value for key, value in selection.items() if key != "resources"},
+    )
+    return ExecutorSettings(**parsed, resources=WorkerResources(**parsed_resources))
 
 
 def role_executor_settings(config: Mapping[str, Any], role: str, default: str = "auto") -> ExecutorSettings:

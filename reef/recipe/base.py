@@ -72,13 +72,30 @@ class Recipe:
     ) -> Recipe:
         values = os.environ if environ is None else environ
         settings = config or {}
-        artifact = settings.get("artifact", {})
+        resolved = resolve_config_field_values(cls, settings.get("data", {}), values)
+        return cls.from_resolved_config(settings, resolved, environ=values, runtime=runtime)
+
+    @classmethod
+    def from_resolved_config(
+        cls,
+        config: Mapping[str, Any],
+        field_values: Mapping[str, Any],
+        *,
+        environ: Mapping[str, str],
+        runtime: InferenceRuntime | None = None,
+    ) -> Recipe:
+        """Construct from values resolved before runtime allocation.
+
+        ``field_values`` comes from ``resolve_config_field_values``. Domain
+        validation still runs in the constructor; no environment is re-read.
+        """
+        artifact = config.get("artifact", {})
         try:
             return cls(
-                **cls._recipe_kwargs(settings, values),
+                **cls._recipe_kwargs(config, environ),
                 checkpoint_strategy=EveryNVersions(config_positive_int(artifact, "checkpoint_every_n_versions", 1)),
-                runtime=cls._resolve_runtime(values, runtime),
-                **resolve_config_field_values(cls, settings.get("data", {}), values),
+                runtime=cls._resolve_runtime(environ, runtime),
+                **field_values,
             )
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
@@ -257,8 +274,8 @@ class WeightTrainingRecipe(Recipe):
         ``reef`` section — the caller (``reef.service.assembly``) removes the
         service's own keys first. Only keys the operator actually set are
         forwarded, so every default lives with the recipe's own config fields,
-        never in the service layer. Parsing is type-aware per field annotation
-        (a float field stays a float). A key this recipe does not declare
+        never in the service layer. This step only translates the layout; shared
+        field resolution performs type conversion before construction. A key this recipe does not declare
         is a loud error: the operator set a value nothing would consume.
         """
         config_fields = recipe_config_fields(cls)
@@ -271,7 +288,7 @@ class WeightTrainingRecipe(Recipe):
             elif key in config_fields:
                 # A YAML key left empty (None) is unset, not a value to parse.
                 if value is not None:
-                    data[key] = config_fields[key].parse(value, f"reef.{key}")
+                    data[key] = value
             else:
                 unknown.append(key)
         if unknown:

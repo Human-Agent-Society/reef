@@ -107,7 +107,7 @@ def test_float_config_field_survives_service_config_uncast() -> None:
     assert config["data"]["temperature"] == 0.25
 
     interpolated = ConfiguredRecipe.service_config({"temperature": "0.25"}, model_path="/models/demo")
-    assert interpolated["data"]["temperature"] == 0.25
+    assert interpolated["data"]["temperature"] == "0.25"  # Translation leaves parsing to field resolution.
 
     recipe = ConfiguredRecipe.from_environment({}, config=interpolated, runtime=StubTrainingRuntime())
     assert recipe.temperature == 0.25
@@ -160,17 +160,18 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
 @pytest.mark.parametrize(
     ("settings", "match"),
     [
-        ({"batch_size": "eight"}, r"reef\.batch_size must be an integer, got 'eight'"),
-        ({"batch_size": 2.5}, r"reef\.batch_size must be an integer, got 2\.5"),
-        ({"temperature": "warm"}, r"reef\.temperature must be a number, got 'warm'"),
-        ({"strict": "maybe"}, r"reef\.strict must be a boolean \(true/false\), got 'maybe'"),
-        ({"label": 3}, r"reef\.label must be a string, got 3"),
-        ({"checkpoint_every_n_versions": "x"}, r"reef\.checkpoint_every_n_versions must be an integer"),
+        ({"batch_size": "eight"}, r"reef\.batch_size must be a valid int"),
+        ({"batch_size": 2.5}, r"reef\.batch_size must be a valid int"),
+        ({"temperature": "warm"}, r"reef\.temperature must be a valid float"),
+        ({"strict": "maybe"}, r"reef\.strict must be a valid bool"),
+        ({"label": 3}, r"reef\.label must be a string"),
+        ({"checkpoint_every_n_versions": "x"}, r"reef\.checkpoint_every_n_versions must be a valid int"),
     ],
 )
 def test_service_config_names_the_setting_and_the_expected_type(settings, match) -> None:
     with pytest.raises(RecipeConfigError, match=match):
-        ConfiguredRecipe.service_config(settings, model_path="/models/demo")
+        config = ConfiguredRecipe.service_config(settings, model_path="/models/demo")
+        resolve_config_field_values(ConfiguredRecipe, config["data"], {})
 
 
 @pytest.mark.unit
@@ -192,7 +193,7 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
         _: KW_ONLY
         sizes: list = config_field(None)  # noqa: RUF009 - the invalid declaration under test
 
-    with pytest.raises(TypeError, match="must be annotated with one of: int, float, bool, str"):
+    with pytest.raises(TypeError, match="unsupported config field type: sizes"):
         recipe_config_fields(BadRecipe)
 
 

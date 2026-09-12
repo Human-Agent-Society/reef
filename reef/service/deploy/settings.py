@@ -20,15 +20,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.service.cors import console_origins
-from reef.service.deploy.arguments import (
-    ConfigArgument,
-    ConfigArgumentParser,
-    config_arguments,
-    config_metadata,
-    config_option,
-)
-from reef.service.deploy.config import config_value, interpolate_config, load_config
+from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values, load_config
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
@@ -48,8 +42,9 @@ Config overrides:
   values override YAML; omitted settings use the dataclass defaults.
   Both --upstream-model and legacy --upstream_model spellings work.
   Lists and objects take one quoted JSON/YAML value, including [] or {}.
-  Recipe and custom-stack overrides retain their existing YAML coercion:
-  bare keys target ``reef``; dotted keys target other sections.
+  Selected recipe/runtime fields share these rules; use -c <file> --help
+  to inspect their definitions. Undeclared custom-stack keys retain YAML
+  coercion; bare keys target ``reef``, dotted keys target other sections.
 
   Examples:
     reef serve -c stack.yaml --model-path Qwen/Qwen2.5-1.5B-Instruct
@@ -148,6 +143,7 @@ class ServiceSettings:
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         RecordRetention(self.agent_record_retention_days, self.agent_record_retention_max_bytes)
@@ -183,7 +179,8 @@ def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
     section = config.get("reef")
     if not isinstance(section, Mapping):
         return {}
-    return {key: _config_service_value(config, "reef", key) for key in section}
+
+    return {key: interpolate_config_values(config, value) for key, value in section.items()}
 
 
 #: ``reef.*`` keys the service consumes under a different field name. The
@@ -232,31 +229,29 @@ def _argument_value(config: Mapping[str, Any], argument: ConfigArgument) -> Any:
             return None
     if isinstance(node, str):
         return os.path.expanduser(interpolate_config(config, node.strip())) if node.strip() else None
-    if argument.kind == "strings" and isinstance(node, (list, tuple)):
-        return [interpolate_config(config, item) if isinstance(item, str) else item for item in node]
-    return node
+    return interpolate_config_values(config, node)
 
 
 def parse_service_arguments(
     config: Mapping[str, Any], *, cli_paths: frozenset[tuple[str, ...]] = frozenset()
 ) -> dict[str, Any]:
-    """Parse YAML arguments followed by explicit CLI values with one parser.
+    """Parse the merged public values with the shared component parser.
 
     The caller has already replaced overridden environment references and
-    expanded the effective config. CLI paths identify the values to append
-    last; containers are encoded as objects, never flattened into shell text.
+    expanded the effective config. ``cli_paths`` remains accepted for callers
+    of the earlier adapter; precedence is already present in the mapping.
     """
-    parser = ConfigArgumentParser(prog="reef serve", add_help=False, allow_abbrev=False)
-    yaml_args: list[str] = []
-    cli_args: list[str] = []
-    for argument in service_config_arguments():
-        argument.add_to(parser)
+    arguments = service_config_arguments()
+    supplied = {}
+    for argument in arguments:
         value = _argument_value(config, argument)
         if value is not None:
-            target = cli_args if argument.path in cli_paths else yaml_args
-            target.append(f"{argument.flags[0]}={argument.encode(value)}")
-    values = vars(parser.parse_args([*yaml_args, *cli_args]))
-    return {argument.name: values[argument.destination] for argument in service_config_arguments()}
+            supplied[argument.name] = value
+    # Precedence is already represented by the merged mapping. Keep cli_paths
+    # in this compatibility entrypoint; conversion is shared with components.
+    return parse_config_values(
+        tuple(dataclasses.replace(argument, required=False) for argument in arguments), supplied, environ=os.environ
+    )
 
 
 def normalize_service_config(
@@ -314,7 +309,9 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     # The legacy retry deadline follows the request timeout unless supplied.
     if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
-    return ServiceSettings(**values, recipe_settings=_reef_section(config))
+    # Built-in profiles use one file as both a stack and a named preset.
+    preset = dict(config) if "implementation" in config and ":" not in values["recipe"] else None
+    return ServiceSettings(**values, recipe_settings=_reef_section(config), preset_config=preset)
 
 
 def run_service(config_path: str | Path | None = None) -> int:

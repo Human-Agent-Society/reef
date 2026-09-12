@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from reef.core.config import config_option
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import (
     HttpInferenceBackend,
@@ -107,11 +109,31 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._inference_backend
 
 
+@dataclass(frozen=True)
+class InferenceProxySettings:
+    """Connection settings owned by the inference proxy adapter."""
+
+    base_url: str = config_option("", help="Inference provider base URL.")
+    api: str = config_option("openai", help="Provider API format.")
+    api_key: str | None = config_option(None, help="Provider credential.")
+    api_key_env: str | None = config_option(None, help="Environment variable containing the provider credential.")
+    timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
+
+    def __post_init__(self) -> None:
+        if not self.base_url:
+            raise ValueError("runtime.base_url must be a non-empty string")
+        if self.timeout_s <= 0:
+            raise ValueError("runtime.timeout_s must be positive")
+
+
 @register_runtime_kind
 class InferenceProxyRuntimeFactory(RuntimeFactory):
     """Build an :class:`InferenceProxyRuntime` from a runtime config section."""
 
     kind = "inference_proxy"
+
+    def config_type(self) -> type:
+        return InferenceProxySettings
 
     def __call__(
         self,
@@ -125,6 +147,6 @@ class InferenceProxyRuntimeFactory(RuntimeFactory):
             model_path=model_path,
             base_url=config_string(config, "base_url"),
             api_key=api_key,
-            api=str(config.get("api", "openai")),
-            inference_timeout_s=float(config.get("timeout_s", 300.0)),
+            api=config["api"],
+            inference_timeout_s=config["timeout_s"],
         )

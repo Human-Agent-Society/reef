@@ -12,7 +12,7 @@ weights or the harness*. This package holds everything a method binds to:
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
   ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
-  for one setting (YAML key, env fallback, typed parser).
+  for one setting (YAML key, env fallback, shared typed parser).
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
 
 Candidate evaluation is part of this contract, not a separate subsystem:

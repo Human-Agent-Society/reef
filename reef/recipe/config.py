@@ -17,6 +17,11 @@ def load_recipe_config(path: str | Path) -> dict[str, Any]:
         loaded = yaml.safe_load(config_path.read_text())
     except (OSError, yaml.YAMLError) as exc:
         raise RecipeConfigError(f"cannot load recipe config {config_path}: {exc}") from exc
+    return recipe_config_from_mapping(loaded)
+
+
+def recipe_config_from_mapping(loaded: Any) -> dict[str, Any]:
+    """Validate the preset structure supplied by either YAML or deployment."""
     if not isinstance(loaded, Mapping):
         raise RecipeConfigError("recipe config must be a YAML object")
     config = dict(loaded)

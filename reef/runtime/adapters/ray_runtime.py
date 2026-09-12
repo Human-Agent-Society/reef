@@ -8,14 +8,17 @@ worker control RPC lives in RayExecutor.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
+from reef.core.config import config_option
 from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
 from reef.runtime.base import TrainingRuntime
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
+from reef.runtime.settings import TrainingRuntimeSettings
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
 RayRuntime = ExecutorTrainingRuntime
@@ -81,6 +84,13 @@ def connect_ray_runtime(
     )
 
 
+@dataclass(frozen=True)
+class RayRuntimeSettings(TrainingRuntimeSettings):
+    actor_name: str = config_option(DEFAULT_ACTOR_NAME, help="Training coordinator actor name.")
+    namespace: str = config_option(DEFAULT_NAMESPACE, help="Ray namespace containing the coordinator.")
+    ray_address: str | None = config_option(None, help="Ray cluster address.")
+
+
 @register_runtime_kind
 class RayTrainingRuntimeFactory(RuntimeFactory):
     """Build (connect) a :class:`RayRuntime` from a runtime config section.
@@ -91,6 +101,16 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
     """
 
     kind = "ray_training"
+
+    def config_type(self) -> type:
+        return RayRuntimeSettings
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        # Existing Python assembly can inject these objects. They are not YAML
+        # fields and must never be serialized through the argument parser.
+        injected = {key: config[key] for key in ("connect", "inference_backend_factory") if key in config}
+        values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
+        return {**{key: value for key, value in values.items() if key in config}, **injected}
 
     def __call__(
         self,

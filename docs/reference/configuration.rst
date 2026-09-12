@@ -63,9 +63,60 @@ objects are preserved, and an explicit container replaces the YAML value:
 The parsed public values are also supplied to service commands and the HTTP
 child's config. Existing empty/null service values retain their defaulting
 behavior. ``reef.token`` and ``reef.tokens`` remain distinct inputs whose
-credentials are combined. Recipe-owned fields and arbitrary custom-stack
-overrides keep their existing parsers and YAML coercion; this change does not
-replace the ``services`` layout or introduce a new configuration format.
+credentials are combined. The selected Recipe, runtime adapter and executor
+settings use the same field parser. Only undeclared custom-stack mappings
+retain generic YAML coercion; the ``services`` layout is unchanged.
+
+Component configuration
+~~~~~~~~~~~~~~~~~~~~~~~
+
+After selecting ``reef.recipe``, Reef loads that class's declarations without
+constructing the recipe. A dotted weight-training recipe exposes its fields
+as ``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
+recipes use their structured ``data`` section, such as
+``--reef.data.batch-size``. ``reef serve -c stack.yaml --help`` includes the
+selected component's flags; basic ``reef serve --help`` does not load a recipe.
+The selected package must be importable in the launcher and child environments.
+When a profile file also declares its recipe ``implementation``, its fields
+use the top-level ``--data.<field>`` and ``--runtime.<field>`` paths. The HTTP
+child receives that merged preset instead of reloading the original file.
+
+Declared component fields follow **CLI > YAML > declared environment fallback
+> dataclass default**. False, zero, empty strings and empty containers remain
+explicit values. Strings are not guessed as YAML scalars. The last CLI alias
+wins, and boolean fields support ``--no-...``. A declaration that conflicts
+with a public option is rejected. The normalized values retain their types
+when handed to the HTTP child.
+
+For compatibility, an empty/null flat weight-recipe key remains omitted.
+Structured component fields accept null only if their annotation is optional;
+the literal string ``null`` remains text for string fields. Recipe floats
+retain their historical non-finite support; a recipe can declare
+``allow_nonfinite=False`` to require finite values. Service fields and backend
+resource/timeouts require finite values. Errors identify the field and expected
+type without echoing its value.
+
+Executor fields are declared by ``ExecutorSettings`` and ``WorkerResources``:
+
+.. code:: bash
+
+   reef serve -c stack.yaml \
+     --execution.evolution.workers 4 \
+     --execution.evolution.resources.cpus-per-worker 0.5
+
+A nested override of a named executor profile makes a local copy for that
+role; it does not modify the shared profile. Backend ``options`` objects
+remain owned by the selected backend. Slime's native model/optimizer flags
+continue through Slime's own parser; Reef does not duplicate that schema.
+
+A non-weight dotted recipe can supply ``reef.runtime`` to select a registered
+or dotted runtime factory. Its declared fields use names such as
+``--reef.runtime.timeout-s``. Inference proxy, Ray training, and executor
+training adapters declare their connection settings. Custom ``RuntimeFactory``
+implementations can opt in with ``config_type()``; legacy callable factories
+keep receiving their existing mapping. Unknown fields in a declared component
+schema fail validation. Recipe-specific sections and opaque adapter option
+objects continue to be validated by their owning component.
 
 If a service exits before readiness or exceeds its ``ready_timeout``, Reef
 stops the stack and reports the service, the failure reason, and the local

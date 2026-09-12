@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 from reef.core.batches import TrainingBatch, policy_samples
+from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.inference import InferenceBackend, InferenceBackendFactory, build_http_inference_backend
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
+from reef.runtime.settings import TrainingRuntimeSettings
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
 
@@ -466,6 +469,16 @@ def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
         raise RuntimeConfigError(f"invalid runtime.executor configuration: {exc}") from exc
 
 
+@dataclass(frozen=True)
+class ExecutorRuntimeSettings(TrainingRuntimeSettings):
+    coordinator_rank: int = config_option(0, help="Rank of the training coordinator worker.")
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.coordinator_rank < 0:
+            raise ValueError("runtime.coordinator_rank must be non-negative")
+
+
 @register_runtime_kind
 class ExecutorTrainingRuntimeFactory(RuntimeFactory):
     """Create a training coordinator using a configured executor.
@@ -477,6 +490,14 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
     """
 
     kind = "executor_training"
+
+    def config_type(self) -> type:
+        return ExecutorRuntimeSettings
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        injected = {key: config[key] for key in ("executor", "inference_backend_factory") if key in config}
+        values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
+        return {**values, **injected}
 
     def __call__(
         self,
@@ -500,7 +521,11 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             handle = ExecutorTrainGroupHandle(
                 executor,
                 rank=config.get("coordinator_rank", 0),
-                timeout_s=config.get("train_timeout_s", config.get("inference_timeout_s", 300.0)),
+                timeout_s=(
+                    config["train_timeout_s"]
+                    if config.get("train_timeout_s") is not None
+                    else config.get("inference_timeout_s", 300.0)
+                ),
             )
             kwargs: dict[str, Any] = {"train_group_handle": handle, "model_path": model_path}
             for key in (
