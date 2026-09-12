@@ -9,9 +9,10 @@ import pytest
 
 from recipes.openclawrl.deployment import prepare_dependencies
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import DeployConfigError, interpolate_config, validate_services
+from reef.service.deploy.config import DeployConfigError, interpolate_config
+from reef.service.deploy.execution import validate_services
+from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.service.deploy.provider import command_line_config
 from reef.train.slime_backend.launch import driver_environment
 
 OPENCLAW = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -117,7 +118,7 @@ def test_external_prm_has_no_managed_process_and_keeps_its_connection():
 
 def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     from reef.service.assembly import _serving_recipe
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.deploy.service_config import service_settings_from_config
 
     raw = {
         "schema-version": 2,

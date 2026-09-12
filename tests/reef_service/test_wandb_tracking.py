@@ -7,7 +7,7 @@ import pytest
 from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.observability.base import RollbackExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.service_config import service_settings_from_config
 
 
 class _StubRun:

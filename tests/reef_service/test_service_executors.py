@@ -13,8 +13,8 @@ import yaml
 from reef.runtime.executor import ExecutorConfig
 from reef.runtime.executor.config import executor_settings, role_executor_settings
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.service.deploy.config import DeployConfigError, validate_services
-from reef.service.deploy.execution import service_executor_config
+from reef.service.deploy.config import DeployConfigError
+from reef.service.deploy.execution import service_executor_config, validate_services
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 

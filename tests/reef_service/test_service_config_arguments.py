@@ -11,9 +11,9 @@ import yaml
 
 from reef.cli import main as cli_main
 from reef.service.deploy import orchestrator
+from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config import interpolate_environment, load_config
-from reef.service.deploy.orchestrator import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.settings import (
+from reef.service.deploy.service_config import (
     ServiceSettings,
     normalize_service_config,
     parse_service_arguments,
@@ -196,7 +196,7 @@ def test_cli_help_exposes_public_fields_without_optional_runtimes():
 
     code = (
         "import sys\n"
-        "from reef.service.deploy.orchestrator import build_serve_parser\n"
+        "from reef.service.deploy.cli import build_serve_parser\n"
         "print(build_serve_parser().format_help())\n"
         "assert not any(name in sys.modules for name in ('torch', 'slime', 'sglang'))\n"
     )

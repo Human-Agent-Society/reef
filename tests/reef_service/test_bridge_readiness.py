@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from reef.service.deploy.config import validate_services
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import ProcessWorker
 

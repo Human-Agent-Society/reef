@@ -7,13 +7,18 @@ import argparse
 import pytest
 import yaml
 
+from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy import orchestrator
-from reef.service.deploy.components import component_config_arguments, normalize_component_config
+from reef.service.deploy.cli import _apply_overrides, _parse_overrides
+from reef.service.deploy.component_config import (
+    component_config_arguments,
+    normalize_component_config,
+    normalize_component_layout,
+    translate_layout,
+    translate_references,
+)
 from reef.service.deploy.config import DeployConfigError, load_config
-from reef.service.deploy.layout import normalize_component_layout, translate_layout, translate_references
-from reef.service.deploy.options import native_arguments
-from reef.service.deploy.orchestrator import _apply_overrides, _parse_overrides
-from reef.service.deploy.settings import normalize_service_config, service_settings_from_config
+from reef.service.deploy.service_config import normalize_service_config, service_settings_from_config
 
 
 def test_public_layout_and_cli_preserve_values_and_opaque_options():

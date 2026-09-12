@@ -1,11 +1,13 @@
-"""Build service executors without embedding a scheduler in the orchestrator."""
+"""Validate process definitions and dependencies, then select their executors."""
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from reef.core.errors import DeployConfigError
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import (
     ExecutorSelection,
@@ -95,3 +97,89 @@ def service_executor_config(
             ),
         ),
     )
+
+
+def _command_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(argument, str) for argument in value)
+        and bool(value[0].strip())
+    )
+
+
+def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
+    """Services with valid commands and unique names, checked before any process starts."""
+    services = config.get("services")
+    if not isinstance(services, list) or not services:
+        raise DeployConfigError(f"config {config_path} must declare a non-empty 'services' list")
+    names: list[str] = []
+    for index, service in enumerate(services):
+        if not isinstance(service, dict):
+            raise DeployConfigError(
+                f"config {config_path}: services[{index}] must be an object, not {type(service).__name__}"
+            )
+        name = service.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise DeployConfigError(f"config {config_path}: services[{index}] must have a non-empty 'name'")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise DeployConfigError(f"invalid service name {name!r}; use letters, digits, '_' or '-'")
+        command = service.get("command")
+        valid_string = isinstance(command, str) and bool(command.strip())
+        valid_list = _command_list(command)
+        if not valid_string and not valid_list:
+            raise DeployConfigError(
+                f"config {config_path}: services[{index}] must have a non-empty 'command' string or list of strings"
+            )
+        names.append(name)
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    if duplicates:
+        raise DeployConfigError(
+            f"config {config_path}: service names must be unique; duplicated: {', '.join(duplicates)}"
+        )
+    endpoints = config.get("endpoints", {})
+    if not isinstance(endpoints, Mapping):
+        raise DeployConfigError("endpoints must be an object")
+    for service in services:
+        dependencies = service.get("depends_on", [])
+        if not isinstance(dependencies, list) or any(not isinstance(dep, str) for dep in dependencies):
+            raise DeployConfigError(f"service {service['name']!r}: depends_on must be a list of names")
+        if any(dep not in names for dep in dependencies):
+            raise DeployConfigError(f"service {service['name']!r}: unknown dependency")
+        if "ready" in service and not isinstance(service["ready"], str) and not _command_list(service["ready"]):
+            raise DeployConfigError(
+                f"service {service['name']!r}: ready must be a string or non-empty list of strings"
+            )
+        for field in ("cwd", "endpoint", "advertise_host"):
+            if field in service and not isinstance(service[field], str):
+                raise DeployConfigError(f"service {service['name']!r}: {field} must be a string")
+        if not isinstance(service.get("env", {}), Mapping):
+            raise DeployConfigError(f"service {service['name']!r}: env must be an object")
+        try:
+            if float(service.get("ready_timeout", config.get("ready_timeout", 3600))) <= 0:
+                raise ValueError("ready_timeout must be positive")
+            service_executor_config(config, service, Path("."), 3600, Path(config_path))
+        except (ValueError, TypeError, ImportError, AttributeError) as exc:
+            raise DeployConfigError(f"service {service['name']!r}: {exc}") from exc
+
+    # Stable dependency order, rather than relying on hand-ordered YAML lists.
+    by_name = {service["name"]: service for service in services}
+    ordered: list[dict[str, Any]] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visiting:
+            raise DeployConfigError(f"service dependency cycle at {name!r}")
+        if name in visited:
+            return
+        visiting.add(name)
+        for dependency in by_name[name].get("depends_on", []):
+            visit(dependency)
+        visiting.remove(name)
+        visited.add(name)
+        ordered.append(by_name[name])
+
+    for name in names:
+        visit(name)
+    return ordered

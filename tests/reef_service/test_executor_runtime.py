@@ -32,7 +32,7 @@ from reef.runtime.adapters import ray_runtime
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
-from reef.service.deploy.settings import ServiceSettings
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 

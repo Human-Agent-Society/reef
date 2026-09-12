@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service import assembly
-from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 

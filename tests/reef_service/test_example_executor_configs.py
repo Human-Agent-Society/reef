@@ -7,10 +7,9 @@ import yaml
 from reef_service.config_helpers import deployment_layout
 
 from reef.recipe.config import recipe_config_from_mapping
+from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.service.deploy.config import validate_services
-from reef.service.deploy.execution import service_executor_selection
-from reef.service.deploy.options import native_arguments
+from reef.service.deploy.execution import service_executor_selection, validate_services
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_CONFIGS = (

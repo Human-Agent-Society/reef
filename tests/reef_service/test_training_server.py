@@ -13,7 +13,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
-from reef.service.deploy.settings import ServiceSettings
+from reef.service.deploy.service_config import ServiceSettings
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -224,7 +224,7 @@ def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkey
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     retention = config["training"]["checkpoint_retention"]
-    from reef.service.deploy.options import native_arguments
+    from reef.runtime.executor.arguments import native_arguments
 
     command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
 

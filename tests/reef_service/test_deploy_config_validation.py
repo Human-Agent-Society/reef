@@ -9,7 +9,8 @@ import pytest
 
 import reef.service.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
-from reef.service.deploy.config import DeployConfigError, load_config, validate_services
+from reef.service.deploy.config import DeployConfigError, load_config
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.process import _command_argv
 
 VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"

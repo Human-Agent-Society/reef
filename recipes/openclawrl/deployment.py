@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_arguments, config_option, parse_config_values
+from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.service.deploy.inference import INFERENCE_BACKENDS, http_readiness_command
-from reef.service.deploy.options import native_arguments, normalize_native_options
 
 
 @dataclass(frozen=True)

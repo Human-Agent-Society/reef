@@ -12,9 +12,10 @@ import yaml
 
 from reef.cli import main
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import interpolate_config, validate_services
+from reef.service.deploy.config import interpolate_config
+from reef.service.deploy.execution import validate_services
+from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.service.deploy.provider import command_line_config
 
 RECIPE = "recipes.sao.recipe:SAORecipe"
 
@@ -156,6 +157,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     monkeypatch.chdir(tmp_path)
     downloads, configs, paths = [], [], []
     from reef.service.deploy import config as config_module
+    from reef.service.deploy import inference
 
     def download(model):
         downloads.append(model)
@@ -178,7 +180,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
         def shutdown(self):
             pass
 
-    monkeypatch.setattr(config_module, "resolve_hf_snapshot", download)
+    monkeypatch.setattr(inference, "resolve_hf_snapshot", download)
     monkeypatch.setattr(orchestrator, "_Stack", Stack)
     with pytest.raises(SystemExit) as result:
         main(

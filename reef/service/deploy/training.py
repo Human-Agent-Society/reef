@@ -8,8 +8,8 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from reef.service.deploy.config import DeployConfigError, config_value
-from reef.service.deploy.provider import http_service
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.inference import http_service
+from reef.service.deploy.service_config import service_settings_from_config
 from reef.train.deployment import TrainingDeployment
 
 

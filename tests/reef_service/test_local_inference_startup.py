@@ -223,7 +223,7 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
 
 def test_backend_definition_controls_launch_without_backend_specific_code(monkeypatch):
     from reef.service.deploy.inference import INFERENCE_BACKENDS, InferenceBackend, prepare_inference
-    from reef.service.deploy.settings import ServiceSettings
+    from reef.service.deploy.service_config import ServiceSettings
 
     monkeypatch.setitem(
         INFERENCE_BACKENDS,

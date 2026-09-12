@@ -233,7 +233,7 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     """Materialize the driver command and deployment recipe reference."""
 
     services = {service["name"]: service for service in config["services"]}
-    from reef.service.deploy.options import native_arguments
+    from reef.runtime.executor.arguments import native_arguments
     from reef.service.deploy.process import _command_argv
 
     tokens = _command_argv(config, services["slime-driver"]["command"])
@@ -377,8 +377,8 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _recipe_owned_settings
-    from reef.service.deploy.config import validate_services
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.deploy.execution import validate_services
+    from reef.service.deploy.service_config import service_settings_from_config
     from reef.train.slime_backend.launch import _configured_inference_backend_factory
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
@@ -423,7 +423,7 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.deploy.service_config import service_settings_from_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")

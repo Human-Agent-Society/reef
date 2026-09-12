@@ -13,7 +13,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config import load_config
-from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
 from reef.storage.records import RecordConflict, RecordRetention

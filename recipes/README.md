@@ -23,7 +23,7 @@ and what the quickstart serves:
 
 Each is complete and runnable: a flat `reef:` section (translated into the
 frozen `ServiceSettings` by
-[`reef/service/deploy/settings.py`](../reef/service/deploy/settings.py)) plus
+[`reef/service/deploy/service_config.py`](../reef/service/deploy/service_config.py)) plus
 a `services:` list the orchestrator starts in dependency order, with `${VAR}`
 environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
 defaults to the interpreter running `reef serve`, so Python services that use

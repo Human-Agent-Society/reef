@@ -10,7 +10,7 @@ import yaml
 from reef_service.config_helpers import deployment_layout
 
 from reef.runtime.executor.ray import RayExecutor
-from reef.service.deploy.config import validate_services
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.orchestrator import _Stack
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")

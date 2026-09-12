@@ -19,9 +19,9 @@ from reef.runtime.registry import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
 from reef.service.deploy import training
 from reef.service.deploy.config import DeployConfigError
+from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.provider import command_line_config
-from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
 from reef.train.runtime_backend import RuntimeTrainingBackend
 
 BACKEND = "reef_service._training_deployment:LocalDeployment"

@@ -12,15 +12,11 @@ from pathlib import Path
 import pytest
 
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.config import DeployConfigError, load_config, validate_services
-from reef.service.deploy.orchestrator import (
-    PROJECT_ROOT,
-    _model_overrides,
-    _prepare_profile,
-    _resolve_config,
-    build_serve_parser,
-)
-from reef.service.deploy.settings import build_parser, service_settings_from_config
+from reef.service.deploy.cli import build_parser, build_serve_parser
+from reef.service.deploy.config import DeployConfigError, load_config
+from reef.service.deploy.execution import validate_services
+from reef.service.deploy.orchestrator import PROJECT_ROOT, _model_overrides, _prepare_profile, _resolve_config
+from reef.service.deploy.service_config import service_settings_from_config
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 from reef.storage.sqlite import SQLiteRecordStore
 

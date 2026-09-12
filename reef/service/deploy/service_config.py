@@ -1,83 +1,24 @@
-"""Translate a ``reef serve`` config into service settings and run them.
+"""Typed HTTP, storage and shared runtime settings derived from component fields.
 
-``build_parser`` is the ``reef serve`` CLI surface; ``service_settings_from_config``
-converts a loaded config's ``reef`` section into a :class:`ServiceSettings`;
-``run_service`` is the internal HTTP child's entrypoint (reads ``REEF_CONFIG``,
-builds the app via :mod:`reef.service.assembly`, and serves it). The process
-orchestrator that starts the surrounding stack lives in
-:mod:`reef.service.deploy.orchestrator`.
+CLI and YAML values use the shared parser in ``reef.core.config``. This module
+converts effective deployment configuration into ``ServiceSettings`` for app assembly.
 """
 
 from __future__ import annotations
 
-import argparse
 import copy
 import dataclasses
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.service.cors import console_origins
-from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values, load_config
+from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
-
-_DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
-
-With no selected config, --inference.upstream-url and --inference.upstream-model start Reef's
-record-only recipe on 127.0.0.1:8900. YAML and a services list are optional.
-Alternatively, --inference.model-path starts managed SGLang inference and Reef;
---inference.tensor-parallel-size selects the visible GPU count (default: 1).
-Config files are selected explicitly with -c; REEF_CONFIG and ./reef.yaml
-are not discovered by the launcher.
-
-``reef serve -c <stack>.yaml`` reads the config's ``services``
-list and starts every declared process (SGLang, Slime driver, Reef, and so on)
-in dependency order. Each service's ``ready`` probe must pass before the next
-starts. After all services are up, Reef blocks until SIGTERM/SIGINT; a
-watchdog thread detects unexpected exits and tears the stack down.
-
-The Reef HTTP child receives the effective configuration from the launcher.
-
-Config overrides:
-  Public settings below share type conversion with YAML. Explicit CLI
-  values override YAML; omitted settings use the dataclass defaults.
-  Use the full public namespace; legacy aliases remain accepted.
-  Lists and objects take one quoted JSON/YAML value, including [] or {}.
-  Selected recipe/runtime fields share these rules; use -c <file> --help
-  to inspect their definitions. Versioned files reject unknown public
-  fields; legacy custom-stack keys retain their compatibility parsing.
-
-  Examples:
-    reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
-    reef serve -c stack.yaml --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve -c path/to/local-sglang.yaml --reef.port 9000
-    reef serve -c stack.yaml --training.config.checkpoint_dir /tmp/ckpt
-"""
-
-
-def build_parser(*, service_arguments: bool = False) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="reef serve",
-        description=_DESCRIPTION,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        allow_abbrev=False,
-    )
-    parser.add_argument(
-        "-c",
-        "--config",
-        default=None,
-        help="Optional config file path, relative to the working directory; no file is loaded unless selected.",
-    )
-    if service_arguments:
-        for argument in service_config_arguments():
-            argument.add_to(parser)
-    return parser
 
 
 @dataclass(frozen=True)
@@ -343,7 +284,7 @@ def parse_service_arguments(
     of the earlier adapter; precedence is already present in the mapping.
     """
     if "schema-version" in config:
-        from reef.service.deploy.layout import translate_layout
+        from reef.service.deploy.component_config import translate_layout
 
         config = translate_layout(config)
     arguments = service_config_arguments()
@@ -369,7 +310,7 @@ def normalize_service_config(
     no Reef HTTP child at all.
     """
     if "schema-version" in config:
-        from reef.service.deploy.layout import translate_layout
+        from reef.service.deploy.component_config import translate_layout
 
         config = translate_layout(config)
     values = parse_service_arguments(config, cli_paths=cli_paths)
@@ -411,8 +352,11 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
 def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     """Translate the config's ``reef`` section into HTTP service settings."""
     if "schema-version" in config:
-        from reef.service.deploy.components import component_config_arguments
-        from reef.service.deploy.layout import normalize_component_layout, translate_layout
+        from reef.service.deploy.component_config import (
+            component_config_arguments,
+            normalize_component_layout,
+            translate_layout,
+        )
 
         config = translate_layout(config)
         config = normalize_component_layout(config, component_config_arguments(config))
@@ -427,18 +371,3 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     # Preserve shared execution settings for presets and directly selected recipes.
     preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
     return ServiceSettings(**values, recipe_settings=_reef_section(config), preset_config=preset)
-
-
-def run_service(config_path: str | Path | None = None) -> int:
-    """Run the internal Reef HTTP child from the orchestrator's config."""
-    selected_config = config_path or os.environ.get("REEF_CONFIG")
-    if selected_config is None:
-        raise SystemExit("[reef] ERROR: internal service requires REEF_CONFIG")
-    settings = service_settings_from_config(load_config(selected_config))
-    from reef.service.assembly import build_app
-
-    app = build_app(settings)
-    from aiohttp import web
-
-    web.run_app(app, host=settings.host, port=settings.port)
-    return 0

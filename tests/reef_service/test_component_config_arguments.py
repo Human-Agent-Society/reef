@@ -19,10 +19,10 @@ from reef.runtime import InferenceProxyRuntime, RuntimeConfigError, RuntimeRegis
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.registry import RuntimeFactory
 from reef.service.deploy import orchestrator
-from reef.service.deploy.components import component_config_arguments, normalize_component_config
+from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
+from reef.service.deploy.component_config import component_config_arguments, normalize_component_config
 from reef.service.deploy.config import DeployConfigError, interpolate_environment
-from reef.service.deploy.orchestrator import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.settings import normalize_service_config, service_settings_from_config
+from reef.service.deploy.service_config import normalize_service_config, service_settings_from_config
 
 
 @dataclass(frozen=True)
@@ -261,7 +261,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
     from reef_service.runtime_stubs import StubTrainingRuntime
 
     from reef.service import assembly
-    from reef.service.deploy.settings import ServiceSettings
+    from reef.service.deploy.service_config import ServiceSettings
 
     resolved = []
     original = assembly.resolve_config_field_values
@@ -388,7 +388,7 @@ def test_profile_can_omit_its_runtime_with_an_empty_object(extension):
 
 
 def test_versioned_recipe_layout_uses_selected_schema(extension):
-    from reef.service.deploy.layout import normalize_component_layout, translate_layout, translate_references
+    from reef.service.deploy.component_config import normalize_component_layout, translate_layout, translate_references
 
     config = translate_layout(
         {

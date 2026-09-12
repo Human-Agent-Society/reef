@@ -253,3 +253,31 @@ counterpart.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``
 requires an RFC that states which layer owns the behavior.
+
+
+Deployment modules
+------------------
+
+``reef/service/deploy/`` separates configuration input from process startup:
+
+* ``config.py`` reads YAML, expands environment/config references and locates
+  recipe source packages. It does not download models or validate process graphs.
+* ``service_config.py`` declares shared HTTP, storage and runtime fields and
+  converts effective values into ``ServiceSettings`` for app assembly.
+* ``component_config.py`` loads selected recipe/runtime declarations, translates
+  the versioned public layout and validates component values.
+* ``cli.py`` builds help and applies dotted command-line overrides before shared
+  type conversion. CLI values take precedence over YAML.
+* ``inference.py`` assembles provider or local inference processes and resolves
+  model snapshots; ``training.py`` selects training deployment definitions and
+  assembles the training dependencies and HTTP process.
+* ``execution.py`` validates process definitions and dependency order and selects
+  executors. ``process.py`` owns worker processes; ``guard.py`` cleans up a remote
+  process group when its Ray owner disappears.
+* ``orchestrator.py`` coordinates configuration resolution, launch, readiness,
+  supervision and shutdown, including the internal HTTP child entrypoint.
+
+Shared parsing types come directly from ``reef.core.config``. Native backend
+argument encoding comes from ``reef.runtime.executor.arguments``. The package
+exports in ``reef.service.deploy`` remain the entrypoints for app assembly and
+launching; internal module names are not a compatibility API.
