@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import suppress
 from typing import Any
 
 import ray
@@ -14,7 +15,9 @@ from slime.utils.logging_utils import configure_logger
 from slime.utils.misc import Box
 
 from reef.runtime.executor import Executor, ExecutorConfig
+from reef.runtime.executor.ray import RayExecutor
 from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
+from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceControl
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars, resolve_tensor_dtype
 
 _PER_SAMPLE_KEYS = (
@@ -68,70 +71,37 @@ def recover_server(server) -> None:
     implementation(server)
 
 
-class ReefRolloutManagerImpl:
+class ReefRolloutManagerImpl(SlimeInferenceControl):
     """Batch scheduling is independent of the serving launch/control backend."""
 
-    def __init__(self, args, pg):
+    def __init__(self, args: Any, pg: Any, serving: Executor | None = None) -> None:
         configure_logger()
         self.args = args
         self.pg = pg
-        self._serving = Executor.create(
-            ExecutorConfig(
-                backend=rollout_executor_class(args),
-                options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
+        self._owns_serving = serving is None
+        self._closed = False
+        if serving is None:
+            # Compatibility path for direct bridge callers and colocated stacks.
+            serving = Executor.create(
+                ExecutorConfig(
+                    backend=rollout_executor_class(args),
+                    options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
+                )
             )
-        )
+        super().__init__(serving)
 
-    def dispose(self):
-        self._serving.shutdown()
+    def check_health(self) -> None:
+        if self._owns_serving:
+            self._serving.check_health(timeout=30)
+        else:
+            super().check_health()
 
-    def check_health(self):
-        self._serving.check_health(timeout=30)
-
-    def inference_url(self):
-        return self._serving.rpc(0, "inference_url", timeout=14_400)
-
-    def get_runtime_load_ids(self):
-        return self._serving.rpc(0, "get_runtime_load_ids", timeout=14_400)
-
-    def pause_generation_for_update(self):
-        return self._serving.rpc(0, "pause_generation_for_update", timeout=14_400)
-
-    def continue_generation_after_update(self):
-        return self._serving.rpc(0, "continue_generation_after_update", timeout=14_400)
-
-    def terminate_updatable_engines(self):
-        return self._serving.rpc(0, "terminate_updatable_engines", timeout=14_400)
-
-    def get_updatable_engines_and_lock(self):
-        return self._serving.rpc(0, "get_updatable_engines_and_lock", timeout=14_400)
-
-    def offload(self, tags=None):
-        return self._serving.rpc(0, "offload", args=(tags,), timeout=14_400)
-
-    def onload(self, tags=None):
-        return self._serving.rpc(0, "onload", args=(tags,), timeout=14_400)
-
-    def onload_weights(self):
-        return self._serving.rpc(0, "onload_weights", timeout=14_400)
-
-    def onload_kv(self):
-        return self._serving.rpc(0, "onload_kv", timeout=14_400)
-
-    def recover_updatable_engines(self):
-        return self._serving.rpc(0, "recover_updatable_engines", timeout=14_400)
-
-    def clear_updatable_num_new_engines(self):
-        return self._serving.rpc(0, "clear_updatable_num_new_engines", timeout=14_400)
-
-    def health_monitoring_pause(self):
-        return self._serving.rpc(0, "health_monitoring_pause", timeout=14_400)
-
-    def health_monitoring_resume(self):
-        return self._serving.rpc(0, "health_monitoring_resume", timeout=14_400)
-
-    def check_weights(self, action: str):
-        return self._serving.rpc(0, "check_weights", args=(action,), timeout=14_400)
+    def dispose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_serving:
+            self._serving.shutdown()
 
     def set_train_parallel_config(self, config: dict):
         self.train_parallel_config = config
@@ -233,7 +203,7 @@ class ReefRolloutManagerImpl:
 ReefRolloutManager = ray.remote(ReefRolloutManagerImpl)
 
 
-def create_rollout_manager(args, pg):
+def create_rollout_manager(args, pg, *, serving: Executor | None = None):
     runtime_env = add_default_ray_env_vars(reef_rollout_env_vars())
     options = {
         "num_cpus": 1,
@@ -242,13 +212,20 @@ def create_rollout_manager(args, pg):
     }
     if getattr(args, "rollout_data_transport", "object-store") == "nixl":
         options["enable_tensor_transport"] = True
-    manager = ReefRolloutManager.options(**options).remote(args, pg)
-    if args.check_weight_update_equal:
-        ray.get(manager.check_weights.remote(action="snapshot"))
-        ray.get(manager.check_weights.remote(action="reset_tensors"))
-    if args.offload_rollout:
-        ray.get(manager.offload.remote())
-    return manager
+    manager = ReefRolloutManager.options(**options).remote(args, pg, serving)
+    try:
+        if args.check_weight_update_equal:
+            ray.get(manager.check_weights.remote(action="snapshot"))
+            ray.get(manager.check_weights.remote(action="reset_tensors"))
+        if args.offload_rollout:
+            ray.get(manager.offload.remote())
+        return manager
+    except BaseException:
+        with suppress(Exception):
+            RayExecutor.from_workers([manager]).rpc(0, "dispose", timeout=60)
+        with suppress(Exception):
+            ray.kill(manager, no_restart=True)
+        raise
 
 
 __all__ = [

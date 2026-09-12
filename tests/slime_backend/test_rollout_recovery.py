@@ -582,3 +582,50 @@ def test_dp_packaging_configured_size_honors_remainder_policy(monkeypatch: pytes
     assert packed[0]["global_batch_sizes"] == [2, 2, 1]
     assert packed[0]["num_microbatches"] == [1, 1, 1]
     assert [rank["partition"] for rank in packed] == [[0, 2, 4], [1, 3]]
+
+
+def test_training_manager_borrows_inference_without_launching_or_disposing_it(monkeypatch):
+    _, module = _load_manager_module(monkeypatch)
+    executor = _RecordingRolloutExecutor(module.ExecutorConfig(backend=_RecordingRolloutExecutor))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("training must not create a serving executor when one is supplied")
+
+    monkeypatch.setattr(module.Executor, "create", unexpected)
+    manager = module.ReefRolloutManagerImpl(types.SimpleNamespace(), None, serving=executor)
+    assert manager.inference_url() == "inference_url"
+    assert manager.get_updatable_engines_and_lock() == "get_updatable_engines_and_lock"
+    manager.dispose()
+    manager.dispose()
+    assert not executor.closed
+    assert executor.rpc(0, "inference_url") == "inference_url"
+    executor.shutdown()
+    assert executor.closed
+
+
+def test_manager_startup_probe_failure_disposes_batch_actor_without_closing_borrowed_inference(monkeypatch):
+    _, module = _load_manager_module(monkeypatch)
+    executor = _RecordingRolloutExecutor(module.ExecutorConfig(backend=_RecordingRolloutExecutor))
+    implementation = module.ReefRolloutManagerImpl(types.SimpleNamespace(), None, serving=executor)
+    events = []
+
+    def fail_probe(**kwargs):
+        raise RuntimeError("probe failed")
+
+    actor = types.SimpleNamespace(
+        check_weights=types.SimpleNamespace(remote=fail_probe),
+        dispose=types.SimpleNamespace(remote=implementation.dispose),
+    )
+    monkeypatch.setattr(
+        module,
+        "ReefRolloutManager",
+        types.SimpleNamespace(options=lambda **kwargs: types.SimpleNamespace(remote=lambda *args: actor)),
+    )
+    monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: events.append(target))
+    args = types.SimpleNamespace(check_weight_update_equal=True, offload_rollout=False)
+    with pytest.raises(RuntimeError, match="probe failed"):
+        module.create_rollout_manager(args, None, serving=executor)
+    assert events == [actor]
+    assert implementation._closed
+    assert not executor.closed
+    executor.shutdown()

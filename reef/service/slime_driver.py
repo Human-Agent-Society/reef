@@ -1,5 +1,10 @@
 """Run the long-lived Slime-to-Reef training bridge driver.
 
+For managed non-colocated full-weight deployments, this entrypoint owns
+inference resources separately and hands a borrowed control connection to the
+training bridge. Shutdown releases training before inference and reservations.
+Other modes retain the combined bridge lifecycle during migration.
+
 Environment contract:
 
 ===============================  =============================================
@@ -335,12 +340,24 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     signal.signal(signal.SIGTERM, request_stop)
 
     bridge = None
+    inference_resources = None
     try:
         ray.init(address=ray_address, namespace=namespace, runtime_env=_job_runtime_env())
         # Importing the bridge initializes the Slime serving/training modules;
         # keep that work out of the lightweight healthcheck path.
-        from reef.train.slime_backend.reef_adapters.bridge import start_bridge
+        from reef.train.slime_backend.reef_adapters.bridge import prepare_bridge, start_bridge
+        from reef.train.slime_backend.resources import SlimeInferenceResources
 
+        prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
+        serving = None
+        placement_groups = None
+        # First migration: full-weight, non-colocated managed inference.
+        # LoRA, shared-GPU and externally owned engines retain their existing path.
+        if not prepared.lora and not getattr(args, "colocate", False) and not getattr(args, "rollout_external", False):
+            inference_resources = SlimeInferenceResources()
+            inference_resources.start(args)
+            serving = inference_resources.serving
+            placement_groups = inference_resources.placement_groups
         bridge = start_bridge(
             args,
             retention=retention,
@@ -348,6 +365,9 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
             loss_family_config=loss_family_config,
             actor_name=actor_name,
             namespace=namespace,
+            preparation=prepared,
+            serving=serving,
+            placement_groups=placement_groups,
         )
         health = ray.get(bridge.health.remote())
         if not isinstance(health, dict) or health.get("ok") is not True:
@@ -367,6 +387,11 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
                 ray.kill(bridge, no_restart=True)
             except Exception as exc:
                 print(f"failed to stop bridge actor cleanly: {exc}", file=sys.stderr)
+        if inference_resources is not None and ray.is_initialized():
+            try:
+                inference_resources.close()
+            except Exception as exc:
+                print(f"failed to release inference resources cleanly: {exc}", file=sys.stderr)
         if ray.is_initialized():
             ray.shutdown()
 

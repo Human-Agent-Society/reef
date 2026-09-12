@@ -1999,3 +1999,46 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}
     assert result.payload is not None and len(result.payload["samples"]) == 12
+
+
+def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_path, monkeypatch):
+    from reef.runtime.executor import ExecutorConfig
+    from reef.runtime.executor.uniproc import UniProcExecutor
+
+    events = []
+    serving = UniProcExecutor(ExecutorConfig(backend="uni"))
+    manager = SimpleNamespace(dispose=SimpleNamespace(remote=lambda: events.append("dispose-batch")))
+    allocation = SimpleNamespace(id="borrowed")
+    groups = {"actor": (allocation, [], []), "rollout": (allocation, [], [])}
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("attaching training must not allocate another model group")
+
+    monkeypatch.setattr(bridge, "create_placement_groups", unexpected)
+    import importlib
+
+    pg_module = importlib.import_module("ray.util.placement_group")
+    monkeypatch.setattr(pg_module, "remove_placement_group", unexpected)
+    monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill-batch"))
+
+    def create_manager(args, pg, *, serving):
+        assert serving is connection
+        assert pg is groups["rollout"]
+        return manager
+
+    def fail_training(args, placements, batch_manager):
+        assert placements is groups
+        assert batch_manager is manager
+        raise RuntimeError("training startup failed")
+
+    connection = serving
+    monkeypatch.setattr(bridge, "create_rollout_manager", create_manager)
+    monkeypatch.setattr(bridge, "create_train_groups", fail_training)
+    monkeypatch.setattr(bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False})
+    args = _bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron"))
+    with pytest.raises(RuntimeError, match="training startup failed"):
+        bridge.start_bridge(args, serving=serving, placement_groups=groups)
+    assert events == ["dispose-batch", "kill-batch"]
+    assert groups["actor"][0] is allocation
+    assert serving._closed is False

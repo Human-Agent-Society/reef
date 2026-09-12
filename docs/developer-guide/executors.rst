@@ -391,6 +391,35 @@ address and only local controllers, Reef passes the address through and the
 drivers connect after their readiness dependencies are satisfied. Stacks
 without Ray services or declared Ray training/rollout roles do not start Ray.
 
+Slime inference ownership
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For managed, non-colocated full-weight training, ``reef.service.slime_driver``
+validates the bridge configuration before creating ``SlimeInferenceResources``.
+That deployment owner uses Slime's existing placement helper once for the
+coordinated model allocation and launches ``SlimeInferenceWorker`` as a separate
+Ray control actor. This actor owns the serving executor, engines and routers.
+It reserves one CPU and zero model GPUs; the model placement groups account for
+engine GPUs separately.
+
+The driver passes a borrowed executor connection and placement groups to
+``start_bridge``. ``ReefRolloutManagerImpl`` retains tensorization, DP partitions
+and micro-batch scheduling and forwards inference controls through the borrowed
+connection. Training workers obtain engine handles through that connection;
+weight transfer remains directly between workers and engines. Training-manager
+shutdown does not destroy inference. On deployment shutdown or startup failure,
+the driver releases training first, then inference, then the model reservations,
+and finally disconnects Ray. Shared reservations are released once.
+
+This first stage keeps the control vocabulary inside the Slime integration.
+Existing full-weight publication, commit acknowledgement and generation-resume
+rules remain in the bridge; the controller does not independently reopen
+serving after a weight update. LoRA, colocated deployments, external engines and
+direct ``start_bridge`` callers without a supplied connection retain their
+existing lifecycle until those modes are migrated and validated. Public
+resource-field migration and a backend-neutral inference control interface
+remain in `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+
 The service stack keeps the runtime alive through service shutdown, publishes
 the actual address as ``reef.ray_address`` in runtime snapshots, and supplies
 ``RAY_ADDRESS`` to subsequent services, including the Slime driver. There is

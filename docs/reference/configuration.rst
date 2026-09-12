@@ -94,8 +94,12 @@ native backend flags belong in ``training.options``.
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
 bridge, then starts HTTP and obtains the inference connection from that bridge.
-Slime owns the SGLang model workers; Reef does not start a second inference
-server. Both processes share the Ray address, namespace, actor name and resolved
+For managed, non-colocated full-weight training, the Reef driver owns a separate
+inference controller and coordinated model reservations. The training batch
+manager borrows that controller; it does not launch or shut down inference.
+Slime's launch/placement helpers still implement the engine integration. LoRA,
+colocated and external-engine paths retain their existing combined lifecycle.
+HTTP and the driver share the Ray address, namespace, actor name and resolved
 model path. With no Ray address, Reef owns the shared runtime and stops it on
 exit; an existing cluster is left running. Model topology, optimizer settings
 and checkpoint paths still need the complete options for the selected recipe.
@@ -119,11 +123,20 @@ support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/32
 this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
-Slime-owned inference uses ``training.options.sglang-*`` for native engine
+Slime-integrated inference still uses ``training.options.sglang-*`` for native engine
 settings; upstream provider settings and standalone ``inference.options`` cannot
 be combined with it. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
+
+This is the first ownership-extraction stage of `RFC #425
+<https://github.com/Human-Agent-Society/reef/issues/425>`__. Resource fields have
+not moved yet: inference capacity remains in ``training.options.rollout-*``
+and training capacity in the existing Slime flags. Inference and training share
+one allocation plan, with no duplicate model-GPU reservations. The separate
+inference control actor requires one additional Ray CPU and zero GPUs. The
+HTTP endpoint is still discovered through the training bridge; a standalone
+training-capable inference deployment/configuration path remains future work.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;

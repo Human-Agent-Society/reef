@@ -34,7 +34,7 @@ import ray
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
-from reef.runtime.executor import resolve
+from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.surface.adapter import parse_adapter_name
@@ -313,10 +313,10 @@ def create_placement_groups(args):
     return implementation(args)
 
 
-def create_rollout_manager(args, placement_group):
+def create_rollout_manager(args, placement_group, *, serving: Executor | None = None):
     from reef.train.slime_backend.reef_adapters.rollout.manager import create_rollout_manager as implementation
 
-    return implementation(args, placement_group)
+    return implementation(args, placement_group, serving=serving)
 
 
 def create_train_groups(args, placement_groups, rollout_manager):
@@ -1192,23 +1192,20 @@ class TrainBridgeActorImpl:
 TrainBridgeActor = ray.remote(max_concurrency=64)(TrainBridgeActorImpl)  # type: ignore[call-overload]
 
 
-def start_bridge(
-    args,
-    *,
-    retention: RetentionConfig | None = None,
-    loss_family: str | None = None,
-    loss_family_config: object | None = None,
-    actor_name: str = DEFAULT_BRIDGE_ACTOR_NAME,
-    namespace: str = DEFAULT_NAMESPACE,
-):
-    """Boot the slime training stack and publish it as a named bridge actor.
+@dataclass(frozen=True)
+class BridgePreparation:
+    """Validated bridge choices, resolved before model resources are allocated."""
 
-    Run this in the slime driver process. ``args`` is slime's
-    ``argparse.Namespace`` (see ``slime.utils.arguments.parse_args``);
-    ``num_rollout`` is the number of externally supplied Reef training steps
-    and ``save_hf`` is a checkpoint path template. The Reef service connects
-    with the same ``actor_name`` and ``namespace``.
-    """
+    retention: RetentionConfig
+    loss_family: str | None
+    lora: bool
+
+
+def prepare_bridge(
+    args: Any, *, retention: RetentionConfig | None = None, loss_family: str | None = None
+) -> BridgePreparation:
+    """Validate and configure training/inference invariants before either starts."""
+    retention = retention or RetentionConfig()
     spec = resolve_loss_family(loss_family) if loss_family is not None else None
     validate_bridge_args(args, spec)
     if loss_family is not None and ":" not in loss_family:
@@ -1222,23 +1219,64 @@ def start_bridge(
     from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
 
     rollout_executor_class(args)
-    colocate = bool(getattr(args, "colocate", False))
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
     # tests/reef_service/test_dependency_boundaries.py).
-    from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots, megatron_lora_enabled
+    from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
     lora = megatron_lora_enabled(args)
-    retention = retention or RetentionConfig()
     prepare_checkpoint_storage(args, retention)
+    return BridgePreparation(retention=retention, loss_family=loss_family, lora=lora)
+
+
+def start_bridge(
+    args,
+    *,
+    retention: RetentionConfig | None = None,
+    loss_family: str | None = None,
+    loss_family_config: object | None = None,
+    actor_name: str = DEFAULT_BRIDGE_ACTOR_NAME,
+    namespace: str = DEFAULT_NAMESPACE,
+    serving: Executor | None = None,
+    placement_groups: Mapping[str, Any] | None = None,
+    preparation: BridgePreparation | None = None,
+):
+    """Boot the slime training stack and publish it as a named bridge actor.
+
+    Run this in the slime driver process. ``args`` is slime's
+    ``argparse.Namespace`` (see ``slime.utils.arguments.parse_args``);
+    ``num_rollout`` is the number of externally supplied Reef training steps
+    and ``save_hf`` is a checkpoint path template. The Reef service connects
+    with the same ``actor_name`` and ``namespace``.
+
+    ``serving`` and ``placement_groups`` are supplied together by the deployment
+    owner. The training manager borrows both; bridge failure/shutdown releases
+    training workers and the batch manager only. Without them, direct callers
+    retain the existing combined lifecycle. ``preparation`` is the result of
+    ``prepare_bridge`` for these same arguments before resource allocation.
+    """
+    prepared = preparation or prepare_bridge(args, retention=retention, loss_family=loss_family)
+    retention = prepared.retention
+    loss_family = prepared.loss_family
+    lora = prepared.lora
+    colocate = bool(getattr(args, "colocate", False))
+    from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
+
+    if (serving is None) != (placement_groups is None):
+        raise ValueError("supplied inference requires its coordinated placement groups")
     if not ray.is_initialized():
         ray.init(namespace=namespace)
-    pgs = create_placement_groups(args)
+    owns_placement_groups = placement_groups is None
+    pgs = create_placement_groups(args) if placement_groups is None else placement_groups
     rollout_manager = None
     actor_group = None
     critic_group = None
     try:
-        rollout_manager = create_rollout_manager(args, pgs["rollout"])
+        rollout_manager = (
+            create_rollout_manager(args, pgs["rollout"])
+            if serving is None
+            else create_rollout_manager(args, pgs["rollout"], serving=serving)
+        )
         # Loss families that train a value model need the critic actor group;
         # the others discard it. ``args.use_critic`` comes from the explicit
         # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
@@ -1275,13 +1313,14 @@ def start_bridge(
                 RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)
             with suppress(Exception):
                 RayExecutor.from_workers([rollout_manager], owned=True).shutdown()
-        # This function created the reservation; per-role executors only borrow it.
-        with suppress(Exception):
-            from ray.util.placement_group import remove_placement_group
+        # Supplied reservations belong to the deployment owner.
+        if owns_placement_groups:
+            with suppress(Exception):
+                from ray.util.placement_group import remove_placement_group
 
-            released = set()
-            for placement in pgs.values():
-                if placement is not None and placement[0] is not None and placement[0].id not in released:
-                    released.add(placement[0].id)
-                    remove_placement_group(placement[0])
+                released = set()
+                for placement in pgs.values():
+                    if placement is not None and placement[0] is not None and placement[0].id not in released:
+                        released.add(placement[0].id)
+                        remove_placement_group(placement[0])
         raise
