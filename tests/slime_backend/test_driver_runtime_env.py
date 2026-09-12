@@ -35,7 +35,8 @@ def test_serve_initializes_ray_with_the_job_runtime_env():
     assert "runtime_env=_job_runtime_env()" in source
 
 
-def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path, monkeypatch):
+@pytest.mark.parametrize("managed", [False, True])
+def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path, monkeypatch, managed):
     import pytest
 
     from reef.service import slime_driver
@@ -56,16 +57,23 @@ def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path
     monkeypatch.setenv("RAY_ADDRESS", "auto")
     monkeypatch.setenv("REEF_CONFIG", "unused.yaml")
     monkeypatch.delenv("SLIME_ARGS_FILE", raising=False)
-    monkeypatch.setattr(
-        slime_driver,
-        "load_config",
-        lambda path: {"reef": {"training_backend_options": {"lr": 1e-6, "use-critic": True}}},
-    )
+    reef = {"training_backend_options": {"lr": 1e-6, "use-critic": True}}
+    if managed:
+        reef.update(inference_num_gpus=4, tensor_parallel_size=2, inference_options={"context-length": 8192})
+    monkeypatch.setattr(slime_driver, "load_config", lambda path: {"reef": reef})
     monkeypatch.setattr(slime_driver, "_resolve_training_recipe", lambda config: ("loss", "recipe", Algorithm()))
     monkeypatch.setattr(slime_driver, "_parse_slime_args", parse)
     with pytest.raises(StopBeforeRuntime):
-        slime_driver._serve(["--lr=2e-6"], tmp_path / "ready")
-    assert captured == ["--lr=1e-06", "--use-critic", "--lr=2e-6"]
+        slime_driver._serve([] if managed else ["--lr=2e-6"], tmp_path / "ready")
+    assert captured == [
+        "--lr=1e-06",
+        "--use-critic",
+        *(
+            ["--rollout-num-gpus=4", "--rollout-num-gpus-per-engine=2", "--sglang-context-length=8192"]
+            if managed
+            else ["--lr=2e-6"]
+        ),
+    ]
 
 
 def _driver_lifecycle(monkeypatch, tmp_path, *, mode="managed", failure=None):

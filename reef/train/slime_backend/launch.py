@@ -51,6 +51,116 @@ def _configured_inference_backend_factory(path: str | None) -> InferenceBackendF
     return factory
 
 
+# These alter engine creation or topology outside Reef's inference request.
+# Reject argparse abbreviations as well as full names, even for omitted values.
+_INFERENCE_LAUNCH_OPTIONS = {
+    "rollout-num-gpus",
+    "rollout-num-gpus-per-engine",
+    "rollout-external",
+    "rollout-external-engine-addrs",
+    "prefill-num-servers",
+}
+_INFERENCE_RESERVED_OPTIONS = {
+    "model",
+    "model-path",
+    "served-model-name",
+    "config",
+    "config-file",
+    "yaml-config",
+    "tp",
+    "tp-size",
+    "tensor-parallel-size",
+    "dp",
+    "dp-size",
+    "data-parallel-size",
+    "pp",
+    "pp-size",
+    "pipeline-parallel-size",
+    "nnodes",
+    "node-rank",
+    "dist-init-addr",
+    "port",
+    "host",
+    "base-gpu-id",
+    "gpu-id-step",
+    "nccl-port",
+    "api-key",
+    "random-seed",
+    "trust-remote-code",
+    "enable-memory-saver",
+    "skip-server-warmup",
+    "enable-return-routed-experts",
+}
+
+
+def prepare_inference_config(
+    config: dict[str, Any], settings: Mapping[str, Any], training_options: Mapping[str, Any]
+) -> None:
+    """Resolve managed inference capacity before downloads or Ray allocation.
+
+    Public engine options use SGLang names without Slime's prefix. The first
+    managed topology uses tensor parallel engines, with independent replicas
+    when the total GPU budget exceeds the per-engine tensor parallel size.
+    LoRA and colocated deployments retain their existing runtime lifecycle.
+    """
+    for name in training_options:
+        if (
+            name.startswith(("sglang-", "router-"))
+            or "sglang".startswith(name)
+            or "router".startswith(name)
+            or any(flag.startswith(name) for flag in _INFERENCE_LAUNCH_OPTIONS)
+        ):
+            raise DeployConfigError(
+                f"training.options.{name} configures inference; use inference.num-gpus, "
+                "inference.tensor-parallel-size or inference.options instead"
+            )
+    parallel_size = settings["tensor_parallel_size"]
+    parallel_size = 1 if parallel_size is None else parallel_size
+    num_gpus = settings["inference_num_gpus"]
+    num_gpus = parallel_size if num_gpus is None else num_gpus
+    if parallel_size <= 0 or num_gpus <= 0 or num_gpus % parallel_size:
+        raise DeployConfigError(
+            "inference.num-gpus and inference.tensor-parallel-size must be positive; "
+            "num-gpus must be divisible by tensor-parallel-size"
+        )
+    options = normalize_native_options(settings["inference_options"])
+    native_arguments(options, reserved=_INFERENCE_RESERVED_OPTIONS)
+    if any(name.startswith("sglang-") for name in options):
+        raise DeployConfigError("inference.options uses native SGLang names without the sglang- prefix")
+    config["reef"].update(
+        inference_backend="sglang",
+        inference_num_gpus=num_gpus,
+        tensor_parallel_size=parallel_size,
+        inference_options=options,
+    )
+
+
+def driver_arguments(config: Mapping[str, Any]) -> list[str]:
+    """Adapt resolved component config to the pinned Slime parser at launch.
+
+    Keep generated inference flags out of training.options. Legacy explicit
+    process stacks without inference_num_gpus retain their native argument path.
+    """
+    reef = config.get("reef", {})
+    arguments = native_arguments(reef.get("training_backend_options", {}))
+    if reef.get("inference_num_gpus") is None:
+        return arguments
+    options = {
+        "rollout-num-gpus": reef["inference_num_gpus"],
+        "rollout-num-gpus-per-engine": reef["tensor_parallel_size"],
+    }
+    for name, value in reef.get("inference_options", {}).items():
+        # Slime has dedicated router bind flags and passes other router flags
+        # directly to RouterArgs. Engine flags are all prefixed by Slime.
+        flag = (
+            name
+            if name.startswith("router-") and name not in {"router-ip", "router-port", "router-request-timeout-secs"}
+            else "sglang-" + name
+        )
+        options[flag] = value
+    return [*arguments, *native_arguments(options)]
+
+
 class SlimeDeployment(TrainingDeployment):
     """Launch the Slime controller and connect HTTP to its shared Ray bridge."""
 
@@ -60,8 +170,6 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError(
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
-        if settings["inference_options"] or settings["tensor_parallel_size"] is not None:
-            raise DeployConfigError("Slime owns inference workers; configure their native flags in training.options")
         if settings["inference_backend"] not in (None, "sglang"):
             raise DeployConfigError("Slime-managed inference currently requires inference.backend: sglang")
 
@@ -73,6 +181,7 @@ class SlimeDeployment(TrainingDeployment):
 
         options = normalize_native_options(settings["training_backend_options"])
         native_arguments(options, reserved={"ready-file"})
+        prepare_inference_config(config, settings, options)
         checkpoint = options.get("hf-checkpoint")
         if checkpoint is not None and (
             not isinstance(checkpoint, str)

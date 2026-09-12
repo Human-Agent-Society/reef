@@ -36,6 +36,13 @@ reef:
   port: 28900
   token: ${REEF_TOKEN}                 # run.sh mints one per run
 inference:
+  num-gpus: "1"
+  tensor-parallel-size: "1"
+  options:
+    router-port: "23000"
+    context-length: "65536"
+    reasoning-parser: "qwen3-thinking"
+    tool-call-parser: "qwen25"
   model-path: /root/models/Qwen3-4B-Thinking-2507
   timeout-s: 7200
   backend-factory: >-
@@ -85,7 +92,6 @@ training:
   # RUNNING marker (observed live as "operator recovery required").
   timeout-s: 7200
   config:
-    sglang_port: "23000"
     checkpoint_dir: /var/lib/reef/checkpoints
     checkpoint_retention:
       max_storage_fraction: 0.80
@@ -104,23 +110,18 @@ training:
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "100"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    sglang-router-port: "${training.config.sglang_port}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"
     global-batch-size: "${training.config.global_batch_size}"
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
-    rollout-num-gpus: "1"
-    rollout-num-gpus-per-engine: "1"
     num-gpus-per-node: "5"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
     seq-length: "65536"
     rollout-max-response-len: "8192"
     rollout-max-context-len: "65536"
-    sglang-context-length: "65536"
-    sglang-reasoning-parser: "qwen3-thinking"
     rotary-base: "5000000"
     recompute-granularity: "full"
     recompute-method: "uniform"
@@ -160,7 +161,6 @@ training:
     normalization: "RMSNorm"
     group-query-attention: true
     qk-layernorm: true
-    sglang-tool-call-parser: "qwen25"
 storage:
   artifact-repository: /var/lib/reef/artifacts.git
   artifact-work-dir: /var/lib/reef/artifact-work

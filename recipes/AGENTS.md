@@ -123,8 +123,9 @@ storage:
 ```
 
 Keep shipped Reef configuration in the versioned public layout. Training
-examples put native driver flags in `training.options`; Reef assembles their
-worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
+examples put native training flags in `training.options`, engine flags in
+`inference.options`, and inference GPU capacity/parallelism in `inference.num-gpus`
+and `inference.tensor-parallel-size`; Reef assembles their worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
 settings belong in `reef`. Deploy method-owned services independently and pass
 their endpoints through recipe fields; Reef coordinates only native inference
 and training. See `recipes/openclawrl/examples/openclawrl/docker-compose.yaml`

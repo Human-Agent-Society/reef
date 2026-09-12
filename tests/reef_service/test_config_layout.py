@@ -208,3 +208,36 @@ def test_declared_recipe_sections_support_leaf_overrides():
     assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_workers": 4}
     assert result["reef"]["data"]["training_mode"] == "manual"
     assert config["reef"]["evolution"]["episode_workers"] == 2
+
+
+@pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])
+def test_standalone_inference_capacity_is_one_engine(tmp_path, num_gpus, tp, valid):
+    raw = {
+        "schema-version": 2,
+        "inference": {
+            "model-path": "/models/demo",
+            "num-gpus": num_gpus,
+            "tensor-parallel-size": tp,
+        },
+    }
+    if not valid:
+        with pytest.raises(DeployConfigError, match="must equal"):
+            orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+        return
+    config, _ = orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+    command = config["services"][0]["command"]
+    assert command[command.index("--tp") + 1] == str(tp)
+    assert config["reef"]["inference_num_gpus"] == num_gpus
+
+
+def test_provider_without_local_model_rejects_gpu_request(tmp_path):
+    raw = {
+        "schema-version": 2,
+        "inference": {
+            "upstream-url": "http://localhost:8000",
+            "upstream-model": "demo",
+            "num-gpus": 1,
+        },
+    }
+    with pytest.raises(DeployConfigError, match=r"require --inference\.model-path"):
+        orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")

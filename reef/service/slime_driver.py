@@ -13,7 +13,9 @@ Variable                         Meaning
 ``RAY_ADDRESS``                  Required. Ray cluster address to join.
 ``SLIME_ARGS_FILE``              Optional. Shell-like file of Slime flags,
                                  parsed without a shell; direct command-line
-                                 flags are appended after it.
+                                 flags are appended after it. Legacy explicit
+                                 process stacks only; managed launches use
+                                 the resolved Reef configuration.
 ``REEF_CONFIG``                  Required. Deployment config written or selected
                                  by ``reef serve``; ``reef.recipe`` identifies
                                  the weight-training recipe class.
@@ -48,11 +50,11 @@ import ray
 
 from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
-from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.service.deploy.config_utils import config_value, load_config
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.launch import driver_arguments
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
 
@@ -311,8 +313,10 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     actor_name = os.environ.get("REEF_RAY_ACTOR_NAME", DEFAULT_ACTOR_NAME)
     config = load_config(_required_environment("REEF_CONFIG"))
     loss_family, recipe, spec = _resolve_training_recipe(config)
+    if config.get("reef", {}).get("inference_num_gpus") is not None and (args_file or direct_args):
+        raise RuntimeError("managed drivers read resolved configuration; pass options through reef serve")
     combined_args = [
-        *native_arguments(config.get("reef", {}).get("training_backend_options", {})),
+        *driver_arguments(config),
         *(load_args_file(args_file) if args_file else []),
         *direct_args,
     ]

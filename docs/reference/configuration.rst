@@ -90,7 +90,7 @@ Version 2 contains no process definitions. ``service`` and ``services`` are
 rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
 or training backend determine the processes, dependencies and connections.
 ``training.config`` holds workload variables such as checkpoint directories;
-native backend flags belong in ``training.options``.
+native training flags belong in ``training.options`` and engine flags in ``inference.options``.
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
 bridge, then starts HTTP and obtains the inference connection from that bridge.
@@ -123,20 +123,73 @@ support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/32
 this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
-Slime-integrated inference still uses ``training.options.sglang-*`` for native engine
-settings; upstream provider settings and standalone ``inference.options`` cannot
-be combined with it. Reef binds ``training.options.hf-checkpoint`` to
+Slime-integrated inference uses the same ``inference`` fields as standalone
+serving. ``inference.num-gpus`` is the total inference GPU budget;
+``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
+The total defaults to the per-engine count and must be a positive multiple of
+it. For example, 4 GPUs with tensor parallel size 2 creates two engines.
+Standalone serving currently supports one engine, so its total must equal its
+tensor parallel size. An external provider does not accept local GPU requests.
+
+.. code:: yaml
+
+   inference:
+     model-path: Qwen/Qwen2.5-1.5B-Instruct
+     num-gpus: 1
+     tensor-parallel-size: 1
+     options:
+       mem-fraction-static: 0.6
+       router-port: 30000  # Slime-integrated inference only
+   training:
+     backend: slime
+     options:
+       actor-num-nodes: 1
+       actor-num-gpus-per-node: 1
+       # Add the recipe's optimizer, model and checkpoint options here.
+
+CLI overrides use the same parser, for example
+``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
+``--inference.options.mem-fraction-static 0.7``. Native engine options use
+SGLang's names without a ``sglang-`` prefix. The Slime integration translates
+these only when constructing driver arguments; generated inference flags are
+not stored in ``training.options``. Router bind settings use ``router-ip`` and
+``router-port``; other supported router flags retain their native ``router-*``
+names. The standalone engine launcher does not include a router.
+
+Migration from the previous version 2 training configuration:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Previous field
+     - Replacement
+   * - ``training.options.rollout-num-gpus``
+     - ``inference.num-gpus``
+   * - ``training.options.rollout-num-gpus-per-engine``
+     - ``inference.tensor-parallel-size`` (tensor-parallel engines)
+   * - ``training.options.sglang-context-length`` (and other ``sglang-*`` options)
+     - ``inference.options.context-length`` (remove the prefix)
+   * - ``training.options.sglang-router-port``
+     - ``inference.options.router-port``
+
+Managed launches reject the previous inference flags in ``training.options``,
+even if their values agree with the new fields. Native options cannot override
+managed model, placement or parallelism settings. Pipeline/data parallel and
+prefill/decode-disaggregated inference topologies are not supported by this
+managed path yet. Unversioned explicit process stacks keep their native flags
+for those legacy deployments. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
 
-This is the first ownership-extraction stage of `RFC #425
-<https://github.com/Human-Agent-Society/reef/issues/425>`__. Resource fields have
-not moved yet: inference capacity remains in ``training.options.rollout-*``
-and training capacity in the existing Slime flags. Inference and training share
-one allocation plan, with no duplicate model-GPU reservations. The separate
-inference control actor requires one additional Ray CPU and zero GPUs. The
-HTTP endpoint is still discovered through the training bridge; a standalone
-training-capable inference deployment/configuration path remains future work.
+This continues `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+Training GPU capacity remains in ``training.options.actor-num-*``; the shared
+physical node size remains ``training.options.num-gpus-per-node``. Inference
+and training share one allocation plan, with no duplicate model-GPU
+reservations. Non-colocated full-weight training borrows Reef-owned inference;
+LoRA and colocated modes use the new config fields with their existing combined
+lifecycle. The separate inference control actor requires one additional Ray
+CPU and zero GPUs. The HTTP endpoint is still discovered through the training
+bridge; independently restarting inference and training remains future work.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -747,7 +800,7 @@ Read by the weight-training stack. See `Evolve your model
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written
    training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
    training.config.checkpoint_retention | storage-fraction bounds and the retention policy
-   training.options | native backend flags as a mapping: GPU layout, optimizer, sequence length, and loss settings
+   training.options | native training flags: actor GPU layout, optimizer, sequence length, and loss settings
 
 Slime fills architecture flags such as layer counts and hidden sizes from
 ``inference.model-path``. Do not put them in the config.

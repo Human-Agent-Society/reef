@@ -12,6 +12,8 @@ reef:
   ready-timeout: 120
 
 inference:
+  num-gpus: "${training.config.num_gpus}"
+  tensor-parallel-size: "1"
   model-path: work/model
   timeout-s: 7200
   backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
@@ -51,8 +53,6 @@ training:
     n-samples-per-prompt: "${recipe.config.group-size}"
     global-batch-size: "4"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
-    rollout-num-gpus: "${training.config.num_gpus}"
-    rollout-num-gpus-per-engine: "1"
     num-gpus-per-node: "${training.config.num_gpus}"
     megatron-lora-rank: "32"
     megatron-lora-alpha: "32"

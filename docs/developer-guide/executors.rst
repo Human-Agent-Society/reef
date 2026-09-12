@@ -416,9 +416,12 @@ Existing full-weight publication, commit acknowledgement and generation-resume
 rules remain in the bridge; the controller does not independently reopen
 serving after a weight update. LoRA, colocated deployments, external engines and
 direct ``start_bridge`` callers without a supplied connection retain their
-existing lifecycle until those modes are migrated and validated. Public
-resource-field migration and a backend-neutral inference control interface
-remain in `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+existing lifecycle until those modes are migrated and validated. Managed
+configurations use ``inference.num-gpus``, ``inference.tensor-parallel-size``
+and ``inference.options`` in all modes. The integration converts these to
+Slime launch arguments once at the driver boundary; training options contain
+only training settings. A backend-neutral inference control interface and
+independent component restarts remain in `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 
 The service stack keeps the runtime alive through service shutdown, publishes
 the actual address as ``reef.ray_address`` in runtime snapshots, and supplies

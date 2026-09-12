@@ -233,8 +233,8 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     """Materialize the driver command and deployment recipe reference."""
 
     services = {service["name"]: service for service in config["services"]}
-    from reef.runtime.executor.arguments import native_arguments
     from reef.service.deploy.process import _command_argv
+    from reef.train.slime_backend.launch import driver_arguments
 
     tokens = _command_argv(config, services["slime-driver"]["command"])
     module = SLIME_DRIVER_MODULE
@@ -244,7 +244,7 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     assert "REEF_TRAINING_LOSS" not in driver_env
     recipe = config["reef"]["recipe"]
     return [
-        *native_arguments(config["reef"].get("training_backend_options", {})),
+        *driver_arguments(config),
         *tokens[tokens.index(module) + 1 :],
     ], recipe
 

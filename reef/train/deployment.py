@@ -49,6 +49,7 @@ class InProcessTrainingDeployment(TrainingDeployment):
             "inference_backend_factory",
             "inference_backend_config",
             "tensor_parallel_size",
+            "inference_num_gpus",
             "inference_options",
         } & config["reef"].keys()
         if unsupported or {"training", "rollout"} & config.get("execution", {}).keys():
