@@ -7,8 +7,9 @@ owner, then use the matching playbook below.
 Core and external extensions
 ----------------------------
 
-Recipes and learning methods are external packages selected by dotted
-reference; Reef does not bundle or register them. Changes to shared runtime or
+Reefine is the built-in harness refinement recipe in ``reef/recipe/reefine/``.
+Other recipes and learning methods are external packages selected by dotted
+reference; Reef does not import those packages at boot. Changes to shared runtime or
 training machinery start with an `RFC issue
 <https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
 A new top-level package, persisted format, wire contract, or incompatible
@@ -77,6 +78,11 @@ Implementation
 - Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
+- Implement ``TrainingDeployment`` in the integration to own process preparation
+  and its runtime connection. In-process integrations can extend
+  ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
+  ``reef.training_backends`` entry-point group; see `Training backend deployment
+  <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
 - Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
   into framework payloads inside the integration.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add

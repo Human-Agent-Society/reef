@@ -1,5 +1,5 @@
 #!/bin/bash
-# Harness requests v1 on reef-pi, end to end. Usage: ./run.sh bugfix | research | measure [--n N]
+# Reefine on reef-pi, end to end. Usage: ./run.sh bugfix | research | measure [--n N]
 # Starts reef serve on configs/deployment.yaml, waits for /healthz, installs
 # the served tree under work/harness, runs run.py <mode>, stops the service.
 # State and logs go to ./work. Setup (once): see README.

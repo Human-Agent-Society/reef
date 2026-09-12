@@ -382,8 +382,8 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     event = tracker.events[0]
     assert event.context.scenario == "math"
     assert event.context.recipe == "test_policy"
-    assert event.context.backend == "SlimeTrainingBackend"
-    assert event.context.backend_config == {"runtime": "slime", "step_preparer": "sft"}
+    assert event.context.backend == "RuntimeTrainingBackend"
+    assert event.context.backend_config == {"runtime": "DurableRuntime", "step_preparer": "sft"}
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced
     assert event.metrics["train/loss"] == pytest.approx(0.25)

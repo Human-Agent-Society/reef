@@ -43,9 +43,9 @@ import ray
 
 from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
+from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.service.deploy.config import config_value, load_config
-from reef.service.deploy.options import native_arguments
+from reef.service.deploy.config_utils import config_value, load_config
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family

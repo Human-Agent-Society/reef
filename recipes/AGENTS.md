@@ -21,7 +21,7 @@ my_example/
     __init__.py           lazily exports HarborAgent
     agent.py              HarborAgent(BaseAgent) — the agent logic
     report.py             optional: post a trainable verifier reward to Reef
-  my_example.yaml         Reef service config (recipe, host, token, services)
+  my_example.yaml         Reef config (recipe, inference, training, HTTP settings)
   run.sh                  starts reef serve, then runs reef-eval with the harness
   pyproject.toml          makes harness/ importable by reef-eval's uvx environment
   README.md               what the example demonstrates and how to run it
@@ -105,7 +105,7 @@ Reef service config. The minimal record-only config (no training stack) is:
 
 ```yaml
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: ${REEF_PORT}
   token: ${REEF_TOKEN}
@@ -123,9 +123,12 @@ storage:
 ```
 
 Keep shipped Reef configuration in the versioned public layout. Training
-examples put native driver flags in `training.options` and retain explicit
-`services` for their worker topology; see
-`recipes/tttd/examples/tttd/serve.yaml`. Recipe fields and owned sections go
+examples put native driver flags in `training.options`; Reef assembles their
+worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
+settings belong in `reef`. Deploy method-owned services independently and pass
+their endpoints through recipe fields; Reef coordinates only native inference
+and training. See `recipes/openclawrl/examples/openclawrl/docker-compose.yaml`
+for external service startup and GPU isolation. Recipe fields and owned sections go
 under `recipe.config`. Docker Compose and third-party task files retain their
 own schemas. Legacy Reef layouts belong in compatibility tests.
 

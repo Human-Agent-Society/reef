@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The reef training stack (docker-compose.yaml), then the 72-session GSM8K
+# The OpenClawRL deployment (Reef, independent PRM and student model), then the 72-session GSM8K
 # stream through reef-eval. Setup (once): see README. State goes to $RUN_DIR.
 #
 # The stack is left running and a healthy one is reused, so a re-run continues
@@ -36,7 +36,7 @@ docker build -q -t "openclawrl-user-sim:$USER_SIM_TAG" user_sim >/dev/null
 [ -f "$RUN_DIR/token" ] || openssl rand -hex 16 > "$RUN_DIR/token"
 REEF_TOKEN="$(cat "$RUN_DIR/token")"
 
-# 1. The reef training stack (docker-compose.yaml holds its configuration)
+# 1. Compose owns Reef, PRM and student-model startup and readiness.
 echo "==> [1/2] the reef stack at $REEF_URL (a cold boot takes ~6 minutes on B200s)"
 # compose reads these from the environment; the subshell keeps the token out of
 # everything that runs after it.

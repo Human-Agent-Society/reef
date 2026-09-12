@@ -58,7 +58,7 @@ function readTerminologyFiles(directory, extensions) {
 const routeFiles = readRouteFiles(routesDirectory);
 const routeSource = routeFiles.map(read).join("\n");
 
-const serviceConfig = configSource.match(/^service:\s*\n((?:[ \t]+.*\n?)*)/m)?.[1];
+const serviceConfig = configSource.match(/^reef:\s*\n((?:[ \t]+.*\n?)*)/m)?.[1];
 const port = serviceConfig?.match(/^[ \t]+port:\s*["']?(\d+)/m)?.[1];
 if (!port) {
   throw new Error("Could not derive the Reef port from recipes/basic/local-sglang.yaml");

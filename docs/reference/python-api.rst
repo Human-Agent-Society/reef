@@ -50,6 +50,7 @@ Recipe
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
    from reef.recipe.cordis import CordisRecipe
+   from reef.recipe.reefine import ReefineRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
 for every scenario in a deployment.

@@ -133,7 +133,7 @@ export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
-  --service.port "8900"
+  --reef.port "8900"
 
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```
@@ -237,8 +237,9 @@ current harness on the tutorial's three coding tasks and publishes it only if
 it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
 tasks and evaluation.
 
-To ask for a harness change in plain words and see the whole path from the ask to the install, run the [harness requests tutorial](tutorials/harness-requests/README.md).
+To ask for a harness change in plain words and see the whole path from the ask to the install, run the [Reefine tutorial](tutorials/reefine/README.md).
 
+Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --model ollama/gemma4:26b`.
 
 ## Recipes and examples
 
@@ -247,14 +248,14 @@ evolve**: model weights or the agent harness. Recipes that evolve model
 weights need the GPU training stack; harness recipes need only a model
 endpoint. Each recipe below links to its guide, and each measured benchmark
 links to its results page; the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
-adds the code and example for every recipe. The implementations live in this
-repository's `recipes/` cookbook, are selected by dotted class reference, and
-do not ship in the Reef wheel.
+adds the code and example for every recipe. Reefine ships with `reef-infra`;
+the other implementations live in this repository's `recipes/` cookbook, are
+selected by dotted class reference, and do not ship in the Reef wheel.
 
 | Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
 |---|---|---|---|---|
 | Scientific discovery | One hard problem, repeated attempts, a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing (n = 26, 32)](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
-| Continual learning on a task stream | A stream of independent tasks, each scored by a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), [Terminal-Bench 30-task subset](recipes/meta_harness/RESULTS.md). Proposed: CEO-Bench |
+| Continual learning on a task stream | A stream of independent tasks, each scored by a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), [Terminal-Bench 30-task subset](recipes/meta_harness/RESULTS.md). Proposed: CEO-Bench |
 | Learning from usage | Real interaction with no explicit score, or delayed feedback | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Measured: the [OpenClaw-RL simulated student](recipes/openclawrl/examples/openclawrl/README.md#results). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays

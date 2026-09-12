@@ -15,7 +15,7 @@ both variants.
 import json
 import logging
 
-from harness.evolution import _ENTRY_NAME, failures_text, grade_text
+from .evolution import _ENTRY_NAME, failures_text, grade_text
 
 KINDS = ("skill", "native_tool", "native_hook", "native_graph", "native_agent")
 EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")

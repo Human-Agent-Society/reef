@@ -8,7 +8,7 @@
 # reef serve puts that package on the service's PYTHONPATH from the checkout it runs in, so this profile
 # runs from a reef checkout.
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   run-dir: .reef/harness-evolve/stack
@@ -19,8 +19,8 @@ recipe:
   config:
     evolution:
       adapter: pi
-      propose: harness.evolution:propose
-      evaluate: harness.evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
       # A person asks for a change with /reef-harness; the next session is offered the install.
       requests: true
       version_check: true
@@ -59,13 +59,3 @@ storage:
   artifact-repository: .reef/harness-evolve/artifacts.git
   artifact-work-dir: .reef/harness-evolve/artifact-work
   artifact-cache-dir: .reef/harness-evolve/artifact-cache
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    env:
-      # reef serve sets both when it starts a profile: the registry reads this file back from here,
-      # and the tutorial's method package imports from the checkout.
-      REEF_RECIPE_CONFIG_DIR: "${REEF_RECIPE_CONFIG_DIR}"
-      PYTHONPATH: "${REEF_CHECKOUT}/tutorials/evolve-your-harness:${REEF_CHECKOUT}"
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz

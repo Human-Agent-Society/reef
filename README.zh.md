@@ -130,7 +130,7 @@ export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
-  --service.port "8900"
+  --reef.port "8900"
 
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```
@@ -224,7 +224,9 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
 [教程](tutorials/evolve-your-harness/README.md)。
 
-要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [harness requests 教程](tutorials/harness-requests/README.md)。
+要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [Reefine 教程](tutorials/reefine/README.md)。
+
+Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --model ollama/gemma4:26b` 即可启动。
 
 
 ## Recipes 与示例
@@ -232,13 +234,13 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 根据工作负载的**任务类型**，以及希望**进化的对象**（模型权重或 Agent 的 harness）来选择
 recipe。进化模型权重的 recipe 需要 GPU 训练栈；harness recipe 只需要一个模型端点。下表中每个
 recipe 链接到其指南，每个已测 benchmark 链接到其结果页；[Recipe 目录](https://reefinfra.ai/docs/user-guide/recipes/)
-还列出了每个 recipe 的代码和示例。这些实现位于本仓库的 `recipes/` cookbook 中，通过带点号的
-类路径指定，不随 Reef wheel 发布。
+还列出了每个 recipe 的代码和示例。Reefine 随 `reef-infra` 内置提供；其他实现位于本仓库的
+`recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
 
 | 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
 |---|---|---|---|---|
 | 科学发现 | 一个难题反复尝试，有可度量的目标 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充（n = 26、32）](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
-| 任务流上的持续学习 | 独立任务组成的任务流，每个由校验器打分 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[Terminal-Bench 30 任务子集](recipes/meta_harness/RESULTS.md)。拟采用：CEO-Bench |
+| 任务流上的持续学习 | 独立任务组成的任务流，每个由校验器打分 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[Terminal-Bench 30 任务子集](recipes/meta_harness/RESULTS.md)。拟采用：CEO-Bench |
 | 从使用中学习 | 真实交互，无显式分数或反馈延迟到达 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | 已测：[OpenClaw-RL 模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解

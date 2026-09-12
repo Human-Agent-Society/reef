@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.service.deploy.config import recipe_source_root
+from reef.service.deploy.config_utils import recipe_source_root
 from reef.service.deploy.execution import service_executor_config
 from reef.service.deploy.orchestrator import _run_orchestrator
 from reef.service.deploy.process import ProcessWorker

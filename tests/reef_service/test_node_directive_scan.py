@@ -12,7 +12,7 @@ from reef.harness.tree.nodes import directive_shaped
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK_SOURCES = (
     "tutorials/evolve-your-harness/configs/serve.yaml",
-    "tutorials/harness-requests/configs/deployment.yaml",
+    "tutorials/reefine/configs/deployment.yaml",
     "recipes/skillclaw/skillclaw.yaml",
 )
 

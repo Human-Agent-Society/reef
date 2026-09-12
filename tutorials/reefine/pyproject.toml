@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-reefine-tutorial"
+version = "0.1.0"
+description = "Reefine built-in recipe demos: bug fix flow, research loop, and request measurements"
+requires-python = ">=3.10"
+dependencies = ["reef-infra", "reef-client"]
+
+# Reefine ships with reef-infra; this directory contains only the driver and demos.
+[tool.setuptools]
+packages = []

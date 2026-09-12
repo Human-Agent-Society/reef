@@ -11,6 +11,8 @@ import copy
 import dataclasses
 import json
 import math
+import os
+import re
 import sys
 import types
 from collections.abc import Mapping
@@ -18,6 +20,10 @@ from dataclasses import dataclass
 from typing import Any, NoReturn, Union, get_args, get_origin, get_type_hints
 
 import yaml
+
+from reef.core.errors import DeployConfigError
+
+_CFG_VAR_RE = re.compile(r"\$\{([\w.-]+)\}")
 
 
 def config_metadata(
@@ -274,3 +280,43 @@ def parse_config_values(
         for argument in arguments
         if include_defaults or argument.name in supplied
     }
+
+
+def config_value(
+    config: Mapping[str, Any],
+    *path: str,
+    default: Any = None,
+    expand: bool = True,
+) -> Any:
+    """Read a dotted-path config value as a stripped string (bools/None pass through)."""
+    node: Any = config
+    for key in path:
+        if not isinstance(node, dict):
+            node = None
+            break
+        node = node.get(key)
+    if node is None or (isinstance(node, str) and not node.strip()):
+        node = default
+    if node is None or isinstance(node, bool):
+        return node
+    value = str(node).strip()
+    return os.path.expanduser(value) if expand else value
+
+
+def interpolate_config(config: Mapping[str, Any], value: str) -> str:
+    """Substitute ``${dotted.path}`` references against the config itself."""
+
+    def repl(match: re.Match[str]) -> str:
+        resolved = config_value(config, *match.group(1).split("."), default=None)
+        return str(resolved) if resolved is not None else match.group(0)
+
+    seen: set[str] = set()
+    for _ in range(64):
+        expanded = _CFG_VAR_RE.sub(repl, value)
+        if expanded == value:
+            return expanded
+        if expanded in seen:
+            raise DeployConfigError("cyclic config interpolation")
+        seen.add(value)
+        value = expanded
+    raise DeployConfigError("config interpolation exceeded 64 levels")

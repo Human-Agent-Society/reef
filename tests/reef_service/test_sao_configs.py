@@ -47,6 +47,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 from reef_service.config_helpers import load_deployment
 
 pytest.importorskip("torch")
@@ -69,7 +70,14 @@ def _iter_config_files() -> list[Path]:
 
 
 def _discover_training_configs() -> list[Path]:
-    return sorted(path for path in _iter_config_files() if SLIME_DRIVER_MODULE in path.read_text())
+    configs = []
+    for path in _iter_config_files():
+        text = path.read_text()
+        config = yaml.safe_load(text)
+        training = config.get("training", {}) if isinstance(config, dict) else {}
+        if SLIME_DRIVER_MODULE in text or (isinstance(training, dict) and training.get("backend") == "slime"):
+            configs.append(path)
+    return sorted(configs)
 
 
 TRAINING_CONFIGS = _discover_training_configs()
@@ -79,7 +87,7 @@ def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
     for path in _iter_config_files():
         text = path.read_text()
-        if "\nservice:" in text or ("\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text)):
+        if "\nreef:" in text:
             deployments.append(path)
     return sorted(deployments)
 
@@ -93,7 +101,7 @@ def _config_id(path: Path) -> str:
 
 def _resolved_strings(config: dict, value):
     """Yield every string after applying the orchestrator's config pass."""
-    from reef.service.deploy.config import interpolate_config
+    from reef.service.deploy.config_utils import interpolate_config
 
     if isinstance(value, dict):
         for item in value.values():
@@ -225,7 +233,7 @@ def _driver_tokens(config: dict) -> tuple[list[str], str]:
     """Materialize the driver command and deployment recipe reference."""
 
     services = {service["name"]: service for service in config["services"]}
-    from reef.service.deploy.options import native_arguments
+    from reef.runtime.executor.arguments import native_arguments
     from reef.service.deploy.process import _command_argv
 
     tokens = _command_argv(config, services["slime-driver"]["command"])
@@ -329,7 +337,7 @@ def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypa
     generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
     for path in (shipped, generated):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("reef: {}\nservices: []\n")
+        path.write_text("schema-version: 2\nreef: {}\ntraining:\n  backend: slime\n")
     monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
     assert _discover_example_deployments() == [shipped]
 
@@ -354,7 +362,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
-        "tutorials/harness-requests/configs/deployment.yaml",
+        "tutorials/reefine/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
         "tutorials/evolve-your-harness/configs/serve.yaml",
@@ -368,14 +376,15 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
-    from reef.service.assembly import _configured_inference_backend_factory, _recipe_owned_settings
-    from reef.service.deploy.config import validate_services
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.assembly import _recipe_owned_settings
+    from reef.service.deploy.execution import validate_services
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.train.slime_backend.launch import _configured_inference_backend_factory
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
 
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     if settings.inference_backend_factory is not None:
         assert callable(_configured_inference_backend_factory(settings.inference_backend_factory))
     services = validate_services(config, config_path)
@@ -414,12 +423,12 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.deploy.service_config import service_config_from_mapping
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
 
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     state_dir = Path(_CONFIG_ENV["TTTD_STATE_DIR"])
     assert Path(settings.artifact_repository) == state_dir / "artifacts.git"
     assert Path(settings.artifact_work_dir) == state_dir / "artifact-work"

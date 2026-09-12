@@ -3,15 +3,16 @@ Choose a recipe for agent learning
 
 A recipe is picked along two axes: the **task type** your workload is, and
 **what the recipe evolves**, model weights or the agent harness. Each task type
-below names the standard benchmarks its examples have measured and the
-benchmarks proposed for it. Recipes that evolve model weights need GPUs and
-the training stack in `Train model weights from agent feedback
+below names the standard benchmarks its examples have measured and, where one
+is proposed, the benchmark still to run. Recipes that evolve model weights need
+GPUs and the training stack in `Train model weights from agent feedback
 <evolve-your-model.rst>`__; harness recipes need only a model endpoint.
 
-The implementations live in the repository's ``recipes/`` cookbook and do not
-ship in the Reef wheel. ``recipes/basic/`` is the record-only starting stack
-and stays outside the catalog. The root `README
-<../../README.md#recipes-and-examples>`__ and `recipes/README.md
+Reefine ships with ``reef-infra``; the other implementations live in the
+repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
+``recipes/basic/`` is the record-only starting stack and stays outside the
+catalog, and beta recipes join it once they publish learning results. The root
+`README <../../README.md#recipes-and-examples>`__ and `recipes/README.md
 <../../recipes/README.md>`__ present the same catalog.
 
 Scientific discovery
@@ -22,7 +23,6 @@ trains on the attempts it generates itself, at test time.
 
 - Measured: TriMul (Guidance-TTT); circle packing (n = 26 and 32) and Erdős
   minimum overlap (TTT-Discover).
-- Proposed: CORAL tasks, once CORAL TTT has results.
 
 .. list-table::
    :header-rows: 1
@@ -43,7 +43,8 @@ trains on the attempts it generates itself, at test time.
      - `TTT-Discover <recipes/tttd.rst>`__
      - `example <../../recipes/tttd/examples/guidance_ttt/README.md>`__ · `results <../../recipes/tttd/examples/guidance_ttt/results/README.md>`__
 
-No recipe evolves the harness for this task type yet.
+No recipe evolves the harness for this task type yet. CORAL TTT targets it and
+is in beta; see the beta recipes below.
 
 Continual learning on a task stream
 -----------------------------------
@@ -53,12 +54,10 @@ feedback on each task as the stream goes by.
 
 - Measured: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO), and the
   Terminal-Bench 30-task hard subset (Meta-Harness). The harness evolve
-  tutorial grades three fixed coding tasks rather than a standard benchmark.
-- Proposed: a SWE-bench stream, a Terminal-Bench stream
-  (`#6 <https://github.com/Human-Agent-Society/reef/issues/6>`__), Continual
-  Learning Bench, and `CEO-Bench <https://arxiv.org/abs/2606.18543>`__ as a
-  long-horizon showcase; expensive per run, with license and cost still
-  unverified.
+  tutorial and Reefine grade three fixed coding tasks rather than a standard
+  benchmark.
+- Proposed: `CEO-Bench <https://arxiv.org/abs/2606.18543>`__ as a long-horizon
+  showcase; expensive per run, with license and cost still unverified.
 
 .. list-table::
    :header-rows: 1
@@ -88,6 +87,11 @@ feedback on each task as the stream goes by.
      - ``reef/``, with the `harness-evolve.yaml <../../reef/service/profiles/harness-evolve.yaml>`__ profile
      - `Evolve your harness <evolve-your-harness.rst>`__
      - `example <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
+   * - Reefine
+     - harness: skills, rules, agent commands, and pi extensions
+     - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ profile
+     - `Reefine <recipes/reefine.rst>`__
+     - `example <../../tutorials/reefine/README.md>`__ · `measurement <../../tutorials/reefine/README.md#the-measurement>`__
 
 Learning from usage
 -------------------
@@ -97,7 +101,6 @@ the signal out of the traffic it already serves.
 
 - Measured: the OpenClaw-RL simulated-student homework stream, 72 GSM8K
   sessions (OpenClaw-RL).
-- Proposed: none yet. This is the task type with the fewest benchmarks.
 
 .. list-table::
    :header-rows: 1
@@ -136,7 +139,7 @@ point deployments configured with different recipes at the same repository.
        batch-size: 1
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
-Reef does not register or import learning methods. The ``recipes/`` tree in
+Reefine ships in Reef; other learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
@@ -153,3 +156,19 @@ Reef yet. For a harness recipe, follow `Evolve agent prompts, rules, and skills
 <evolve-your-harness.rst>`__. For a weight recipe, follow `Train model weights
 from agent feedback <evolve-your-model.rst>`__. Each recipe page above provides
 its own configuration and example.
+
+Built-in harness refinement
+---------------------------
+
+`Reefine <recipes/reefine.rst>`__ turns user instructions into harness updates
+and ships with ``reef-infra``. Start it with ``reef serve --recipe reefine``
+and a configured model endpoint.
+
+Beta recipes
+------------
+
+`CORAL TTT <../../recipes/beta/coral/README.md>`__ and its
+`coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
+**beta** until complete, reproducible learning results are published. Both
+live under ``recipes/beta/coral/``. Integration and smoke tests validate the
+wiring; they do not establish learning performance.

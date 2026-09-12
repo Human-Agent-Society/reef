@@ -20,19 +20,15 @@
 # Started by run.sh; state under ./work.
 
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
   run-dir: work/stack
+  ready-timeout: 3600
 
 inference:
   model-path: ~/models/Qwen2.5-1.5B-Instruct
-  # SAO's DIS ratio uses the rollout log-probabilities as its behaviour proxy,
-  # so the rollout must be captured token-natively from the engine. Reef never
-  # re-tokenizes a completion to reconstruct policy tensors.
-  backend-factory: >-
-    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
@@ -40,8 +36,8 @@ recipe:
     max-staleness: 18
     checkpoint-every-n-versions: 1
 training:
-  ray-namespace: reef
-  ray-actor-name: reef-train-bridge
+  backend: slime
+  ready-timeout: 900
   # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
   # actor step, a checkpoint save, and a weight publish, so it outlasts an
   # inference request by a wide margin. Match the bridge ceiling instead of
@@ -69,7 +65,6 @@ training:
   # weights first move on step 11.
   options:
     megatron-to-hf-mode: "bridge"
-    hf-checkpoint: "${inference.model-path}"
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "100"
@@ -116,13 +111,6 @@ storage:
   artifact-work-dir: work/artifact-work
   artifact-cache-dir: work/artifact-cache
   agent-record-dir: work/agent-record
-
-
-# Service processes launch locally; Slime owns distributed GPU model workers.
-execution:
-  training: ray
-  rollout: ray
-
 observability:
   wandb:
     enabled: false                     # omitted or false means no tracking
@@ -134,20 +122,3 @@ observability:
     mode: online                       # online, offline, or disabled
     directory: work/wandb
     upload_checkpoints: false
-
-services:
-  - name: slime-driver
-    command:
-      - ${REEF_PYTHON}
-      - -m
-      - reef.service.slime_driver
-    ready: test -f "$REEF_BRIDGE_READY_FILE"
-    ready_timeout: 900
-    env:
-      REEF_RAY_NAMESPACE: reef
-      REEF_RAY_ACTOR_NAME: reef-train-bridge
-
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz
-    depends_on: [slime-driver]

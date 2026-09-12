@@ -1,13 +1,14 @@
-# The outer reef training stack: one container running `reef serve` against
-# serve.yaml, with the GPUs, host networking and mounts it needs. The 72
-# task environments have their own compose files under harbor-tasks/.
-#
-# run.sh exports the values below and brings this up; nothing here is a
-# credential except REEF_TOKEN, which run.sh mints per run into $RUN_DIR/token.
+# OpenClawRL owns PRM and user-model startup, health checks and GPU isolation.
+# Reef coordinates only its inference/training runtime. Task environments have
+# separate Compose files under harbor-tasks/.
+# run.sh supplies image, paths and a per-run REEF_TOKEN.
 services:
   reef:
     image: ${REEF_IMAGE}
     container_name: reef-openclawrl
+    depends_on:
+      prm:
+        condition: service_healthy
     command: reef serve -c /workspace/Reef/${REEF_CONFIG}
     # Host networking: the per-task containers reach reef on the machine's IP,
     # and slime binds the training engines' router to that same IP.
@@ -19,8 +20,8 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # One pool; Ray assigns GPUs to services and Slime workers.
-              device_ids: ["1", "2", "3", "4", "5", "6", "7"]
+              # Slime alone uses this pool: four actor GPUs and one rollout GPU.
+              device_ids: ["3", "4", "5", "6", "7"]
               capabilities: [gpu]
     volumes:
       - ${MODEL_DIR}:/root/models
@@ -37,5 +38,73 @@ services:
       interval: 10s
       timeout: 5s
       # The full stack boots in ~6 minutes on B200s; 120 x 10s is the ceiling.
+      retries: 120
+      start_period: 30s
+
+  prm:
+    image: ${REEF_IMAGE}
+    command:
+      - python
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - /root/models/Qwen3-4B-Thinking-2507
+      - --host
+      - 0.0.0.0
+      - --port
+      - "23001"
+      - --tp
+      - "1"
+    network_mode: host
+    ipc: host
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:23001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+
+  user-model:
+    image: ${REEF_IMAGE}
+    command:
+      - python
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - /root/models/Qwen3-32B
+      - --served-model-name
+      - qwen3-32b-user-llm
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30001"
+      - --tp
+      - "1"
+    network_mode: host
+    ipc: host
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["2"]
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:30001/health"]
+      interval: 10s
+      timeout: 5s
       retries: 120
       start_period: 30s

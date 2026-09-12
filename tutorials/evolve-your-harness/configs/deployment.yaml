@@ -4,7 +4,7 @@
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8901
   token: reef-local
@@ -16,8 +16,8 @@ recipe:
   config:
     evolution:
       adapter: pi
-      propose: harness.evolution:propose
-      evaluate: harness.evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
       # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
@@ -86,11 +86,3 @@ storage:
 execution:
   evolution:
     workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    env:
-      REEF_RECIPE_CONFIG_DIR: tutorials/evolve-your-harness/configs
-      PYTHONPATH: "${PWD}/tutorials/evolve-your-harness:${PWD}"
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz

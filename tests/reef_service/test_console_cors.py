@@ -10,7 +10,7 @@ from reef.dispatcher import build_default_dispatcher
 from reef.service import assembly
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 ORIGIN = "https://api.reefinfra.ai"
@@ -152,12 +152,12 @@ def test_browser_access_is_disabled_by_default():
 )
 def test_config_rejects_non_origins(origins):
     with pytest.raises(ValueError):
-        service_settings_from_config({"reef": {"recipe": "recipe", "console_origins": origins}})
+        service_config_from_mapping({"reef": {"recipe": "recipe", "console_origins": origins}})
 
 
 def test_config_defaults_and_explicit_origins():
-    assert service_settings_from_config({"reef": {"recipe": "recipe"}}).console_origins == ()
-    assert service_settings_from_config(
+    assert service_config_from_mapping({"reef": {"recipe": "recipe"}}).console_origins == ()
+    assert service_config_from_mapping(
         {"reef": {"recipe": "recipe", "console_origins": [ORIGIN, "http://localhost:3000", ORIGIN]}}
     ).console_origins == (ORIGIN, "http://localhost:3000")
 
@@ -166,7 +166,7 @@ def test_serve_settings_enable_browser_access_on_real_scenario_routes(monkeypatc
     dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
     dispatcher.get_or_create_scenario("existing-local")
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
-    settings = service_settings_from_config(
+    settings = service_config_from_mapping(
         {"reef": {"recipe": "recipe", "tokens": ["local-secret"], "console_origins": [ORIGIN]}}
     )
 

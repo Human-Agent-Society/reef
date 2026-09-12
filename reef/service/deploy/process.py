@@ -20,7 +20,7 @@ from typing import Any, TextIO
 
 import yaml
 
-from reef.service.deploy.config import interpolate_config
+from reef.service.deploy.config_utils import interpolate_config
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _PROCESS_REAP_TIMEOUT = 5

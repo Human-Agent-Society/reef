@@ -105,8 +105,8 @@ Copy a weight-training config as described in `Evolve your model
      config:
        batch-size: 4
 
-This fragment shows only the new keys; keep the model, storage, runtime, and
-``services`` settings from the config you copied. Set
+This fragment shows only the new keys; keep the inference, storage and training
+settings from the config you copied. Reef assembles the driver and HTTP process. Set
 ``training.config.global_batch_size`` to the same value, and add the driver flags your
 loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
@@ -128,8 +128,7 @@ Declare each method setting once with ``config_field``:
 
    @dataclass(frozen=True)
    class MyMethodRecipe(WeightTrainingRecipe):
-       config:
-       batch-size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
+       batch_size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
        temperature: float = config_field(0.5, allow_nonfinite=False)
        tags: tuple[str, ...] = config_field(())
 
@@ -180,3 +179,83 @@ Reef never invents feedback. Use whatever already judges your agent; for the
 numeric ``score`` field, a consistent scale where higher is better. If you have
 no number, `Choosing a recipe <../user-guide/recipes.rst>`__ lists the methods that need
 none.
+
+External method services
+------------------------
+
+Version 2 configuration describes components and their parameters. It does not
+accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
+in ``reef``. Reef assembles its HTTP process and supported inference/training
+backends. Additional method services run independently of Reef's orchestrator.
+
+Declare a recipe field for the external endpoint and implement the client in
+the method package. For example, OpenClawRL uses ``recipe.config.prm-url`` and
+``recipe.config.prm-tokenizer-path`` to call its independently served PRM.
+CLI overrides such as ``--recipe.config.prm-url http://localhost:23001`` use the
+same field declarations and validation as YAML. Request timeouts and scoring
+failure behavior belong to that recipe's client.
+
+The method's deployment tools own external service startup, readiness, resources
+and shutdown. Reef does not register their processes, probe their health or
+reserve their GPUs. The OpenClawRL example's ``docker-compose.yaml`` starts PRM
+and user-model containers on devices separate from Reef/Slime. A remote endpoint
+can be substituted without changing Reef's process topology. Reef shutdown or a
+training startup failure leaves independently deployed services running.
+
+Backend environment defaults belong to their integration; Slime's defaults
+live in ``reef/train/slime_backend/launch.py`` and honor explicit environment
+overrides.
+
+
+Training backend deployment
+----------------------------
+
+``training.backend`` selects one definition for both process preparation and
+HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
+``reef.train.deployment`` and live under the owning integration:
+
+* ``prepare(config, settings)`` receives the resolved deployment plus parsed
+  service settings as a mapping. It validates backend combinations, binds
+  derived values and returns process definitions that HTTP must wait for.
+  It must not download models, allocate devices or construct a runtime.
+* ``runtime_config(settings, *, max_staleness, connector=None)`` returns the
+  configuration consumed by ``RuntimeRegistry`` in the HTTP process. The
+  result must construct a ``TrainingRuntime``. ``connector`` is an optional
+  legacy connection injection; an in-process backend rejects it.
+
+The Slime implementation in ``reef/train/slime_backend/launch.py`` owns the
+Ray roles, driver command, native checkpoint binding and bridge connection.
+An in-process integration can reuse the supplied implementation:
+
+.. code:: python
+
+   from reef.train.deployment import InProcessTrainingDeployment
+
+   class Deployment(InProcessTrainingDeployment):
+       runtime_type = "my_backend.runtime:factory"
+
+Here ``factory`` is a lightweight ``RuntimeFactory`` instance. Its
+``config_type()`` declarations validate ``training.options`` using the shared
+parser; older factories can retain their owning parser. Import execution
+libraries only when the factory constructs the runtime, and provide any
+backend-owned defaults there. No Ray, standalone inference process or driver
+is added by this definition.
+
+Select ``--training.backend my_backend.launch:Deployment`` directly, or register
+an installed name in the integration distribution:
+
+.. code:: toml
+
+   [project.entry-points."reef.training_backends"]
+   my-backend = "my_backend.launch:Deployment"
+
+This enables ``--training.backend my-backend`` in both the launcher and HTTP
+child. Only the selected definition is imported. Missing or ambiguous names
+fail explicitly, without falling back to Slime. Do not introduce a separate
+user-facing runtime selector for weight training: runtime wiring belongs to
+the selected backend. Method dependencies remain the Recipe's responsibility.
+
+Weight recipes use ``RuntimeTrainingBackend`` to adapt any ``TrainingRuntime``
+to the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
+an alias. Experiment metadata now reports ``RuntimeTrainingBackend`` and the
+actual runtime class instead of labeling all weight training as Slime.

@@ -21,9 +21,10 @@ import pytest
 import reef
 from reef.cli import main
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import DeployConfigError, load_config, validate_services
-from reef.service.deploy.provider import assemble_provider_services
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.config_utils import DeployConfigError, load_config
+from reef.service.deploy.execution import validate_services
+from reef.service.deploy.inference import assemble_provider_services
+from reef.service.deploy.service_config import service_config_from_mapping
 
 
 @pytest.fixture
@@ -74,16 +75,16 @@ def test_provider_settings_use_shared_types_and_reach_the_child(tmp_path, monkey
                 "http://localhost:8000",
                 spelling,
                 "00123",
-                "--service.port",
+                "--reef.port",
                 "9001",
-                "--no-service.allow-implicit-scenario-creation",
-                "--service.tokens",
+                "--no-reef.allow-implicit-scenario-creation",
+                "--reef.tokens",
                 "[]",
             ]
         )
     assert result.value.code == 0
     config = captured_stack["config"]
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     assert settings.upstream_model == "00123"
     assert settings.upstream_api_key == "test-provider-secret"
     assert settings.tokens == ("test-reef-secret",)
@@ -106,7 +107,7 @@ def test_without_c_ignores_files_and_config_environment(tmp_path, monkeypatch, c
     with pytest.raises(SystemExit) as result:
         main(["serve", "--model", "ollama/my-model"])
     assert result.value.code == 0
-    settings = service_settings_from_config(captured_stack["config"])
+    settings = service_config_from_mapping(captured_stack["config"])
     assert settings.upstream_url == "http://127.0.0.1:11434"
     assert settings.upstream_model == "my-model"
 
@@ -130,7 +131,7 @@ def test_provider_startup_can_take_all_inputs_from_declared_environment(monkeypa
     with pytest.raises(SystemExit) as result:
         main(["serve"])
     assert result.value.code == 0
-    assert service_settings_from_config(captured_stack["config"]).upstream_model == "env-model"
+    assert service_config_from_mapping(captured_stack["config"]).upstream_model == "env-model"
 
 
 @pytest.mark.usefixtures("provider_environment")
@@ -138,7 +139,7 @@ def test_model_shorthand_accepts_explicit_provider_key(captured_stack):
     with pytest.raises(SystemExit) as result:
         main(["serve", "--model", "openai/demo", "--reef.upstream-api-key", "explicit-key"])
     assert result.value.code == 0
-    settings = service_settings_from_config(captured_stack["config"])
+    settings = service_config_from_mapping(captured_stack["config"])
     assert settings.upstream_url == "https://api.openai.com"
     assert settings.upstream_api_key == "explicit-key"
 
@@ -186,11 +187,14 @@ def test_invalid_readiness_commands_are_rejected(ready):
         (["--model", "ollama/demo", "--port", "0"], "between 1 and 65535"),
         (["--model", "ollama/demo", "--port", "nope"], "reef.port"),
         (["--model", "ollama/demo", "--host", ""], "must be non-empty"),
-        (["--model", "ollama/demo", "--no-config"], "unknown option"),
+        (["--model", "ollama/demo", "--no-config"], "unknown configuration flag"),
         (["--model", "ollama/demo", "--model-path", "org/model"], "cannot be combined"),
-        (["--model", "ollama/demo", "--reef.recipe", "missing.module:Recipe"], "core recipe"),
-        (["--model", "ollama/demo", "--upstream-modle", "typo"], "unknown option"),
-        (["--model", "ollama/demo", "--services", "[]"], "unknown option"),
+        (
+            ["--model", "ollama/demo", "--recipe.implementation", "missing.module:Recipe"],
+            "cannot import recipe reference",
+        ),
+        (["--model", "ollama/demo", "--upstream-modle", "typo"], "unknown configuration flag"),
+        (["--model", "ollama/demo", "--services", "[]"], "unknown configuration flag"),
         (["--model", "ollama/demo", "--inference-timeout-s", "0"], "must be positive"),
     ],
 )
@@ -273,9 +277,9 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
                     f"http://127.0.0.1:{provider.server_port}",
                     "--inference.upstream-model",
                     "demo",
-                    "--service.port",
+                    "--reef.port",
                     str(port),
-                    "--service.token",
+                    "--reef.token",
                     "test-token",
                 ],
                 cwd=tmp_path,
