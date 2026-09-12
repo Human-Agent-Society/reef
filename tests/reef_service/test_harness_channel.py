@@ -1141,6 +1141,54 @@ def test_install_script_writes_executable_wrapper_with_baked_paths(tmp_path) -> 
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("scenario", ["sc$dollar", "sc`id`tick"])
+def test_the_wrapper_carries_a_scenario_name_with_shell_metacharacters_verbatim(tmp_path, scenario: str) -> None:
+    """A scenario name with shell metacharacters reaches the wrapper byte exact, never expanded."""
+    script, dest, prefix, env = _install_fixture(
+        tmp_path,
+        binary_version="0.84.2",
+        npm="#!/bin/sh\nexit 1\n",
+        scenario=scenario,
+    )
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    try:
+        wrapper = dest / "reef-pi"
+        line = next(
+            candidate
+            for candidate in wrapper.read_text(encoding="utf-8").splitlines()
+            if candidate.startswith("export REEF_HARNESS_SCENARIO=")
+        )
+        evaluated = subprocess.run(
+            ["sh", "-c", f"{line}; printf '%s' \"$REEF_HARNESS_SCENARIO\""],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert evaluated.returncode == 0, evaluated.stderr
+        assert evaluated.stdout == scenario
+        plain_dir = tmp_path / "plain"
+        plain_dir.mkdir()
+        plain_script, plain_dest, plain_prefix, plain_env = _install_fixture(
+            plain_dir,
+            binary_version="0.84.2",
+            npm="#!/bin/sh\nexit 1\n",
+            scenario="plain-name",
+        )
+        plain_result = _run_install(plain_script, plain_dest, plain_prefix, plain_env)
+        assert plain_result.returncode == 0, plain_result.stderr
+        plain_line = next(
+            candidate
+            for candidate in (plain_dest / "reef-pi").read_text(encoding="utf-8").splitlines()
+            if candidate.startswith("export REEF_HARNESS_SCENARIO=")
+        )
+        assert plain_line == 'export REEF_HARNESS_SCENARIO="plain-name"'
+    finally:
+        link = Path.home() / ".local" / "bin" / "reef-pi"
+        link.unlink(missing_ok=True)
+
+
+@pytest.mark.unit
 def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_changed(tmp_path) -> None:
     """The wrapper depends on the machine, not the composition: a current tree still gets a wrapper whose
     interpreter line is stale, and a rerun that changes nothing leaves the wrapper's bytes and mtime alone."""
