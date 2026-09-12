@@ -91,7 +91,7 @@ feedback on each task as the stream goes by.
      - harness: skills, rules, agent commands, and pi extensions
      - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ profile
      - `Reefine <recipes/reefine.rst>`__
-     - `example <../../tutorials/reefine/README.md>`__ · `measurement <../../tutorials/reefine/README.md#the-measurement>`__
+     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__
 
 Learning from usage
 -------------------

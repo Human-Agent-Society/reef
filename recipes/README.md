@@ -67,7 +67,7 @@ feedback on each task as the stream goes by.
 | GEPA | harness tree: rules, skills, and agent commands | [`gepa/`](gepa/) | [guide](../docs/user-guide/recipes/gepa.rst) | [`gepa/examples/aime/`](gepa/examples/aime/README.md) · [results](gepa/examples/aime/README.md#the-validation-contract) |
 | Meta-Harness | harness: complete compositions | [`meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [results](meta_harness/RESULTS.md) |
 | Harness evolve | harness skills | [`reef/`](../reef/) with the [`harness-evolve.yaml`](../reef/service/profiles/harness-evolve.yaml) profile | [guide](../docs/user-guide/evolve-your-harness.rst) | [`tutorials/evolve-your-harness/`](../tutorials/evolve-your-harness/README.md) · [results](../tutorials/evolve-your-harness/README.md#results) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) with the [`reefine.yaml`](../reef/service/profiles/reefine.yaml) profile | [guide](../docs/user-guide/recipes/reefine.rst) | [`tutorials/reefine/`](../tutorials/reefine/README.md) · [measurement](../tutorials/reefine/README.md#the-measurement) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) with the [`reefine.yaml`](../reef/service/profiles/reefine.yaml) profile | [guide](../docs/user-guide/recipes/reefine.rst) | [`tutorials/reefine/`](../tutorials/reefine/README.md) · [results](../tutorials/reefine/README.md#runs) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
