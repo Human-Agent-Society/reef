@@ -19,10 +19,12 @@ from typing import Any, Protocol, runtime_checkable
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.requirements import ancestor_requiring_nothing, required_by
 from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
@@ -34,8 +36,6 @@ from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, R
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.proposals import ProposalInbox
-from reef.train.cordis_backend.requests import ancestor_requiring_nothing, required_by
-from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 logger = logging.getLogger(__name__)
 

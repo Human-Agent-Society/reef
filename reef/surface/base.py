@@ -15,6 +15,20 @@ from typing import Any, Protocol, runtime_checkable
 from reef.artifact.artifact import Artifact, ArtifactRef
 
 
+class ArtifactValidator(Protocol):
+    """Artifact admission checks selected for one scenario."""
+
+    def validate(self, artifact: Artifact) -> None: ...
+
+
+@dataclass(frozen=True)
+class AcceptAnyArtifact:
+    """Default admission policy for shape-agnostic scenarios."""
+
+    def validate(self, artifact: Artifact) -> None:
+        return None
+
+
 class ServingRuntime(Protocol):
     """The runtime shape visible to surface loaders."""
 

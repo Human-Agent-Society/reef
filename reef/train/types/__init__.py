@@ -1,5 +1,5 @@
 from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.train.types.batches import (
+from reef.core.batches import (
     GroupedPolicyBatch,
     PolicyBatch,
     PolicySample,

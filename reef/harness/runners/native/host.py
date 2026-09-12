@@ -315,9 +315,9 @@ class NativeHost:
     def _from_tree(cls, tree: Path, mount_dir: Path | None) -> NativeHost:
         """One fresh compose context over the entries list; the loader stays on the host for later mounts."""
         # Late: the training package imports the harness, and the episode form pays for it only on a tree boot.
+        from reef.harness.compose import Context
+        from reef.harness.compose.loader import Loader
         from reef.harness.runners.native.plugins import NATIVE_PLUGINS
-        from reef.train.cordis_backend.compose import Context
-        from reef.train.cordis_backend.compose.loader import Loader
 
         entries = tree_entries(tree)
         if mount_dir is None:
@@ -361,7 +361,7 @@ def tree_entries(path: Path) -> list[dict[str, Any]]:
 
 def tree_failure(loader: Any) -> tuple[str, str] | None:
     """The first enabled entry that did not end ACTIVE, as (id, what went wrong); None when every entry stands."""
-    from reef.train.cordis_backend.compose import FiberState  # late: see _from_tree
+    from reef.harness.compose import FiberState
 
     for options in loader.root.data:
         entry = loader.store.get(str(options.get("id")))

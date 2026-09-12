@@ -188,7 +188,7 @@ services:
 
   - name: slime-driver
     command: >-
-      "${REEF_PYTHON}" -m reef.train.slime_backend.reef_adapters.driver
+      "${REEF_PYTHON}" -m reef.service.slime_driver
       --reef-checkpoint-max-storage-fraction=${training.checkpoint_retention.max_storage_fraction}
       --reef-checkpoint-min-free-space-fraction=${training.checkpoint_retention.min_free_space_fraction}
       --reef-checkpoint-policy=${training.checkpoint_retention.policy}

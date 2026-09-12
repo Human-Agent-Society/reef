@@ -57,7 +57,7 @@ from reef.service.app import create_app
 from reef.service.deploy.config import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend.execution import evaluation_selection
 
 HERE = Path(__file__).resolve().parent

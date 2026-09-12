@@ -4,8 +4,7 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
-from reef.scenario import AcceptAnyArtifact
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     RuntimeLoadMismatch,
     SkillLayer,
@@ -17,6 +16,7 @@ from reef.surface import (
     create_skill_surface,
     create_weight_surface,
 )
+from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
 
 

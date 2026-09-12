@@ -33,7 +33,7 @@ from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
 from reef.service.deploy.settings import ServiceSettings
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle, policy_batch

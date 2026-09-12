@@ -6,7 +6,7 @@ from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.service.app import RequestService
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 
 

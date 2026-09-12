@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from reef.train.evaluation.contracts import UpdateCandidate
+from reef.core.evaluation import UpdateCandidate
 
 
 class CandidateTrainingDeferred(Exception):

@@ -23,10 +23,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
+from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
 from reef.service.release_page import before_release_id, build_release_page, served_step, verdict_of
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"

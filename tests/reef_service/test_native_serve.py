@@ -30,7 +30,7 @@ from reef.harness.runners.native import serve
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.runners.native.selftools import RESERVED_NAMES
 from reef.harness.runners.native.serve import ServeError, Server, admit_mutations
-from reef.train.cordis_backend.strategies import Mutation
+from reef.harness.tree.mutations import Mutation
 
 SCENARIO = "serve-demo"
 

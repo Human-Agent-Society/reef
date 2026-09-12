@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import Any
 
+from reef.core.evaluation import SelectionDecision
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import CordisBackend
-from reef.train.evaluation.contracts import SelectionDecision
 from reef.train.types import TrainingBatch, TrainStepResult
 
 from .archive import Archive

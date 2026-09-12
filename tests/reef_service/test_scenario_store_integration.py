@@ -14,10 +14,10 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
-from reef.scenario.commits import CommitRecord
-from reef.scenario.store import ScenarioStorage, ScenarioStore
+from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 

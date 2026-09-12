@@ -19,7 +19,7 @@ from aiohttp import web
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 CORRECT = """\
 def merge_sorted(a, b):

@@ -30,9 +30,9 @@ from reef.observability import ExperimentTracker
 from reef.recipe.base import Recipe
 from reef.runtime.model_config import ModelConfig
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.scenario.scenario import Scenario
-from reef.scenario.store import ScenarioStorage, ScenarioStore
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
+from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import ArtifactActivator
 from reef.train.trainer import Trainer
 

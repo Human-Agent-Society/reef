@@ -15,12 +15,13 @@ import pytest
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.recipe.cordis import CordisRecipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
 from reef.runtime.model_config import ModelConfig
 from reef.storage.model_config import read_model_config, write_model_config
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonPlugin
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.cordis_backend import Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.types import TraceBatch, TraceSample
 

@@ -9,7 +9,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// The manifest's rule (reef.train.cordis_backend.requests.required_by): the union over the chain, newest name wins.
+// The manifest's rule (reef.core.requirements.required_by): the union over the chain, newest name wins.
 function requiredBy(releases, releaseId) {
   const published = new Map();
   for (const row of releases) {

@@ -18,11 +18,10 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.scenario.commits import CommitRecord
-from reef.scenario.store import ScenarioStoreConflict
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.commits import CommitRecord
+from reef.storage.scenario import ScenarioStoreConflict
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
 def record(record_id: str, *, scenario: str = "math") -> AgentRecord:
@@ -458,7 +457,7 @@ def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):
         sys.modules['fcntl'] = None
         import reef
         from reef.core.errors import ReefError
-        from reef.storage.scenario import SQLiteScenarioStorage
+        from reef.storage.sqlite import SQLiteScenarioStorage
 
         with closing(SQLiteScenarioStorage()) as factory:
             with closing(factory.open('math')) as store:

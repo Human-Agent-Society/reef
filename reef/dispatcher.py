@@ -33,12 +33,12 @@ from reef.observability import (
     TrainingExperimentEvent,
 )
 from reef.recipe.base import Recipe
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.base import RuntimeContractError, TrainingRuntime
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
-from reef.scenario.store import ScenarioStorage
 from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)

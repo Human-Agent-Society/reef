@@ -34,6 +34,8 @@ from reef_service.test_native_serve import (
 )
 
 from reef.harness.adapters import get_adapter
+from reef.harness.compose import Context, FiberState
+from reef.harness.compose.loader import Loader
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
@@ -44,6 +46,7 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.plugins import NATIVE_PLUGINS
 from reef.harness.runners.native.seed import SEED_NODES, SEED_TOOLS
 from reef.harness.runners.native.selftools import SelfTools
+from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import (
     ALWAYS_REVIEWED_KINDS,
     FLAT_TREE_REFUSAL,
@@ -53,9 +56,7 @@ from reef.harness.tree.nodes import (
 )
 from reef.harness.tree.render import RenderError, render_composition, render_native_module
 from reef.train.cordis_backend import CordisBackend, Mutation
-from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _stage_path, admit_mutations, tree_files
-from reef.train.cordis_backend.compose import Context, FiberState
-from reef.train.cordis_backend.compose.loader import Loader
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _stage_path, tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.

@@ -9,15 +9,15 @@ from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
+from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.runtime.model_config import ModelConfig
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.checkpoint_strategy import CheckpointStrategy
-from reef.scenario.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
 from reef.scenario.committer import ScenarioCommitter
-from reef.scenario.store import ScenarioStore
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
 from reef.storage.records import RecordStore
+from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
 from reef.train.trainer import Trainer

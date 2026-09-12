@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import inspect
 
-from reef.train.slime_backend.reef_adapters.driver import _job_runtime_env, _serve
+from reef.service.slime_driver import _job_runtime_env, _serve
 
 
 def test_driver_pythonpath_becomes_the_job_runtime_env():

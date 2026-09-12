@@ -11,11 +11,11 @@ from threading import Condition
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
+from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
+from reef.core.evaluation import SelectionDecision
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.inference import InferenceBackend
-from reef.train.evaluation.contracts import SelectionDecision
-from reef.train.types import TrainingBatch
 
 
 class RuntimeContractError(ReefError):

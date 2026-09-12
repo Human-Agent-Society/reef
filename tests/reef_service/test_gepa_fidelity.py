@@ -23,11 +23,11 @@ from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa.archive import Archive
 from recipes.gepa.method import GEPAProposer, GEPASelectorMixin
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 from reef.train.types import TraceSample
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]

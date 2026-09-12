@@ -12,8 +12,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.evaluation import (

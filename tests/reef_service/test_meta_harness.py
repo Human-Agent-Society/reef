@@ -15,18 +15,17 @@ from recipes.meta_harness.population import Population, PopulationStore, content
 from recipes.meta_harness.recipe import MetaHarnessRecipe, scenario_population_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree.mutations import Mutation
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend.strategies import Mutation
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 
@@ -200,7 +199,7 @@ def test_a_reordered_composition_is_replaced_atomically_in_target_order() -> Non
 
 
 def test_changing_a_node_kind_is_admitted_as_remove_and_create() -> None:
-    from reef.train.cordis_backend.backend import admit_mutations
+    from reef.harness.tree.mutations import admit_mutations
 
     target = ({"id": "rules", "name": "skill", "config": {"name": "review", "text": "Check the result."}},)
     admitted, refusal = admit_mutations(SEED, mutations_between(SEED, target), get_adapter("pi"))

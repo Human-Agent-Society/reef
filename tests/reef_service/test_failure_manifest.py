@@ -13,8 +13,8 @@ import pytest
 
 from reef.artifact import LiveWeightArtifactRef
 from reef.harness.adapters import get_adapter
-from reef.scenario.commits import CommitRecord
 from reef.storage.commit_log import CommitLog
+from reef.storage.commits import CommitRecord
 from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
 from reef.train.cordis_backend.manifest import MANIFEST_KIND, FailureObservation, advance, fingerprint, normalize_cause
 from reef.train.cordis_backend.strategies import Proposer, resolve_episode_scorer, resolve_proposer

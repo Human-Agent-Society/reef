@@ -16,7 +16,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.train.cordis_backend.requests import required_by
+from reef.core.requirements import required_by
 
 #: The gate numbers the Verdict section lists, in this order, when the row carries them.
 VERDICT_FIELDS = (

@@ -12,7 +12,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime import InferenceProxyRuntime, InferenceRuntime, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 @pytest.mark.unit

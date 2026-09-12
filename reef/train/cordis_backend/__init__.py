@@ -16,10 +16,14 @@ Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact
 set, so ``ScenarioCommitter`` stages and publishes it through
 ``Repository``. The composition tree state travels in the algorithm state
-(``"entries"`` key), which the commit log and snapshot metadata persist and
-recover.
+(``"entries"`` key), which commit records persist and recover.
+
+``reef.recipe.cordis.CordisRecipe`` assembles this backend. Composition and
+mutation admission live in ``reef.harness`` so serving uses them independently
+of the training loop.
 """
 
+from reef.harness.tree.mutations import Mutation, MutationError
 from reef.train.cordis_backend.backend import (
     CordisBackend,
     HarnessCandidate,
@@ -28,20 +32,11 @@ from reef.train.cordis_backend.backend import (
 )
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
 from reef.train.cordis_backend.processor import CordisProcessor
-from reef.train.cordis_backend.recipe import CordisRecipe
-from reef.train.cordis_backend.strategies import (
-    EpisodeScorer,
-    Mutation,
-    MutationError,
-    Promoter,
-    Proposer,
-    untrusted_text,
-)
+from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, untrusted_text
 
 __all__ = [
     "CordisBackend",
     "CordisProcessor",
-    "CordisRecipe",
     "EpisodeScorer",
     "FailureManifest",
     "FailureObservation",

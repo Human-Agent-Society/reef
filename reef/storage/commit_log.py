@@ -18,9 +18,9 @@ from pathlib import Path
 from threading import RLock
 
 from reef.core.errors import ReefError
-from reef.scenario.commits import RECORD_KIND, CommitLogError, CommitRecord
-from reef.scenario.store import ScenarioStore, ScenarioStoreConflict
+from reef.storage.commits import RECORD_KIND, CommitLogError, CommitRecord
 from reef.storage.records import RecordStore
+from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 
 
 class CommitLog:

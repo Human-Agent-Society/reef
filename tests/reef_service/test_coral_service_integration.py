@@ -25,7 +25,7 @@ from recipes.coral.middleware import ReefGatewayMiddleware
 from recipes.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class _EchoBackend(InferenceBackend):

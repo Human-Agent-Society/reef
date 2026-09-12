@@ -6,7 +6,7 @@ could not boot, and nothing in CI noticed because no test ever
 re-parsed a cookbook YAML's flags. These tests close that hole: for each
 ``training-*.yaml`` they materialize the slime-driver command exactly as
 ``reef serve`` would, strip the driver/retention/loss-family options exactly as
-``reef_adapters.driver`` does, and then feed the remaining flags to the actual
+``reef.service.slime_driver`` does, and then feed the remaining flags to the actual
 Slime argparse surface plus the recipe's ``validate_backend_args`` and the
 bridge preflight.
 
@@ -53,7 +53,7 @@ pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOTS = (REPO_ROOT / "recipes", REPO_ROOT / "tutorials")
-SLIME_DRIVER_MODULE = "reef.train.slime_backend.reef_adapters.driver"
+SLIME_DRIVER_MODULE = "reef.service.slime_driver"
 
 
 def _iter_config_files() -> list[Path]:
@@ -259,11 +259,7 @@ def _parse_config(config_path: Path):
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
     from reef.service.deploy.config import load_config
-    from reef.train.slime_backend.reef_adapters.driver import (
-        _driver_options,
-        _resolve_training_recipe,
-        _retention_options,
-    )
+    from reef.service.slime_driver import _driver_options, _resolve_training_recipe, _retention_options
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_config(config_path)

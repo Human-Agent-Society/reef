@@ -9,7 +9,7 @@ from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 from .test_meta_harness import (
     IMPROVED,

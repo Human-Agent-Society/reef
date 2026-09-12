@@ -25,11 +25,11 @@ from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.commits import CommitRecord
 from reef.storage.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.commits import CommitRecord
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult

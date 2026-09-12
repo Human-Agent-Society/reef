@@ -12,8 +12,7 @@ from reef.artifact import ArtifactRef, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.records import RecordConflict
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
 def item(

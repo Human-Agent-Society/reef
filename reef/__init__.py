@@ -10,12 +10,7 @@ installed Reef package.
 """
 
 # isort: skip_file
-from importlib.metadata import PackageNotFoundError, version
-
-try:
-    __version__ = version("reef-infra")
-except PackageNotFoundError:
-    __version__ = "0.0.0.dev0"
+from reef.core.version import __version__
 
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
@@ -36,12 +31,9 @@ from reef.train.evaluation import (
     UpdateCandidate,
     build_candidate_evaluation,
 )
-from reef.scenario import (
-    SCENARIO_METADATA_KEY,
-    CheckpointStrategy,
-    EveryNVersions,
-    Scenario,
-)
+from reef.storage.commits import SCENARIO_METADATA_KEY
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.scenario import Scenario
 from reef.recipe import (
     RecipeConfigError,
     Recipe,
@@ -87,6 +79,7 @@ __all__ = [
     "Trainer",
     "TrainingRuntime",
     "UpdateCandidate",
+    "__version__",
     "build_candidate_evaluation",
     "build_default_dispatcher",
     "parse_request_headers",

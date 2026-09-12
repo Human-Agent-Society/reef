@@ -43,13 +43,14 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Any
 
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.harness.adapters import get_adapter
+from reef.harness.tree.mutations import Mutation
 from reef.observability import ExperimentLogger
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.storage.records import RecordStore
-from reef.train.cordis_backend import CordisRecipe
-from reef.train.cordis_backend.strategies import Mutation, Proposer, resolve_proposer
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin
+from reef.train.cordis_backend.strategies import Proposer, resolve_proposer
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 

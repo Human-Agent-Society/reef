@@ -12,13 +12,13 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.scenario import ReleaseNotRestorable
-from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 from ._policy_recipe import TestPolicyRecipe
 

@@ -4,7 +4,7 @@
 # tutorials/evolve-your-harness with its state under tutorials/harness-requests/work/,
 # training_mode manual and the gate's selection set to always. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
-implementation: reef.train.cordis_backend.recipe:CordisRecipe
+implementation: reef.recipe.cordis:CordisRecipe
 # The recipe uses the upstream runtime's model for evaluation as well as serving.
 
 evolution:

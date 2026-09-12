@@ -27,11 +27,11 @@ from reef.artifact.artifact import (
 )
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.errors import ReefError
+from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.checkpoint_strategy import CheckpointStrategy
-from reef.scenario.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
 from reef.scenario.releases import ScenarioReleases
-from reef.scenario.store import ScenarioStore, ScenarioStoreConflict
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
+from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.surface.base import ArtifactActivator
 from reef.train.trainer import Trainer
 from reef.train.types import (

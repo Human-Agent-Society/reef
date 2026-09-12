@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from reef.core.errors import ReefError
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
@@ -48,7 +49,6 @@ from reef.train.cordis_backend.strategies import (
     resolve_promoter,
     resolve_proposer,
 )
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
 

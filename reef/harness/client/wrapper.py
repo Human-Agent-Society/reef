@@ -102,9 +102,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.train.cordis_backend.requests import required_by
 
 
 def _captures_dir() -> Path:
@@ -937,9 +937,9 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
     try:
-        import reef
+        from reef.core.version import __version__
 
-        rows.append((True, "interpreter", f"{sys.executable} (reef {reef.__version__}, reef-client importable)"))
+        rows.append((True, "interpreter", f"{sys.executable} (reef {__version__}, reef-client importable)"))
     except Exception as exc:  # pragma: no cover - the wrapper itself imports both
         rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
     try:

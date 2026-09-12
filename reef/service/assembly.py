@@ -25,11 +25,12 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.registry import RuntimeRegistry
-from reef.scenario.store import ScenarioStorage
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.settings import ServiceSettings, service_owned_keys
+from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
-from reef.storage.scenario import PostgresScenarioStorage, SQLiteScenarioStorage
+from reef.storage.scenario import ScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:

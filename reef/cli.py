@@ -49,7 +49,7 @@ def main(argv=None):
         sys.exit(0)
 
     if argv[0] in ("-V", "--version"):
-        from reef import __version__
+        from reef.core.version import __version__
 
         print(f"reef {__version__}")
         sys.exit(0)

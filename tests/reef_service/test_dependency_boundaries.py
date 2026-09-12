@@ -5,6 +5,8 @@ import importlib
 import inspect
 import subprocess
 import sys
+from graphlib import CycleError, TopologicalSorter
+from itertools import pairwise
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -128,12 +130,17 @@ def test_record_contracts_and_retention_policy_do_not_import_database_adapters()
 def test_importing_record_contracts_does_not_load_database_adapters() -> None:
     _assert_isolated_import(
         "import sys; from reef.storage.records import RecordStore; "
+        "from reef.storage.scenario import ScenarioStorage, ScenarioStore; "
         "assert not [name for name in sys.modules if name.startswith("
         "('sqlalchemy', 'psycopg', 'sqlite3', 'reef.storage.sqlite', "
         "'reef.storage.postgres', 'reef.storage.sql_records'))]; "
         "from reef import SQLiteRecordStore, PostgresRecordStore; "
         "from reef.storage.sqlite import SQLiteRecordStore as SQLiteImplementation; "
         "from reef.storage.postgres import PostgresRecordStore as PostgresImplementation; "
+        "from reef.storage.sqlite import SQLiteScenarioStorage; "
+        "from reef.storage.postgres import PostgresScenarioStorage; "
+        "assert issubclass(SQLiteScenarioStorage, ScenarioStorage); "
+        "assert issubclass(PostgresScenarioStorage, ScenarioStorage); "
         "assert SQLiteRecordStore is SQLiteImplementation; "
         "assert PostgresRecordStore is PostgresImplementation"
     )
@@ -160,7 +167,10 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
     module = importlib.import_module("reef.dispatcher")
     imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef")
     assert all(
-        target == "reef.storage.records" or target.startswith("reef.storage.records.")
+        any(
+            target == contract or target.startswith(contract + ".")
+            for contract in ("reef.storage.records", "reef.storage.scenario")
+        )
         for target in _imports_of(imported, "reef.storage")
     )
     for dependency in ("sqlite3", "sqlalchemy", "psycopg"):
@@ -185,13 +195,13 @@ def test_http_app_requires_dispatcher_without_selecting_storage() -> None:
 
 def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
     allowed_domains = {
-        "reef.scenario.commits": ("reef.core",),
-        "reef.scenario.store": ("reef.core", "reef.storage.records", "reef.scenario.commits"),
+        "reef.storage.commits": ("reef.core",),
+        "reef.storage.scenario": ("reef.core", "reef.storage.records", "reef.storage.commits"),
     }
     for module_name, allowed in allowed_domains.items():
         module = importlib.import_module(module_name)
         tree = ast.parse(inspect.getsource(module))
-        imported = _imported_modules(tree, package="reef.scenario")
+        imported = _imported_modules(tree, package=module_name.rpartition(".")[0])
         for dependency in imported:
             assert dependency.partition(".")[0] in sys.stdlib_module_names or any(
                 dependency == domain or dependency.startswith(domain + ".") for domain in allowed
@@ -206,6 +216,8 @@ def test_only_registry_imports_private_model_file_operations() -> None:
         # commit backends still enter through the injected ScenarioStorage.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
             _imports_of(imported, "reef.storage.records")
+            + _imports_of(imported, "reef.storage.scenario")
+            + _imports_of(imported, "reef.storage.commits")
         )
         if path.name == "registry.py":
             assert all(
@@ -237,7 +249,14 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/surface",
     )
     core_modules = ["reef/dispatcher.py"]
-    files = [path for package in core_packages for path in sorted((REPO_ROOT / package).rglob("*.py"))]
+    # The explicit Slime process entrypoint assembles that integration; it is
+    # never imported by the HTTP app or another backend-neutral package.
+    files = [
+        path
+        for package in core_packages
+        for path in sorted((REPO_ROOT / package).rglob("*.py"))
+        if path != REPO_ROOT / "reef/service/slime_driver.py"
+    ]
     files += [REPO_ROOT / module for module in core_modules]
     # A method package's public half too; its ``slime`` subpackage is the
     # backend half, imported by the training driver and workers only.
@@ -262,7 +281,8 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
 
 def test_importing_reef_does_not_load_cookbook_or_slime_packages() -> None:
     _assert_isolated_import(
-        "import sys; import reef; "
+        "import sys; import reef; from reef.core.version import __version__; "
+        "assert reef.__version__ == __version__; "
         "assert not [m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')], "
         "[m for m in sys.modules if m == 'recipes' or m.startswith('recipes.')]; "
         "assert not [m for m in sys.modules if m.startswith('reef.train.slime_backend')], "
@@ -278,7 +298,7 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
 
 
 def test_checkpoint_strategy_is_a_leaf_module() -> None:
-    module = importlib.import_module("reef.scenario.checkpoint_strategy")
+    module = importlib.import_module("reef.recipe.checkpoint_strategy")
     tree = ast.parse(inspect.getsource(module))
     reef_imports = [
         node for node in tree.body if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("reef")
@@ -330,3 +350,57 @@ def test_model_config_and_file_operations_do_not_depend_on_scenario() -> None:
         imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
         for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
             assert _imports_of(imported, dependency) == [], module_name
+
+
+def test_reef_package_dependencies_are_acyclic() -> None:
+    # Collapse submodules into their owning top-level Reef package. Walk all
+    # imports, including local and relative ones: delaying an import cannot
+    # turn a reversed dependency into a valid boundary.
+    graph: dict[str, set[str]] = {}
+    sources: dict[tuple[str, str], list[str]] = {}
+    root = REPO_ROOT / "reef"
+    owners = {
+        path.stem if path.is_file() else path.name for path in root.iterdir() if path.is_dir() or path.suffix == ".py"
+    }
+    for path in sorted(root.rglob("*.py")):
+        relative = path.relative_to(root)
+        owner = relative.parts[0].removesuffix(".py")
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        graph.setdefault(owner, set())
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
+            if target == "reef":
+                dependency = "__init__"
+            elif target.startswith("reef."):
+                dependency = target.split(".")[1]
+                if dependency not in owners:
+                    # Imports from the public facade depend on that facade,
+                    # even when the selected name is a class or constant.
+                    dependency = "__init__"
+            else:
+                continue
+            if dependency != owner:
+                graph[owner].add(dependency)
+                sources.setdefault((owner, dependency), []).append(f"{path.relative_to(REPO_ROOT)} -> {target}")
+    try:
+        tuple(TopologicalSorter(graph).static_order())
+    except CycleError as exc:
+        cycle = exc.args[1]
+        details = [source for left, right in pairwise(cycle) for source in sources.get((right, left), [])]
+        raise AssertionError(f"Reef package dependency cycle: {cycle}\n" + "\n".join(details)) from exc
+
+
+def test_storage_and_core_only_depend_on_lower_layers() -> None:
+    allowed = {"core": ("reef.core",), "storage": ("reef.core", "reef.storage")}
+    for owner, prefixes in allowed.items():
+        for path in sorted((REPO_ROOT / "reef" / owner).rglob("*.py")):
+            package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+            for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
+                if target == "reef" or target.startswith("reef."):
+                    assert any(
+                        target == prefix or target.startswith(prefix + ".") for prefix in prefixes
+                    ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
+def test_package_scan_includes_relative_local_and_facade_imports() -> None:
+    tree = ast.parse("from ..storage import commits\ndef load():\n    import reef\n    from reef import Scenario\n")
+    assert _imported_modules(tree, package="reef.scenario") == ["reef.storage.commits", "reef", "reef.Scenario"]

@@ -14,11 +14,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import Recipe
+from reef.recipe.cordis import CordisRecipe
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
-from reef.train.cordis_backend import CordisRecipe
 from reef.train.cordis_backend.proposals import ProposalInbox
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 

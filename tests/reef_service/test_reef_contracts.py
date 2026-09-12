@@ -19,10 +19,10 @@ from reef.artifact import (
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.inference import HttpInferenceBackend, InferenceBackend, default_artifact_request_headers
-from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
 from reef.train.types import PolicyBatch

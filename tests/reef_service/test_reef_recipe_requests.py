@@ -12,7 +12,7 @@ from reef.core import RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService, create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class StubInferenceBackend(InferenceBackend):

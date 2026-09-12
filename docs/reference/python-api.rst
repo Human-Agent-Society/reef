@@ -49,7 +49,7 @@ Recipe
 .. code:: python
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
-   from reef.train.cordis_backend import CordisRecipe
+   from reef.recipe.cordis import CordisRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
 for every scenario in a deployment.
@@ -61,7 +61,7 @@ for every scenario in a deployment.
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── CordisRecipe             harness tree + episodes  reef.train.cordis_backend
+   └── CordisRecipe             harness tree + episodes  reef.recipe.cordis
        └── SkillClawRecipe                                recipes.skillclaw.recipe
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
@@ -235,7 +235,7 @@ bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
    from pathlib import Path
 
    from reef.dispatcher import Dispatcher
-   from reef.storage.scenario import SQLiteScenarioStorage
+   from reef.storage.sqlite import SQLiteScenarioStorage
 
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
    dispatcher = Dispatcher(
@@ -283,10 +283,11 @@ Direct ``Scenario`` construction requires ``store=...``. Replace the former
 removed. The concrete commit log store's ``commit_log`` is for backend diagnostics.
 
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
-``reef.scenario``, alongside ``ScenarioStoreConflict``. Concrete storage classes
+``reef.storage.scenario``, alongside ``ScenarioStoreConflict``. Concrete storage classes
 live under ``reef.storage``: ``commit_log.CommitLogScenarioStore`` accepts a
-``RecordStore`` and a JSONL ``CommitLog``; ``scenario.SQLiteScenarioStorage``
-assembles it with ``sqlite.SQLiteRecordStore``. The scenario package depends only
+``RecordStore`` and a JSONL ``CommitLog``; ``sqlite.SQLiteScenarioStorage`` and
+``postgres.PostgresScenarioStorage`` assemble their respective record backends.
+The scenario package depends only
 on storage contracts. Direct commit log callers now import ``CommitLog`` from
 ``reef.storage.commit_log``; ``reef.scenario.commit_log`` is removed. The session
 contract is:
@@ -497,7 +498,7 @@ standalone SQLite maintenance, pass the directory to the storage service:
    from pathlib import Path
 
    from reef.storage.records import RecordRetention
-   from reef.storage.scenario import SQLiteScenarioStorage
+   from reef.storage.sqlite import SQLiteScenarioStorage
 
    retention = RecordRetention(days=7, max_bytes=20 * 1024**3)
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))

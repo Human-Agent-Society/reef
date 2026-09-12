@@ -13,7 +13,7 @@ from reef.artifact import (
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class BasicBackend(RepositoryBackend):

@@ -23,23 +23,23 @@ from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.tree.mutations import admit_mutations
 from reef.recipe import RecipeConfigError
+from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import (
     CordisBackend,
-    CordisRecipe,
     FailureManifest,
     Mutation,
     MutationError,
     Promoter,
     ScoreComparisonPlugin,
 )
-from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, admit_mutations
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_promoter, resolve_proposer
 from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
@@ -181,7 +181,7 @@ def run_backend_step(
 
 
 def test_recipe_resolves_by_dotted_reference() -> None:
-    assert recipe_class_for("reef.train.cordis_backend.recipe:CordisRecipe") is CordisRecipe
+    assert recipe_class_for("reef.recipe.cordis:CordisRecipe") is CordisRecipe
     assert recipe_class_for("harness_evolve") is None
 
 

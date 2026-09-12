@@ -18,8 +18,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
 from reef.runtime.base import TrainingRuntime
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.processors.base import DataProcessor

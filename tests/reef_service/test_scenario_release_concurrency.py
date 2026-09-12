@@ -16,7 +16,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PreparedStep, Trainer, TrainingBackend, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 

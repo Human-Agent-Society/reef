@@ -20,19 +20,19 @@ from recipes.gepa.method import GEPAPlugin, GEPAProposer, default_feedback
 from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult
+from reef.harness.tree.mutations import Mutation
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend.strategies import Mutation, resolve_episode_scorer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.train.cordis_backend.strategies import resolve_episode_scorer
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 

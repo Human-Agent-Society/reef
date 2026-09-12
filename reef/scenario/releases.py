@@ -19,7 +19,7 @@ from reef.artifact.artifact import (
     is_local_release,
 )
 from reef.artifact.release_chain import ArtifactReleaseChain
-from reef.scenario.store import ScenarioStore
+from reef.storage.scenario import ScenarioStore
 
 
 class ScenarioReleases:

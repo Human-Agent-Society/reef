@@ -10,7 +10,7 @@ from reef.core import UnknownScenario
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.service.app import create_app
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:

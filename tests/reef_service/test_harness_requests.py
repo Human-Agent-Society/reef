@@ -28,10 +28,11 @@ from reef_service.test_reef_trainer_contracts import ExampleBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.harness.client.wrapper import harness
+from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import _merged_requires
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer

@@ -23,7 +23,8 @@ from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID,
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
-from reef.train.cordis_backend import CordisBackend, CordisRecipe
+from reef.recipe.cordis import CordisRecipe
+from reef.train.cordis_backend import CordisBackend
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 EXTENSION = "export default function (pi) {\n  if (process.env.PI_OFFLINE) return;\n}\n"

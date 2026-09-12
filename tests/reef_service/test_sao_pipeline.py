@@ -19,12 +19,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import StaleCandidate
-from reef.scenario.checkpoint_strategy import EveryNVersions
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step

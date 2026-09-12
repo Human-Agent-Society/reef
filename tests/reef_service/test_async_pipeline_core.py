@@ -14,7 +14,7 @@ from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, T
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 from ._policy_recipe import TestPolicyRecipe
 

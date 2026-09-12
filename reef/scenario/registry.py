@@ -26,8 +26,8 @@ from reef.runtime.base import TrainingRuntime
 from reef.runtime.model_config import ModelConfig
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
-from reef.scenario.store import ScenarioStorage
 from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
+from reef.storage.scenario import ScenarioStorage
 
 
 class ScenarioRegistry:

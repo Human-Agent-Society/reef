@@ -9,8 +9,8 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
-from reef.scenario.checkpoint_strategy import EveryNVersions
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -84,7 +84,7 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
 
 
 def test_scenario_metadata_round_trips() -> None:
-    from reef.scenario.commits import parse_scenario_metadata
+    from reef.storage.commits import parse_scenario_metadata
 
     scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
     metadata = scenario.to_metadata()
@@ -109,7 +109,7 @@ def test_scenario_metadata_round_trips() -> None:
 
 
 def test_rollback_metadata_preserves_its_operation() -> None:
-    from reef.scenario.commits import parse_scenario_metadata
+    from reef.storage.commits import parse_scenario_metadata
 
     scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
     assert scenario is not None
@@ -256,7 +256,7 @@ def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
 @pytest.mark.parametrize("operation", [None, "training", "rollback", "promote"])
 def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> None:
     from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
-    from reef.scenario.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
+    from reef.storage.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
 
     base = ArtifactRef("base-content", "base-release", None)
     head = ArtifactRef("checkpoint-content", "checkpoint-release", base.release_id)
@@ -340,7 +340,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 )
 def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:
     from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
-    from reef.scenario.commits import parse_scenario_metadata
+    from reef.storage.commits import parse_scenario_metadata
 
     base = ArtifactRef("base", "base", None)
     metadata = {

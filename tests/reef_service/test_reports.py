@@ -16,7 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ProcessorContext
 
 

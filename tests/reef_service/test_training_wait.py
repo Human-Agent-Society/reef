@@ -25,7 +25,7 @@ import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 pytestmark = pytest.mark.unit
 

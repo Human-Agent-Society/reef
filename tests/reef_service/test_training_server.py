@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 
-from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
 from reef.service.deploy.config import interpolate_config
@@ -319,7 +319,7 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
 
     dispatcher = deploy.build_dispatcher(
         _settings(
-            recipe="reef.train.cordis_backend.recipe:CordisRecipe",
+            recipe="reef.recipe.cordis:CordisRecipe",
             recipe_settings={
                 "evolution": {
                     "propose": "demo_evolution:propose",

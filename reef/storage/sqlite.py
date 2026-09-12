@@ -1,10 +1,13 @@
-"""SQLite schema, connections, and retained-file maintenance for SQL record storage."""
+"""SQLite records, scenario storage, and retained-file maintenance."""
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import math
+import shutil
 import time
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -32,7 +35,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
+from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
 from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
 _METADATA = MetaData()
@@ -333,3 +338,80 @@ class SQLiteRecordRetention:
     def _delete(self, path: str, sequences: list[int]) -> int:
         with self._connect(path) as connection, connection.begin():
             return self._queries.delete(connection, sequences)
+
+
+class SQLiteScenarioStorage(ScenarioStorage):
+    """Open existing hashed SQLite and JSONL paths and manage their lifecycle."""
+
+    def __init__(self, directory: Path | None = None) -> None:
+        self._directory = None if directory is None else Path(directory)
+        self._lock = RLock()
+        self._closed = False
+        if self._directory is not None:
+            self._directory.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def durable(self) -> bool:
+        return self._directory is not None
+
+    def open(self, scenario: str) -> CommitLogScenarioStore:
+        with self._lock:
+            self._ensure_open()
+            key = self._scenario_key(scenario)
+            database = None if self._directory is None else self._directory / f"{key}.sqlite3"
+            commit_log = None if self._directory is None else CommitLog(self._directory / f"{key}.commits.jsonl")
+            records = SQLiteRecordStore(database)
+            try:
+                return CommitLogScenarioStore(scenario, records, commit_log)
+            except BaseException:
+                records.close()
+                raise
+
+    def archive(self, scenario: str) -> tuple[str, ...]:
+        with self._lock:
+            self._ensure_open()
+            paths = self.state_paths(scenario)
+            if self._directory is None:
+                return ()
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
+            moved: list[str] = []
+            for path in paths:
+                if path.exists():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    target = destination / path.name
+                    shutil.move(str(path), str(target))
+                    moved.append(str(target))
+            return tuple(moved)
+
+    def prune(self, *, days: float, max_bytes: int) -> int:
+        with self._lock:
+            self._ensure_open()
+            retention = RecordRetention(days, max_bytes)
+            return 0 if self._directory is None else SQLiteRecordRetention(retention).prune(self._directory)
+
+    def state_paths(self, scenario: str) -> tuple[Path, ...]:
+        """Existing local state paths; the stable process lock is never moved."""
+        with self._lock:
+            self._ensure_open()
+            key = self._scenario_key(scenario)
+            if self._directory is None:
+                return ()
+            return tuple(
+                self._directory / name
+                for name in (f"{key}.sqlite3", f"{key}.sqlite3-wal", f"{key}.sqlite3-shm", f"{key}.commits.jsonl")
+            )
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("scenario storage is closed")
+
+    @staticmethod
+    def _scenario_key(scenario: str) -> str:
+        if not isinstance(scenario, str) or not scenario:
+            raise ValueError("scenario must be a non-empty string")
+        return hashlib.sha256(scenario.encode("utf-8")).hexdigest()

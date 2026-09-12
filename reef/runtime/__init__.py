@@ -10,6 +10,9 @@ evaluates it before choosing activation or rejection.
 ``model_config.ModelConfig`` is the concrete, in-memory model selection shared
 by a scenario and its recipe. It has no file paths or persistence behavior.
 
+Training batches and candidate evaluation contracts come from ``reef.core``.
+This package never imports ``reef.train``.
+
 Boundaries this package holds:
 
 - No concrete training backend is imported here. Backends implement

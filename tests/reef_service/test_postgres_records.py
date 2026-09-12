@@ -11,13 +11,12 @@ from sqlalchemy import select
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.scenario.commits import CommitRecord
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
-from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, postgres_url
+from reef.storage.commits import CommitRecord
+from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
 from reef.storage.records import RecordConflict, RecordRetention
-from reef.storage.scenario import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteRecordStore
 
 
@@ -272,7 +271,7 @@ def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, m
         def failed_move(*args):
             raise OSError("move failed")
 
-        monkeypatch.setattr("reef.storage.scenario.shutil.move", failed_move)
+        monkeypatch.setattr("reef.storage.postgres.shutil.move", failed_move)
         with pytest.raises(OSError, match="move failed"):
             factory.archive("math")
         with closing(factory.open("math")) as store:

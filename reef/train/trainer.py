@@ -17,13 +17,13 @@ from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any
 
+from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.storage.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.processors.base import DataProcessor, InstructionFailure
 from reef.train.types import PreparedCommit, ProcessorContext, TrainingBatch, TrainStepResult

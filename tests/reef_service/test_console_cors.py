@@ -11,7 +11,7 @@ from reef.service import assembly
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.deploy.settings import service_settings_from_config
-from reef.storage.scenario import SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 ORIGIN = "https://api.reefinfra.ai"
 

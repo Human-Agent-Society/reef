@@ -16,8 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.storage.records import RecordConflict
-from reef.storage.scenario import SQLiteScenarioStorage
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 HEADERS = {"x-reef-scenario": "idempotency"}
 
