@@ -339,8 +339,8 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
     through reef's config loader and build the explicit implementation - selection
     always, batch_size 60, the seed composition plus the seed_skills pool."""
-    from reef.records import RecordStore
     from reef.service.deploy.config import load_config
+    from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
     from reef.surface.skills import SkillInferenceHooks
     from reef.train.trainer import Trainer
@@ -373,7 +373,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert isinstance(surface.inference, SkillInferenceHooks)
     assert [layer.layer for layer in surface.inference.layers] == ["pi-agent"]
     assert [layer.layer for layer in built.build_artifact_validator().layers] == ["pi-agent"]
-    assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
 
 
 def test_seed_skills_must_name_an_existing_directory(example, tmp_path) -> None:

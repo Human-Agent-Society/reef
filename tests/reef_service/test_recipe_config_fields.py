@@ -16,7 +16,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
-from reef.records import RecordStore
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
@@ -198,7 +198,7 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 
 @pytest.mark.unit
 def test_default_build_uses_declared_processor_and_config_fields() -> None:
-    trainer = ConfiguredRecipe(StubTrainingRuntime(), batch_size=2).build("scenario", RecordStore())
+    trainer = ConfiguredRecipe(StubTrainingRuntime(), batch_size=2).build("scenario", SQLiteRecordStore())
 
     assert isinstance(trainer.processor, ThresholdProcessor)
     assert isinstance(trainer.training_backend, SlimeTrainingBackend)
@@ -211,7 +211,7 @@ def test_default_build_uses_declared_processor_and_config_fields() -> None:
 
 @pytest.mark.unit
 def test_default_build_requires_processor_and_step_preparer_declarations() -> None:
-    from reef.records import RecordStore
+    from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
     class NoProcessorRecipe(WeightTrainingRecipe):
@@ -226,6 +226,6 @@ def test_default_build_requires_processor_and_step_preparer_declarations() -> No
             return WeightTrainingSpec(step_preparer="", loss_family="sft", processor=ThresholdProcessor)
 
     with pytest.raises(TypeError, match=r"declares no processor.*training_spec\(\).*override build"):
-        NoProcessorRecipe(StubTrainingRuntime()).build("scenario", RecordStore())
+        NoProcessorRecipe(StubTrainingRuntime()).build("scenario", SQLiteRecordStore())
     with pytest.raises(TypeError, match=r"declares no step_preparer.*registered preparer name.*'module:callable'"):
-        NoPreparerRecipe(StubTrainingRuntime()).build("scenario", RecordStore())
+        NoPreparerRecipe(StubTrainingRuntime()).build("scenario", SQLiteRecordStore())

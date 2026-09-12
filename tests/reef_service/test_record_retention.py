@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from threading import Event
 
@@ -12,9 +13,11 @@ from sqlalchemy.exc import OperationalError
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
-from reef.records import RecordConflict, RecordRetention, RecordStore
+from reef.records import RecordConflict, RecordRetention
 from reef.service import assembly
 from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:
@@ -26,23 +29,29 @@ def trace(record_id: str, scenario: str = "math") -> AgentRecord:
 BODY_BYTES = len('{"text":"海"}[]'.encode())
 
 
-def test_retention_uses_one_budget_across_scenarios_and_archived_databases(tmp_path, monkeypatch):
+@pytest.fixture
+def store_factory(tmp_path):
+    with closing(SQLiteScenarioStoreFactory(tmp_path)) as factory:
+        yield factory
+
+
+def test_retention_uses_one_budget_across_scenarios_and_archived_databases(tmp_path, monkeypatch, store_factory):
     archive = tmp_path / "archived" / "removed" / "archived.sqlite3"
     oldest = trace("old")
-    with RecordStore(tmp_path / "a.sqlite3") as first, RecordStore(tmp_path / "b.sqlite3") as second:
-        with RecordStore(archive) as removed:
+    with SQLiteRecordStore(tmp_path / "a.sqlite3") as first, SQLiteRecordStore(tmp_path / "b.sqlite3") as second:
+        with SQLiteRecordStore(archive) as removed:
             for clock, store, record in (
                 (10.0, first, oldest),
                 (15.0, removed, trace("archived")),
                 (20.0, second, trace("middle", "code")),
                 (30.0, first, trace("new")),
             ):
-                monkeypatch.setattr("reef.records.time.time", lambda clock=clock: clock)
+                monkeypatch.setattr("reef.storage.sql_records.time.time", lambda clock=clock: clock)
                 store.append(record)
                 store.compact(record.scenario, frozenset({record.agent_record_id}))
         first.append(replace(trace("active"), payload={"text": "x" * 4096}))
-        monkeypatch.setattr("reef.records.time.time", lambda: 40.0)
-        assert RecordRetention(max_bytes=2 * BODY_BYTES).prune(tmp_path) == 2
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 40.0)
+        assert store_factory.prune(days=7, max_bytes=2 * BODY_BYTES) == 2
         assert first.get_for_audit("math", "old") is None
         assert first.get_for_audit("math", "new") is not None
         assert second.get_for_audit("code", "middle") is not None
@@ -54,15 +63,15 @@ def test_retention_uses_one_budget_across_scenarios_and_archived_databases(tmp_p
             first.append_result(replace(trace("late"), request_type=RequestType.REPORT, references=("old",))).inserted
             is False
         )
-    with RecordStore(archive) as removed:
+    with SQLiteRecordStore(archive) as removed:
         assert removed.get_for_audit("math", "archived") is None
 
 
-def test_retention_expires_bodies_in_batches_and_preserves_boundary_and_receipts(tmp_path, monkeypatch):
-    with RecordStore(tmp_path / "records.sqlite3") as records:
+def test_retention_expires_bodies_in_batches_and_preserves_boundary_and_receipts(tmp_path, monkeypatch, store_factory):
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         for index in range(257):
             records.append(trace(f"old-{index}"))
-        monkeypatch.setattr("reef.records.time.time", lambda: 99.0)
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 99.0)
         records.compact(
             "math",
             frozenset(f"old-{index}" for index in range(257)),
@@ -70,44 +79,46 @@ def test_retention_expires_bodies_in_batches_and_preserves_boundary_and_receipts
             receipt_metadata={"outcome": "stale"},
         )
         records.append(trace("boundary"))
-        monkeypatch.setattr("reef.records.time.time", lambda: 100.0)
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
         records.compact("math", frozenset({"boundary"}))
-        monkeypatch.setattr("reef.records.time.time", lambda: 7 * 86400 + 100.0)
-        assert RecordRetention().prune(tmp_path) == 257
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 7 * 86400 + 100.0)
+        retention = RecordRetention()
+        assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 257
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["boundary"]
         assert records.compaction_receipts("math")[0]["receipt_id"] == "batch"
-        assert RecordRetention().prune(tmp_path) == 0
+        assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 0
 
 
-def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_path, monkeypatch):
-    with RecordStore(tmp_path / "records.sqlite3") as records:
+def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_path, monkeypatch, store_factory):
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         for index in range(600):
             records.append(trace(str(index)))
-        monkeypatch.setattr("reef.records.time.time", lambda: 100.0)
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
         records.compact("math", frozenset(str(index) for index in range(600)))
-        assert RecordRetention(max_bytes=3 * BODY_BYTES).prune(tmp_path) == 597
+        assert store_factory.prune(days=7, max_bytes=3 * BODY_BYTES) == 597
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["597", "598", "599"]
 
 
-def test_large_finite_retention_days_still_enforce_the_byte_budget(tmp_path, monkeypatch):
-    with RecordStore(tmp_path / "records.sqlite3") as records:
+def test_large_finite_retention_days_still_enforce_the_byte_budget(tmp_path, monkeypatch, store_factory):
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         for timestamp, record_id in ((1.0, "old"), (2.0, "new")):
             records.append(trace(record_id))
-            monkeypatch.setattr("reef.records.time.time", lambda timestamp=timestamp: timestamp)
+            monkeypatch.setattr("reef.storage.sql_records.time.time", lambda timestamp=timestamp: timestamp)
             records.compact("math", frozenset({record_id}))
-        monkeypatch.setattr("reef.records.time.time", lambda: 3.0)
+        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 3.0)
 
         # A finite number of days can produce an infinite cutoff in seconds.
-        assert RecordRetention(days=1e308, max_bytes=BODY_BYTES).prune(tmp_path) == 1
+        assert store_factory.prune(days=1e308, max_bytes=BODY_BYTES) == 1
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["new"]
 
 
-def test_retention_skips_unmigrated_stores_and_empty_directories(tmp_path):
-    assert RecordRetention().prune(tmp_path) == 0
+def test_retention_skips_unmigrated_stores_and_empty_directories(tmp_path, store_factory):
+    retention = RecordRetention()
+    assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 0
     with sqlite3.connect(tmp_path / "legacy.sqlite3") as connection:
         connection.execute("CREATE TABLE agent_record (sequence INTEGER PRIMARY KEY, payload_json TEXT)")
         connection.execute("INSERT INTO agent_record VALUES (1, 'original')")
-    assert RecordRetention().prune(tmp_path) == 0
+    assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 0
     with sqlite3.connect(tmp_path / "legacy.sqlite3") as connection:
         assert connection.execute("SELECT payload_json FROM agent_record").fetchone() == ("original",)
 
@@ -139,7 +150,9 @@ def test_service_config_defaults_to_seven_days_and_twenty_gib_and_accepts_overri
 
 
 def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, monkeypatch, caplog):
-    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path)
+    dispatcher = build_default_dispatcher(
+        agent_record_dir=tmp_path, scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path)
+    )
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     monkeypatch.setattr("reef.service.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
     original = dispatcher.prune_record_archives
@@ -154,10 +167,10 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
         return original(retention)
 
     monkeypatch.setattr(dispatcher, "prune_record_archives", flaky)
-    with RecordStore(tmp_path / "records.sqlite3") as records:
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         records.append(trace("expired"))
         with monkeypatch.context() as clock:
-            clock.setattr("reef.records.time.time", lambda: 1.0)
+            clock.setattr("reef.storage.sql_records.time.time", lambda: 1.0)
             records.compact("math", frozenset({"expired"}))
 
         async def run():
@@ -184,21 +197,23 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
 
 
 def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch):
-    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path)
+    dispatcher = build_default_dispatcher(
+        agent_record_dir=tmp_path, scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path)
+    )
     dispatcher.get_or_create_scenario("math")
     started, release, deleting = Event(), Event(), Event()
-    original = RecordRetention.prune
+    original = SQLiteScenarioStoreFactory.prune
 
-    def held(retention, directory):
+    def held(factory, *, days, max_bytes):
         started.set()
         assert release.wait(3)
-        return original(retention, directory)
+        return original(factory, days=days, max_bytes=max_bytes)
 
     def remove():
         deleting.set()
         return dispatcher.delete_scenario("math")
 
-    monkeypatch.setattr(RecordRetention, "prune", held)
+    monkeypatch.setattr(SQLiteScenarioStoreFactory, "prune", held)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             pruning = executor.submit(dispatcher.prune_record_archives, RecordRetention())

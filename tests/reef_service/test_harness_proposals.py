@@ -16,6 +16,7 @@ from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import Recipe
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
 from reef.surface import Surface, create_harness_surface
 from reef.train.cordis_backend import CordisRecipe
 from reef.train.cordis_backend.proposals import ProposalInbox
@@ -43,7 +44,12 @@ def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    return Dispatcher(recipe, factory, agent_record_dir=tmp_path / "agent-record")
+    return Dispatcher(
+        recipe,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+    )
 
 
 def _proposal(*mutations: dict, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0", reason: str = "because"):

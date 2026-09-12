@@ -13,6 +13,7 @@ from reef.artifact import (
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 
 class BasicBackend(RepositoryBackend):
@@ -60,7 +61,9 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
 ):
     backend = backend_type(InMemoryRepositoryBackend("math", tmp_path))
     if registered:
-        dispatcher = build_default_dispatcher(backend_factory=lambda name: backend)
+        dispatcher = build_default_dispatcher(
+            backend_factory=lambda name: backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+        )
         try:
             dispatcher.get_or_create_scenario("math")
         finally:
@@ -70,7 +73,11 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
     def unexpected_metadata():
         pytest.fail("unsupported backend must be rejected before registration or recovery")
 
-    dispatcher = build_default_dispatcher(backend_factory=lambda name: backend, agent_record_dir=tmp_path / "records")
+    dispatcher = build_default_dispatcher(
+        backend_factory=lambda name: backend,
+        agent_record_dir=tmp_path / "records",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+    )
     try:
         with monkeypatch.context() as patch:
             patch.setattr(backend, "metadata", unexpected_metadata)
@@ -84,10 +91,12 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
 def test_basic_backend_remains_usable_without_commit_log(tmp_path):
     backend = BasicBackend(InMemoryRepositoryBackend("math", tmp_path))
     for _ in range(2):
-        dispatcher = build_default_dispatcher(backend_factory=lambda name: backend)
+        dispatcher = build_default_dispatcher(
+            backend_factory=lambda name: backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+        )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
-            assert scenario.commit_log is None
+            assert not scenario.store.durable
             assert scenario.current_artifact_ref() == backend.current()
         finally:
             dispatcher.close()
@@ -102,11 +111,13 @@ def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(t
     backend = StagedBackend(InMemoryRepositoryBackend("math", tmp_path))
     for _ in range(2):
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, agent_record_dir=tmp_path / "records"
+            backend_factory=lambda name: backend,
+            agent_record_dir=tmp_path / "records",
+            scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
-            assert scenario.commit_log is not None
+            assert scenario.store.durable
             assert scenario.current_artifact_ref() == backend.current()
         finally:
             dispatcher.close()

@@ -453,12 +453,22 @@ class Trainer:
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
-        """Retire disposable rows from training while preserving their audit bodies."""
+        """Retire rows and notify the processor for standalone trainer callers.
+
+        Scenario commits settle records through their store and then call
+        :meth:`compaction_applied` to update processor memory.
+        """
         if not compacted_ids:
             return
         with self._lock:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
+
+    def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
+        """Notify the processor after the scenario store retires committed rows."""
+        if compacted_ids:
+            with self._lock:
+                self._processor.compaction_applied(compacted_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
