@@ -92,7 +92,7 @@ or training backend determine the processes, dependencies and connections.
 ``training.config`` holds workload variables such as checkpoint directories;
 native backend flags belong in ``training.options``.
 
-For weight training, Reef starts a local Slime driver, waits for its healthy
+With the default Slime backend, Reef starts a local driver, waits for its healthy
 bridge, then starts HTTP and obtains the inference connection from that bridge.
 Slime owns the SGLang model workers; Reef does not start a second inference
 server. Both processes share the Ray address, namespace, actor name and resolved
@@ -103,10 +103,23 @@ and checkpoint paths still need the complete options for the selected recipe.
 The same path supports CLI-only training with
 ``--recipe.implementation package.module:WeightRecipe``,
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
-``training.backend`` currently supports ``slime`` and defaults to it.
+``training.backend`` defaults to ``slime`` for compatibility. It also accepts an
+installed ``reef.training_backends`` entry-point name or an importable
+``package.module:Deployment`` class. The selected definition owns the process
+plan and HTTP runtime connection; other backends do not inherit Slime's Ray,
+SGLang or native-argument requirements.
+
+An in-process integration can use ``InProcessTrainingDeployment``: it starts
+only Reef HTTP and constructs its registered training runtime inside that
+process. ``training.options`` is parsed by that runtime factory, with CLI leaf
+overrides taking precedence over YAML. Runtime type, model and shared timeout
+settings cannot be overridden inside the options map. Such integrations reject
+Ray, training/rollout executor and standalone inference-engine settings. MLX
+support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/325>`__;
+this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
-Training-owned inference uses ``training.options.sglang-*`` for native engine
+Slime-owned inference uses ``training.options.sglang-*`` for native engine
 settings; upstream provider settings and standalone ``inference.options`` cannot
 be combined with it. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
@@ -149,7 +162,9 @@ For managed SGLang, use:
 These become native ``--mem-fraction-static=0.8`` and ``--trust-remote-code``
 arguments to ``python -m sglang.launch_server``. SGLang owns their types,
 defaults and validation. Reef does not duplicate the engine argument schema.
-A native ``true`` emits a switch; ``false`` or ``null`` omits it. To disable
+For argv-based engines such as Slime, ``true`` emits a switch and ``false``
+or ``null`` omits it. In-process training passes values to its runtime parser;
+``false`` stays false and null follows the declared field type. To disable
 an engine feature enabled by default, use that engine's native disabling
 flag. Lists supply multiple argument values; objects are passed as JSON.
 Use native flag names without their leading ``--`` inside ``options``.
@@ -712,8 +727,8 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.backend | slime | backend for automatic weight-training assembly; currently only ``slime``
-   training.ready-timeout | 3600 | seconds to wait for the generated driver's bridge to become ready
+   training.backend | slime | built-in, installed entry-point name, or dotted TrainingDeployment class
+   training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written

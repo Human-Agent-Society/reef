@@ -127,11 +127,13 @@ class ServiceSettings:
         None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
     )
     training_ready_timeout: int = config_option(
-        3600, public_path=("training", "ready_timeout"), help="Training bridge startup deadline in seconds."
+        3600, public_path=("training", "ready_timeout"), help="Training component startup deadline in seconds."
     )
     training_backend_options: Mapping[str, Any] = field(
         default_factory=dict,
-        metadata=config_metadata("Native Slime driver options.", public_path=("training", "options")),
+        metadata=config_metadata(
+            "Options owned by the selected training backend.", public_path=("training", "options")
+        ),
     )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The

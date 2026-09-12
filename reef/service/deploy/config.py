@@ -16,12 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.core.errors import ReefError
-
-
-class DeployConfigError(ReefError):
-    """A ``reef serve`` deployment config cannot be loaded or is invalid."""
-
+from reef.core.config import config_value, interpolate_config
+from reef.core.errors import DeployConfigError
 
 try:
     import yaml
@@ -30,7 +26,6 @@ except ImportError as exc:  # pragma: no cover - environment-dependent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)(:\?)?\}")
-_CFG_VAR_RE = re.compile(r"\$\{([\w.-]+)\}")
 
 
 def _deep_interp_env(obj: Any, environ: Mapping[str, str], missing: dict[str, list[str]], location: str = "") -> Any:
@@ -69,46 +64,6 @@ def interpolate_environment(config: Mapping[str, Any], config_path: str | Path) 
             "Set these variables before running reef serve, or override the corresponding config fields."
         )
     return resolved
-
-
-def config_value(
-    config: Mapping[str, Any],
-    *path: str,
-    default: Any = None,
-    expand: bool = True,
-) -> Any:
-    """Read a dotted-path config value as a stripped string (bools/None pass through)."""
-    node: Any = config
-    for key in path:
-        if not isinstance(node, dict):
-            node = None
-            break
-        node = node.get(key)
-    if node is None or (isinstance(node, str) and not node.strip()):
-        node = default
-    if node is None or isinstance(node, bool):
-        return node
-    value = str(node).strip()
-    return os.path.expanduser(value) if expand else value
-
-
-def interpolate_config(config: Mapping[str, Any], value: str) -> str:
-    """Substitute ``${dotted.path}`` references against the config itself."""
-
-    def repl(match: re.Match[str]) -> str:
-        resolved = config_value(config, *match.group(1).split("."), default=None)
-        return str(resolved) if resolved is not None else match.group(0)
-
-    seen: set[str] = set()
-    for _ in range(64):
-        expanded = _CFG_VAR_RE.sub(repl, value)
-        if expanded == value:
-            return expanded
-        if expanded in seen:
-            raise DeployConfigError("cyclic config interpolation")
-        seen.add(value)
-        value = expanded
-    raise DeployConfigError("config interpolation exceeded 64 levels")
 
 
 def interpolate_config_values(config: Mapping[str, Any], value: Any) -> Any:

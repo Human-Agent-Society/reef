@@ -392,7 +392,7 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        from reef.train.slime_backend.backend import SlimeTrainingBackend
+        from reef.train.runtime_backend import RuntimeTrainingBackend
 
         spec = type(self).training_spec()
         processor_class = spec.processor
@@ -428,7 +428,7 @@ class WeightTrainingRecipe(Recipe):
             scenario,
             records,
             processor_factory=lambda context: processor_class(context.with_config(config)),
-            training_backend=SlimeTrainingBackend(
+            training_backend=RuntimeTrainingBackend(
                 self.runtime,
                 spec.step_preparer,
                 loss_family=spec.loss_family,

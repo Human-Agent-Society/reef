@@ -73,7 +73,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     "override,match",
     [
         ({"inference.model-path": ""}, "must be non-empty"),
-        ({"training.backend": "unknown"}, "supports training.backend: slime"),
+        ({"training.backend": "unknown"}, "unknown training backend"),
         ({"training.ready-timeout": "0"}, "must be positive"),
         ({"training.timeout-s": "0"}, "must be positive"),
         ({"training.options.hf-checkpoint": "different/model"}, "must match inference.model-path"),

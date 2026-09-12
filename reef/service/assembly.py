@@ -8,10 +8,10 @@ orchestrates processes around the result.
 
 from __future__ import annotations
 
-import importlib
 import os
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +23,11 @@ from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.registry import RuntimeRegistry
+from reef.runtime.settings import TrainingRuntimeSettings
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.settings import ServiceSettings, service_owned_keys
+from reef.service.deploy.training_backend import training_deployment_for
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -66,25 +67,6 @@ def _require_non_empty(value: str | None, setting: str) -> str:
     return value.strip()
 
 
-def _configured_inference_backend_factory(path: str | None) -> InferenceBackendFactory | None:
-    """Load an optional backend factory selected by deployment config."""
-
-    if path is None:
-        return None
-    if not isinstance(path, str) or not path.strip():
-        raise ValueError("reef.inference_backend_factory must be a non-empty dotted path")
-    module_path, separator, attribute = path.strip().rpartition(".")
-    if not separator or not module_path or not attribute:
-        raise ValueError("reef.inference_backend_factory must be a dotted path")
-    try:
-        factory = getattr(importlib.import_module(module_path), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load reef.inference_backend_factory {path!r}") from exc
-    if not callable(factory):
-        raise ValueError(f"reef.inference_backend_factory {path!r} is not callable")
-    return factory
-
-
 def _connect_training_runtime(
     settings: ServiceSettings,
     *,
@@ -92,38 +74,19 @@ def _connect_training_runtime(
     max_staleness: int,
     connector: Any = None,
 ) -> TrainingRuntime:
-    """Build the training runtime through the runtime registry's ``ray_training`` kind."""
-    ray_address = _require_non_empty(settings.ray_address, "reef.ray_address")
-    inference_url = settings.inference_url.strip() if isinstance(settings.inference_url, str) else None
-    if settings.inference_timeout_s <= 0:
-        raise ValueError("reef.inference_timeout_s must be positive")
-    if settings.train_timeout_s is not None and settings.train_timeout_s <= 0:
-        raise ValueError("reef.train_timeout_s must be positive when set")
-    runtime_config: dict[str, Any] = {
-        "type": "ray_training",
-        "inference_url": inference_url or None,
-        "actor_name": settings.ray_actor_name,
-        "namespace": settings.ray_namespace,
-        "ray_address": ray_address,
-        "inference_timeout_s": settings.inference_timeout_s,
-        "train_timeout_s": settings.train_timeout_s,
-    }
-    if max_staleness:
-        runtime_config["max_staleness"] = max_staleness
-    inference_backend_factory = _configured_inference_backend_factory(settings.inference_backend_factory)
-    if inference_backend_factory is not None:
-        runtime_config["inference_backend_factory"] = inference_backend_factory
-    if not isinstance(settings.inference_backend_config, Mapping):
-        raise ValueError("reef.inference_backend_config must be an object")
-    if settings.inference_backend_config:
-        if inference_backend_factory is None:
-            raise ValueError("reef.inference_backend_config requires reef.inference_backend_factory")
-        runtime_config["inference_backend_config"] = dict(settings.inference_backend_config)
-    if connector is not None:
-        runtime_config["connect"] = connector
+    """Build the selected integration's runtime, independently of its process topology."""
+    TrainingRuntimeSettings(
+        inference_timeout_s=settings.inference_timeout_s,
+        train_timeout_s=settings.train_timeout_s,
+        max_staleness=max_staleness,
+    )
+    backend = training_deployment_for(settings.training_backend)
+    runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
     runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
     if not isinstance(runtime, TrainingRuntime):
-        raise TypeError("ray_training runtime factory must build a TrainingRuntime")
+        with suppress(Exception):
+            runtime.shutdown()
+        raise TypeError("training backend runtime factory must build a TrainingRuntime")
     return runtime
 
 
@@ -148,7 +111,7 @@ def _training_recipe(
     env: Mapping[str, str],
     connector: Any,
 ) -> Recipe:
-    """Build a weight-training recipe on the Ray training runtime the settings name."""
+    """Build a weight-training recipe on the selected backend runtime."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     # Translate the legacy layout, then resolve the recipe fields once before
     # connecting its runtime. Construction consumes those same resolved values.

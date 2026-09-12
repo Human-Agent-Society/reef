@@ -11,3 +11,7 @@ class ReefError(Exception):
 
 class UnknownScenario(ReefError):
     """The scenario does not exist and the caller may not create it implicitly."""
+
+
+class DeployConfigError(ReefError):
+    """A ``reef serve`` deployment config cannot be loaded or is invalid."""

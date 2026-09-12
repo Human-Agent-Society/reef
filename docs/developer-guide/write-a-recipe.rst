@@ -205,3 +205,57 @@ runtime, while Slime owns its model-worker GPU allocations. See
 Backend environment defaults belong to their integration; Slime's defaults
 live in ``reef/train/slime_backend/launch.py`` and honor explicit environment
 overrides.
+
+
+Training backend deployment
+----------------------------
+
+``training.backend`` selects one definition for both process preparation and
+HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
+``reef.train.deployment`` and live under the owning integration:
+
+* ``prepare(config, settings)`` receives the resolved deployment plus parsed
+  service settings as a mapping. It validates backend combinations, binds
+  derived values and returns process definitions that HTTP must wait for.
+  It must not download models, allocate devices or construct a runtime.
+* ``runtime_config(settings, *, max_staleness, connector=None)`` returns the
+  configuration consumed by ``RuntimeRegistry`` in the HTTP process. The
+  result must construct a ``TrainingRuntime``. ``connector`` is an optional
+  legacy connection injection; an in-process backend rejects it.
+
+The Slime implementation in ``reef/train/slime_backend/launch.py`` owns the
+Ray roles, driver command, native checkpoint binding and bridge connection.
+An in-process integration can reuse the supplied implementation:
+
+.. code:: python
+
+   from reef.train.deployment import InProcessTrainingDeployment
+
+   class Deployment(InProcessTrainingDeployment):
+       runtime_type = "my_backend.runtime:factory"
+
+Here ``factory`` is a lightweight ``RuntimeFactory`` instance. Its
+``config_type()`` declarations validate ``training.options`` using the shared
+parser; older factories can retain their owning parser. Import execution
+libraries only when the factory constructs the runtime, and provide any
+backend-owned defaults there. No Ray, standalone inference process or driver
+is added by this definition.
+
+Select ``--training.backend my_backend.launch:Deployment`` directly, or register
+an installed name in the integration distribution:
+
+.. code:: toml
+
+   [project.entry-points."reef.training_backends"]
+   my-backend = "my_backend.launch:Deployment"
+
+This enables ``--training.backend my-backend`` in both the launcher and HTTP
+child. Only the selected definition is imported. Missing or ambiguous names
+fail explicitly, without falling back to Slime. Do not introduce a separate
+user-facing runtime selector for weight training: runtime wiring belongs to
+the selected backend. Method dependencies remain the Recipe's responsibility.
+
+Weight recipes use ``RuntimeTrainingBackend`` to adapt any ``TrainingRuntime``
+to the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
+an alias. Experiment metadata now reports ``RuntimeTrainingBackend`` and the
+actual runtime class instead of labeling all weight training as Slime.

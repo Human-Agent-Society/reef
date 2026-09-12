@@ -376,9 +376,10 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
-    from reef.service.assembly import _configured_inference_backend_factory, _recipe_owned_settings
+    from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.config import validate_services
     from reef.service.deploy.settings import service_settings_from_config
+    from reef.train.slime_backend.launch import _configured_inference_backend_factory
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
