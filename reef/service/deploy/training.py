@@ -31,11 +31,13 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     settings = service_settings_from_config(config)
     if (settings.training_backend or "slime") != "slime":
         raise DeployConfigError("automatic weight training currently supports training.backend: slime")
+    from reef.train.slime_backend.launch import driver_environment
+
     model = config_value(config, "reef", "model_path")
     if not isinstance(model, str) or not model:
         raise DeployConfigError("weight training requires --inference.model-path")
     if not settings.host.strip() or not 1 <= settings.port <= 65535:
-        raise DeployConfigError("weight training requires a non-empty --service.host and valid --service.port")
+        raise DeployConfigError("weight training requires a non-empty --reef.host and valid --reef.port")
     if settings.training_ready_timeout <= 0 or settings.inference_timeout_s <= 0:
         raise DeployConfigError("training.ready-timeout and inference.timeout-s must be positive")
     if settings.train_timeout_s is not None and settings.train_timeout_s <= 0:
@@ -89,6 +91,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         "ready": [python, "-c", _READY_PROBE],
         "ready_timeout": settings.training_ready_timeout,
         "env": {
+            **driver_environment(os.environ),
             "REEF_RAY_NAMESPACE": "${reef.ray_namespace}",
             "REEF_RAY_ACTOR_NAME": "${reef.ray_actor_name}",
             # Managed launches take native options from the resolved config.

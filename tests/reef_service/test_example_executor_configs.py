@@ -60,7 +60,9 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in path.with_name("run.sh").read_text()
     if "tttd" in relative:
         assert config["training"]["num_gpus"] == 2
-        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "${training.num_gpus}"
+        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == str(
+            config["training"]["num_gpus"]
+        )
         assert config["reef"]["training_backend_options"]["colocate"] is True
     elif "sao" in relative:
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "1"
@@ -132,8 +134,8 @@ def test_openclawrl_shares_one_ray_gpu_pool_without_double_reserving_driver_gpus
         assert order.index(name) < order.index("slime-driver")
         assert name in by_name["slime-driver"]["depends_on"]
         assert "CUDA_VISIBLE_DEVICES" not in service.get("env", {})
-    assert "cuda_visible_devices" not in config["training"]["prm"]
-    assert "cuda_visible_devices" not in config["training"]["user_llm"]
+    assert "cuda_visible_devices" not in config["reef"]["prm"]
+    assert "cuda_visible_devices" not in config["reef"]["user_simulator"]
     assert not by_name["slime-driver"].get("resources")
     flags = dict(
         argument.removeprefix("--").split("=", 1)

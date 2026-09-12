@@ -10,7 +10,7 @@
 #   export REEF_UPSTREAM_API_KEY=sk-...
 
 schema-version: 2
-service:
+reef:
   host: 0.0.0.0
   port: 8900
   # Use tokens: [...] to accept several credentials during rotation.

@@ -4,12 +4,12 @@
 # machine's IP.
 
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
   run-dir: ${TTTD_STATE_DIR}/stack
-  ready-timeout: 3600
+  ready-timeout: 120
 
 inference:
   model-path: work/model
@@ -22,6 +22,8 @@ recipe:
     rollouts-per-group: 64
     checkpoint-every-n-versions: 2
 training:
+  backend: slime
+  ready-timeout: 3600
   ray-namespace: reef
   ray-actor-name: reef-train-bridge
   timeout-s: 7200
@@ -132,23 +134,3 @@ observability:
     enabled: false
     project: reef
     directory: ${TTTD_STATE_DIR}/wandb
-
-services:
-  - name: slime-driver
-    command:
-      - ${REEF_PYTHON}
-      - -m
-      - reef.service.slime_driver
-    ready: test -f "$REEF_BRIDGE_READY_FILE"
-    ready_timeout: 3600
-    env:
-      REEF_RAY_NAMESPACE: reef
-      REEF_RAY_ACTOR_NAME: reef-train-bridge
-      CUDA_DEVICE_MAX_CONNECTIONS: "1"
-      NCCL_NVLS_ENABLE: "0"
-
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz
-    ready_timeout: 120
-    depends_on: [slime-driver]

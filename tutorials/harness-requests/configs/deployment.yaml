@@ -5,7 +5,7 @@
 # training_mode manual and the gate's selection set to always. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8901
   token: reef-local
@@ -19,8 +19,8 @@ recipe:
     evolution:
       adapter: pi
       # The other tutorial's method package: its propose answers a request with any kind pi renders.
-      propose: harness.evolution:propose
-      evaluate: harness.evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
       # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
@@ -92,12 +92,3 @@ storage:
   artifact-repository: tutorials/harness-requests/work/deployment/artifacts.git
   artifact-work-dir: tutorials/harness-requests/work/deployment/artifact-work
   artifact-cache-dir: tutorials/harness-requests/work/deployment/artifact-cache
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    env:
-      REEF_RECIPE_CONFIG_DIR: tutorials/harness-requests/configs
-      # The method package is the other tutorial's; this directory adds no Python of its own.
-      PYTHONPATH: "${PWD}/tutorials/evolve-your-harness:${PWD}"
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz

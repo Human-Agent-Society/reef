@@ -128,7 +128,9 @@ def test_a_profile_needs_a_model_and_the_checkout_before_it_loads(tmp_path, monk
 def test_a_profile_sets_its_directory_and_the_checkout_for_the_service() -> None:
     env: dict[str, str] = {}
     _prepare_profile("harness-evolve", "ollama/gemma4:26b", env)
-    assert env == {"REEF_RECIPE_CONFIG_DIR": str(PROFILES_DIR), "REEF_CHECKOUT": str(PROJECT_ROOT)}
+    assert env["REEF_RECIPE_CONFIG_DIR"] == str(PROFILES_DIR)
+    assert env["REEF_CHECKOUT"] == str(PROJECT_ROOT)
+    assert str(PROJECT_ROOT) in env["PYTHONPATH"].split(os.pathsep)
     env = {"REEF_UPSTREAM_MODEL": "qwen3-8b"}
     _prepare_profile("harness-evolve", None, env)  # the environment names the model as before
 
@@ -157,9 +159,9 @@ def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_
 
     config = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
     validate_services(config, path)
-    reef_service = next(service for service in config["services"] if service["name"] == "reef")
-    assert reef_service["env"]["REEF_RECIPE_CONFIG_DIR"] == str(PROFILES_DIR)
-    method_root = Path(reef_service["env"]["PYTHONPATH"].split(os.pathsep)[0])
+    assert [service["name"] for service in config["services"]] == ["reef"]
+    assert env["REEF_RECIPE_CONFIG_DIR"] == str(PROFILES_DIR)
+    method_root = Path(env["PYTHONPATH"].split(os.pathsep)[0])
     assert (method_root / "harness" / "evolution.py").is_file()
     assert config["reef"]["recipe"] == "reef.recipe.cordis:CordisRecipe" and config["reef"]["port"] == 8900
     assert "token" not in config["reef"]  # loopback only; a copy of the file adds one

@@ -55,10 +55,10 @@ Start from a config
 -------------------
 
 Each weight-training example ships a complete ``serve.yaml`` that starts the
-services in the required order and manages the shared Ray runtime. SAO omits
-``services``: Reef assembles the Slime driver and HTTP process, discovers the
-inference connection through the bridge, and stops the stack on exit. Custom
-stacks can still declare processes explicitly. Copy the closest example and edit it.
+processes in the required order and manages the shared Ray runtime. Reef
+assembles the Slime driver and HTTP process, discovers the inference connection
+through the bridge, and stops the stack on exit. Method-specific dependencies
+are implemented by the Recipe. Copy the closest example and edit it.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
   ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
@@ -79,7 +79,7 @@ What to review
 
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
-   service.token | the bearer token the service accepts
+   reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
    training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths

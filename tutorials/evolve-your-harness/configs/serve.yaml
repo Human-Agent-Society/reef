@@ -7,7 +7,7 @@
 # work/recipes/harness_evolve.yaml, together with optional execution/executors sections.
 
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
@@ -24,8 +24,8 @@ recipe:
       adapter: pi
       # The method package beside this file (harness/): the reef service resolves
       # these dotted references because run.sh starts it with this cwd.
-      propose: harness.evolution:propose
-      evaluate: harness.evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi, shared with the client install script.
       # Set evolution.binary to a path to use an install of your own instead.
@@ -85,8 +85,3 @@ storage:
 execution:
   evolution:
     workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz

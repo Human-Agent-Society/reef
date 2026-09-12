@@ -84,11 +84,12 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     assert section["selection"] == "always"
     assert config["data"]["training_mode"] == "manual"
     assert section["tasks"] == load_config(METHOD_ROOT / "configs" / "deployment.yaml")["evolution"]["tasks"]
-    env = next(service for service in config["services"] if service["name"] == "reef")["env"]
-    assert (REPO_ROOT / env["REEF_RECIPE_CONFIG_DIR"] / "deployment.yaml").resolve() == path.resolve()
-    method_root = Path(env["PYTHONPATH"].split(":")[0])
-    assert method_root.resolve() == METHOD_ROOT.resolve()
-    assert (method_root / "harness" / "evolution.py").is_file()
+    assert [service["name"] for service in config["services"]] == ["reef"]
+    method_root = METHOD_ROOT
+    module_name = section["propose"].partition(":")[0]
+    spec = importlib.util.find_spec(module_name)
+    assert spec is not None
+    assert Path(spec.origin).resolve() == (method_root / "harness" / "evolution.py").resolve()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/harness-requests/work/")
     assert config["run_dir"].startswith("tutorials/harness-requests/work/")

@@ -1,5 +1,5 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
-# Four services: prm-sglang + user-llm-sglang + slime-driver + reef.
+# OpenClawRL prepares PRM and user-simulation workers; Reef assembles driver + HTTP.
 # Reef starts a shared local Ray runtime when the first GPU service launches.
 # The whole method is the cookbook `openclawrl` recipe: its processor
 # correlates sessions from the harness's conversation-unique
@@ -30,7 +30,8 @@
 #   directly; no torch_dist conversion needed).
 
 schema-version: 2
-service:
+reef:
+  ready-timeout: 3600
   host: 0.0.0.0
   port: 28900
   token: ${REEF_TOKEN}                 # run.sh mints one per run
@@ -57,8 +58,16 @@ recipe:
   config:
     batch-size: 16                     # MUST equal training.config.global_batch_size
     checkpoint-every-n-versions: 1
-    prm-url: ${endpoints.prm-sglang}
-    prm-tokenizer-path: ${training.config.prm.model_path}
+    # These model workers belong to OpenClawRL; its deployment hook binds the PRM client.
+    prm:
+      model-path: /root/models/Qwen3-4B-Thinking-2507
+      port: 23001
+      tensor-parallel-size: 1
+    user-simulator:
+      # The paper's user simulation model, on one B200.
+      model-path: /root/models/Qwen3-32B
+      port: 30001
+      served-model-name: qwen3-32b-user-llm
     # Thinking-model PRM under judge load: single votes need minutes. Upstream
     # never times judge calls out (httpx timeout=None); 3600s is effectively
     # that while still freeing a truly wedged socket. 300s was punishing long
@@ -74,6 +83,8 @@ recipe:
     # "the judges disagree" from "the judges never ran".
     prm-record-file: /var/lib/reef/prm-records.jsonl
 training:
+  backend: slime
+  ready-timeout: 900
   ray-namespace: reef
   ray-actor-name: reef-train-bridge
   # A step with long assembled episodes can exceed the 300 s default; a
@@ -88,19 +99,6 @@ training:
       min_free_space_fraction: 0.10
       policy: latest
     global_batch_size: 16
-    # The private SGLang service answers judge generations and teacher prefills.
-    prm:
-      model_path: /root/models/Qwen3-4B-Thinking-2507
-      port: "23001"
-      tp: 1
-
-    user_llm:
-      # The paper simulates users with Qwen3-32B "to ensure faithful
-      # role-following" (§4.1); one B200 hosts it comfortably.
-      model_path: /root/models/Qwen3-32B
-      port: "30001"
-      served_name: qwen3-32b-user-llm
-
   # Model sizes are derived from HF metadata; tokenizer padding and model-family
   # flags are explicit here. The loss family supplies its hook paths.
   options:
@@ -191,45 +189,3 @@ observability:
     mode: online                       # online, offline, or disabled
     directory: /var/lib/reef/wandb
     upload_checkpoints: false
-
-services:
-  - name: prm-sglang
-    endpoint: http://{host}:${training.config.prm.port}
-    command: >-
-      "${REEF_PYTHON}" -m sglang.launch_server --model-path=${training.config.prm.model_path} --tp ${training.config.prm.tp}
-      --host 0.0.0.0 --port=${training.config.prm.port}
-    ready: curl -sf http://127.0.0.1:${training.config.prm.port}/health
-    ready_timeout: 600
-    resources:
-      num_gpus: 1
-
-  - name: user-llm-sglang
-    endpoint: http://{host}:${training.config.user_llm.port}
-    command: >-
-      "${REEF_PYTHON}" -m sglang.launch_server --model-path=${training.config.user_llm.model_path} --tp 1 --served-model-name=${training.config.user_llm.served_name}
-      --host 0.0.0.0 --port=${training.config.user_llm.port}
-    ready: curl -sf http://127.0.0.1:${training.config.user_llm.port}/health
-    ready_timeout: 600
-    resources:
-      num_gpus: 1
-
-  - name: slime-driver
-    command:
-      - ${REEF_PYTHON}
-      - -m
-      - reef.service.slime_driver
-    ready: test -f "$REEF_BRIDGE_READY_FILE"
-    ready_timeout: 900
-    env:
-      REEF_RAY_NAMESPACE: reef
-      REEF_RAY_ACTOR_NAME: reef-train-bridge
-      CUDA_DEVICE_MAX_CONNECTIONS: "1"
-      NCCL_NVLS_ENABLE: "0"
-    # Reserve both inference services before Slime creates its five-GPU group.
-    # The driver itself is CPU-only; Slime's model workers own its GPUs.
-    depends_on: [prm-sglang, user-llm-sglang]
-
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz
-    depends_on: [slime-driver, prm-sglang]

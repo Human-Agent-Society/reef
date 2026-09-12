@@ -72,7 +72,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
 @pytest.mark.parametrize(
     "override,match",
     [
-        ({"inference.model-path": ""}, "requires --inference.model-path"),
+        ({"inference.model-path": ""}, "must be non-empty"),
         ({"training.backend": "unknown"}, "supports training.backend: slime"),
         ({"training.ready-timeout": "0"}, "must be positive"),
         ({"training.timeout-s": "0"}, "must be positive"),
@@ -106,8 +106,7 @@ def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, m
 
 
 def test_explicit_services_preserve_custom_training_topology(tmp_path):
-    raw = training_config()
-    raw["training"]["backend"] = "custom"
+    raw = {"reef": {"recipe": RECIPE, "model_path": "/models/demo", "training_backend": "custom"}}
     raw["services"] = [{"name": "custom-driver", "command": ["custom"]}]
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert config["services"] == raw["services"]
@@ -205,7 +204,8 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     assert not (tmp_path / "reef.yaml").exists()
 
 
-def test_training_planning_does_not_import_gpu_packages(tmp_path):
+@pytest.mark.parametrize("recipe", [RECIPE, "recipes.openclawrl.recipe:OpenClawRLRecipe"])
+def test_training_planning_does_not_import_gpu_packages(tmp_path, recipe):
     script = """
 import sys
 class NoTrainingImports:
@@ -216,10 +216,14 @@ sys.meta_path.insert(0, NoTrainingImports())
 from reef.service.deploy.orchestrator import resolve_deployment_config
 import json
 config, _ = resolve_deployment_config(json.loads(sys.argv[1]), None, sys.argv[2])
-assert len(config['services']) == 2
+assert config['services'][-1]['name'] == 'reef'
 """
+    raw = training_config()
+    raw["recipe"]["implementation"] = recipe
+    if "openclawrl" in recipe:
+        raw["recipe"]["config"]["prm"] = {"model-path": "/models/judge"}
     result = subprocess.run(
-        [sys.executable, "-c", script, json.dumps(training_config()), str(tmp_path / "serve.yaml")],
+        [sys.executable, "-c", script, json.dumps(raw), str(tmp_path / "serve.yaml")],
         capture_output=True,
         text=True,
         timeout=30,
@@ -243,7 +247,7 @@ def test_generated_services_share_connection_wait_for_bridge_and_clean_up(
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     raw = training_config()
-    raw["service"] = {"port": port, "ready-timeout": 15}
+    raw["reef"] = {"port": port, "ready-timeout": 15}
     raw["training"].update({"ray-namespace": "test-namespace", "ray-actor-name": "test-actor"})
     if external_cluster:
         raw["training"]["ray-address"] = "127.0.0.1:6380"

@@ -323,8 +323,10 @@ guess GPU needs. Slime training/rollout still require specialized Ray launchers.
 Whole-stack deployment configuration
 ------------------------------------
 
-All services in ``services`` use the same Executor factory as the model
-workers. The orchestrator only handles dependencies, readiness, endpoint
+Version 2 has no public process list: Reef assembles native processes and
+Recipes describe method dependencies in Python. Those processes use the same
+Executor factory as the model workers. The explicit ``services`` and
+``execution.services`` examples below apply only to unversioned legacy stacks. The orchestrator only handles dependencies, readiness, endpoint
 publication, log tailing, failure detection and reverse-order shutdown. It
 does not contain local process or Ray placement operations.
 

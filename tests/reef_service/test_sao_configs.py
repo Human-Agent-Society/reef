@@ -87,7 +87,7 @@ def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
     for path in _iter_config_files():
         text = path.read_text()
-        if "\nservice:" in text or ("\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text)):
+        if "\nreef:" in text:
             deployments.append(path)
     return sorted(deployments)
 
@@ -337,7 +337,7 @@ def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypa
     generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
     for path in (shipped, generated):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("reef: {}\nservices: []\n")
+        path.write_text("schema-version: 2\nreef: {}\ntraining:\n  backend: slime\n")
     monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
     assert _discover_example_deployments() == [shipped]
 

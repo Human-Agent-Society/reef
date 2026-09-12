@@ -158,17 +158,13 @@ the one to copy:
    schema-version: 2
    recipe:
      implementation: <name>  # resolves to recipes/<name>.yaml
-   service:
+   reef:
      token: reef-local
      port: 8900
    inference:
      upstream-url: ${REEF_UPSTREAM_URL}
      upstream-api-key: ${REEF_UPSTREAM_API_KEY}
      upstream-model: ${REEF_MODEL}
-   services:
-     - name: reef
-       command: ["${REEF_PYTHON}", "-m", "reef.service"]
-       ready: curl -sf http://127.0.0.1:${service.port}/healthz
 
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
 The tutorial selects the dotted class directly and keeps its recipe settings

@@ -23,12 +23,12 @@ _MISSING = object()
 class DeploymentSettings:
     run_dir: str = field(
         default=".reef/run",
-        metadata=config_metadata("Service log directory.", path=("run_dir",), public_path=("service", "run_dir")),
+        metadata=config_metadata("Service log directory.", path=("run_dir",), public_path=("reef", "run_dir")),
     )
     ready_timeout: int = field(
-        default=3600,
+        default=30,
         metadata=config_metadata(
-            "Service readiness deadline in seconds.", path=("ready_timeout",), public_path=("service", "ready_timeout")
+            "Service readiness deadline in seconds.", path=("ready_timeout",), public_path=("reef", "ready_timeout")
         ),
     )
 
@@ -79,12 +79,19 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         return copy.deepcopy(dict(config))
     if type(config["schema-version"]) is not int or config["schema-version"] != 2:
         raise DeployConfigError("unsupported schema-version; expected 2")
-    if "reef" in config:
-        raise DeployConfigError("schema-version 2 uses service/inference/recipe sections, not reef")
+    if "service" in config or "services" in config:
+        raise DeployConfigError(
+            "schema-version 2 does not accept service/services: move HTTP settings to reef; "
+            "processes are assembled by Reef and the selected recipe"
+        )
+    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
+        raise DeployConfigError(
+            "execution.services belongs to legacy process stacks; configure component resources instead"
+        )
     pending = copy.deepcopy(dict(config))
     pending.pop("schema-version")
     known_sections = {
-        "service",
+        "reef",
         "inference",
         "recipe",
         "training",
@@ -93,7 +100,6 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "executors",
         "evaluation",
         "observability",
-        "services",
     }
     extra = set(pending) - known_sections
     if extra:
@@ -109,7 +115,6 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         (("recipe", "runtime"), ("reef", "runtime")),
         (("execution",), ("execution",)),
         (("executors",), ("executors",)),
-        (("services",), ("services",)),
     ):
         value = _take(pending, path)
         if value is not _MISSING:

@@ -147,7 +147,7 @@ paths must mean the same thing to the host docker daemon.
 
 The launcher waits for Reef's health endpoint and stops waiting if Reef
 exits. Configure bridge startup with `training.ready-timeout` and HTTP startup
-with `service.ready-timeout` in `serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
+with `reef.ready-timeout` in `serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
 the script also stops its Reef process.
 
 `run.sh` starts `reef serve -c serve.yaml` with its state under `./work`,

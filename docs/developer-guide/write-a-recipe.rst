@@ -105,8 +105,8 @@ Copy a weight-training config as described in `Evolve your model
      config:
        batch-size: 4
 
-This fragment shows only the new keys; keep the model, storage, runtime, and
-``services`` settings from the config you copied. Set
+This fragment shows only the new keys; keep the inference, storage and training
+settings from the config you copied. Reef assembles the driver and HTTP process. Set
 ``training.config.global_batch_size`` to the same value, and add the driver flags your
 loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
@@ -128,8 +128,7 @@ Declare each method setting once with ``config_field``:
 
    @dataclass(frozen=True)
    class MyMethodRecipe(WeightTrainingRecipe):
-       config:
-       batch-size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
+       batch_size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
        temperature: float = config_field(0.5, allow_nonfinite=False)
        tags: tuple[str, ...] = config_field(())
 
@@ -180,3 +179,29 @@ Reef never invents feedback. Use whatever already judges your agent; for the
 numeric ``score`` field, a consistent scale where higher is better. If you have
 no number, `Choosing a recipe <../user-guide/recipes.rst>`__ lists the methods that need
 none.
+
+Deployment dependencies
+-----------------------
+
+Version 2 configuration describes components and their parameters. It does not
+accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
+in ``reef``. Reef assembles its HTTP process and supported inference/training
+backends; a Recipe owns any additional model or method-specific process.
+
+Override ``Recipe.prepare_deployment(config)`` when the method needs such a
+process. The class hook receives a copy of resolved recipe-owned settings,
+without constructing a recipe or allocating GPU resources. It returns a tuple
+of process definitions using the executor's existing Python process contract
+(``name``, argv ``command``, readiness probe/deadline, executor and resources).
+It may bind derived values in that recipe-owned mapping, for example a client
+URL referencing ``${endpoints.judge}``. Define dependency processes in Python;
+do not expose an arbitrary process list as a recipe config field.
+
+The launcher waits for these processes before starting the standard runtime,
+publishes their endpoints and handles partial startup, interruption and
+reverse-order cleanup. GPU dependencies and the Slime driver share one Ray
+runtime, while Slime owns its model-worker GPU allocations. See
+``recipes/openclawrl/deployment.py`` for the PRM and user-simulation example.
+Backend environment defaults belong to their integration; Slime's defaults
+live in ``reef/train/slime_backend/launch.py`` and honor explicit environment
+overrides.

@@ -20,7 +20,7 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
     config = translate_layout(
         {
             "schema-version": 2,
-            "service": {"port": 8000, "token": "001"},
+            "reef": {"port": 8000, "token": "001"},
             "inference": {
                 "model-path": "org/model",
                 "options": {"mem_fraction_static": 0.8, "trust-remote-code": True},
@@ -31,7 +31,7 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
     )
     overrides = _parse_overrides(
         [
-            "--service.port",
+            "--reef.port",
             "9000",
             "--inference.options.mem-fraction-static",
             "0.6",
@@ -54,10 +54,11 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
     [
         ({"schema-version": 3}, "unsupported"),
         ({"schema-version": True}, "unsupported"),
-        ({"schema-version": 2, "reef": {}}, "not reef"),
+        ({"schema-version": 2, "service": {}}, "does not accept service/services"),
+        ({"schema-version": 2, "services": []}, "does not accept service/services"),
         ({"schema-version": 2, "infernce": {}}, "unknown config sections"),
         ({"schema-version": 2, "inference": {"model-pth": {}}}, "unknown config fields"),
-        ({"schema-version": 2, "service": "oops"}, "must be an object"),
+        ({"schema-version": 2, "reef": "oops"}, "must be an object"),
         ({"schema-version": 2, "inference": {"model-path": "a", "model_path": "b"}}, "duplicate"),
     ],
 )
@@ -70,16 +71,16 @@ def test_component_yaml_spelling_and_public_references():
     config = translate_layout(
         {
             "schema-version": 2,
-            "service": {"port": 9001},
-            "execution": {"services": {"backend": "uni", "resources": {"cpus-per-worker": 0.5}}},
-            "services": [{"name": "http", "command": ["echo", "${service.port}"]}],
+            "reef": {"port": 9001},
+            "execution": {"evolution": {"backend": "uni", "resources": {"cpus-per-worker": 0.5}}},
+            "inference": {"options": {"custom": "${reef.port}"}},
         }
     )
     arguments = component_config_arguments(config)
     config = normalize_component_layout(config, arguments)
     config = normalize_component_config(normalize_service_config(config), arguments)
-    assert config["execution"]["services"]["resources"]["cpus_per_worker"] == 0.5
-    assert translate_references(config, arguments)["services"][0]["command"][1] == "${reef.port}"
+    assert config["execution"]["evolution"]["resources"]["cpus_per_worker"] == 0.5
+    assert translate_references(config, arguments)["reef"]["inference_options"]["custom"] == "9001"
 
 
 def test_native_options_reach_the_backend_parser():
@@ -115,11 +116,8 @@ def test_native_option_aliases_and_object_replacement():
         native_arguments({"foo_bar": 1, "foo-bar": 2})
 
 
-@pytest.mark.parametrize("services", [None, [{"name": "reef", "command": ["python", "-m", "reef.service"]}]])
-def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, monkeypatch, services):
+def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, monkeypatch):
     raw = {"schema-version": 2, "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "001"}}
-    if services is not None:
-        raw["services"] = services
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(raw))
     captured = {}
@@ -152,7 +150,7 @@ def test_versioned_files_always_pass_normalized_config_to_children(tmp_path, mon
 def test_automatic_stack_rejects_unused_training_options(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({"schema-version": 2, "training": {"options": {"lr": 1e-6}}}))
-    with pytest.raises(DeployConfigError, match="explicit services stack"):
+    with pytest.raises(DeployConfigError, match="select a weight-training recipe"):
         orchestrator._run_orchestrator(str(path))
 
 
@@ -184,7 +182,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
             configs.append(path)
             config = yaml.safe_load(text)
             assert config.get("schema-version") == 2, path
-            assert not {"reef", "implementation", "data", "evolution"} & config.keys(), path
+            assert not {"service", "services", "implementation", "data", "evolution"} & config.keys(), path
     assert len(configs) >= 15
 
 

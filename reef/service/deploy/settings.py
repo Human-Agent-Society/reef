@@ -56,7 +56,7 @@ Config overrides:
     reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
     reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
     reef serve -c stack.yaml --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve -c path/to/local-sglang.yaml --service.port 9000
+    reef serve -c path/to/local-sglang.yaml --reef.port 9000
     reef serve -c stack.yaml --training.config.checkpoint_dir /tmp/ckpt
 """
 
@@ -94,13 +94,13 @@ class ServiceSettings:
         public_path=("recipe", "implementation"),
         help="Recipe implementation or named deployment preset (the launcher owns --recipe).",
     )
-    host: str = config_option("0.0.0.0", public_path=("service", "host"), help="HTTP bind address.")
-    port: int = config_option(8900, public_path=("service", "port"), help="HTTP bind port.")
+    host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
+    port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
     tokens: tuple[str, ...] = config_option(
-        (), public_path=("service", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
+        (), public_path=("reef", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
     )
     console_origins: tuple[str, ...] = config_option(
-        (), public_path=("service", "console_origins"), help="Allowed console origins as a JSON/YAML list."
+        (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
@@ -211,7 +211,7 @@ class ServiceSettings:
     )
     allow_implicit_scenario_creation: bool = config_option(
         True,
-        public_path=("service", "allow_implicit_scenario_creation"),
+        public_path=("reef", "allow_implicit_scenario_creation"),
         help="Allow requests to create scenarios implicitly.",
     )
     #: Deployment-level experiment provider settings, sourced from
@@ -302,7 +302,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
             True,
             None,
             "One accepted bearer token.",
-            public_path=("service", "token"),
+            public_path=("reef", "token"),
         ),
     )
 

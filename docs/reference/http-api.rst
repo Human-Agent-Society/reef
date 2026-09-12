@@ -774,14 +774,14 @@ status code, and any other upstream 4xx comes back as 400.
 Browser consoles
 ----------------
 
-The service can opt in to direct browser access with ``service.console-origins``
+The service can opt in to direct browser access with ``reef.console-origins``
 in the serve YAML. List each trusted console origin explicitly, with no path,
 trailing slash, credentials, or wildcard:
 
 .. code-block:: yaml
 
    schema-version: 2
-   service:
+   reef:
      console-origins:
        - "https://api.reefinfra.ai"
        - "http://localhost:3000"

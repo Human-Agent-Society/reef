@@ -1,17 +1,10 @@
 """``reef serve`` — start managed inference, connect a provider, or run a configured stack.
 
-Without a services list, inference settings assemble the record-only service,
-optionally with managed SGLang, and weight recipes assemble the Slime driver
-and HTTP service. Configuration parsing and process lifecycle use the same
-deployment path as explicitly configured stacks.
-
-When supplied, ``reef serve -c <stack>.yaml`` reads the config's ``services``
-list and starts every declared process (SGLang, Slime driver, Reef, and so
-on) in dependency order; see :mod:`reef.service.deploy.orchestrator`. The
-Reef HTTP child is an internal service process: this package translates the
-YAML into service settings (:mod:`reef.service.deploy.settings`) and
-:mod:`reef.service.assembly` builds the dispatcher and app from those
-settings.
+Version 2 and CLI-only input describe components, not process definitions.
+Reef assembles inference, training and HTTP processes; selected recipes supply
+method-specific dependencies in Python. Unversioned files retain their explicit
+``services`` process contract. All paths share the existing executor lifecycle,
+readiness and cleanup machinery. HTTP assembly lives in :mod:`reef.service.assembly`.
 """
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend

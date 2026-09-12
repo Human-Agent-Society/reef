@@ -134,7 +134,7 @@ You need a GPU host with seven available GPUs, Docker, and `uv` (for `uvx`,
 which runs reef-eval). In `docker-compose.yaml`, `device_ids` defines the
 container's pool once: the default exposes physical GPUs 1-7, leaving GPU 0 free.
 Ray assigns device IDs within that pool: the PRM and student model each reserve
-one GPU through `services[].resources.num_gpus`; Slime reserves five more for
+one GPU through OpenClawRL's Python deployment hook; Slime reserves five more for
 the Megatron actor (tensor parallel 4) and policy rollout engine (one GPU).
 The inference services start before Slime allocates its group. The CPU-only
 `slime-driver` does not reserve GPUs itself, and individual services do not
@@ -268,3 +268,18 @@ A session passes when the agent's first solution reply already matches the stude
 The demo above replays two sessions from this run. In session 1 the student
 rejects a formatted reply, reef keeps the training going, and by session 16
 the first reply passes directly.
+
+## Configuration ownership
+
+The Reef YAML contains no `service` or `services` sections. HTTP settings use
+`reef.*`. OpenClawRL declares its PRM under `recipe.config.prm` and its user
+simulation model under `recipe.config.user-simulator`; each supports
+`model-path`, `port`, `tensor-parallel-size`, `served-model-name`,
+`ready-timeout` and native SGLang `options`. CLI leaf overrides use the same
+paths, for example `--recipe.config.prm.tensor-parallel-size 2`.
+
+`recipes/openclawrl/deployment.py` validates those options and defines the model
+workers. The launcher reserves their Ray GPUs and waits for readiness before
+starting Slime, then starts HTTP after the training bridge is ready. The method
+binds `prm-url` and `prm-tokenizer-path` from the managed PRM; to connect an
+external PRM instead, omit `prm` and supply those two client settings.

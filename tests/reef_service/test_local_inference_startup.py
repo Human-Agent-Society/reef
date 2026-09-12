@@ -94,7 +94,7 @@ def test_model_is_resolved_once_and_shared_with_the_children(tmp_path, monkeypat
         (["--inference-backend", "unknown"], "supports"),
         (["--upstream-url", "http://localhost:8000"], "cannot be combined"),
         (["--upstream-model", "remote"], "cannot be combined"),
-        (["--port", "0"], "valid --service.port"),
+        (["--port", "0"], "valid --reef.port"),
     ],
 )
 def test_local_invalid_settings_fail_before_downloads(monkeypatch, capsys, extra, match):
@@ -173,7 +173,7 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
                     "serve",
                     "--inference.model-path",
                     str(model),
-                    "--service.port",
+                    "--reef.port",
                     str(port),
                 ],
                 cwd=tmp_path,

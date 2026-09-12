@@ -26,8 +26,8 @@ from typing import Any
 
 import yaml
 
-from reef.core.config import ConfigArgument
-from reef.recipe.base import WeightTrainingRecipe
+from reef.core.config import ConfigArgument, config_arguments
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor import Executor
@@ -55,12 +55,13 @@ from reef.service.deploy.layout import (
     translate_references,
 )
 from reef.service.deploy.options import native_override, normalize_native_options, object_override_path
-from reef.service.deploy.provider import assemble_provider_services, command_line_config, provider_config
+from reef.service.deploy.provider import assemble_provider_services, command_line_config
 from reef.service.deploy.settings import (
     build_parser,
     normalize_service_config,
     service_config_arguments,
     service_override,
+    service_owned_keys,
 )
 from reef.service.deploy.training import assemble_training_services
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
@@ -523,6 +524,35 @@ def _component_selection(
     return selected, source_root
 
 
+def _prepare_recipe_dependencies(config: dict[str, Any], recipe_type: type[Recipe]) -> None:
+    """Prepare only the selected method's dependencies and derived client bindings."""
+    training = issubclass(recipe_type, WeightTrainingRecipe)
+    reef = config["reef"]
+    if training:
+        owned = {key: value for key, value in reef.items() if key not in service_owned_keys()}
+    else:
+        owned = {
+            **reef.get("data", {}),
+            **{key: reef[key] for key in recipe_type.config_sections if key in reef},
+        }
+    dependencies = list(recipe_type.prepare_deployment(owned))
+    known = {argument.name for argument in config_arguments(recipe_type)} | set(recipe_type.config_sections)
+    if training:
+        known.add("checkpoint_every_n_versions")
+    if set(owned) - known:
+        raise DeployConfigError("recipe deployment hooks may bind only declared recipe settings")
+    if training:
+        reef.update(owned)
+    else:
+        for key, value in owned.items():
+            target = reef if key in recipe_type.config_sections else reef.setdefault("data", {})
+            target[key] = value
+    if dependencies:
+        services = config["services"]
+        services[0].setdefault("depends_on", []).extend(item["name"] for item in dependencies)
+        config["services"] = [*dependencies, *services]
+
+
 def resolve_deployment_config(
     config: dict[str, Any], overrides: dict[str, str] | None, source: str | Path, *, standard: bool = False
 ) -> tuple[dict[str, Any], Path | None]:
@@ -530,7 +560,7 @@ def resolve_deployment_config(
     resolved_config_path = Path(source).resolve()
     versioned = config.get("schema-version") == 2
     config = translate_layout(config)
-    standard = standard or (versioned and "services" not in config)
+    standard = standard or versioned
     selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
     if source_root is not None:
         _log(f"recipe package resolves from {source_root}")
@@ -540,7 +570,7 @@ def resolve_deployment_config(
         training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
         if versioned:
             config = normalize_component_layout(config, arguments)
-        if versioned or (standard and training):
+        if versioned or standard:
             for key, value in (overrides or {}).items():
                 if (
                     service_override(key, value) is None
@@ -553,15 +583,21 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        if standard:
+            if "services" in config.get("execution", {}):
+                raise DeployConfigError("execution.services belongs to legacy process stacks")
+            for name, flag in (("host", "reef.host"), ("model_path", "inference.model-path")):
+                value = config.get("reef", {}).get(name)
+                if isinstance(value, str) and not value.strip():
+                    raise DeployConfigError(f"--{flag} must be non-empty")
         normalized_config = normalize_component_config(normalize_service_config(config), arguments)
         if standard:
             if training:
                 assemble_training_services(normalized_config)
             else:
-                provider_config(overrides or {}, os.environ)
-                if normalized_config.get("reef", {}).get("recipe") != "recipe":
-                    raise DeployConfigError("automatic serving requires a record-only or weight-training recipe")
                 assemble_provider_services(normalized_config)
+            if recipe_type is not None:
+                _prepare_recipe_dependencies(normalized_config, recipe_type)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root
@@ -699,6 +735,11 @@ def _prepare_profile(
         )
     environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
     environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
+    if method is not None:
+        python_paths = [str((PROJECT_ROOT / method).parents[1]), str(PROJECT_ROOT)]
+        if environ.get("PYTHONPATH"):
+            python_paths.append(environ["PYTHONPATH"])
+        environ["PYTHONPATH"] = os.pathsep.join(python_paths)
 
 
 def build_serve_parser(

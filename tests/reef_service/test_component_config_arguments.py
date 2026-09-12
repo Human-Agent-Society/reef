@@ -394,8 +394,7 @@ def test_versioned_recipe_layout_uses_selected_schema(extension):
         {
             "schema-version": 2,
             "recipe": {"implementation": "reef_config_extension:Training", "config": {"label": "001", "count": 2}},
-            "inference": {"model-path": "org/model"},
-            "services": [{"name": "reef", "command": ["echo", "${recipe.config.count}"]}],
+            "inference": {"model-path": "org/model", "options": {"custom": "${recipe.config.count}"}},
         }
     )
     arguments = component_config_arguments(config)
@@ -404,4 +403,4 @@ def test_versioned_recipe_layout_uses_selected_schema(extension):
     config = normalize_component_config(normalize_service_config(config), arguments)
     assert config["reef"]["count"] == 5 and config["reef"]["label"] == "001"
     assert "data" not in config["reef"]
-    assert translate_references(config, arguments)["services"][0]["command"][1] == "${reef.count}"
+    assert translate_references(config, arguments)["reef"]["inference_options"]["custom"] == "${reef.count}"

@@ -711,12 +711,11 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     monkeypatch.setenv("PWD", str(repo_root))
     path = EXAMPLE_DIR / "configs" / "deployment.yaml"
     config = load_config(path)
-    env = next(service for service in config["services"] if service["name"] == "reef")["env"]
-    recipe_dir = repo_root / env["REEF_RECIPE_CONFIG_DIR"]
+    recipe_dir = EXAMPLE_DIR / "configs"
     assert (recipe_dir / "deployment.yaml").resolve() == path.resolve()
-    method_root = Path(env["PYTHONPATH"].split(":")[0])
-    assert (method_root / "harness" / "evolution.py").is_file()
-    monkeypatch.syspath_prepend(str(method_root))  # what the service env PYTHONPATH gives the recipe
+    method_reference = config["evolution"]["propose"]
+    module, _, function = method_reference.partition(":")
+    assert callable(getattr(importlib.import_module(module), function))
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")

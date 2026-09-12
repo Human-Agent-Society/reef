@@ -11,9 +11,7 @@ from urllib.parse import urlsplit
 from reef.runtime.adapters.inference_proxy import PROVIDER_APIS
 from reef.service.deploy.config import DeployConfigError
 from reef.service.deploy.inference import http_readiness_command, prepare_inference
-from reef.service.deploy.layout import deployment_config_arguments
-from reef.service.deploy.options import native_override
-from reef.service.deploy.settings import ServiceSettings, service_override, service_settings_from_config
+from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
 from reef.service.profiles import profile_names
 
 # Only these environment fallbacks belong to configuration-free startup.
@@ -40,33 +38,6 @@ _CONFIGURED_FIELDS = {
 }
 
 
-def provider_config(overrides: Mapping[str, str], environ: Mapping[str, str]) -> dict[str, Any]:
-    """Supply standard serving defaults; the orchestrator parses overrides."""
-    for key, value in overrides.items():
-        native = native_override(key)
-        if native is not None and native[0] == ("reef", "inference_options"):
-            continue
-        declared = service_override(key, value)
-        if declared is None:
-            declared = next(
-                ((argument, value) for argument in deployment_config_arguments() if f"--{key}" in argument.flags), None
-            )
-        if declared is None:
-            raise DeployConfigError(f"unknown option --{key} for provider startup; use -c for a custom stack")
-        argument, _ = declared
-        if argument.name == "host" and not value.strip():
-            raise DeployConfigError("--service.host must be non-empty")
-        if argument.name == "model_path" and not value.strip():
-            raise DeployConfigError("--inference.model-path must be non-empty")
-        if argument.name in _CONFIGURED_FIELDS:
-            raise DeployConfigError(f"--{key} requires a weight-training recipe or an explicit services stack")
-        if argument.name == "recipe" and value != "recipe":
-            raise DeployConfigError(
-                "provider startup uses the core recipe; select a weight-training recipe or an explicit custom stack"
-            )
-    return command_line_config(environ)
-
-
 def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
     """Seed optional environment fallbacks before selecting component schemas."""
     reef: dict[str, Any] = {"recipe": "recipe", "host": "127.0.0.1"}
@@ -80,15 +51,20 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
     if unsupported or "training" in config or "evaluation" in config:
-        raise DeployConfigError("select a weight-training recipe for training, or declare an explicit services stack")
+        raise DeployConfigError(
+            "select a weight-training recipe for training; custom process stacks require unversioned legacy YAML"
+        )
     settings = service_settings_from_config(config)
+    if config.get("reef", {}).get("runtime"):
+        if not settings.host.strip() or not 1 <= settings.port <= 65535:
+            raise DeployConfigError("invalid reef.host or reef.port")
+        config["services"] = [http_service(config, settings)]
+        return
     local_service = None
     if settings.model_path:
         # Validate the public bind and timeout before checking GPU dependencies.
         if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
-            raise DeployConfigError(
-                "local inference requires a valid --service.port and positive --inference.timeout-s"
-            )
+            raise DeployConfigError("local inference requires a valid --reef.port and positive --inference.timeout-s")
         local_service = prepare_inference(config, settings)
         settings = service_settings_from_config(config)
     elif (
@@ -118,7 +94,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         raise DeployConfigError("--inference.upstream-url must be an HTTP(S) URL with a valid host and port")
     if not settings.host or not 1 <= settings.port <= 65535:
         raise DeployConfigError(
-            "provider startup requires a non-empty --service.host and --service.port between 1 and 65535"
+            "provider startup requires a non-empty --reef.host and --reef.port between 1 and 65535"
         )
     if settings.upstream_api not in PROVIDER_APIS:
         raise DeployConfigError("--inference.upstream-api must be openai, responses, or anthropic")

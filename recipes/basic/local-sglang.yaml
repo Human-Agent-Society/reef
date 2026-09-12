@@ -11,7 +11,7 @@
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 
 schema-version: 2
-service:
+reef:
   host: 0.0.0.0
   port: 8900
   token: ${REEF_TOKEN}
