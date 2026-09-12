@@ -92,22 +92,38 @@ def _connect_training_runtime(
     max_staleness: int,
     connector: Any = None,
 ) -> TrainingRuntime:
-    """Build the training runtime through the runtime registry's ``ray_training`` kind."""
-    ray_address = _require_non_empty(settings.ray_address, "reef.ray_address")
+    """Build the training runtime the deployment's ``reef.runtime_type`` names.
+
+    The kind defaults to ``ray_training``, so a deployment that never mentions
+    a runtime keeps the Ray bridge and its required ``reef.ray_address``. Any
+    other kind resolves through the same registry and receives only the
+    service-owned keys plus whatever ``reef.runtime_config`` adds, because the
+    Ray connection settings are meaningless to it.
+    """
     inference_url = settings.inference_url.strip() if isinstance(settings.inference_url, str) else None
     if settings.inference_timeout_s <= 0:
         raise ValueError("reef.inference_timeout_s must be positive")
     if settings.train_timeout_s is not None and settings.train_timeout_s <= 0:
         raise ValueError("reef.train_timeout_s must be positive when set")
+    runtime_type = _require_non_empty(settings.runtime_type, "reef.runtime_type")
     runtime_config: dict[str, Any] = {
-        "type": "ray_training",
+        "type": runtime_type,
         "inference_url": inference_url or None,
-        "actor_name": settings.ray_actor_name,
-        "namespace": settings.ray_namespace,
-        "ray_address": ray_address,
         "inference_timeout_s": settings.inference_timeout_s,
         "train_timeout_s": settings.train_timeout_s,
     }
+    if runtime_type == "ray_training":
+        runtime_config.update(
+            actor_name=settings.ray_actor_name,
+            namespace=settings.ray_namespace,
+            ray_address=_require_non_empty(settings.ray_address, "reef.ray_address"),
+        )
+    if not isinstance(settings.runtime_config, Mapping):
+        raise ValueError("reef.runtime_config must be an object")
+    for key, value in settings.runtime_config.items():
+        if key in runtime_config:
+            raise ValueError(f"reef.runtime_config.{key} is supplied by the service and cannot be overridden")
+        runtime_config[key] = value
     if max_staleness:
         runtime_config["max_staleness"] = max_staleness
     inference_backend_factory = _configured_inference_backend_factory(settings.inference_backend_factory)
@@ -119,11 +135,11 @@ def _connect_training_runtime(
         if inference_backend_factory is None:
             raise ValueError("reef.inference_backend_config requires reef.inference_backend_factory")
         runtime_config["inference_backend_config"] = dict(settings.inference_backend_config)
-    if connector is not None:
+    if connector is not None and runtime_type == "ray_training":
         runtime_config["connect"] = connector
     runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
     if not isinstance(runtime, TrainingRuntime):
-        raise TypeError("ray_training runtime factory must build a TrainingRuntime")
+        raise TypeError(f"{runtime_type!r} runtime factory must build a TrainingRuntime")
     return runtime
 
 

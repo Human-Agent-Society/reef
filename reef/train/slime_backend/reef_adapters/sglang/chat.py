@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
+from reef.runtime.assistant_message import ReasoningStreamSplitter, reasoning_is_pre_opened, split_assistant_message
 from reef.runtime.inference import HttpInferenceBackend, InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -146,65 +147,6 @@ class _NativeStreamCapture:
         if versions is not None:
             response["_reef_token_runtime_load_ids"] = versions
         return response
-
-
-class _ReasoningStreamSplitter:
-    """Split sampled thinking tags without waiting for the full completion."""
-
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
-
-    def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
-        self._mode = "thinking" if enabled and force_reasoning else ("undecided" if enabled else "text")
-        self._buffer = ""
-
-    @staticmethod
-    def _held_suffix(value: str, delimiter: str) -> int:
-        for size in range(min(len(value), len(delimiter) - 1), 0, -1):
-            if delimiter.startswith(value[-size:]):
-                return size
-        return 0
-
-    def feed(self, delta: str) -> list[tuple[str, str]]:
-        if not delta:
-            return []
-        if self._mode == "text":
-            return [("text", delta)]
-        self._buffer += delta
-        if self._mode == "undecided":
-            if self._OPEN.startswith(self._buffer) and len(self._buffer) < len(self._OPEN):
-                return []
-            if self._buffer.startswith(self._OPEN):
-                self._buffer = self._buffer[len(self._OPEN) :]
-                self._mode = "thinking"
-            else:
-                value, self._buffer = self._buffer, ""
-                self._mode = "text"
-                return [("text", value)]
-
-        before, separator, after = self._buffer.partition(self._CLOSE)
-        if separator:
-            self._buffer = ""
-            self._mode = "text"
-            parts = [("thinking", before)] if before else []
-            visible = after.lstrip("\n")
-            if visible:
-                parts.append(("text", visible))
-            return parts
-        held = self._held_suffix(self._buffer, self._CLOSE)
-        if held:
-            value = self._buffer[:-held]
-            self._buffer = self._buffer[-held:]
-        else:
-            value, self._buffer = self._buffer, ""
-        return [("thinking", value)] if value else []
-
-    def finish(self) -> list[tuple[str, str]]:
-        if not self._buffer:
-            return []
-        value, self._buffer = self._buffer, ""
-        kind = "thinking" if self._mode == "thinking" else "text"
-        return [(kind, value)]
 
 
 def _build_sglang_tool_parser(tools: list[dict[str, Any]], parser_name: str) -> Any:
@@ -656,7 +598,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
 
         async def chunks() -> AsyncIterator[bytes]:
             capture = _NativeStreamCapture()
-            reasoning = _ReasoningStreamSplitter(
+            reasoning = ReasoningStreamSplitter(
                 enabled=self._SPLIT_REASONING,
                 force_reasoning=self._reasoning_is_pre_opened(),
             )
@@ -1317,14 +1259,7 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         """
         if self._force_reasoning is not None:
             return self._force_reasoning
-        try:
-            rendered = self._require_tokenizer().apply_chat_template(
-                [{"role": "user", "content": ""}], tokenize=False, add_generation_prompt=True
-            )
-        except Exception:  # a template we cannot render tells us nothing
-            self._force_reasoning = False
-            return False
-        self._force_reasoning = str(rendered).rstrip().endswith("<think>")
+        self._force_reasoning = reasoning_is_pre_opened(self._require_tokenizer())
         return self._force_reasoning
 
     @classmethod
@@ -1335,54 +1270,18 @@ class SGLangChatTrainingInferenceBackend(HttpInferenceBackend):
         *,
         force_reasoning: bool = False,
     ) -> tuple[dict[str, Any], bool]:
-        # Thinking-template models emit reasoning before the last </think>
-        # (the opening tag is auto-inserted by the chat template, so it is
-        # usually absent from the sampled text). OpenAI-shaped clients render
-        # content verbatim, so reasoning must ride the standard
-        # reasoning_content field — otherwise every consumer downstream
-        # (agents, judges, user simulators) sees chain-of-thought as the
-        # reply. Training tensors are captured from the raw token stream and
-        # are unaffected by this presentation split.
-        reasoning: str | None = None
-        if cls._SPLIT_REASONING and "</think>" in text:
-            head, _, tail = text.rpartition("</think>")
-            reasoning = head.replace("<think>", "").strip()
-            text = tail.lstrip("\n")
-        elif cls._SPLIT_REASONING and force_reasoning:
-            # A pre-opened template with no closing tag: the generation hit
-            # its token cap mid-thought. The whole sample is reasoning, so
-            # fail closed — handing it back as content is exactly the
-            # chain-of-thought-as-reply this split exists to prevent, and a
-            # judge scoring it scores the wrong text. SGLang's own parser
-            # takes the same branch (force_reasoning => normal_text empty).
-            reasoning = text.replace("<think>", "").strip()
-            text = ""
-        message: dict[str, Any] = {"role": "assistant", "content": text}
-        if reasoning:
-            message["reasoning_content"] = reasoning
-        if tool_parser is None or not tool_parser.has_tool_call(text):
-            return message, False
-        try:
-            remaining_text, parsed = tool_parser.parse_non_stream(text)
-        except Exception as exc:
-            raise ValueError("SGLang tool-call parser could not parse the sampled output") from exc
-        if not parsed:
-            return message, False
-        tool_calls = []
-        for call in parsed:
-            arguments = call.parameters
-            if not isinstance(arguments, str):
-                arguments = json.dumps(arguments, ensure_ascii=False)
-            tool_calls.append(
-                {
-                    "id": f"call_{uuid.uuid4().hex[:24]}",
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": arguments},
-                }
-            )
-        message["content"] = remaining_text or None
-        message["tool_calls"] = tool_calls
-        return message, True
+        # The split every trainable chat backend shares: reasoning rides
+        # reasoning_content and calls ride tool_calls, so no consumer
+        # downstream reads chain-of-thought or call markup as the reply.
+        # Training tensors are captured from the raw token stream and are
+        # unaffected by this presentation split.
+        return split_assistant_message(
+            text,
+            tool_parser,
+            force_reasoning=force_reasoning,
+            split_reasoning=cls._SPLIT_REASONING,
+            parser_label="SGLang tool-call",
+        )
 
     def _openai_logprobs(self, token_ids: list[int], log_probs: list[float]) -> list[dict[str, Any]]:
         tokenizer = self._require_tokenizer()

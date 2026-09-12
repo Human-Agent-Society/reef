@@ -170,6 +170,25 @@ class _GitWorkspace:
         return self._git_client.run(command, cwd=cwd, source_error=source_error)
 
 
+def _cached_metadata(destination: Path) -> Mapping[str, object]:
+    """The metadata recorded with a materialized artifact.
+
+    Materializing checked out the manifest along with the bytes, so the
+    record is already on disk; returning only the bytes made every caller
+    that needed the record — which version published this, above all — see an
+    empty mapping and quietly conclude there was nothing to know.
+    """
+    manifest_path = destination / _MANIFEST
+    if not manifest_path.is_file():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    metadata = manifest.get("metadata") if isinstance(manifest, Mapping) else None
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
+
+
 class _ArtifactManifest:
     """Read and write the reef-artifact.json manifest inside a git work tree."""
 
@@ -345,7 +364,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     def materialize(self, ref: ArtifactRef) -> Artifact:
         destination = self.cache_dir / ref.release_id
         if destination.is_dir():
-            return Artifact(ref, None, local_path=destination)
+            return Artifact(ref, None, local_path=destination, metadata=_cached_metadata(destination))
         temporary = Path(tempfile.mkdtemp(prefix=f".{ref.release_id}-", dir=self.cache_dir))
         checkout = temporary / "artifact"
         try:
@@ -366,7 +385,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             shutil.rmtree(temporary, ignore_errors=True)
         if not destination.is_dir():
             raise ArtifactMaterializationError(f"artifact cache was not created: {ref.release_id}")
-        return Artifact(ref, None, local_path=destination)
+        return Artifact(ref, None, local_path=destination, metadata=_cached_metadata(destination))
 
     def publish(
         self,

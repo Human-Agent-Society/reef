@@ -620,3 +620,118 @@ def test_candidate_validation_checks_the_native_tail_not_widths() -> None:
     assert validate_teacher_cands((wrong_tail,), sample) is None
     no_prompt = {"hint": "h", "teacher_tokens": [2, 3]}
     assert validate_teacher_cands((no_prompt,), sample) is None
+
+
+class TestJudgeDialects:
+    """The judge reaches the same verdict over either transport.
+
+    Everything upstream owns — prompts, parser, vote rule, hint candidates —
+    is dialect-independent; only the request shape and the field the reply
+    text lives in differ. These pin that boundary, because it is what lets a
+    deployment judge against a hosted provider instead of serving a second
+    model of its own.
+    """
+
+    @staticmethod
+    def _judge(**overrides):
+        from recipes.openclawrl.prm import PRMJudge
+
+        settings = {
+            "generate_url": "https://provider.example/v1/chat/completions",
+            "tokenizer_path": "some/tokenizer",
+            "m": 2,
+            "api": "openai",
+            "model": "vendor/judge-1",
+            "api_key": "secret-token",
+        }
+        settings.update(overrides)
+        return PRMJudge(**settings)
+
+    def test_an_openai_judge_sends_messages_and_reads_the_reply(self, monkeypatch):
+        import asyncio
+
+        from recipes.openclawrl import prm
+
+        seen = {}
+
+        async def fake_post(url, payload, timeout_s, headers=None):
+            seen["url"] = url
+            seen["payload"] = payload
+            seen["headers"] = headers
+            return {"choices": [{"message": {"content": "\\boxed{1}\n[HINT_START]Be brief.[HINT_END]"}}]}
+
+        monkeypatch.setattr(prm, "_post_json", fake_post)
+        votes = asyncio.run(self._judge().evaluate_hint_votes("a reply", "a follow-up", "user"))
+
+        assert seen["url"] == "https://provider.example/v1/chat/completions"
+        assert seen["payload"]["model"] == "vendor/judge-1"
+        # Chat messages, not a pre-templated string: the provider owns its own
+        # model's template, so the judge needs no tokenizer of its own.
+        assert isinstance(seen["payload"]["messages"], list)
+        assert "text" not in seen["payload"]
+        assert seen["headers"] == {"Authorization": "Bearer secret-token"}
+        assert [vote["score"] for vote in votes] == [1, 1]
+        assert votes[0]["hint"] == "Be brief."
+
+    def test_a_provider_failure_is_a_failed_vote_not_an_error(self, monkeypatch):
+        import asyncio
+
+        from recipes.openclawrl import prm
+
+        async def fake_post(url, payload, timeout_s, headers=None):
+            return None
+
+        monkeypatch.setattr(prm, "_post_json", fake_post)
+        votes = asyncio.run(self._judge().evaluate_hint_votes("a reply", "a follow-up", "user"))
+
+        assert [vote["score"] for vote in votes] == [None, None]
+
+    def test_an_openai_judge_without_a_model_is_refused(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="requires prm_model"):
+            self._judge(model="")
+
+    def test_build_clients_reads_the_credential_from_the_named_variable(self, monkeypatch):
+        from recipes.openclawrl.prm import build_clients
+
+        monkeypatch.setenv("TEST_JUDGE_KEY", "from-the-environment")
+        judge, _, _ = build_clients(
+            {
+                "prm_url": "https://provider.example/v1/chat/completions",
+                "prm_tokenizer_path": "some/tokenizer",
+                "prm_api": "openai",
+                "prm_model": "vendor/judge-1",
+                "prm_api_key_env": "TEST_JUDGE_KEY",
+            }
+        )
+
+        assert judge.api == "openai"
+        assert judge.api_key == "from-the-environment"
+        # An OpenAI base URL already names its endpoint; only sglang appends one.
+        assert judge.generate_url == "https://provider.example/v1/chat/completions"
+
+    def test_an_unset_credential_variable_is_a_loud_failure(self, monkeypatch):
+        import pytest
+
+        from recipes.openclawrl.prm import build_clients
+
+        monkeypatch.delenv("TEST_MISSING_KEY", raising=False)
+        with pytest.raises(ValueError, match="TEST_MISSING_KEY"):
+            build_clients(
+                {
+                    "prm_url": "https://provider.example/v1/chat/completions",
+                    "prm_tokenizer_path": "some/tokenizer",
+                    "prm_api": "openai",
+                    "prm_model": "vendor/judge-1",
+                    "prm_api_key_env": "TEST_MISSING_KEY",
+                }
+            )
+
+    def test_the_sglang_dialect_still_appends_its_native_path(self):
+        from recipes.openclawrl.prm import build_clients
+
+        judge, _, _ = build_clients({"prm_url": "http://prm:23001", "prm_tokenizer_path": "some/tokenizer"})
+
+        assert judge.api == "sglang"
+        assert judge.generate_url == "http://prm:23001/generate"

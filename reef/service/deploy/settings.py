@@ -75,6 +75,15 @@ class ServiceSettings:
     host: str = "0.0.0.0"
     port: int = 8900
     tokens: tuple[str, ...] = ()
+    #: The runtime kind a weight-training deployment trains on, resolved
+    #: through :class:`reef.runtime.registry.RuntimeRegistry`. The default
+    #: keeps every existing deployment on the Ray bridge without naming it.
+    runtime_type: str = "ray_training"
+    #: Kind-specific runtime configuration merged into the runtime's config
+    #: section. Keys the shared service layer already owns (model path,
+    #: timeouts, staleness) are supplied by the service and cannot be
+    #: overridden here.
+    runtime_config: Mapping[str, Any] = field(default_factory=dict)
     console_origins: tuple[str, ...] = ()
     ray_address: str | None = None
     ray_namespace: str = "reef"
@@ -233,6 +242,8 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
         tokens=_service_tokens(config),
         console_origins=_console_origins(config),
         recipe=selected_recipe,
+        runtime_type=_config_service_value(config, "reef", "runtime_type", default="ray_training"),
+        runtime_config=_config_service_mapping(config, "reef", "runtime_config"),
         ray_address=_config_service_value(config, "reef", "ray_address"),
         ray_namespace=_config_service_value(config, "reef", "ray_namespace", default="reef"),
         ray_actor_name=_config_service_value(

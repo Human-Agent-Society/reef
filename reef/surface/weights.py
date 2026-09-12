@@ -110,6 +110,41 @@ class WeightLoader:
             raise TypeError("restore_checkpoint must return a non-empty runtime load ID")
         return runtime_load_id
 
+    def restore_recovered(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
+        """Put a recovered head back into a runtime that no longer holds it.
+
+        A runtime keeping its weights inside the Reef process loses them when
+        that process exits. Recovery already picks the release that should
+        serve, but picking is not loading, and nothing loaded it: the scenario
+        came back reporting its full step count and trained on from an engine
+        silently answering out of the bare base model, with no record anywhere
+        that it had. Only asking the model to do something it had been trained
+        to do differently revealed it.
+
+        Deliberately not ``activate``: that also fires after publications and
+        rollbacks, where the weights are already in place, and its signature
+        cannot tell which caller it has. This runs on the startup path only.
+
+        Loads on a positive mismatch — both versions known and different. An
+        artifact recording no version says nothing about the engine, and a
+        runtime already serving that version needs nothing.
+        """
+        if not isinstance(runtime, WeightRuntime) or artifact.local_path is None:
+            return None
+        recorded = artifact_runtime_load_id(artifact)
+        if recorded is None:
+            return None
+        served = self._served_version(runtime)
+        if served == recorded:
+            return None
+        logger.info(
+            "restoring %r into the serving runtime: published under %r, engine holds %r",
+            artifact.ref.release_id,
+            recorded,
+            served,
+        )
+        return self.load(artifact, runtime)
+
 
 class WeightInferenceHooks:
     """Address weight-backed requests and verify the serving runtime load ID.
