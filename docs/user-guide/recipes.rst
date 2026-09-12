@@ -81,9 +81,9 @@ three fixed coding tasks rather than a standard benchmark.
      - `results <../../recipes/meta_harness/RESULTS.md>`__
    * - Reefine
      - harness: skills, rules, agent commands, and pi extensions
-     - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ and `harness-evolve.yaml <../../reef/service/profiles/harness-evolve.yaml>`__ profiles
-     - `Reefine <recipes/reefine.rst>`__ · `Evolve your harness <evolve-your-harness.rst>`__
-     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__; `example <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
+     - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ profile
+     - `Reefine <recipes/reefine.rst>`__
+     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__
 
 Learning from usage
 -------------------
