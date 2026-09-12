@@ -237,7 +237,6 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 | 由测试或校验器打分的任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | 模型权重 | [示例](recipes/sao/examples/sao/README.md) · [结果](recipes/sao/examples/sao/README.md#results) |
 | 具备可用的下一状态信号、但无显式上报的 Agent 流量 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | 模型权重 | [示例](recipes/openclawrl/examples/openclawrl/README.md) |
 | 对同一问题的多次带分尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 模型权重 | [示例](recipes/tttd/examples/tttd/README.md) · [结果](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |
-| 多个 coding agent 并行处理同一任务，尝试由 grader 打分（[CORAL](https://github.com/Human-Agent-Society/CORAL)） | [CORAL TTT](recipes/coral/README.md) | 模型权重 | [示例](recipes/coral/README.md#quickstart-2-gpus) |
 | 带分数的代码搜索：引导模型可训练，执行器冻结 | [Guidance-TTT / TTTD](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 引导模型权重 | [示例](recipes/tttd/examples/guidance_ttt/README.md) · [结果](recipes/tttd/examples/guidance_ttt/results/README.md) |
 | 使用 Agent 反馈进化其技能池 | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Harness 技能；无需训练 GPU | [示例](recipes/skillclaw/README.md) |
 | 使用分数和交互记录改进提示词与指令 | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness；模型权重不变 | [示例与结果](recipes/gepa/examples/aime/README.md) |
