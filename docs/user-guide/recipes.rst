@@ -42,11 +42,6 @@ trains on the attempts it generates itself, at test time.
      - ``recipes/tttd/``
      - `TTT-Discover <recipes/tttd.rst>`__
      - `example <../../recipes/tttd/examples/guidance_ttt/README.md>`__ · `results <../../recipes/tttd/examples/guidance_ttt/results/README.md>`__
-   * - CORAL TTT (beta)
-     - model weights
-     - ``recipes/beta/coral/``
-     - `recipe README <../../recipes/beta/coral/README.md>`__
-     - `example <../../recipes/beta/coral/examples/coral_demo>`__ · no results yet
 
 No recipe evolves the harness for this task type yet.
 
@@ -86,13 +81,13 @@ feedback on each task as the stream goes by.
    * - Meta-Harness
      - harness: complete compositions
      - ``recipes/meta_harness/``
-     - `recipe README <../../recipes/meta_harness/README.md>`__
+     - `Meta-Harness <../../recipes/meta_harness/README.md>`__
      - `results <../../recipes/meta_harness/RESULTS.md>`__
    * - Harness evolve
      - harness skills
      - ``reef/``, with the `harness-evolve.yaml <../../reef/service/profiles/harness-evolve.yaml>`__ profile
      - `Evolve your harness <evolve-your-harness.rst>`__
-     - `tutorial <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
+     - `example <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
 
 Learning from usage
 -------------------
