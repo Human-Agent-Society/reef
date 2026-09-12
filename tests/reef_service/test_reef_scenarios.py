@@ -8,6 +8,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -25,7 +26,9 @@ def test_artifact_state_and_snapshot_are_not_parallel_public_types() -> None:
 
 
 def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
 
     assert not hasattr(scenario, "recipe")
     assert scenario.repository.base_artifact.release_id
@@ -34,7 +37,9 @@ def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
 
 
 def test_scenario_step_is_owned_by_scenario() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
 
     assert not hasattr(scenario.repository.base_artifact, "scenario")
     assert scenario.scenario_step == 0
@@ -45,7 +50,9 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
 
 def test_scenario_owns_scenario_scoped_repository() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
 
     repository = scenario.repository
 
@@ -65,10 +72,12 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
     fast_dispatcher = Dispatcher(
         Recipe(name="fast", checkpoint_strategy=EveryNVersions(1)),
         backend_factory,
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     slow_dispatcher = Dispatcher(
         Recipe(name="slow", checkpoint_strategy=EveryNVersions(3)),
         backend_factory,
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
 
     fast = fast_dispatcher.get_or_create_scenario("fast")
@@ -81,7 +90,9 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
 def test_scenario_snapshot_round_trips() -> None:
     from reef.scenario.snapshot import ScenarioSnapshot, parse_snapshot_metadata
 
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
     metadata = scenario.to_snapshot_metadata()
 
     assert metadata["format"] == "reef-scenario/4"
@@ -108,7 +119,9 @@ def test_scenario_snapshot_round_trips() -> None:
 def test_rollback_snapshot_preserves_its_operation() -> None:
     from reef.scenario.snapshot import parse_snapshot_metadata
 
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
     assert scenario is not None
     metadata = scenario.to_snapshot_metadata()
     metadata["operation"] = "rollback"
@@ -125,7 +138,11 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     initial.mkdir()
     backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
-    first = build_default_dispatcher(backend_factory=backend, agent_record_dir=agent_record_dir)
+    first = build_default_dispatcher(
+        backend_factory=backend,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     record = AgentRecord.create(
         agent_record_id="persisted",
         scenario="math",
@@ -135,7 +152,11 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     )
     first.get_or_create_scenario("math").records.append(record)
 
-    second = build_default_dispatcher(backend_factory=backend, agent_record_dir=agent_record_dir)
+    second = build_default_dispatcher(
+        backend_factory=backend,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
 
     assert second.get_or_create_scenario("math").records.replay("math") == (record,)
 
@@ -145,7 +166,11 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     initial.mkdir()
     backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
-    first = build_default_dispatcher(backend_factory=backend, agent_record_dir=agent_record_dir)
+    first = build_default_dispatcher(
+        backend_factory=backend,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     first.accept_record(
         AgentRecord.create(
             agent_record_id="first",
@@ -158,7 +183,11 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     # recipe never trains, so step stays at 0 and records accumulate.
     assert first.get_or_create_scenario("math").trainer.state == {}
 
-    second = build_default_dispatcher(backend_factory=backend, agent_record_dir=agent_record_dir)
+    second = build_default_dispatcher(
+        backend_factory=backend,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     recovered = second.get_or_create_scenario("math")
 
     # recipe publishes no artifact, so algorithm_state is not recovered
@@ -177,7 +206,9 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
 
 
 def test_scenario_close_closes_processor_before_records() -> None:
-    scenario = build_default_dispatcher().get_or_create_scenario("math")
+    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
+        "math"
+    )
     calls: list[str] = []
 
     def _spy(name: str, original):
@@ -188,7 +219,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
         return wrapped
 
     scenario.trainer._processor.close = _spy("processor", scenario.trainer._processor.close)
-    scenario._records.close = _spy("records", scenario._records.close)
+    scenario.records.close = _spy("records", scenario.records.close)
 
     scenario.close()
     scenario.close()
@@ -199,7 +230,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
 
 
 def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
-    dispatcher = build_default_dispatcher()
+    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
     scenario = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = scenario.close
@@ -211,7 +242,7 @@ def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
 
 
 def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
-    dispatcher = build_default_dispatcher()
+    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
     dropped = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = dropped.close

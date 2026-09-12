@@ -22,9 +22,11 @@ from reef.artifact.repository import (
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.records import RecordRetention
 from reef.runtime.base import TrainingRuntime
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
+from reef.scenario.store import ScenarioStoreFactory
 
 
 class ScenarioRegistry:
@@ -46,12 +48,14 @@ class ScenarioRegistry:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        scenario_store_factory: ScenarioStoreFactory,
     ) -> None:
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
+            scenario_store_factory=scenario_store_factory,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
         )
         self._backend_factory = backend_factory
@@ -256,8 +260,14 @@ class ScenarioRegistry:
         with self._lock:
             self._scenario_locks.pop(scenario, None)
 
-    def state_paths(self, scenario: str) -> tuple[Path, ...]:
-        return self._scenario_factory.state_paths(scenario)
+    def archive_store(self, scenario: str) -> tuple[str, ...]:
+        return self._scenario_factory.archive_store(scenario)
+
+    def prune_records(self, retention: RecordRetention) -> int:
+        return self._scenario_factory.prune_records(retention)
+
+    def close_store_factory(self) -> None:
+        self._scenario_factory.close()
 
     @property
     def agent_record_dir(self) -> Path | None:

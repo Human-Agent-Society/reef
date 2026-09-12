@@ -16,9 +16,10 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
-from reef.records import RecordStore
 from reef.runtime.base import TrainingRuntime
 from reef.service.app import create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.processors.base import DataProcessor
@@ -105,7 +106,7 @@ def _release_texts(dispatcher, scenario="s"):
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
 @pytest.mark.parametrize("batch_size", [1, 100])
 def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, batch_size):
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, processor, batch_size=batch_size)
     for receipt in ("other-session", "turn-1", "turn-2"):
         records.append(inference(receipt))
@@ -136,7 +137,7 @@ def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, b
 
 
 def test_auto_keeps_recipe_batching():
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, mode="auto", batch_size=2)
     records.append(inference("a"))
     assert trainer.run_once() is None
@@ -149,7 +150,7 @@ def test_auto_keeps_recipe_batching():
 
 
 def test_dispatched_manual_reserves_one_instruction_and_leaves_the_next_pending():
-    records, backend = RecordStore(), CaptureBackend(dispatched=True)
+    records, backend = SQLiteRecordStore(), CaptureBackend(dispatched=True)
     trainer = build(records, backend)
     records.append(inference("a"))
     assert trainer.reserve_training_batch() is None
@@ -170,7 +171,7 @@ def test_dispatched_manual_reserves_one_instruction_and_leaves_the_next_pending(
 
 def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_path):
     path = tmp_path / "records.sqlite"
-    records, backend = RecordStore(path), CaptureBackend()
+    records, backend = SQLiteRecordStore(path), CaptureBackend()
     first = build(records, backend)
     records.append(inference("a"))
     records.append(instruction("committed"))
@@ -181,7 +182,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     records.append(instruction("pending"))
     first.close()
     records.close()
-    records = RecordStore(path)
+    records = SQLiteRecordStore(path)
     recovered = build(records, backend)
     recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     recovered.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
@@ -192,7 +193,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
 
 
 def test_manual_requires_an_explicit_recipe_assembler():
-    records = RecordStore()
+    records = SQLiteRecordStore()
     with pytest.raises(NotImplementedError, match="does not implement training_mode='manual'"):
         build(records, CaptureBackend(), DataProcessor)
     with pytest.raises(NotImplementedError, match="does not implement training_mode='hybrid'"):
@@ -278,7 +279,7 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         InstructionProcessor(ProcessorContext("s"))
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, InstructionProcessor)
     records.append(instruction("change"))
     assert trainer.run_once() is not None
@@ -366,7 +367,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
             self.exchanges.clear()
             return consumed
 
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, TrajectoryProcessor, mode=mode, batch_size=2)
     try:
         records.append(inference("first"))
@@ -389,7 +390,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
 
 
 def test_factory_cannot_silently_change_the_processor_mode():
-    records = RecordStore()
+    records = SQLiteRecordStore()
     with pytest.raises(ValueError, match="preserve the requested training_mode"):
         Trainer.build(
             "s",
@@ -408,7 +409,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
         seen.append(requests)
 
     recipe = replace(_recipe(tmp_path, propose), training_mode="manual", recheck_every=1)
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = recipe.build("s", records)
     backend = trainer.training_backend
     state = dict(backend.initial_state())
@@ -437,7 +438,7 @@ def test_manual_instruction_cannot_be_consumed_by_recheck_or_inbox_proposal(tmp_
 @pytest.mark.parametrize("mode", ["manual", "hybrid"])
 def test_harness_instruction_modes_require_explicit_requests_keyword(tmp_path, mode):
     recipe = replace(_recipe(tmp_path, lambda n, s, m, **kwargs: None), training_mode=mode)
-    records = RecordStore()
+    records = SQLiteRecordStore()
     with pytest.raises(RecipeConfigError, match="requests"):
         recipe.build("s", records)
     records.close()
@@ -446,7 +447,7 @@ def test_harness_instruction_modes_require_explicit_requests_keyword(tmp_path, m
 @pytest.mark.parametrize("dispatched", [False, True])
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_switch_during_reserved_batch_keeps_original_acknowledgement(mode, dispatched):
-    records, backend = RecordStore(), CaptureBackend(dispatched=dispatched)
+    records, backend = SQLiteRecordStore(), CaptureBackend(dispatched=dispatched)
     trainer = build(records, backend, mode=mode)
     try:
         records.append(inference("first") if mode == "auto" else instruction("first"))
@@ -481,7 +482,7 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(mode, dispa
 
 
 def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions():
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, mode="auto", batch_size=2)
     try:
         records.append(inference("a"))
@@ -672,7 +673,7 @@ def test_a_failed_step_keeps_the_selected_mode_and_the_next_instruction_runs(tmp
     dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, propose))
     try:
         scenario = dispatcher.get_or_create_scenario("s")
-        assert scenario.commit_log is not None
+        assert scenario.store.durable
         dispatcher.set_training_mode("s", "manual")
         dispatcher.accept_record(instruction("one"))
         assert entered.wait(5)
@@ -798,7 +799,7 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
         current = dispatcher.get_or_create_scenario("s")
         skip = next(
             record
-            for record in current.commit_log.records()
+            for record in current.store.history()
             if record.metrics is not None and "training_request" in record.metrics
         )
         # The skip row consumed the instruction alone: the unit it carried is held for the automatic step.
@@ -878,10 +879,14 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(replace(_recipe(tmp_path, propose), training_mode="manual"), factory)
+    dispatcher = Dispatcher(
+        replace(_recipe(tmp_path, propose), training_mode="manual"),
+        factory,
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("s")
-        assert scenario.commit_log is None
+        assert not scenario.store.durable
         dispatcher.accept_record(instruction("poison"))
         dispatcher.accept_record(instruction("fine"))
         assert entered.wait(5)
@@ -954,7 +959,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         return
 
     recipe = replace(_recipe(tmp_path, propose), training_mode="manual", max_steps=1)
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = recipe.build("s", records)
     try:
         records.append(instruction("one"))
@@ -983,7 +988,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         records.close()
 
     streak = replace(_recipe(tmp_path, propose), training_mode="manual", max_failure_streak=1)
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = streak.build("s", records)
     try:
         backend = trainer.training_backend
@@ -1000,7 +1005,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
 def test_manual_traffic_is_available_to_auto_without_reingestion(processor):
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, processor, mode="manual", batch_size=2)
     try:
         for receipt in ("a", "b"):
@@ -1034,7 +1039,7 @@ def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp
         return None
 
     recipe = replace(_recipe(tmp_path, propose), training_mode="hybrid")
-    records = RecordStore()
+    records = SQLiteRecordStore()
     try:
         trainer = recipe.build("s", records)
         assert trainer.training_mode == "hybrid"
@@ -1053,7 +1058,7 @@ def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
 def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor):
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
     try:
         assert trainer.run_once() is None
@@ -1079,7 +1084,7 @@ def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor
 
 @pytest.mark.parametrize("processor", [CordisProcessor, RecordDrivenTraceProcessor])
 def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(processor):
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, processor, mode="hybrid", batch_size=2)
     try:
         failure(records, "a")
@@ -1133,7 +1138,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
 
 
 def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_mode_change():
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
 
     def step():
@@ -1175,7 +1180,7 @@ def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_m
 
 
 def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_takes_it():
-    records, backend = RecordStore(), CaptureBackend()
+    records, backend = SQLiteRecordStore(), CaptureBackend()
     trainer = build(records, backend, CordisProcessor, mode="hybrid", batch_size=2)
     try:
         records.append(instruction("later"))

@@ -25,10 +25,11 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
-from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import (
     CordisBackend,
     CordisRecipe,
@@ -214,7 +215,7 @@ def test_config_without_evolution_section_is_rejected() -> None:
 
 def test_build_returns_a_trainer_over_the_evolution_backend(tmp_path: Path) -> None:
     built = recipe(tmp_path, lambda nodes, samples, model: None)
-    trainer = built.build("demo", RecordStore())
+    trainer = built.build("demo", SQLiteRecordStore())
     assert isinstance(trainer, Trainer)
     assert trainer.report_type is ScoredRolloutReport
 
@@ -630,7 +631,7 @@ def test_seed_boots_the_composition_tree(tmp_path: Path) -> None:
         seen.append(nodes)
         return
 
-    trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", RecordStore())
+    trainer = recipe(tmp_path, propose, seed=(SEED_MODELS, SEED_SETTINGS)).build("demo", SQLiteRecordStore())
     b = trainer.training_backend
     assert isinstance(b, CordisBackend)
     state = b.initial_state()
@@ -781,6 +782,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
 
     try:
@@ -819,7 +821,12 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476")
         assert scenario is not None
@@ -836,7 +843,12 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
     assert "inline credential" in record["metrics"]["skipped"]
     assert record["algorithm_state"]["entries"] == [SEED_MODELS, SEED_SETTINGS]
 
-    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
         assert recovered is not None
@@ -890,7 +902,12 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
         assert scenario is not None
@@ -920,7 +937,12 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     agent_record_dir = tmp_path / "agent-record"
 
-    dispatcher = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("pregate-476")
         assert scenario is not None
@@ -939,7 +961,12 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 
-    restarted = Dispatcher(built, factory, agent_record_dir=agent_record_dir)
+    restarted = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=agent_record_dir,
+        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+    )
     try:
         recovered = restarted.get_or_create_scenario("pregate-476")
         assert recovered is not None
@@ -1107,7 +1134,7 @@ def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
         binary=str(make_binary(tmp_path)),
     )
     with pytest.raises(RecipeConfigError, match=r"reef\.upstream_url"):
-        built.build("demo", RecordStore())
+        built.build("demo", SQLiteRecordStore())
 
 
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path) -> None:
@@ -1279,14 +1306,14 @@ def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch)
         {}, config=config("records"), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
     )
     assert records.batch_policy == "records"
-    trainer = records.build("demo", RecordStore())
+    trainer = records.build("demo", SQLiteRecordStore())
     assert type(trainer.processor).__name__ == "RecordDrivenTraceProcessor"
 
     reported = CordisRecipe.from_environment(
         {}, config=config(None), runtime=InferenceProxyRuntime(model_path="m", base_url="http://localhost:8000")
     )
     assert reported.batch_policy == "reports"
-    trainer = reported.build("demo", RecordStore())
+    trainer = reported.build("demo", SQLiteRecordStore())
     assert type(trainer.processor).__name__ == "CordisProcessor"
 
     with pytest.raises(RecipeConfigError, match="batch_policy must be 'reports' or 'records'"):
@@ -1433,7 +1460,7 @@ def test_recipe_forwards_the_episode_executor_to_the_backend(tmp_path: Path, mon
         executor=executor,
         runtime=runtime(),
     )
-    trainer = built.build("demo", RecordStore())
+    trainer = built.build("demo", SQLiteRecordStore())
     backend = trainer.training_backend
     assert isinstance(backend, CordisBackend)
 
@@ -2151,7 +2178,12 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
@@ -2161,7 +2193,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert result is not None and result.pending is True
         scenario.commit(result)
 
-        record = scenario.commit_log.records()[-1]
+        record = scenario.store.history()[-1]
         assert record.operation == "training" and record.pending is True and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
         row = scenario.releases()[0]
@@ -2179,7 +2211,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert scenario.current_artifact_ref() == promoted
         served_files = tree.read_files(scenario.artifact_snapshot()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
-        last = scenario.commit_log.records()[-1]
+        last = scenario.store.history()[-1]
         assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
         assert scenario.releases()[0]["pending"] is False
     finally:
@@ -2252,7 +2284,12 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+    )
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("review-http")
@@ -2311,7 +2348,12 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
     initial = tmp_path / "initial"
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(built, factory, agent_record_dir=tmp_path / "agent-record")
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("live-pending")
         assert scenario is not None
@@ -2406,7 +2448,7 @@ def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) ->
         dataclasses.replace(default, proposals_dir=" ")
     # The backend gets the scenario's own directory; nothing is created until a proposal arrives.
     trainer = dataclasses.replace(built, proposals_dir=str(tmp_path / "inbox"), runtime=runtime()).build(
-        "demo", RecordStore()
+        "demo", SQLiteRecordStore()
     )
     inbox = trainer.training_backend.proposals
     assert inbox is not None and inbox.directory == tmp_path / "inbox" / "demo" and inbox.max_pending == 2

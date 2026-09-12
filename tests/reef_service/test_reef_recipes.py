@@ -15,9 +15,9 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, WeightTrainingSpec, load_recipe_config
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.records import RecordStore
 from reef.runtime import InferenceProxyRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.processors.base import DataProcessor
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
@@ -99,7 +99,7 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
 def test_concrete_recipe_builds_its_processor_step_preparer_and_report_type(
     recipe, name, processor_type, step_preparer, report_type
 ) -> None:
-    trainer = recipe.build("math", RecordStore())
+    trainer = recipe.build("math", SQLiteRecordStore())
 
     assert recipe.name == name
     assert recipe.report_type is report_type
@@ -131,7 +131,7 @@ def test_build_rejects_an_unknown_step_preparer_before_any_training_step() -> No
             )
 
     with pytest.raises(ValueError, match=r"unknown step preparer 'online_grpo'.*available preparers"):
-        StalePreparerRecipe(StubTrainingRuntime()).build("math", RecordStore())
+        StalePreparerRecipe(StubTrainingRuntime()).build("math", SQLiteRecordStore())
 
 
 def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process() -> None:
@@ -147,10 +147,10 @@ def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process(
             (
                 f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
                 "from recipes.tttd import TTTDRecipe\n"
-                "from reef.records import RecordStore\n"
+                "from reef.storage.sqlite import SQLiteRecordStore\n"
                 "from reef_service.runtime_stubs import StubTrainingRuntime\n"
                 "trainer = TTTDRecipe(StubTrainingRuntime(), groups_per_step=1, rollouts_per_group=2)"
-                ".build('math', RecordStore())\n"
+                ".build('math', SQLiteRecordStore())\n"
                 "assert trainer.training_backend.step_preparer == 'tttd'\n"
             ),
         ],
@@ -201,7 +201,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
     # cookbook recipes' processors — the report is terminal and released, not
     # accepted as a candidate. (openclawrl is absent: it consumes no reports
     # at all — see test_openclawrl_recipe_ignores_reports.)
-    trainer = recipe.build("math", RecordStore())
+    trainer = recipe.build("math", SQLiteRecordStore())
     processor = trainer.processor
     processor.ingest(_turn_inference("i1", [10, 20], -0.1))
     processor.ingest(_turn_inference("i2", [10, 20, 11, 21], -0.2))
@@ -222,7 +222,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # The judging half lives inside the processor now: a report is consumed
     # held for retention only — terminal on sight, releasable, never a candidate.
-    trainer = OpenClawRLRecipe(StubTrainingRuntime()).build("math", RecordStore())
+    trainer = OpenClawRLRecipe(StubTrainingRuntime()).build("math", SQLiteRecordStore())
     processor = trainer.processor
     processor.ingest(
         AgentRecord.create(

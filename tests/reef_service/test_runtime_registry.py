@@ -12,6 +12,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime import InferenceProxyRuntime, InferenceRuntime, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 
 @pytest.mark.unit
@@ -93,6 +94,7 @@ model:
     dispatcher = Dispatcher(
         build_named_recipe("qwen", config_directory=recipes),
         InMemoryRepositoryBackend.factory(initial),
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
 
     scenario = dispatcher.get_or_create_scenario("math")
@@ -124,6 +126,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
             recipe: Dispatcher(
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
                 backend_factory,
+                scenario_store_factory=SQLiteScenarioStoreFactory(),
             )
             for recipe in ("qwen", "gemma")
         }

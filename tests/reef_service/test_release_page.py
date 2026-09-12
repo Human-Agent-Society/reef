@@ -25,6 +25,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
 from reef.service.app import create_app
 from reef.service.release_page import before_release_id, build_release_page, served_step, verdict_of
+from reef.storage.factory import SQLiteScenarioStoreFactory
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
@@ -81,7 +82,11 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         target.write_text(text, encoding="utf-8")
     factory = InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository")
     return Dispatcher(
-        recipe, factory, local_artifact_dir=tmp_path / "local", agent_record_dir=tmp_path / "agent-record"
+        recipe,
+        factory,
+        local_artifact_dir=tmp_path / "local",
+        agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
 
 

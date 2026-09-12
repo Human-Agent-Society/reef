@@ -12,6 +12,7 @@ from reef.core import RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService, create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 
 class StubInferenceBackend(InferenceBackend):
@@ -33,7 +34,7 @@ def _payload_for(path: str) -> dict:
 )
 def test_new_scenario_is_created_for_every_request_type(path: str) -> None:
     async def run() -> None:
-        dispatcher = build_default_dispatcher()
+        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
         client = TestClient(
             TestServer(
                 create_app(
@@ -68,7 +69,7 @@ def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
     ``x-reef-recipe`` is an ordinary unknown header and changes nothing."""
 
     async def run() -> None:
-        dispatcher = build_default_dispatcher()
+        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
         client = TestClient(
             TestServer(
                 create_app(
@@ -100,7 +101,7 @@ def test_recipe_header_is_not_part_of_the_protocol(path: str) -> None:
 )
 def test_registered_scenario_keeps_its_binding_for_every_request_type(path: str) -> None:
     async def run() -> None:
-        dispatcher = build_default_dispatcher()
+        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
         RequestService(dispatcher).accept(
             {"x-reef-scenario": "registered"},
             {"score": 1.0},
@@ -142,7 +143,9 @@ def test_request_recovers_durable_scenario_without_resubmission(
         cache_dir=tmp_path / "first-cache",
     )
 
-    first = RequestService(build_default_dispatcher(backend_factory=first_factory))
+    first = RequestService(
+        build_default_dispatcher(backend_factory=first_factory, scenario_store_factory=SQLiteScenarioStoreFactory())
+    )
     first.accept({"x-reef-scenario": "durable"}, {"score": 1.0}, request_type=RequestType.REPORT)
 
     restarted_factory = GitLFSRepositoryBackend.factory(
@@ -150,7 +153,9 @@ def test_request_recovers_durable_scenario_without_resubmission(
         work_dir=tmp_path / "restarted-work",
         cache_dir=tmp_path / "restarted-cache",
     )
-    restarted_dispatcher = build_default_dispatcher(backend_factory=restarted_factory)
+    restarted_dispatcher = build_default_dispatcher(
+        backend_factory=restarted_factory, scenario_store_factory=SQLiteScenarioStoreFactory()
+    )
     restarted = RequestService(restarted_dispatcher)
     restarted.accept(
         {"x-reef-scenario": "durable"},
@@ -163,7 +168,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
 
 @pytest.mark.unit
 def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
-    dispatcher = build_default_dispatcher()
+    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
     load_or_create = dispatcher._registry._scenario_factory.load_or_create
     entered = Barrier(2)
 
@@ -205,7 +210,9 @@ def test_create_freezes_head_selector_at_the_resolved_release(monkeypatch, tmp_p
         return resolve_release(release_id)
 
     monkeypatch.setattr(backend, "resolve_release", moving_head)
-    dispatcher = build_default_dispatcher(backend_factory=backend_factory)
+    dispatcher = build_default_dispatcher(
+        backend_factory=backend_factory, scenario_store_factory=SQLiteScenarioStoreFactory()
+    )
 
     created = dispatcher.get_or_create_scenario(
         "moving-latest",

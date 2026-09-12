@@ -11,6 +11,7 @@ from reef.service import assembly
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.deploy.settings import service_settings_from_config
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 ORIGIN = "https://api.reefinfra.ai"
 
@@ -162,7 +163,7 @@ def test_config_defaults_and_explicit_origins():
 
 
 def test_serve_settings_enable_browser_access_on_real_scenario_routes(monkeypatch):
-    dispatcher = build_default_dispatcher()
+    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
     dispatcher.get_or_create_scenario("existing-local")
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     settings = service_settings_from_config(

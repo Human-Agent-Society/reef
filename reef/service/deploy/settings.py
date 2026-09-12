@@ -21,6 +21,7 @@ from typing import Any
 from reef.records import RecordRetention
 from reef.service.cors import console_origins
 from reef.service.deploy.config import config_value, interpolate_config, load_config
+from reef.storage.postgres import postgres_url, validate_postgres_schema
 
 _DESCRIPTION = """reef serve — start a stack from a config.
 
@@ -102,6 +103,9 @@ class ServiceSettings:
     artifact_work_dir: str = ".reef/artifact-work"
     artifact_cache_dir: str = ".reef/artifact-cache"
     agent_record_dir: str = ".reef/agent-record"
+    record_backend: str = "sqlite"
+    record_database_url: str | None = field(default=None, repr=False)
+    record_database_schema: str = "reef_records"
     agent_record_retention_days: float = 7.0
     agent_record_retention_max_bytes: int = 20 * 1024**3
     allow_implicit_scenario_creation: bool = True
@@ -113,10 +117,19 @@ class ServiceSettings:
     evaluation_settings: Mapping[str, Any] | None = None
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
-    recipe_settings: Mapping[str, Any] = field(default_factory=dict)
+    recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         RecordRetention(self.agent_record_retention_days, self.agent_record_retention_max_bytes)
+        if self.record_backend not in {"sqlite", "postgres"}:
+            raise ValueError("reef.record_backend must be sqlite or postgres")
+        if self.record_backend == "postgres":
+            if not isinstance(self.record_database_url, str) or not self.record_database_url:
+                raise ValueError("reef.record_database_url is required for the postgres backend")
+            postgres_url(self.record_database_url)
+            validate_postgres_schema(self.record_database_schema)
+        elif self.record_database_url is not None or self.record_database_schema != "reef_records":
+            raise ValueError("record_database_url and record_database_schema require reef.record_backend: postgres")
 
 
 def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:
@@ -280,6 +293,9 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
         agent_record_retention_days=float(
             _config_service_value(config, "reef", "agent_record_retention_days", default=7.0)
         ),
+        record_backend=_config_service_value(config, "reef", "record_backend", default="sqlite"),
+        record_database_url=_config_service_value(config, "reef", "record_database_url"),
+        record_database_schema=_config_service_value(config, "reef", "record_database_schema", default="reef_records"),
         agent_record_retention_max_bytes=int(
             _config_service_value(config, "reef", "agent_record_retention_max_bytes", default=20 * 1024**3)
         ),

@@ -48,7 +48,7 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
     if len(record_ids) > 100 or any(not value or len(value) > 256 for value in record_ids):
         raise ValueError("at most 100 non-empty record_id values of at most 256 characters are accepted")
     requested = frozenset(record_ids)
-    commits = scenario.commit_log.records() if scenario.commit_log else ()
+    commits = scenario.store.history() if scenario.store.durable else ()
     matches = tuple(
         islice(
             (
