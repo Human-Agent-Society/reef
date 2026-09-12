@@ -25,8 +25,7 @@ from typing import Any
 
 import yaml
 
-from reef.core.config import config_arguments
-from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor import Executor
@@ -65,7 +64,6 @@ from reef.service.deploy.service_config import (
     service_config_arguments,
     service_config_from_mapping,
     service_override,
-    service_owned_keys,
 )
 from reef.service.deploy.training import assemble_training_services
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
@@ -397,35 +395,6 @@ def _component_selection(
     return selected, source_root
 
 
-def _prepare_recipe_dependencies(config: dict[str, Any], recipe_type: type[Recipe]) -> None:
-    """Prepare only the selected method's dependencies and derived client bindings."""
-    training = issubclass(recipe_type, WeightTrainingRecipe)
-    reef = config["reef"]
-    if training:
-        owned = {key: value for key, value in reef.items() if key not in service_owned_keys()}
-    else:
-        owned = {
-            **reef.get("data", {}),
-            **{key: reef[key] for key in recipe_type.config_sections if key in reef},
-        }
-    dependencies = list(recipe_type.prepare_deployment(owned))
-    known = {argument.name for argument in config_arguments(recipe_type)} | set(recipe_type.config_sections)
-    if training:
-        known.add("checkpoint_every_n_versions")
-    if set(owned) - known:
-        raise DeployConfigError("recipe deployment hooks may bind only declared recipe settings")
-    if training:
-        reef.update(owned)
-    else:
-        for key, value in owned.items():
-            target = reef if key in recipe_type.config_sections else reef.setdefault("data", {})
-            target[key] = value
-    if dependencies:
-        services = config["services"]
-        services[0].setdefault("depends_on", []).extend(item["name"] for item in dependencies)
-        config["services"] = [*dependencies, *services]
-
-
 def resolve_deployment_config(
     config: dict[str, Any], overrides: dict[str, str] | None, source: str | Path, *, standard: bool = False
 ) -> tuple[dict[str, Any], Path | None]:
@@ -469,8 +438,6 @@ def resolve_deployment_config(
                 assemble_training_services(normalized_config)
             else:
                 assemble_provider_services(normalized_config)
-            if recipe_type is not None:
-                _prepare_recipe_dependencies(normalized_config, recipe_type)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root

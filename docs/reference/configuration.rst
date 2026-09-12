@@ -125,13 +125,13 @@ be combined with it. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
 
-PRM and user-simulation dependencies belong to OpenClawRL. Its
-``recipe.config.prm`` and ``recipe.config.user-simulator`` objects describe the
-models, ports, parallelism and native options. The method's Python deployment
-hook prepares their process definitions and PRM client binding. Reef starts
-those workers before the training driver, keeps them in the same Ray GPU pool,
-and cleans them up with the stack. Other methods use the same
-``Recipe.prepare_deployment`` hook; no arbitrary command list is read from YAML.
+Reef coordinates native inference and training, alongside its HTTP service.
+PRM and user-simulation services are independently deployed by OpenClawRL;
+Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
+``recipe.config.prm-url`` and ``recipe.config.prm-tokenizer-path``, with the same
+CLI-over-YAML precedence as other recipe fields. Its client owns request timeouts
+and error handling. The example's Docker Compose owns auxiliary model commands,
+health checks and GPU allocation, with separate devices from Reef/Slime.
 
 Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
@@ -597,7 +597,7 @@ contracts and examples.
 Stack execution backends
 ------------------------
 
-Version 2 chooses process placement in backend and recipe implementation code;
+Version 2 chooses native process placement in backend implementation code;
 ``execution.services`` is rejected. Unversioned custom stacks retain
 ``execution.services`` and per-process ``services[].executor`` overrides.
 ``execution.training`` and ``execution.rollout``

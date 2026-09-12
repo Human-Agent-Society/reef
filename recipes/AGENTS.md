@@ -125,9 +125,10 @@ storage:
 Keep shipped Reef configuration in the versioned public layout. Training
 examples put native driver flags in `training.options`; Reef assembles their
 worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
-settings belong in `reef`, and method-owned dependencies use
-`Recipe.prepare_deployment` in Python; see
-`recipes/tttd/examples/tttd/serve.yaml`. Recipe fields and owned sections go
+settings belong in `reef`. Deploy method-owned services independently and pass
+their endpoints through recipe fields; Reef coordinates only native inference
+and training. See `recipes/openclawrl/examples/openclawrl/docker-compose.yaml`
+for external service startup and GPU isolation. Recipe fields and owned sections go
 under `recipe.config`. Docker Compose and third-party task files retain their
 own schemas. Legacy Reef layouts belong in compatibility tests.
 

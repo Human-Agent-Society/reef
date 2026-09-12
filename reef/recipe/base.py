@@ -112,19 +112,6 @@ class Recipe:
         """Recipe-specific keyword arguments resolved from config sections."""
         return {}
 
-    @classmethod
-    def prepare_deployment(cls, config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-        """Describe method-owned processes required before the standard runtime starts.
-
-        Called once on the selected class with resolved recipe-owned settings,
-        without constructing a recipe or allocating resources. Definitions use
-        the executor's process contract; the launcher provides readiness,
-        dependency ordering and cleanup, including partial startup failures.
-        The hook may bind derived values in its recipe-owned config mapping.
-        This is a Python extension hook, never a user configuration section.
-        """
-        return ()
-
     @property
     def report_type(self) -> type[ReportBase] | None:
         """The typed external-report contract this recipe accepts.

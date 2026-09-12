@@ -223,7 +223,7 @@ assert config['services'][-1]['name'] == 'reef'
     raw = training_config()
     raw["recipe"]["implementation"] = recipe
     if "openclawrl" in recipe:
-        raw["recipe"]["config"]["prm"] = {"model-path": "/models/judge"}
+        raw["recipe"]["config"].update(prm_url="http://external:23001", prm_tokenizer_path="/models/judge")
     result = subprocess.run(
         [sys.executable, "-c", script, json.dumps(raw), str(tmp_path / "serve.yaml")],
         capture_output=True,

@@ -1,8 +1,8 @@
 """``reef serve`` — start managed inference, connect a provider, or run a configured stack.
 
 Version 2 and CLI-only input describe components, not process definitions.
-Reef assembles inference, training and HTTP processes; selected recipes supply
-method-specific dependencies in Python. Unversioned files retain their explicit
+Reef assembles inference, training and HTTP processes. Method-specific services
+are independently deployed; recipes consume their endpoints. Unversioned files retain their explicit
 ``services`` process contract. All paths share the existing executor lifecycle,
 readiness and cleanup machinery. HTTP assembly lives in :mod:`reef.service.assembly`.
 

@@ -1,19 +1,19 @@
 # OpenClaw-RL on reef — next-state binary reward, changes model weights.
-# OpenClawRL prepares PRM and user-simulation workers; Reef assembles driver + HTTP.
-# Reef starts a shared local Ray runtime when the first GPU service launches.
+# OpenClawRL Compose owns PRM and user-simulation services independently.
+# Reef assembles driver + HTTP and a local Ray runtime for Slime.
 # The whole method is the cookbook `openclawrl` recipe: its processor
 # correlates sessions from the harness's conversation-unique
 # x-reef-tag-session value, with trace matching as a fallback, and judges next
-# states with the PRM on a private worker. Clients use reef as their inference
+# states through the independently deployed PRM endpoint. Clients use reef as their inference
 # endpoint; the example shim only injects Reef routing/correlation headers,
 # and there is no grader proxy.
 #
 # Ports sit in the 2xxxx range: --network host shares the namespace with
 # anything else on the host (e.g. another reef stack on 8900/30000), and
 # Ray reserves 10002-19999 for worker ports.
-# One Ray pool: 4 GPUs for Megatron (TP4), 1 for policy rollout,
-# 1 for PRM and 1 for the Qwen3-32B user simulator (the paper's §4.1 persona).
-# Ray assigns the device IDs; the container's GPU pool excludes physical GPU 0.
+# Compose isolates PRM on GPU 1 and the Qwen3-32B user simulator on GPU 2.
+# Reef sees GPUs 3-7: Slime reserves 4 for Megatron (TP4) and 1 for rollout.
+# Physical GPU 0 is left free. External Ray clusters must use a disjoint pool.
 #
 # Hyperparameters mirror the run that reproduced the paper's Table 3
 # (PR #240): Qwen3-4B-Thinking policy/PRM, batch 16, 8192-token responses.
@@ -58,16 +58,9 @@ recipe:
   config:
     batch-size: 16                     # MUST equal training.config.global_batch_size
     checkpoint-every-n-versions: 1
-    # These model workers belong to OpenClawRL; its deployment hook binds the PRM client.
-    prm:
-      model-path: /root/models/Qwen3-4B-Thinking-2507
-      port: 23001
-      tensor-parallel-size: 1
-    user-simulator:
-      # The paper's user simulation model, on one B200.
-      model-path: /root/models/Qwen3-32B
-      port: 30001
-      served-model-name: qwen3-32b-user-llm
+    # The recipe consumes this external service; Reef does not launch or schedule it.
+    prm-url: http://127.0.0.1:23001
+    prm-tokenizer-path: /root/models/Qwen3-4B-Thinking-2507
     # Thinking-model PRM under judge load: single votes need minutes. Upstream
     # never times judge calls out (httpx timeout=None); 3600s is effectively
     # that while still freeing a truly wedged socket. 300s was punishing long
@@ -120,7 +113,7 @@ training:
     actor-num-gpus-per-node: "4"
     rollout-num-gpus: "1"
     rollout-num-gpus-per-engine: "1"
-    num-gpus-per-node: "7"
+    num-gpus-per-node: "5"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
     seq-length: "65536"

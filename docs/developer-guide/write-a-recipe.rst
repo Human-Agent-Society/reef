@@ -180,28 +180,28 @@ numeric ``score`` field, a consistent scale where higher is better. If you have
 no number, `Choosing a recipe <../user-guide/recipes.rst>`__ lists the methods that need
 none.
 
-Deployment dependencies
------------------------
+External method services
+------------------------
 
 Version 2 configuration describes components and their parameters. It does not
 accept ``service``, ``services`` or ``execution.services``. HTTP settings belong
 in ``reef``. Reef assembles its HTTP process and supported inference/training
-backends; a Recipe owns any additional model or method-specific process.
+backends. Additional method services run independently of Reef's orchestrator.
 
-Override ``Recipe.prepare_deployment(config)`` when the method needs such a
-process. The class hook receives a copy of resolved recipe-owned settings,
-without constructing a recipe or allocating GPU resources. It returns a tuple
-of process definitions using the executor's existing Python process contract
-(``name``, argv ``command``, readiness probe/deadline, executor and resources).
-It may bind derived values in that recipe-owned mapping, for example a client
-URL referencing ``${endpoints.judge}``. Define dependency processes in Python;
-do not expose an arbitrary process list as a recipe config field.
+Declare a recipe field for the external endpoint and implement the client in
+the method package. For example, OpenClawRL uses ``recipe.config.prm-url`` and
+``recipe.config.prm-tokenizer-path`` to call its independently served PRM.
+CLI overrides such as ``--recipe.config.prm-url http://localhost:23001`` use the
+same field declarations and validation as YAML. Request timeouts and scoring
+failure behavior belong to that recipe's client.
 
-The launcher waits for these processes before starting the standard runtime,
-publishes their endpoints and handles partial startup, interruption and
-reverse-order cleanup. GPU dependencies and the Slime driver share one Ray
-runtime, while Slime owns its model-worker GPU allocations. See
-``recipes/openclawrl/deployment.py`` for the PRM and user-simulation example.
+The method's deployment tools own external service startup, readiness, resources
+and shutdown. Reef does not register their processes, probe their health or
+reserve their GPUs. The OpenClawRL example's ``docker-compose.yaml`` starts PRM
+and user-model containers on devices separate from Reef/Slime. A remote endpoint
+can be substituted without changing Reef's process topology. Reef shutdown or a
+training startup failure leaves independently deployed services running.
+
 Backend environment defaults belong to their integration; Slime's defaults
 live in ``reef/train/slime_backend/launch.py`` and honor explicit environment
 overrides.

@@ -7,7 +7,7 @@ what the user did next, a follow-up that moves on counting as acceptance and
 a complaint as rejection, and the policy updates while it keeps serving. The
 method itself is the `openclawrl` recipe package (`recipes/openclawrl/`). Its
 processor rebuilds sessions from the traffic Reef already records, judges
-every completed turn with a PRM on a private worker, and turns accepted
+every completed turn through an independently deployed PRM, and turns accepted
 hindsight hints into a training signal. No report call is required. The
 processor prefers a stable, conversation-unique `x-reef-tag-session` value
 and otherwise falls back to matching transcripts; this example's header shim
@@ -47,8 +47,8 @@ results/
   learning_curve.py              per-session accept and style metrics, logged to W&B during a stream or exported afterwards
   2026-08-27-gsm8k-stream-qwen3-4b-thinking/
                                  the learning curve of a complete run
-serve.yaml                       the paper's training stack: Reef, Slime, the PRM, the student model
-docker-compose.yaml              the reef container: GPUs, mounts, host networking, the health check
+serve.yaml                       Reef/Slime configuration and the recipe's PRM endpoint
+docker-compose.yaml              Reef, PRM and student-model containers with separate GPUs
 run.sh                           builds the student service image, starts the stack, runs the stream
 restamp.sh                       re-pins the 72 tasks to user_sim/'s content hash after a change there
 pyproject.toml                   makes harness/ importable
@@ -131,24 +131,26 @@ reef-eval starts the task container and the judge service for the next session
 ## Setup (once)
 
 You need a GPU host with seven available GPUs, Docker, and `uv` (for `uvx`,
-which runs reef-eval). In `docker-compose.yaml`, `device_ids` defines the
-container's pool once: the default exposes physical GPUs 1-7, leaving GPU 0 free.
-Ray assigns device IDs within that pool: the PRM and student model each reserve
-one GPU through OpenClawRL's Python deployment hook; Slime reserves five more for
-the Megatron actor (tensor parallel 4) and policy rollout engine (one GPU).
-The inference services start before Slime allocates its group. The CPU-only
-`slime-driver` does not reserve GPUs itself, and individual services do not
-set CUDA visibility. This is a single-host stack, not a multi-node deployment.
+which runs reef-eval). The example's `docker-compose.yaml` assigns physical GPU 1
+to the PRM, GPU 2 to the student model, and GPUs 3–7 to Reef/Slime, leaving GPU 0
+free. Slime reserves four GPUs for the Megatron actor (tensor parallel 4) and
+one for policy rollout. Its CPU driver reserves no model GPUs itself. Adjust
+Compose device assignments for your host; keep the three pools disjoint.
+This example is a single-host deployment.
 
-There is no `ray-head` service or fixed Ray port to configure. The first GPU
-service selects the Ray executor and Reef starts one shared local runtime.
-Reef passes its actual address to Slime and subsequent services, and stops
-the runtime after the services exit. Set `RAY_ADDRESS` only to connect to an
-external cluster; Reef does not stop that cluster. An unavailable external
-address is an error, not a reason to start a different local cluster.
-When launching directly instead of through Compose, restrict the available
-pool once at the deployment boundary, for example
-`CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml`.
+Compose starts and health-checks the independent model services, waits for PRM
+readiness before starting Reef, and waits for all three services before the
+harness runs. Reef starts a local Ray runtime for Slime and connects its HTTP
+service to the training-owned inference engine. Reef shutdown stops its own
+runtime; `docker compose down` stops the entire example, including PRM and the
+student model.
+
+Set `RAY_ADDRESS` only to connect Slime to an external cluster, which Reef leaves
+running. That cluster must exclude the PRM/student GPUs: the Reef container's
+GPU visibility does not constrain an external cluster. An unavailable external
+address is an error. To launch Reef directly, first start the independent PRM
+and student model, then restrict Reef's local pool, for example:
+`CUDA_VISIBLE_DEVICES=3,4,5,6,7 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml`.
 
 ```bash
 docker build -f docker/Dockerfile.reef -t reef-openclawrl .
@@ -250,7 +252,7 @@ uv run --no-project --with matplotlib \
 | Task | the 72-session GSM8K homework stream, hermes memory off |
 | Model | `Qwen3-4B-Thinking-2507` as the policy and as the PRM |
 | Student | the `Qwen3-32B` persona |
-| Hardware | the seven-GPU layout of `serve.yaml`: a tensor-parallel-4 actor, one rollout engine, one PRM engine, one engine for the Qwen3-32B student |
+| Hardware | the seven-GPU reference layout: a tensor-parallel-4 actor, one rollout engine, one PRM engine, one engine for the Qwen3-32B student |
 | Batch | 16 judged turns per training step |
 | Responses | up to 8192 tokens in a 65,536-token context |
 | Objective | top-K select loss, PPO clip 0.2 / 0.28, `w_rl` 1.0, `w_opd` 1.0, top-4 capture, `sequence_optimal` hint selection |
@@ -272,14 +274,21 @@ the first reply passes directly.
 ## Configuration ownership
 
 The Reef YAML contains no `service` or `services` sections. HTTP settings use
-`reef.*`. OpenClawRL declares its PRM under `recipe.config.prm` and its user
-simulation model under `recipe.config.user-simulator`; each supports
-`model-path`, `port`, `tensor-parallel-size`, `served-model-name`,
-`ready-timeout` and native SGLang `options`. CLI leaf overrides use the same
-paths, for example `--recipe.config.prm.tensor-parallel-size 2`.
+`reef.*`; Reef assembles inference and training. OpenClawRL consumes an
+independently deployed PRM through `recipe.config.prm-url` and
+`recipe.config.prm-tokenizer-path`. The tokenizer must match the served PRM.
+CLI overrides use the same paths, for example:
 
-`recipes/openclawrl/deployment.py` validates those options and defines the model
-workers. The launcher reserves their Ray GPUs and waits for readiness before
-starting Slime, then starts HTTP after the training bridge is ready. The method
-binds `prm-url` and `prm-tokenizer-path` from the managed PRM; to connect an
-external PRM instead, omit `prm` and supply those two client settings.
+```bash
+reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml \
+  --recipe.config.prm-url http://prm-host:23001 \
+  --recipe.config.prm-tokenizer-path /models/prm-tokenizer
+```
+
+The example's Compose file owns PRM and student-model launch arguments, health
+checks and GPU assignments. Configure native SGLang options in those containers'
+commands. The student-model endpoint belongs to the user-simulation harness;
+Reef does not receive it. To use an existing PRM in the Compose example, remove
+the `prm` container and Reef's Compose `depends_on: prm` entry, then update the
+two recipe client fields. PRM request timeouts and scoring errors remain the
+OpenClawRL recipe's responsibility.

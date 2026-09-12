@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS
@@ -59,15 +57,6 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     # Upstream's OPENCLAW_PRM_RECORD_FILE: the judged population, one JSON
     # line per batch. Empty disables it.
     prm_record_file: str = config_field("")
-
-    prm: Mapping[str, Any] = config_field(default_factory=dict)
-    user_simulator: Mapping[str, Any] = config_field(default_factory=dict)
-
-    @classmethod
-    def prepare_deployment(cls, config: dict[str, Any]) -> tuple[dict[str, Any], ...]:
-        from recipes.openclawrl.deployment import prepare_dependencies
-
-        return prepare_dependencies(config)
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
