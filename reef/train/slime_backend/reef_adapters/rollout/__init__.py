@@ -1,1 +1,1 @@
-"""Slime rollout-manager extensions and failure-aware coordination."""
+"""Slime weight-update locking backed by Reef coordination."""

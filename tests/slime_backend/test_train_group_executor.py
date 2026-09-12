@@ -32,6 +32,7 @@ class _Worker:
 
     def set_rollout_manager(self, manager):
         self.manager_calls.append(manager)
+        return {"dp_size": 2, "cp_size": 1}
 
     def train(self, rollout_id, data, *, external_data):
         self.train_calls.append((rollout_id, data, external_data))
@@ -135,6 +136,7 @@ def test_custom_executor_factory_recreates_workers_with_checkpoint_and_manager(m
     manager = object()
 
     assert group.create(rollout_manager=manager) == [4, 4]
+    assert group.train_parallel_config == {"dp_size": 2, "cp_size": 1}
     first = group.executor
     assert isinstance(first, CpuSlimeExecutor)
     assert first.launch_options["pg"] == "shared-placement"
@@ -431,3 +433,16 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
     finally:
         for executor in attached:
             executor.shutdown()
+
+
+@pytest.mark.parametrize("invalid", [None, {"dp_size": 99}])
+def test_attachment_rejects_missing_or_inconsistent_training_layout(make_group, monkeypatch, invalid):
+    group = make_group()
+
+    def attach(worker, inference):
+        return {"dp_size": 2, "cp_size": 1} if worker.rank == 0 else invalid
+
+    monkeypatch.setattr(_Worker, "set_rollout_manager", attach)
+    with pytest.raises(RuntimeError, match="training parallel config"):
+        group.create(rollout_manager=object())
+    assert group._executor is None

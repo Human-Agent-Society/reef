@@ -238,7 +238,7 @@ SERVING_VERSION = "inc:5"
 class _FakeRolloutManager:
     def __init__(self, packed):
         self.packed = packed
-        self.prepare_external_train_data = _RemoteMethod(lambda data: "packed-ref")
+        self.prepare_external_train_data = lambda data: "packed-ref"
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
         self.get_runtime_load_ids = _RemoteMethod(lambda: [SERVING_VERSION])
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
@@ -308,6 +308,7 @@ def _sao_actor(
     actor = bridge.TrainBridgeActorImpl(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         critic_save_root=critic_save_root,
@@ -438,6 +439,7 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
     actor = bridge.TrainBridgeActorImpl(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         loss_family="sao",
@@ -723,6 +725,7 @@ def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
     actor = bridge.TrainBridgeActorImpl(
         group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         loss_family="sao",
     )

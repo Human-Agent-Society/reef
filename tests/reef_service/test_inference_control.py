@@ -10,7 +10,7 @@ from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceControl, SlimeInferenceWorker
+from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -51,7 +51,16 @@ class CpuServingExecutor(DelegatingExecutor):
         self._rpc = UniProcExecutor.from_workers([CpuServingWorker()], owned=True)
 
 
-class TrainingControl(SlimeInferenceControl):
+class TrainingControl:
+    def __init__(self, serving):
+        self._serving = serving
+
+    def check_health(self):
+        self._serving.rpc(0, "check_health", timeout=30)
+
+    def get_updatable_engines_and_lock(self):
+        return self._serving.rpc(0, "get_updatable_engines_and_lock", timeout=30)
+
     def shutdown(self):
         self._serving.shutdown()
 

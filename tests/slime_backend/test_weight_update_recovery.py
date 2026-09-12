@@ -572,3 +572,14 @@ def test_peer_waits_for_source_phase_completion_before_continuing(
 
     assert not thread.is_alive()
     assert peer_result == [None]
+
+
+def test_native_trainer_attaches_to_inference_without_pushing_batch_config(monkeypatch):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    worker = object.__new__(module.ReefMegatronTrainRayActor)
+    worker.train_parallel_config = {"dp_size": 2, "cp_size": 1}
+    inference = object()  # No batch scheduling RPCs exist on the inference handle.
+    layout = worker.set_rollout_manager(inference)
+    assert worker.rollout_manager is inference
+    assert layout == worker.train_parallel_config
+    assert layout is not worker.train_parallel_config

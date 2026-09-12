@@ -1,4 +1,4 @@
-"""SGLang engine extension installed inside Reef rollout-manager actors."""
+"""SGLang engine extension installed inside Reef inference control actors."""
 
 from __future__ import annotations
 
@@ -288,7 +288,7 @@ class _SGLangMemoryOperations:
 
 
 def install_sglang_extensions() -> None:
-    """Install extensions in the dedicated rollout-manager process only."""
+    """Install extensions in the dedicated inference control process only."""
     from slime.ray import rollout, utils
 
     # Slime constructs each SGLang Ray actor with an explicit runtime_env,

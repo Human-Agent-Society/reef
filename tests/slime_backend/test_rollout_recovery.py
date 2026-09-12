@@ -131,9 +131,9 @@ def _load_rollout_module(monkeypatch: pytest.MonkeyPatch):
 
 def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = False):
     raw_rollout = _load_rollout_module(monkeypatch)
-    path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "rollout" / "manager.py"
+    path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "batches.py"
     if serving:
-        path = path.parent.parent / "executors" / "rollout_worker.py"
+        path = path.parent / "executors" / "rollout_worker.py"
     name = "reef.train.slime_backend.reef_adapters._rollout_manager_recovery_test"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -164,9 +164,10 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
 
 
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
-    _, module = _load_manager_module(monkeypatch)
+    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+
     args = types.SimpleNamespace(reef_rollout_executor_backend=_RecordingRolloutExecutor)
-    manager = module.ReefRolloutManagerImpl(args, "placement")
+    manager = SlimeInferenceWorker(args, "placement")
     executor = manager._serving
     assert executor.config.options == {"args": args, "pg": "placement"}
     methods = [
@@ -186,18 +187,20 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
         "health_monitoring_resume",
     ]
     for method in methods:
-        assert getattr(manager, method)() == method
+        result = getattr(manager, method)()
+        assert result == (None if method == "prepare_training_connection" else method)
     assert manager.onload(["weights"]) == "onload"
     assert manager.check_weights("snapshot") == "check_weights"
     assert executor.calls[-2:] == [("onload", (["weights"],), {}), ("check_weights", ("snapshot",), {})]
-    manager.dispose()
+    manager.shutdown()
     assert executor.closed
 
 
 def test_rollout_executor_rejects_uni_before_gpu_startup(monkeypatch):
-    _, module = _load_manager_module(monkeypatch)
+    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+
     with pytest.raises(ValueError, match="Slime-compatible"):
-        module.ReefRolloutManagerImpl(types.SimpleNamespace(reef_rollout_executor_backend="uni"), None)
+        SlimeInferenceWorker(types.SimpleNamespace(reef_rollout_executor_backend="uni"), None)
 
 
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
@@ -301,7 +304,7 @@ def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.unit
 def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch: pytest.MonkeyPatch) -> None:
     _load_rollout_module(monkeypatch)
-    from reef.train.slime_backend.reef_adapters.rollout.manager import tensorize_external_fields
+    from reef.train.slime_backend.reef_adapters.batches import tensorize_external_fields
 
     data = {
         "action_masks": [[1, 0]],
@@ -499,7 +502,7 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
 ) -> None:
     _, module = _load_manager_module(monkeypatch)
     monkeypatch.setattr(
-        module,
+        sys.modules["slime.utils.dp_schedule"],
         "build_dp_schedule",
         lambda *_args, **_kwargs: (
             [[0], [1]],
@@ -509,9 +512,9 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
         ),
     )
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
-    monkeypatch.setattr(module, "Box", lambda value: value)
+    monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
 
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    manager = object.__new__(module.TrainingBatchProcessor)
     manager.args = types.SimpleNamespace(
         global_batch_size=2,
         rollout_data_transport="object-store",
@@ -548,10 +551,10 @@ def _round_robin_dp_schedule(_args, config, total_lengths, *, global_batch_size,
 
 def _manager_for_schedule(monkeypatch: pytest.MonkeyPatch, *, global_batch_size: int):
     _, module = _load_manager_module(monkeypatch)
-    monkeypatch.setattr(module, "build_dp_schedule", _round_robin_dp_schedule)
+    monkeypatch.setattr(sys.modules["slime.utils.dp_schedule"], "build_dp_schedule", _round_robin_dp_schedule)
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
-    monkeypatch.setattr(module, "Box", lambda value: value)
-    manager = object.__new__(module.ReefRolloutManagerImpl)
+    monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
+    manager = object.__new__(module.TrainingBatchProcessor)
     manager.args = types.SimpleNamespace(global_batch_size=global_batch_size, rollout_data_transport="object-store")
     manager.train_parallel_config = {"dp_size": 2}
     return manager
@@ -599,57 +602,12 @@ def test_dp_packaging_configured_size_honors_remainder_policy(monkeypatch: pytes
     assert [rank["partition"] for rank in packed] == [[0, 2, 4], [1, 3]]
 
 
-def test_training_manager_borrows_inference_without_launching_or_disposing_it(monkeypatch):
+def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
     _, module = _load_manager_module(monkeypatch)
-    executor = _RecordingRolloutExecutor(module.ExecutorConfig(backend=_RecordingRolloutExecutor))
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("training must not create a serving executor when one is supplied")
-
-    monkeypatch.setattr(module.Executor, "create", unexpected)
-    manager = module.ReefRolloutManagerImpl(types.SimpleNamespace(), None, serving=executor)
-    assert manager.inference_url() == "inference_url"
-    assert manager.get_updatable_engines_and_lock() == "get_updatable_engines_and_lock"
-    manager.dispose()
-    manager.dispose()
-    assert not executor.closed
-    assert executor.rpc(0, "inference_url") == "inference_url"
-    executor.shutdown()
-    assert executor.closed
-
-
-@pytest.mark.parametrize("borrowed", [False, True])
-def test_manager_only_prepares_inference_when_it_owns_it(monkeypatch, borrowed):
-    _, module = _load_manager_module(monkeypatch)
-    executor = _RecordingRolloutExecutor(module.ExecutorConfig(backend=_RecordingRolloutExecutor))
-    implementation = module.ReefRolloutManagerImpl(types.SimpleNamespace(), None, serving=executor)
-    events = []
-
-    def fail_probe(**kwargs):
-        raise RuntimeError("probe failed")
-
-    actor = types.SimpleNamespace(
-        check_weights=types.SimpleNamespace(remote=fail_probe),
-        dispose=types.SimpleNamespace(remote=implementation.dispose),
-    )
-    monkeypatch.setattr(
-        module,
-        "ReefRolloutManager",
-        types.SimpleNamespace(options=lambda **kwargs: types.SimpleNamespace(remote=lambda *args: actor)),
-    )
-    monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: events.append(target))
-    args = types.SimpleNamespace(check_weight_update_equal=True, offload_rollout=False)
-    if borrowed:
-        assert module.create_rollout_manager(args, None, serving=executor) is actor
-        assert events == []
-        assert not implementation._closed
-    else:
-        with pytest.raises(RuntimeError, match="probe failed"):
-            module.create_rollout_manager(args, None)
-        assert events == [actor]
-        assert implementation._closed
-    assert not executor.closed
-    executor.shutdown()
+    processor = module.TrainingBatchProcessor(types.SimpleNamespace(), {"dp_size": 1})
+    assert processor.train_parallel_config == {"dp_size": 1}
+    for name in ("inference_url", "pause_generation_for_update", "dispose", "shutdown"):
+        assert not hasattr(processor, name)
 
 
 def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):

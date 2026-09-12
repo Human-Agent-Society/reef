@@ -109,9 +109,9 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
     monkeypatch.setattr(bridge.ray, "init", unexpected)
     plan = driver.create_model_plan({}, loss_family="loss")
     plan.validate()
-    assert (plan.inference is not None) == (mode != "external")
-    assert plan.resources.allocate_models == (mode != "external")
+    assert plan.inference is not None
+    assert plan.resources.allocate_models
     assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert (plan.training.inference_protocol is not None) == (mode != "external")
+    assert plan.training.inference_protocol is not None

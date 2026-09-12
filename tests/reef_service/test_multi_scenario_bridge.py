@@ -211,6 +211,7 @@ def _actor(
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         start_rollout_id=start_rollout_id,
         lora=True,

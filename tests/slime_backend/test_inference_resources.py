@@ -189,7 +189,6 @@ def test_training_worker_loss_fails_health_without_waiting_for_another_job():
         loss_family_config=None,
         actor_name="bridge",
         namespace="test",
-        separate_inference=True,
     )
     service.on_executor_failure(ExecutorFailure("test", "worker died", rank=1))
     with pytest.raises(ExecutorFailedError, match="worker died"):
@@ -198,18 +197,14 @@ def test_training_worker_loss_fails_health_without_waiting_for_another_job():
         service.poll()
 
 
-@pytest.mark.parametrize("separate", [False, True])
 @pytest.mark.parametrize("failure", [None, "health", "shutdown"])
-def test_training_adapter_attaches_without_allocating_or_closing_inference(
-    resource_runtime, monkeypatch, separate, failure
-):
+def test_training_adapter_attaches_without_allocating_or_closing_inference(resource_runtime, monkeypatch, failure):
     from reef.train.slime_backend import training
 
     allocation = plan_for(resource_runtime).resources
-    allocation.allocate_models = separate
     allocation.start()
     borrowed = SimpleNamespace(owned=False)
-    connection = resources.InferenceConnection(resources.INFERENCE_PROTOCOL, borrowed) if separate else None
+    connection = resources.InferenceConnection(resources.INFERENCE_PROTOCOL, borrowed)
 
     def shutdown():
         resource_runtime.events.append("training-close")
@@ -222,8 +217,8 @@ def test_training_adapter_attaches_without_allocating_or_closing_inference(
     )
 
     def start(args, **kwargs):
-        assert kwargs["serving"] is (borrowed if separate else None)
-        assert kwargs["placement_groups"] is (allocation.placement_groups if separate else None)
+        assert kwargs["serving"] is borrowed
+        assert kwargs["placement_groups"] is allocation.placement_groups
         return bridge
 
     monkeypatch.setattr(training, "start_bridge", start)
@@ -241,26 +236,20 @@ def test_training_adapter_attaches_without_allocating_or_closing_inference(
         loss_family_config=None,
         actor_name="test",
         namespace="test",
-        separate_inference=separate,
     )
-    if separate:
-        with pytest.raises(ValueError, match="existing inference connection"):
-            service.start(allocation, None)
+    with pytest.raises(ValueError, match="existing inference connection"):
+        service.start(allocation, None)
     service.start(allocation, connection)
     if failure == "health":
         with pytest.raises(RuntimeError, match="health check"):
             service.check_health()
     else:
         service.check_health()
-    if failure == "shutdown" and not separate:
-        with pytest.raises(RuntimeError, match="shutdown failed"):
-            service.close()
-    else:
-        service.close()
+    service.close()
     service.close()
     assert resource_runtime.events == [
         "connect",
-        *(["allocate"] if separate else []),
+        "allocate",
         "training-close",
         "kill-training",
     ]

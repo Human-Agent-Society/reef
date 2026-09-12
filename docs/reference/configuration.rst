@@ -96,10 +96,12 @@ With the default Slime backend, Reef starts a local driver, waits for its health
 bridge, then starts HTTP and obtains the inference connection from that bridge.
 For managed full-weight and LoRA training, including colocated configurations,
 the backend-neutral Reef model driver owns separate
-resource, inference and training components. The training batch
-manager borrows that controller; it does not launch or shut down inference.
+resource, inference and training components. Training workers connect directly
+to the inference controller; batch processing stays local to the training
+coordinator. Training does not launch or shut down inference.
 Slime's launch/placement helpers still implement the engine integration.
-External-engine paths retain their existing combined lifecycle.
+External-engine paths use the same component lifecycle while borrowing their
+external engines; automatic cold-rebuild supervision remains disabled for them.
 HTTP and the driver share the Ray address, namespace, actor name and resolved
 model path. With no Ray address, Reef owns the shared runtime and stops it on
 exit; an existing cluster is left running. Model topology, optimizer settings
@@ -192,11 +194,11 @@ training and inference offload must both be enabled.
 ``training.options.keep-lora-base-resident`` retains the frozen inference base
 during later colocated LoRA steps; cold startup still releases all inference
 memory before training initializes. The separate inference control actor requires
-one additional Ray
-CPU and zero GPUs. The HTTP endpoint is still discovered through the training
-bridge. Managed deployments, including LoRA and colocated modes, automatically
-rebuild both
-components after failure, rerun checkpoint recovery and rediscover the endpoint
+one Ray CPU and zero GPUs. Batch processing runs locally in the training
+coordinator, so no separate batch-manager CPU is reserved. The HTTP endpoint is
+still discovered through the training bridge. Managed deployments, including
+LoRA and colocated modes, automatically rebuild both components after failure,
+rerun checkpoint recovery and rediscover the endpoint
 without restarting the HTTP service. Explicit gateway URLs stay fixed. This
 recovery does not replay ambiguous optimizer steps and stops if old resources
 cannot be confirmed retired. A rejected Slime candidate also requires restoring

@@ -14,7 +14,7 @@ class, while callers use the same methods for each backend.
        SE --> LW[Local ProcessWorker]
        SE --> RW[Ray ProcessWorker]
        SE --> CW[Custom executor]
-       LW --> SV[SGLang / PRM / user LLM / Slime driver / Reef]
+       LW --> SV[Inference / training driver / Reef]
        RW --> SV
        R[ExecutorTrainingRuntime] --> H[TrainingGroupHandle]
        H --> C[Coordinator Executor]
@@ -24,8 +24,10 @@ class, while callers use the same methods for each backend.
        E --> S[SlimeRayExecutor]
        E --> P[Custom Slime-compatible Executor]
        S --> W[Megatron workers]
-       B --> RM[ReefRolloutManager: batches / DP partitioning]
-       RM --> RE[Rollout Executor]
+       B --> BP[Local batch processor: tensorization / DP partitioning]
+       B --> I[Inference control actor]
+       W --> I
+       I --> RE[Rollout Executor]
        RE --> SR[SlimeRayRolloutExecutor: SGLang engines / routers / update lock]
        RE --> CR[Custom rollout executor]
 
@@ -196,19 +198,24 @@ The Slime driver accepts:
 The custom executor receives ``args``, node/GPU counts, ``pg``, per-actor GPU
 allocation, ``role``, reference/teacher flags and ``actor_cls`` in
 ``ExecutorConfig.options``. Its constructor launches workers; ``SlimeTrainGroup``
-then calls their collective ``init`` and connects the rollout manager. It must
+then calls their collective ``init`` and connects the inference control actor.
+Workers return their training parallel configuration from ``set_rollout_manager``
+instead of sending batch configuration to inference. The group validates the
+returned layouts and passes them to the coordinator's batch processor. It must
 preserve rank order and support Slime's worker methods and rollout payloads.
 Critic output is passed to the actor worker at the same rank, including empty
 outputs on non-final pipeline stages.
 
-The rollout manager no longer launches SGLang directly. Its serving operations
-go through a separate ``Executor`` selected by ``execution.rollout`` or
+The inference control actor owns the serving ``Executor`` selected by ``execution.rollout`` or
 ``--reef-rollout-executor-backend``. The default ``ray`` selection maps to
 ``SlimeRayRolloutExecutor``: Slime-specific launch, placement, routers, health
 monitors, update locks, offload/onload and recovery live in its backend worker.
-The manager retains external-batch packing and DP scheduling.
+The training coordinator runs external-batch packing and DP scheduling locally
+through ``TrainingBatchProcessor``; there is no batch-manager Ray actor or
+inference RPC relay. NIXL tensor transport is enabled on the training coordinator
+when selected. This removes one Ray actor and its CPU reservation.
 
-Slime's bridge/manager actors and payload/weight transport still use Ray.
+Slime's training coordinator, inference control actor and weight transport use Ray.
 Alternative rollout executors must support the existing Slime weight-transport
 contract (including engine/lock handles); selecting a backend does not rewrite
 that data plane. There is no built-in torchrun, Slurm or Kubernetes backend,
@@ -415,8 +422,9 @@ Inference borrows those reservations and owns ``SlimeInferenceWorker`` as a
 separate Ray control actor. It reserves one CPU and zero model GPUs; model
 placement groups account for engine GPUs separately. Training receives the
 existing inference connection and reservations and calls ``start_bridge`` with
-both. Its batch manager retains tensorization, DP partitions and micro-batch
-scheduling; it never creates or closes the supplied inference component.
+both. The coordinator retains tensorization, DP partitions and micro-batch
+scheduling in a local processor. Native training workers receive the inference
+actor handle directly. Training never creates or closes inference or reservations.
 
 The owner closes training, inference and resources in reverse dependency order,
 including components whose startup failed partway through. Cleanup failures do
@@ -431,11 +439,12 @@ representations remain private to its adapters. Weight transfer remains directly
 between training workers and engines. This protocol identifies the supported
 attachment vocabulary; it is not a general engine capability negotiation API.
 
-External-engine mode selects an explicit combined plan before startup.
-A failure in the separate path never falls back to combined ownership. Direct ``start_bridge`` callers
-remain supported, and ``reef.service.slime_driver`` remains a compatibility CLI
-for explicit process stacks. It delegates lifecycle orchestration to the same
-Reef owner.
+All Slime entrypoints use the same resource, inference and training ownership,
+including external-engine mode. External engines remain borrowed and are not
+stopped by Reef. ``reef.service.slime_driver`` retains legacy argument-file and
+healthcheck syntax but uses this same lifecycle. Direct ``start_bridge`` calls
+require supplied inference and placement groups; the old self-allocating
+combined path has been removed.
 
 Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
@@ -547,7 +556,7 @@ Colocated inference and training share the GPU reservations produced by one
 placement call; separating their control actors does not duplicate GPUs.
 Before training workers initialize, the inference owner fences generation,
 performs optional weight checks and releases inference memory. The borrowed
-training batch manager does not repeat this preparation.
+training coordinator does not repeat this preparation.
 
 Cold startup releases weights, KV cache and CUDA graphs even when
 ``training.options.keep-lora-base-resident`` is enabled. Once training has
@@ -600,8 +609,8 @@ weights. Restore the committed checkpoint before restarting those deployments.
 This is a cold rebuild of the model deployment. It recreates the inference
 controller, routers, engines and training workers; it does not attach a new
 controller to surviving engine handles. The external Ray cluster and HTTP
-service remain running. External-engine and explicit legacy process stacks
-keep their existing compatibility lifecycle.
+service remain running. External-engine and explicit legacy entrypoints use
+the same component ownership but do not enable automatic cold-rebuild supervision.
 
 Owned Ray jobs install a POSIX process lease before model workers initialize.
 A watchdog retires a worker's process group after owner loss, including native

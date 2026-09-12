@@ -11,7 +11,6 @@ from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.inference_control import InferenceControl
 from reef.runtime.training_job.marker import read_marker, write_marker
 from reef.runtime.training_job.publication import TrainingPublication
-from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceControl
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -119,32 +118,32 @@ class CheckpointPublisher:
         self.control = control
 
     def pause(self):
-        self.control.pause_generation_for_update()
+        self.control.rpc(0, "pause_generation_for_update", timeout=30)
 
     def resume(self):
-        self.control.continue_generation_after_update()
+        self.control.rpc(0, "continue_generation_after_update", timeout=30)
 
     def abort(self):
-        self.control.terminate_updatable_engines()
+        self.control.rpc(0, "terminate_updatable_engines", timeout=30)
 
     def restore(self, marker):
         import ray
 
-        engines, _, reconnect, *_ = self.control.get_updatable_engines_and_lock()
+        engines, _, reconnect, *_ = self.control.rpc(0, "get_updatable_engines_and_lock", timeout=30)
         if not reconnect:
             raise RuntimeError("new trainer was not asked to attach")
         # The fixture represents backend checkpoint I/O. The actual transport
         # uses the borrowed engine handle, never the serving control actor.
         weights = json.loads((Path(marker["checkpoint_path"]) / "weights.json").read_text())
-        self.control.clear_updatable_num_new_engines()
+        self.control.rpc(0, "clear_updatable_num_new_engines", timeout=30)
         ray.get(engines[0].load.remote(weights["weight"], weights["version"]), timeout=10)
         return ray.get(engines[0].status.remote(), timeout=10)["version"]
 
 
 class RestartCoordinator:
     def __init__(self, marker_path, serving):
-        self.control = SlimeInferenceControl(serving)
-        self.control.prepare_training_connection()
+        self.control = serving
+        self.control.rpc(0, "prepare_training_connection", timeout=30)
         publisher = CheckpointPublisher(self.control)
         self.publication = TrainingPublication(Path(marker_path), publisher)
         marker = read_marker(Path(marker_path))

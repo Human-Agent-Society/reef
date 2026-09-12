@@ -223,15 +223,13 @@ def create_model_plan(
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
-    separate = not getattr(args, "rollout_external", False)
-    inference = SlimeInferenceService(args) if separate else None
+    inference = SlimeInferenceService(args)
     training = SlimeTrainingService(
         args,
         preparation=prepared,
         loss_family_config=loss_family_config,
         actor_name=actor_name,
         namespace=namespace,
-        separate_inference=separate,
     )
     return ModelDeploymentPlan(
         resources=SlimeDeploymentResources(
@@ -239,9 +237,8 @@ def create_model_plan(
             ray_address=ray_address,
             namespace=namespace,
             runtime_env=_job_runtime_env(),
-            allocate_models=separate,
         ),
         inference=inference,
         training=training,
-        health=SlimeDeploymentHealth(inference, training) if inference is not None else None,
+        health=None if getattr(args, "rollout_external", False) else SlimeDeploymentHealth(inference, training),
     )

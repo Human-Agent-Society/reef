@@ -16,6 +16,8 @@ from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, RayHealthProb
 class SlimeTrainingService:
     """Own training workers and the bridge, never supplied inference objects."""
 
+    inference_protocol = INFERENCE_PROTOCOL
+
     def __init__(
         self,
         args: Any,
@@ -24,14 +26,12 @@ class SlimeTrainingService:
         loss_family_config: object | None,
         actor_name: str,
         namespace: str,
-        separate_inference: bool,
     ) -> None:
         self.args = args
         self.preparation = preparation
         self.loss_family_config = loss_family_config
         self.actor_name = actor_name
         self.namespace = namespace
-        self.inference_protocol = INFERENCE_PROTOCOL if separate_inference else None
         self._bridge: Any = None
         self._started = False
         self._closed = False
@@ -43,15 +43,8 @@ class SlimeTrainingService:
             raise RuntimeError("training service can only be started once")
         if not isinstance(resources, SlimeDeploymentResources):
             raise ValueError("Slime training requires its supplied deployment resources")
-        serving = None
-        placement_groups = None
-        if self.inference_protocol is not None:
-            if inference is None or inference.protocol != self.inference_protocol or not resources.placement_groups:
-                raise ValueError("Slime training requires an existing inference connection and model reservations")
-            serving = inference.control
-            placement_groups = resources.placement_groups
-        elif inference is not None or resources.placement_groups:
-            raise ValueError("combined Slime compatibility mode cannot own supplied inference resources")
+        if inference is None or inference.protocol != self.inference_protocol or not resources.placement_groups:
+            raise ValueError("Slime training requires an existing inference connection and model reservations")
         self._started = True
         self._bridge = start_bridge(
             self.args,
@@ -59,9 +52,9 @@ class SlimeTrainingService:
             actor_name=self.actor_name,
             namespace=self.namespace,
             preparation=self.preparation,
-            serving=serving,
-            placement_groups=placement_groups,
-            failure_listener=self if self.inference_protocol is not None else None,
+            serving=inference.control,
+            placement_groups=resources.placement_groups,
+            failure_listener=self,
         )
 
     def check_health(self) -> None:
@@ -84,8 +77,6 @@ class SlimeTrainingService:
             try:
                 ray.get(self._bridge.shutdown.remote(), timeout=90)
             except Exception:
-                if self.inference_protocol is None:
-                    raise
                 logging.getLogger(__name__).exception("Bridge shutdown failed; retiring its owned process groups")
             finally:
                 ray.kill(self._bridge, no_restart=True)

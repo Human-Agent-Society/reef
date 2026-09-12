@@ -206,7 +206,7 @@ class SlimeAlgorithm(ABC):
     # --- optional wire-surface declarations (consumed generically by the
     # reef_adapters layer via ``configure_reef_loss_args``) ---
     rollout_data_keys: tuple[str, ...] = ()
-    """Extra per-sample payload keys the rollout manager partitions across DP ranks."""
+    """Extra per-sample payload keys the training coordinator partitions across DP ranks."""
     rollout_tensor_dtypes: Mapping[str, str] = {}
     """Payload keys to tensorize before training, as {key: "int"|"long"|"float32"}."""
     external_batch_keys: tuple[str, ...] = ()

@@ -14,14 +14,23 @@ from reef.runtime.executor import Executor, ExecutorConfig
 from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
 
 
-class SlimeInferenceControl:
-    """Borrow serving operations without acquiring the executor's lifecycle."""
+class SlimeInferenceWorker:
+    """Own the selected serving executor inside Reef's inference control actor."""
 
-    def __init__(self, serving: Executor) -> None:
+    def __init__(self, args: Any, pg: Any) -> None:
+        serving = Executor.create(
+            ExecutorConfig(
+                backend=rollout_executor_class(args),
+                options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
+            )
+        )
         self._serving = serving
+        self._args = args
+        self._prepared = False
+        self._closed = False
 
     def check_health(self) -> None:
-        self._serving.rpc(0, "check_health", timeout=30)
+        self._serving.check_health(timeout=30)
 
     def inference_url(self) -> Any:
         return self._serving.rpc(0, "inference_url", timeout=14_400)
@@ -53,8 +62,18 @@ class SlimeInferenceControl:
     def onload_kv(self) -> Any:
         return self._serving.rpc(0, "onload_kv", timeout=14_400)
 
-    def prepare_training_connection(self) -> Any:
-        return self._serving.rpc(0, "prepare_training_connection", timeout=14_400)
+    def prepare_training_connection(self) -> None:
+        """Fence serving and release shared memory before training workers exist."""
+        self._serving.rpc(0, "prepare_training_connection", timeout=14_400)
+        if not self._prepared and getattr(self._args, "check_weight_update_equal", False):
+            self.check_weights("snapshot")
+            self.check_weights("reset_tensors")
+        if getattr(self._args, "offload_rollout", False):
+            # Every trainer attachment needs the whole allocation, even when
+            # later LoRA steps keep the frozen base resident. The engine skips
+            # regions already released by an earlier attachment attempt.
+            self.offload()
+        self._prepared = True
 
     def recover_updatable_engines(self) -> Any:
         return self._serving.rpc(0, "recover_updatable_engines", timeout=14_400)
@@ -70,38 +89,6 @@ class SlimeInferenceControl:
 
     def check_weights(self, action: str) -> Any:
         return self._serving.rpc(0, "check_weights", args=(action,), timeout=14_400)
-
-
-class SlimeInferenceWorker(SlimeInferenceControl):
-    """Own the selected serving executor inside a separately managed Ray actor."""
-
-    def __init__(self, args: Any, pg: Any) -> None:
-        serving = Executor.create(
-            ExecutorConfig(
-                backend=rollout_executor_class(args),
-                options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
-            )
-        )
-        super().__init__(serving)
-        self._args = args
-        self._prepared = False
-        self._closed = False
-
-    def check_health(self) -> None:
-        self._serving.check_health(timeout=30)
-
-    def prepare_training_connection(self) -> None:
-        """Fence serving and release shared memory before training workers exist."""
-        super().prepare_training_connection()
-        if not self._prepared and getattr(self._args, "check_weight_update_equal", False):
-            self.check_weights("snapshot")
-            self.check_weights("reset_tensors")
-        if getattr(self._args, "offload_rollout", False):
-            # Every trainer attachment needs the whole allocation, even when
-            # later LoRA steps keep the frozen base resident. The engine skips
-            # regions already released by an earlier attachment attempt.
-            self.offload()
-        self._prepared = True
 
     def shutdown(self) -> None:
         if self._closed:

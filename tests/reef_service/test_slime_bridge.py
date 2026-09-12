@@ -31,7 +31,13 @@ def _local_ray_get(monkeypatch):
     monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
 
 
-def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failure(monkeypatch):
+def _inference_connection(events=None):
+    events = [] if events is None else events
+    inference = SimpleNamespace(prepare_training_connection=_RemoteMethod(lambda: events.append("attach-paused")))
+    return bridge.RayExecutor.from_workers([inference])
+
+
+def test_bridge_shutdown_releases_only_training_even_on_failure(monkeypatch):
     from threading import Lock
 
     from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
@@ -63,17 +69,16 @@ def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failu
     actor._operation_lock = Lock()
     actor._critic_group = group("critic")
     actor._group = group("actor")
-    actor._rollout_manager = manager
-    actor._manager_executor = bridge.RayExecutor.from_workers([manager])
+    actor._inference_executor = bridge.RayExecutor.from_workers([manager])
     monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("rollout-kill"))
     with pytest.raises(RuntimeError, match="critic unavailable"):
         actor.shutdown()
     actor.shutdown()
-    assert events == ["critic", "actor", "rollout-dispose", "rollout-kill"]
+    assert events == ["critic", "actor"]
     assert actor._phase == "stopped"
 
 
-def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tmp_path, monkeypatch):
+def test_bridge_startup_failure_releases_only_training_groups(tmp_path, monkeypatch):
     import importlib
 
     from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
@@ -90,25 +95,17 @@ def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tm
     def group(name):
         train_group = object.__new__(SlimeTrainGroup)
         train_group._executor = Executor(name)
+        train_group.train_parallel_config = {"dp_size": 1}
         return train_group
 
     actor_group = group("actor")
     critic_group = group("critic")
 
-    class Dispose:
-        def remote(self):
-            events.append("dispose")
-
-    manager = SimpleNamespace(dispose=Dispose())
     pg = SimpleNamespace(id="shared")
     monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill"))
     pg_module = importlib.import_module("ray.util.placement_group")
     monkeypatch.setattr(pg_module, "remove_placement_group", lambda target: events.append("remove-pg"))
-    monkeypatch.setattr(
-        bridge, "create_placement_groups", lambda args: {"actor": (pg, [], []), "rollout": (pg, [], [])}
-    )
-    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: manager)
     monkeypatch.setattr(bridge, "create_train_groups", lambda *args: (actor_group, critic_group))
 
     class FailingBridgeActor:
@@ -123,8 +120,12 @@ def test_bridge_startup_failure_releases_rollout_and_owned_shared_reservation(tm
         bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False, "reasons": []}
     )
     with pytest.raises(RuntimeError, match="bridge creation failed"):
-        bridge.start_bridge(_bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")))
-    assert events == ["critic", "actor", "dispose", "kill", "remove-pg"]
+        bridge.start_bridge(
+            _bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron")),
+            serving=_inference_connection(),
+            placement_groups={"actor": (pg, [], []), "rollout": (pg, [], [])},
+        )
+    assert events == ["critic", "actor"]
 
 
 def _row(
@@ -395,7 +396,7 @@ class _FakeRolloutManager:
         # interleaved. ``lifecycle_calls`` stays the rollout only view.
         self.lifecycle_calls: list[str] = []
         self.timeline = timeline if timeline is not None else []
-        self.prepare_external_train_data = _RemoteMethod(self._prepare)
+        self.prepare_external_train_data = self._prepare
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
         self.get_runtime_load_ids = _RemoteMethod(
             lambda: self.versions if self.versions is not None else [self.version]
@@ -485,7 +486,12 @@ class _DurableGroup(_FakeGroup):
 def _durable_actor(tmp_path):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager(["packed"]), save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(
+        group,
+        _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
+        save_hf_template=template,
+    )
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
     return actor, group, payload
@@ -506,6 +512,7 @@ def _sao_durable_actor(
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=resolve_loss_family("sao").bind(),
         critic_group=_FakeGroup(),
@@ -557,6 +564,7 @@ def _loss_family_durable_actor(
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=loss_runtime,
     )
@@ -612,7 +620,11 @@ def _bridge_args(**overrides) -> SimpleNamespace:
 def test_bridge_health_reports_start_rollout_id() -> None:
     group = _FakeGroup()
     actor = bridge.TrainBridgeActorImpl(
-        group, _FakeRolloutManager(["packed"]), save_hf_template=None, start_rollout_id=3
+        group,
+        _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
+        save_hf_template=None,
+        start_rollout_id=3,
     )
 
     health = actor.health()
@@ -623,7 +635,9 @@ def test_bridge_health_reports_start_rollout_id() -> None:
 @pytest.mark.unit
 def test_bridge_reports_the_serving_runtime_load_id() -> None:
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager([]), save_hf_template=None)
+    actor = bridge.TrainBridgeActorImpl(
+        group, _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
+    )
 
     assert actor.serving_runtime_load_id() == "v1"
 
@@ -633,25 +647,27 @@ def test_durable_bridge_syncs_training_weights_before_reporting_ready(tmp_path) 
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
 
-    actor = bridge.TrainBridgeActorImpl(group, _FakeRolloutManager([]), save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(
+        group, _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=template
+    )
 
     assert group.update_calls == 1
     assert actor.health()["ok"] is True
 
 
 @pytest.mark.unit
-def test_bridge_packs_with_rollout_manager_then_passes_list_of_boxes(tmp_path, monkeypatch) -> None:
+def test_bridge_packs_locally_then_passes_list_of_boxes(tmp_path, monkeypatch) -> None:
     packed = [Box("dp-0"), Box("dp-1")]
     manager = _FakeRolloutManager(packed)
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
 
-    def fake_ray_get(value, **kwargs):
-        del kwargs
-        return packed if value == "packed-ref" else value
+    def prepare(data):
+        manager.calls.append(data)
+        return packed
 
-    monkeypatch.setattr(bridge.ray, "get", fake_ray_get)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    manager.prepare_external_train_data = prepare
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
@@ -674,7 +690,9 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
     timeline: list[str] = []
     group = _DurableGroup(template, timeline=timeline)
     manager = _FakeRolloutManager(["packed"], timeline=timeline)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template, colocate=True)
+    actor = bridge.TrainBridgeActorImpl(
+        group, manager, batch_processor=manager, save_hf_template=template, colocate=True
+    )
     payload = _payload(loss="tttd", advantages=[0.25, -0.25, 0.0])
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
@@ -722,7 +740,9 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
 @pytest.mark.unit
 def test_bridge_checkpoint_requires_save_template() -> None:
-    actor = bridge.TrainBridgeActorImpl(_FakeGroup(), _FakeRolloutManager([]), save_hf_template=None)
+    actor = bridge.TrainBridgeActorImpl(
+        _FakeGroup(), _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
+    )
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
@@ -752,7 +772,7 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
     payload = _payload(loss="sft")
@@ -787,7 +807,7 @@ def test_pause_barrier_failure_leaves_checkpoint_replayable(tmp_path) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
@@ -831,7 +851,7 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
     group._actor_handlers[0].version = "engine:7"
     manager = _FakeRolloutManager(["packed"])
     manager.version = "engine:7"
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     payload = {
         "samples": [
             _row(
@@ -870,7 +890,7 @@ def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_
     group._actor_handlers[0].version = "engine:7"
     manager = _FakeRolloutManager(["packed"])
     manager.version = "engine:7"
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     payload = {
         "samples": [_row("mixed", tokens=(10, 20, 21), loss_mask=(1, 1), log_probs=(-0.1, -0.2))],
         "rollout_ids": [0],
@@ -1133,6 +1153,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         storage_config=RetentionConfig(max_storage_bytes=pair_bytes),
         megatron_save_root=str(megatron_root),
@@ -1191,10 +1212,15 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
 
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
-            bridge.TrainBridgeActorImpl(group, _FakeRolloutManager(["packed"]), save_hf_template=template)
+            bridge.TrainBridgeActorImpl(
+                group,
+                _FakeRolloutManager(["packed"]),
+                batch_processor=_FakeRolloutManager(["packed"]),
+                save_hf_template=template,
+            )
     else:
         manager = _FakeRolloutManager(["packed"])
-        actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+        actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
         result = _execute_and_update_weights(actor, payload)
         assert result.outcome == "complete"
         assert result.training_job_id is not None
@@ -1264,7 +1290,7 @@ def test_weight_update_recovery_converges_disagreeing_engines_before_startup_val
             manager.versions = ["engine:3", "engine:3"]
 
     group = RecoveryGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
 
     assert manager.lifecycle_calls[:2] == ["pause_generation", "recover_engines"]
     assert group.update_force_full == [True]
@@ -1301,6 +1327,7 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         loss_runtime=resolve_loss_family("sao").bind(),
         critic_group=_FakeGroup(),
@@ -1341,7 +1368,7 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
 def test_serving_republication_preserves_current_runtime_load_id() -> None:
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=None)
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
 
@@ -1691,8 +1718,8 @@ def test_start_bridge_rejects_ambiguous_marker_before_creating_workers(tmp_path,
     )
     monkeypatch.setattr(
         bridge,
-        "create_placement_groups",
-        lambda args: pytest.fail("workers started before marker validation"),
+        "create_train_groups",
+        lambda *args: pytest.fail("workers started before marker validation"),
     )
     args = _bridge_args(save_hf=template, save=str(root / "megatron"))
 
@@ -1713,8 +1740,8 @@ def test_start_bridge_rejects_blocked_storage_before_creating_workers(tmp_path, 
     )
     monkeypatch.setattr(
         bridge,
-        "create_placement_groups",
-        lambda args: pytest.fail("workers started before storage validation"),
+        "create_train_groups",
+        lambda *args: pytest.fail("workers started before storage validation"),
     )
     args = _bridge_args(
         save_hf=str(root / "hf" / "{rollout_id}"),
@@ -1726,12 +1753,15 @@ def test_start_bridge_rejects_blocked_storage_before_creating_workers(tmp_path, 
 
 
 @pytest.mark.unit
-def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("transport", ["object-store", "nixl"])
+def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch, transport) -> None:
     events = []
-    rollout_manager = object()
+    connection = _inference_connection()
     monkeypatch.setenv("HOME", str(tmp_path))
 
     class Group:
+        train_parallel_config = {"dp_size": 1}
+
         def update_weights(self):
             events.append("update_weights")
 
@@ -1747,12 +1777,6 @@ def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> 
             return "bridge-handle"
 
     monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
-    monkeypatch.setattr(
-        bridge,
-        "create_rollout_manager",
-        lambda args, pg: rollout_manager,
-    )
     monkeypatch.setattr(
         bridge,
         "create_train_groups",
@@ -1770,12 +1794,18 @@ def test_start_bridge_delegates_initial_sync_to_actor(tmp_path, monkeypatch) -> 
         hf_checkpoint="/models/hf",
         load="/models/megatron",
         start_rollout_id=2,
+        rollout_data_transport=transport,
     )
 
-    result = bridge.start_bridge(args)
+    result = bridge.start_bridge(args, serving=connection, placement_groups={"rollout": "rollout-pg"})
 
     assert result == "bridge-handle"
-    assert events[0] == ("options", {"name": "reef-train-bridge", "namespace": "reef"})
+    options = {"name": "reef-train-bridge", "namespace": "reef"}
+    if transport == "nixl":
+        options["enable_tensor_transport"] = True
+    assert events[0] == ("options", options)
+    assert events[1][1][1] is connection.workers[0]
+    assert events[1][2]["batch_processor"].train_parallel_config == {"dp_size": 1}
     assert events[1][0] == "remote"
     assert events[1][1][0] is group
     assert isinstance(events[1][2]["storage_config"], RetentionConfig)
@@ -1827,9 +1857,12 @@ def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeyp
             return "bridge-handle"
 
     monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(bridge, "create_placement_groups", lambda args: {"rollout": "rollout-pg"})
-    monkeypatch.setattr(bridge, "create_rollout_manager", lambda args, pg: object())
-    monkeypatch.setattr(bridge, "create_train_groups", lambda args, pgs, manager: (object(), None))
+    connection = _inference_connection()
+    monkeypatch.setattr(
+        bridge,
+        "create_train_groups",
+        lambda args, pgs, manager: (SimpleNamespace(train_parallel_config={"dp_size": 1}), None),
+    )
     monkeypatch.setattr(bridge, "TrainBridgeActor", ActorClass())
     monkeypatch.setattr(
         bridge.CheckpointStorage,
@@ -1842,14 +1875,19 @@ def test_start_bridge_ships_a_resolvable_loss_family_reference(tmp_path, monkeyp
     )
 
     try:
-        assert bridge.start_bridge(args, loss_family="external_family") == "bridge-handle"
+        assert (
+            bridge.start_bridge(
+                args, loss_family="external_family", serving=connection, placement_groups={"rollout": "pg"}
+            )
+            == "bridge-handle"
+        )
         assert events[0]["loss_family"] == "external_family_pkg:ALGORITHM"
     finally:
         unregister_loss_family("external_family")
 
     # A registered family without a dotted reference ships under its own
     # name, and an explicit dotted reference passes through untouched.
-    bridge.start_bridge(args, loss_family="sft")
+    bridge.start_bridge(args, loss_family="sft", serving=connection, placement_groups={"rollout": "pg"})
     assert events[1]["loss_family"] == "sft"
 
 
@@ -2023,20 +2061,14 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
 
 
 def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_path, monkeypatch):
-    from reef.runtime.executor.uniproc import UniProcExecutor
-
     events = []
-    serving = UniProcExecutor.from_workers(
-        [SimpleNamespace(prepare_training_connection=lambda: events.append("attach-paused"))]
-    )
-    manager = SimpleNamespace(dispose=SimpleNamespace(remote=lambda: events.append("dispose-batch")))
+    serving = _inference_connection(events)
     allocation = SimpleNamespace(id="borrowed")
     groups = {"actor": (allocation, [], []), "rollout": (allocation, [], [])}
 
     def unexpected(*args, **kwargs):
         pytest.fail("attaching training must not allocate another model group")
 
-    monkeypatch.setattr(bridge, "create_placement_groups", unexpected)
     import importlib
 
     pg_module = importlib.import_module("ray.util.placement_group")
@@ -2044,25 +2076,18 @@ def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_
     monkeypatch.setattr(bridge.ray, "is_initialized", lambda: True)
     monkeypatch.setattr(bridge.ray, "kill", lambda target, **kwargs: events.append("kill-batch"))
 
-    def create_manager(args, pg, *, serving):
-        assert serving is connection
-        assert pg is groups["rollout"]
-        return manager
-
     def fail_training(args, placements, batch_manager):
         assert placements is groups
-        assert batch_manager is manager
+        assert batch_manager is serving.workers[0]
         assert events == ["attach-paused"]
         raise RuntimeError("training startup failed")
 
-    connection = serving
-    monkeypatch.setattr(bridge, "create_rollout_manager", create_manager)
     monkeypatch.setattr(bridge, "create_train_groups", fail_training)
     monkeypatch.setattr(bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False})
     args = _bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron"))
     with pytest.raises(RuntimeError, match="training startup failed"):
         bridge.start_bridge(args, serving=serving, placement_groups=groups)
-    assert events == ["attach-paused", "dispose-batch", "kill-batch"]
+    assert events == ["attach-paused"]
     assert groups["actor"][0] is allocation
     assert serving._closed is False
 
@@ -2071,7 +2096,7 @@ def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_
 def test_republication_reconciles_cached_pause_and_preserves_identity_after_failure():
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=None)
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
     actor._generation_paused = True
@@ -2100,7 +2125,7 @@ def test_standalone_republication_cannot_publish_checkpointed_candidate(tmp_path
     template = str(tmp_path / "checkpoint-{rollout_id}")
     manager = _FakeRolloutManager([])
     group = _DurableGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     checkpoint = Path(template.format(rollout_id=0))
     checkpoint.mkdir()
     write_marker(
@@ -2138,7 +2163,7 @@ def test_committed_restart_reasserts_pause_before_checkpoint_transfer(tmp_path):
     )
     manager = _FakeRolloutManager([])
     group = _DurableGroup(template)
-    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     assert group.update_generation_management == [False]
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     assert actor.health()["phase"] == "serving"
@@ -2173,8 +2198,16 @@ def test_startup_reconstruction_failure_aborts_supplied_inference(tmp_path, fail
 
         group.restore_runtime_load_id_for_republication = fail_restore
     with pytest.raises(RuntimeError):
-        bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+        bridge.TrainBridgeActorImpl(group, manager, batch_processor=manager, save_hf_template=template)
     assert terminated
     assert manager.lifecycle_calls == ["pause_generation"]
     assert group.update_calls == 0
     assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "COMPLETE"
+
+
+def test_direct_bridge_start_requires_deployment_owned_inference(tmp_path, monkeypatch):
+    monkeypatch.setattr(bridge.CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False})
+    monkeypatch.setattr(bridge, "create_train_groups", lambda *args: pytest.fail("training started without inference"))
+    args = _bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron"))
+    with pytest.raises(ValueError, match="use the model driver"):
+        bridge.start_bridge(args)

@@ -49,6 +49,7 @@ from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
     configure_rollout_runtime,
@@ -276,19 +277,6 @@ def _scenario_staleness_admission(
     )
 
 
-def create_placement_groups(args):
-    """Load Slime's heavyweight placement-group module only in the driver."""
-    from slime.ray.placement_group import create_placement_groups as implementation
-
-    return implementation(args)
-
-
-def create_rollout_manager(args, placement_group, *, serving: Executor | None = None):
-    from reef.train.slime_backend.reef_adapters.rollout.manager import create_rollout_manager as implementation
-
-    return implementation(args, placement_group, serving=serving)
-
-
 def create_train_groups(args, placement_groups, rollout_manager):
     from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
     from reef.train.slime_backend.reef_adapters.train_groups import create_train_groups as implementation
@@ -360,8 +348,9 @@ class TrainBridgeActorImpl:
     def __init__(
         self,
         actor_group,
-        rollout_manager,
+        inference,
         *,
+        batch_processor: TrainingBatchProcessor,
         save_hf_template: str | None,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
@@ -386,8 +375,8 @@ class TrainBridgeActorImpl:
         # saves would land in the actor's Megatron tree (path collision), so
         # the bridge falls back to the historical save-actor-only behavior.
         self._critic_save_root = critic_save_root if critic_group is not None else None
-        self._rollout_manager = rollout_manager
-        self._manager_executor = RayExecutor.from_workers([rollout_manager])
+        self._inference_executor = RayExecutor.from_workers([inference])
+        self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
         self._colocate = colocate
         # A LoRA deployment serves one adapter per scenario: the scenarios
@@ -404,7 +393,7 @@ class TrainBridgeActorImpl:
         # publication makes room through it, restart recovery reloads through
         # it, and its status is what the serving side reports.
         self._residency = AdapterResidencyManager(adapter_capacity) if lora else None
-        self._adapter_engine = _RolloutAdapterEngine(rollout_manager) if lora else None
+        self._adapter_engine = _RolloutAdapterEngine(inference) if lora else None
         # A LoRA run never rewrites the base, so releasing it copies identical
         # bytes to the host and back on every step. Opt in and the training
         # step releases only what it invalidates. Whether the base can stay
@@ -460,20 +449,20 @@ class TrainBridgeActorImpl:
             # The previous fan-out may have updated only some engines. Recover
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
-            self._manager_call("recover_updatable_engines")
+            self._inference_call("recover_updatable_engines")
         if self._colocate and self._lora:
             # Cold startup releases everything before training initializes.
             # Restore the frozen base before registering scenario adapters,
             # including runs that only release KV/graphs on later steps.
-            self._manager_call("onload_weights")
+            self._inference_call("onload_weights")
         if marker_status == "REJECTING":
             if marker is None:
                 raise RuntimeError("REJECTING marker status has no marker payload")
             self._publication.reject(str(marker["job_id"]))
             marker["status"] = marker_status = "REJECTED"
             self._pause_generation(reconcile=True)
-        self._inference_url = self._manager_call("inference_url")
-        versions = self._manager_call("get_runtime_load_ids")
+        self._inference_url = self._inference_call("inference_url")
+        versions = self._inference_call("get_runtime_load_ids")
         if not versions or (marker_status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
             raise RuntimeError(f"serving engines disagree at bridge startup: {versions!r}")
         # An UPDATING_WEIGHTS marker explicitly means this observation may be mixed.
@@ -511,10 +500,10 @@ class TrainBridgeActorImpl:
             # engines boot released: give them their weights and KV back
             # before the first request.
             if self._colocate:
-                self._manager_call("onload_weights")
-                self._manager_call("onload_kv")
+                self._inference_call("onload_weights")
+                self._inference_call("onload_kv")
             self._runtime_load_id = str(self._group.sync_serving_runtime_load_id())
-            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
+            observed = [str(value) for value in self._inference_call("get_runtime_load_ids")]
             if not observed or set(observed) != {self._runtime_load_id}:
                 raise RuntimeError(f"serving engines disagree after version sync: {observed!r}")
         self._publication.finish_recovery(marker, self._runtime_load_id)
@@ -549,7 +538,7 @@ class TrainBridgeActorImpl:
             return
         self._pause_generation()
         if self._colocate:
-            self._manager_call("onload_weights")
+            self._inference_call("onload_weights")
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(
@@ -588,7 +577,7 @@ class TrainBridgeActorImpl:
         return scenario
 
     def shutdown(self) -> None:
-        """Release training and rollout workers before retiring their bridge."""
+        """Release training workers; inference and reservations belong to Reef."""
         with self._operation_lock:
             if self._closed:
                 return
@@ -601,12 +590,6 @@ class TrainBridgeActorImpl:
                         group.release()
                     except Exception as exc:
                         errors.append(exc)
-            try:
-                self._manager_executor.rpc(0, "dispose", timeout=60)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                RayExecutor.from_workers([self._rollout_manager], owned=True).shutdown()
             if errors:
                 raise errors[0]
 
@@ -716,8 +699,8 @@ class TrainBridgeActorImpl:
         # never released fails, because SGLang resumes by removing the tag
         # from the set release added it to.
         if self._release_tags is None:
-            self._manager_call("onload_weights")
-        self._manager_call("onload_kv")
+            self._inference_call("onload_weights")
+        self._inference_call("onload_kv")
         self._continue_generation()
 
     def acknowledge_training_commit(self, training_job_id: str) -> None:
@@ -756,7 +739,7 @@ class TrainBridgeActorImpl:
         try:
             self._phase = "publishing"
             if self._colocate and self._release_tags is None:
-                self._manager_call("onload_weights")
+                self._inference_call("onload_weights")
             if residency is not None and scenario is not None:
                 residency.make_room(scenario, self._adapter_engine, supersede=True)
             self._group.update_weights(
@@ -764,9 +747,9 @@ class TrainBridgeActorImpl:
                 force_full=force_full,
             )
             if self._colocate:
-                self._manager_call("onload_kv")
+                self._inference_call("onload_kv")
             raw_version = str(self._get(self._group.async_get_rank0_runtime_load_id()))
-            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
+            observed = [str(value) for value in self._inference_call("get_runtime_load_ids")]
             if not observed or set(observed) != {raw_version}:
                 raise RuntimeError(f"serving engines disagree after update: {observed!r}")
             if residency is not None and scenario is not None:
@@ -774,7 +757,7 @@ class TrainBridgeActorImpl:
         except AdapterEvictionFailed:
             self._phase = "weight_sync_failed"
             with suppress(Exception):
-                self._manager_call("terminate_updatable_engines")
+                self._inference_call("terminate_updatable_engines")
             raise
         except AdapterCapacityExhausted:
             # Admission was refused before any weight left the trainer.
@@ -783,24 +766,24 @@ class TrainBridgeActorImpl:
         except BaseException:
             self._phase = "weight_sync_failed"
             with suppress(Exception):
-                self._manager_call("terminate_updatable_engines")
+                self._inference_call("terminate_updatable_engines")
             raise
         self._runtime_load_id = raw_version
         return raw_version
 
-    def _manager_call(self, method: str, *args: Any) -> Any:
-        return self._manager_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
+    def _inference_call(self, method: str, *args: Any) -> Any:
+        return self._inference_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
 
     def _pause_generation(self, *, reconcile: bool = False) -> None:
         if self._generation_paused and not reconcile:
             return
-        self._manager_call("pause_generation_for_update")
+        self._inference_call("pause_generation_for_update")
         self._generation_paused = True
 
     def _continue_generation(self) -> None:
         if not self._generation_paused:
             return
-        self._manager_call("continue_generation_after_update")
+        self._inference_call("continue_generation_after_update")
         self._generation_paused = False
 
     @staticmethod
@@ -927,10 +910,9 @@ class _SlimeTrainingBackend:
             # scoring failure leaves no partial state: the job
             # stays retryable under the same identity.
             algorithm_metrics = bridge._algo.prepare_rollout(rollout_data)
-            # RolloutManager owns Slime's DP schedule and
-            # object-store transport contract. It returns one Box
-            # per DP rank, exactly what the training actors expect.
-            packed = bridge._manager_call("prepare_external_train_data", rollout_data)
+            # Local batch processing preserves Slime's DP schedule and
+            # object-store transport: one Box per training DP rank.
+            packed = bridge._batch_processor.prepare_external_train_data(rollout_data)
             yield _SlimePreparedTrainingJob(
                 bridge,
                 checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
@@ -974,7 +956,7 @@ class _SlimePreparedTrainingJob:
             # Retract requests before releasing weights/KV/graphs. Reef's
             # publication commit gate decides when those requests can resume.
             bridge._pause_generation()
-            bridge._manager_call("offload", bridge._release_tags)
+            bridge._inference_call("offload", bridge._release_tags)
         if self.checkpoint.scenario is not None:
             bridge._group.activate_scenario(self.checkpoint.scenario)
         training = bridge._algo.train(
@@ -1022,7 +1004,7 @@ class _SlimeWeightPublisher:
 
     def recover(self, marker: Mapping[str, Any] | None) -> None:
         bridge = self._bridge
-        bridge._manager_call("recover_updatable_engines")
+        bridge._inference_call("recover_updatable_engines")
         if bridge._history is not None:
             # Replacement engines boot without adapters. Restore other scenarios
             # before this job's complete transfer, and release dead residency slots.
@@ -1062,7 +1044,7 @@ class _SlimeWeightPublisher:
         self._bridge._restore_incumbent_serving()
 
     def abort(self) -> None:
-        self._bridge._manager_call("terminate_updatable_engines")
+        self._bridge._inference_call("terminate_updatable_engines")
 
 
 # A concurrent health call must remain responsive while a training RPC is
@@ -1131,11 +1113,9 @@ def start_bridge(
     and ``save_hf`` is a checkpoint path template. The Reef service connects
     with the same ``actor_name`` and ``namespace``.
 
-    ``serving`` and ``placement_groups`` are supplied together by the deployment
-    owner. The training manager borrows both; bridge failure/shutdown releases
-    training workers and the batch manager only. Without them, direct callers
-    retain the existing combined lifecycle. ``preparation`` is the result of
-    ``prepare_bridge`` for these same arguments before resource allocation.
+    ``serving`` and ``placement_groups`` must be supplied by Reef's deployment
+    owner. This function creates training workers only. ``preparation`` carries
+    the preflight result for the same arguments before resource allocation.
     """
     prepared = preparation or prepare_bridge(args, retention=retention, loss_family=loss_family)
     retention = prepared.retention
@@ -1144,38 +1124,32 @@ def start_bridge(
     colocate = bool(getattr(args, "colocate", False))
     from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
 
-    if (serving is None) != (placement_groups is None):
-        raise ValueError("supplied inference requires its coordinated placement groups")
-    if not ray.is_initialized():
-        ray.init(namespace=namespace)
-    owns_placement_groups = placement_groups is None
-    pgs = create_placement_groups(args) if placement_groups is None else placement_groups
-    rollout_manager = None
+    if serving is None or placement_groups is None:
+        raise ValueError("start_bridge requires Reef-owned inference and placement groups; use the model driver")
+    if not isinstance(serving, RayExecutor) or len(serving.workers) != 1:
+        raise ValueError("Slime training requires one Ray inference control actor")
+    inference = serving.workers[0]
     actor_group = None
     critic_group = None
     try:
-        if serving is not None:
-            # The owner has retired the previous trainer. Fence its replacement
-            # before creating workers, including healthy-engine reattachment.
-            serving.rpc(0, "prepare_training_connection", timeout=_TRAIN_RPC_TIMEOUT_S)
-        rollout_manager = (
-            create_rollout_manager(args, pgs["rollout"])
-            if serving is None
-            else create_rollout_manager(args, pgs["rollout"], serving=serving)
-        )
+        serving.rpc(0, "prepare_training_connection", timeout=_TRAIN_RPC_TIMEOUT_S)
         # Loss families that train a value model need the critic actor group;
         # the others discard it. ``args.use_critic`` comes from the explicit
         # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
         # so keeping the group here is what wires the value model into the bridge
         # schedule rather than leaving it uninitialized.
-        actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
+        actor_group, critic_group = create_train_groups(args, placement_groups, inference)
         if failure_listener is not None:
             for group in (actor_group, critic_group):
                 if group is not None:
                     group.executor.register_failure_listener(failure_listener)
-        return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
+        options: dict[str, Any] = {"name": actor_name, "namespace": namespace}
+        if getattr(args, "rollout_data_transport", "object-store") == "nixl":
+            options["enable_tensor_transport"] = True
+        return TrainBridgeActor.options(**options).remote(
             actor_group,
-            rollout_manager,
+            inference,
+            batch_processor=TrainingBatchProcessor(args, actor_group.train_parallel_config),
             save_hf_template=args.save_hf,
             start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
             storage_config=retention,
@@ -1198,19 +1172,4 @@ def start_bridge(
             if group is not None:
                 with suppress(Exception):
                     group.release()
-        if rollout_manager is not None:
-            with suppress(Exception):
-                RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)
-            with suppress(Exception):
-                RayExecutor.from_workers([rollout_manager], owned=True).shutdown()
-        # Supplied reservations belong to the deployment owner.
-        if owns_placement_groups:
-            with suppress(Exception):
-                from ray.util.placement_group import remove_placement_group
-
-                released = set()
-                for placement in pgs.values():
-                    if placement is not None and placement[0] is not None and placement[0].id not in released:
-                        released.add(placement[0].id)
-                        remove_placement_group(placement[0])
         raise

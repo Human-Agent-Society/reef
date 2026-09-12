@@ -17,7 +17,7 @@ def rollout_executor_class(args):
 class SlimeRayRolloutExecutor(DelegatingExecutor):
     """One control rank manages Slime's multi-node SGLang engine groups.
 
-    The control object lives in the rollout manager; engine processes are Ray
+    The control object lives in the inference control actor; engine processes are Ray
     actors allocated by Slime. Alternative executors implement the same control
     RPC vocabulary without inheriting Slime's server or actor classes.
     """
