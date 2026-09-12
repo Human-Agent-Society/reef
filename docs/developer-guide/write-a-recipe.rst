@@ -235,6 +235,17 @@ Other deployment definitions, including in-process integrations, may keep their
 existing entrypoint and need not implement ``create_model_plan``. These startup
 contracts do not replace training, weight-update or version-commit contracts.
 
+A backend with checkpoint-first candidate training can use
+``reef.runtime.training_job.publication.TrainingPublication`` for publication
+and commit gating. Implement ``WeightPublisher`` with engine barriers and direct
+weight transport. Its ``publish`` must verify the returned runtime load ID on
+all engines and must leave requests paused. Serialize coordinator calls with
+training and shutdown; acknowledge only after Reef has durably committed its
+head. Reuse the runtime's durable marker format, while keeping checkpoint
+production and any backend-specific tensor/adapter restoration in the backend.
+See `commit-gated weight publication <executors.rst#commit-gated-weight-publication>`__
+for retry and startup-recovery requirements.
+
 ``training.backend`` selects one definition for both process preparation and
 HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
 ``reef.train.deployment`` and live under the owning integration:

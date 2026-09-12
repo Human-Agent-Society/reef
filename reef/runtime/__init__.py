@@ -11,7 +11,9 @@ evaluates it before choosing activation or rejection.
 by a scenario and its recipe. It has no file paths or persistence behavior.
 
 ``deployment`` defines the minimal resource, inference-connection and training
-component contracts used by Reef's model driver.
+component contracts used by Reef's model driver. ``training_job`` owns durable
+publication markers and commit-gated inference resumption; concrete backends
+provide checkpoint production and weight transport.
 
 Training batches and candidate evaluation contracts come from ``reef.core``.
 This package never imports ``reef.train``.

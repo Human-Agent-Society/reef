@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.training_job import durable_io
+from reef.runtime.training_job import durable_io
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 

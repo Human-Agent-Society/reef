@@ -439,10 +439,42 @@ Reef owner.
 
 Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
-Publication, commit acknowledgement and generation resumption remain in the
-existing bridge state machine. Moving that coordination, independent component
-restarts and validating additional real backend combinations remain in
+Checkpoint production and backend-specific startup recovery remain in the
+Slime bridge. Independent component restarts, training-step orchestration and
+validation of additional real backend combinations remain in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+
+Commit-gated weight publication
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``reef.runtime.training_job.publication.TrainingPublication`` owns the shared
+checkpoint-publication transaction. The Slime bridge delegates publication,
+candidate rejection, commit acknowledgement and startup commit gating to it.
+``WeightPublisher`` supplies concrete engine operations: pause, recover,
+transfer and verify weights, resume, restore incumbent resources and abort.
+Tensors continue to travel directly from training workers to inference engines.
+
+Publication crosses the pause barrier before persisting ``UPDATING_WEIGHTS``.
+A failed pause leaves ``CHECKPOINT`` retryable. A partial transfer or failed
+publication record leaves ``UPDATING_WEIGHTS`` and prevents serving; retry
+recovers engines and forces a full transfer. Success records ``READY_TO_COMMIT``
+while requests remain paused. Reef must durably commit its head before calling
+``acknowledge_training_commit``. The coordinator persists ``HEAD_COMMITTED``
+before resuming and then records ``COMPLETE``. A failed resume can retry from
+``HEAD_COMMITTED`` without training or transferring weights again.
+
+Startup uses the same commit gate after restoring checkpoint tensors. Previously
+published jobs must retain their runtime load ID, and an uncommitted candidate
+stays paused after recovery. Rejection persists ``REJECTING`` before restoring
+incumbent resources and records ``REJECTED`` only on success. Plain LoRA capacity
+refusal preserves unrelated engines; failed eviction follows engine recovery.
+
+Marker and durable JSON helpers now live in ``reef.runtime.training_job``.
+The on-disk filename, checkpoint-derived location, fields and transitions are
+unchanged. Slime retains checkpoint layout, optimizer execution, scenario/LoRA
+restoration and tensor transport. Callers serialize the shared publication
+coordinator with training and shutdown; it does not allocate a new actor or own
+an independent process lifecycle.
 
 The service stack keeps the runtime alive through service shutdown, publishes
 the actual address as ``reef.ray_address`` in runtime snapshots, and supplies

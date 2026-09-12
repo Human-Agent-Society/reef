@@ -16,12 +16,12 @@ import pytest
 from slime.utils.misc import Box
 
 from reef.runtime.base import TrainingJobResult
+from reef.runtime.training_job.marker import read_marker, transition_marker, write_marker
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.preparation import _build_payload
-from reef.train.slime_backend.reef_adapters.training_job.marker import read_marker, transition_marker, write_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig, _allocated_bytes
 from reef.train.types import GroupedPolicyBatch, PolicyBatch, PolicySample
 
@@ -58,6 +58,7 @@ def test_bridge_shutdown_attempts_both_training_groups_and_rollout_even_on_failu
 
     manager = SimpleNamespace(dispose=Dispose())
     actor = object.__new__(bridge.TrainBridgeActorImpl)
+    actor._publication = bridge.TrainingPublication(None, bridge._SlimeWeightPublisher(actor))
     actor._closed = False
     actor._operation_lock = Lock()
     actor._critic_group = group("critic")

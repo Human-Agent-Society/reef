@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import os
 
+from reef.runtime.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
     require_lora_distributed_request_schema,
     require_lora_tensor_request_schema,
 )
 from reef.train.slime_backend.reef_adapters.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
-from reef.train.slime_backend.reef_adapters.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"

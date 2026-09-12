@@ -37,6 +37,17 @@ from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import Executor, resolve
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.runtime.training_job.marker import (
+    marker_checkpoint_result,
+    marker_disposition,
+    marker_path,
+    marker_result,
+    marker_rollouts,
+    read_marker,
+    transition_marker,
+    write_marker,
+)
+from reef.runtime.training_job.publication import TrainingPublication
 from reef.surface.adapter import parse_adapter_name
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -50,16 +61,6 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.training_job.marker import (
-    marker_checkpoint_result,
-    marker_disposition,
-    marker_path,
-    marker_result,
-    marker_rollouts,
-    read_marker,
-    transition_marker,
-    write_marker,
-)
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
@@ -451,7 +452,10 @@ class TrainBridgeActorImpl:
             )
         else:
             self._algo = _NullAlgorithm()
-        self._phase = "serving"
+        self._publication = TrainingPublication(
+            marker_path(save_hf_template) if save_hf_template is not None else None,
+            _SlimeWeightPublisher(self),
+        )
         self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None
@@ -481,9 +485,8 @@ class TrainBridgeActorImpl:
         if marker_status == "REJECTING":
             if marker is None:
                 raise RuntimeError("REJECTING marker status has no marker payload")
-            self._restore_incumbent_serving()
-            transition_marker(self._marker_path(), marker, "REJECTED")
-            marker_status = "REJECTED"
+            self._publication.reject(str(marker["job_id"]))
+            marker["status"] = marker_status = "REJECTED"
         self._inference_url = self._manager_call("inference_url")
         versions = self._manager_call("get_runtime_load_ids")
         if not versions or (marker_status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
@@ -506,17 +509,7 @@ class TrainBridgeActorImpl:
             self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
         if self._history is not None:
             self._recover_scenario_adapters(marker)
-        if marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED"}:
-            try:
-                self._pause_generation()
-            except BaseException:
-                with suppress(Exception):
-                    self._manager_call("terminate_updatable_engines")
-                raise
-        if marker_status == "CHECKPOINT":
-            if marker is None:
-                raise RuntimeError("CHECKPOINT marker status has no marker payload")
-            transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
+        self._publication.prepare_recovery(marker)
         if self._save_hf_template is not None and marker_status != "REJECTED" and not (self._lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot SGLang. Publish actor weights before construction returns
@@ -540,37 +533,17 @@ class TrainBridgeActorImpl:
             observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
             if not observed or set(observed) != {self._runtime_load_id}:
                 raise RuntimeError(f"serving engines disagree after version sync: {observed!r}")
-        if recovered_runtime_load_id is not None and self._runtime_load_id != recovered_runtime_load_id:
-            raise RuntimeError(
-                "checkpoint republication changed runtime load ID "
-                f"{recovered_runtime_load_id!r} to {self._runtime_load_id!r}"
-            )
-        if marker is not None and marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "READY_TO_COMMIT",
-                runtime_load_id=self._runtime_load_id,
-            )
-            self._phase = "awaiting_commit"
-        elif marker_status == "READY_TO_COMMIT":
-            self._phase = "awaiting_commit"
-        elif marker is not None and marker_status == "HEAD_COMMITTED":
-            self._continue_generation()
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "COMPLETE",
-                commit_acknowledged=True,
-            )
-            self._phase = "serving"
-        else:
-            self._phase = "serving"
-            # Per-scenario recovery paused the engines itself; a serving
-            # bridge must not leave them paused.
-            self._continue_generation()
+        self._publication.finish_recovery(marker, self._runtime_load_id)
 
-    def _recover_scenario_adapters(self, marker: dict[str, Any] | None) -> None:
+    @property
+    def _phase(self) -> str:
+        return self._publication.phase
+
+    @_phase.setter
+    def _phase(self, phase: str) -> None:
+        self._publication.phase = phase
+
+    def _recover_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
         """Re-register every scenario's committed adapter after a restart.
 
         The Megatron checkpoint restores only the slot's last occupant; the
@@ -768,102 +741,26 @@ class TrainBridgeActorImpl:
             return marker_checkpoint_result(marker)
 
     def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
-        """Publish one checkpointed job while keeping generation paused."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
+        """Delegate durable publication ordering to Reef's shared coordinator."""
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            status = marker["status"]
-            if status in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
-                return marker_result(marker)
-            if status not in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
-                raise RuntimeError(f"training job is {status}; operator recovery required")
-
-            recovering = status == "UPDATING_WEIGHTS"
-            try:
-                if recovering:
-                    self._manager_call("recover_updatable_engines")
-                    if self._history is not None:
-                        # The failed publication terminated every updatable
-                        # engine, so recovery restarted them from the frozen
-                        # base with no adapters resident. Align residency with
-                        # that — a slot leaked against the dead engine must
-                        # not read as exhausted capacity forever — and reload
-                        # the other scenarios' committed adapters before this
-                        # scenario's forced full publication.
-                        self._require_residency().reconcile((), self._adapter_engine)
-                        self._recover_scenario_adapters(marker)
-                self._pause_generation()
-                if self._history is not None:
-                    # A restart between checkpoint and publication may have
-                    # left another scenario in the slot.
-                    self._group.activate_scenario(str(marker["scenario"]))
-                if not recovering:
-                    # Persist uncertainty only after every engine has crossed
-                    # the pause barrier. A pause failure has not changed any
-                    # weights and remains safely replayable from CHECKPOINT.
-                    transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
-                published = self._update_serving(force_full=recovering, scenario=self._marker_scenario(marker))
-                if self._history is not None:
-                    from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-
-                    scenario = str(marker["scenario"])
-                    self._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
-                transition_marker(
-                    self._marker_path(),
-                    marker,
-                    "READY_TO_COMMIT",
-                    runtime_load_id=published,
+            publication = self._publication.publish(training_job_id)
+            marker = publication.marker
+            if publication.published:
+                rollout_id = int(marker["rollout_id"])
+                self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
+                self._completed_train_steps += 1
+                self._last_train_rollout_id = rollout_id
+                recorded_train_metrics = marker.get("train_metrics")
+                self._last_train_metrics = (
+                    dict(recorded_train_metrics) if isinstance(recorded_train_metrics, Mapping) else {}
                 )
-                self._phase = "awaiting_commit"
-            except AdapterCapacityExhausted:
-                # Capacity failures are classified in _update_serving, which
-                # terminates the engines only for the eviction one an engine
-                # refused (#61). A plain refusal published nothing and touched
-                # no engine, so escalating here would terminate engines it
-                # never involved and then fail identically on the next
-                # attempt; only more slots resolve it (#65).
-                traceback.print_exc(file=sys.stderr)
-                raise
-            except BaseException:
-                self._phase = "weight_sync_failed"
-                with suppress(Exception):
-                    self._manager_call("terminate_updatable_engines")
-                traceback.print_exc(file=sys.stderr)
-                raise
-
-            rollout_id = int(marker["rollout_id"])
-            self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
-            self._completed_train_steps += 1
-            self._last_train_rollout_id = rollout_id
-            recorded_train_metrics = marker.get("train_metrics")
-            self._last_train_metrics = (
-                dict(recorded_train_metrics) if isinstance(recorded_train_metrics, Mapping) else {}
-            )
             return marker_result(marker)
 
     def reject_training_candidate(self, training_job_id: str) -> None:
         """Finish a checkpointed job without changing the serving weights."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            status = marker["status"]
-            if status == "REJECTED":
-                return
-            if status == "CHECKPOINT":
-                transition_marker(self._marker_path(), marker, "REJECTING")
-            elif status != "REJECTING":
-                raise RuntimeError(f"cannot reject training job {training_job_id!r} from {status}")
-            self._restore_incumbent_serving()
-            transition_marker(self._marker_path(), marker, "REJECTED")
-            rollout_id = int(marker["rollout_id"])
-            self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
-            self._phase = "serving"
+            marker = self._publication.reject(training_job_id)
+            self._next_rollout_id = max(self._next_rollout_id, int(marker["rollout_id"]) + 1)
 
     def _restore_incumbent_serving(self) -> None:
         if not self._colocate:
@@ -877,35 +774,9 @@ class TrainBridgeActorImpl:
         self._continue_generation()
 
     def acknowledge_training_commit(self, training_job_id: str) -> None:
-        """Resume paused requests only after Reef durably commits the new head."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
+        """Resume requests only through Reef's durable commit gate."""
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            if marker["status"] == "COMPLETE":
-                if marker.get("commit_acknowledged") is not True:
-                    marker["commit_acknowledged"] = True
-                    write_marker(self._marker_path(), marker)
-                return
-            if marker["status"] == "READY_TO_COMMIT":
-                transition_marker(
-                    self._marker_path(),
-                    marker,
-                    "HEAD_COMMITTED",
-                    commit_acknowledged=True,
-                )
-            if marker["status"] != "HEAD_COMMITTED":
-                raise RuntimeError(f"cannot acknowledge training job {training_job_id!r} from {marker['status']}")
-            self._continue_generation()
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "COMPLETE",
-                commit_acknowledged=True,
-            )
-            self._phase = "serving"
+            self._publication.acknowledge(training_job_id)
 
     def _run_train_step(
         self,
@@ -1182,6 +1053,46 @@ class TrainBridgeActorImpl:
             raise RuntimeError(f"ambiguous training job {marker['job_id']}")
         self._next_rollout_id = max(self._next_rollout_id, marker["rollout_id"] + 1)
         return marker
+
+
+class _SlimeWeightPublisher:
+    """Slime transport and colocated/LoRA engine operations, without commit policy."""
+
+    def __init__(self, bridge: TrainBridgeActorImpl) -> None:
+        self._bridge = bridge
+
+    def recover(self, marker: Mapping[str, Any]) -> None:
+        bridge = self._bridge
+        bridge._manager_call("recover_updatable_engines")
+        if bridge._history is not None:
+            # Replacement engines boot without adapters. Restore other scenarios
+            # before this job's complete transfer, and release dead residency slots.
+            bridge._require_residency().reconcile((), bridge._adapter_engine)
+            bridge._recover_scenario_adapters(marker)
+
+    def pause(self) -> None:
+        self._bridge._pause_generation()
+
+    def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str:
+        bridge = self._bridge
+        if bridge._history is not None:
+            bridge._group.activate_scenario(str(marker["scenario"]))
+        published = bridge._update_serving(force_full=force_full, scenario=bridge._marker_scenario(marker))
+        if bridge._history is not None:
+            from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
+
+            scenario = str(marker["scenario"])
+            bridge._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
+        return published
+
+    def resume(self) -> None:
+        self._bridge._continue_generation()
+
+    def restore_incumbent(self) -> None:
+        self._bridge._restore_incumbent_serving()
+
+    def abort(self) -> None:
+        self._bridge._manager_call("terminate_updatable_engines")
 
 
 # A concurrent health call must remain responsive while a training RPC is
