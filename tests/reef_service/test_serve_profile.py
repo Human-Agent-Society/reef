@@ -61,11 +61,12 @@ def test_the_serve_parser_takes_recipe_and_model_and_the_service_parser_still_do
     args, extras = build_serve_parser().parse_known_args(
         ["--recipe", "harness-evolve", "--model", "ollama/gemma4:26b", "--port", "8901"]
     )
-    assert (args.config, args.recipe, args.model, extras) == (
+    assert (args.config, args.recipe, args.model, args.port, extras) == (
         None,
         "harness-evolve",
         "ollama/gemma4:26b",
-        ["--port", "8901"],
+        8901,
+        [],
     )
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--recipe", "harness-evolve"])

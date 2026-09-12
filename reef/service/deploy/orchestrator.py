@@ -42,7 +42,7 @@ from reef.service.deploy.config import (
     validate_services,
 )
 from reef.service.deploy.execution import service_executor_config, service_executor_selection
-from reef.service.deploy.settings import build_parser
+from reef.service.deploy.settings import build_parser, normalize_service_config, service_override
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -76,22 +76,30 @@ def _parse_overrides(extras: list[str]) -> dict[str, str]:
         if not token.startswith("--"):
             raise InvalidOverrideError(f"unrecognized argument: {token!r}")
         key = token[2:]
+        has_value = True
         if "=" in key:
             key, value = key.split("=", 1)
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = value
             i += 1
         elif i + 1 < len(extras) and not extras[i + 1].startswith("--"):
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = extras[i + 1]
+            value = extras[i + 1]
             i += 2
         else:
-            if not key:
-                raise InvalidOverrideError(f"override is missing a name: {token!r}")
-            overrides[key] = "true"
+            value = "true"
+            has_value = False
             i += 1
+        if not key:
+            raise InvalidOverrideError(f"override is missing a name: {token!r}")
+        declared = service_override(key, value)
+        if declared is not None:
+            argument, _ = declared
+            if not has_value and argument.kind != "bool":
+                raise InvalidOverrideError(f"argument --{key} requires a value")
+            if has_value and f"--{key}" in argument.negative_flags:
+                raise InvalidOverrideError(f"argument --{key} does not take a value")
+        # Preserve the last occurrence's position as well as its value, so
+        # a repeated spelling can still override an intervening alias.
+        overrides.pop(key, None)
+        overrides[key] = value
     return overrides
 
 
@@ -111,7 +119,11 @@ def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[
     """
     config = copy.deepcopy(config)
     for key, raw_value in overrides.items():
-        if "." not in key:
+        declared = service_override(key, raw_value)
+        if declared is not None:
+            argument, raw_value = declared
+            key = ".".join(argument.path)
+        if "." not in key and declared is None:
             key = f"reef.{key}"
         parts = key.split(".")
         node: dict[str, Any] = config
@@ -123,7 +135,9 @@ def _apply_overrides(config: dict[str, Any], overrides: dict[str, str]) -> dict[
                 prefix = ".".join(parts[: index + 1])
                 raise InvalidOverrideError(f"override path {prefix!r} is not a section")
             node = existing
-        node[parts[-1]] = _coerce_value(raw_value)
+        # Public fields are converted by argparse, just like YAML values.
+        # Keep generic recipe/custom-stack overrides on their legacy path.
+        node[parts[-1]] = raw_value if declared is not None else _coerce_value(raw_value)
     return config
 
 
@@ -416,6 +430,17 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
     if overrides:
         config = _apply_overrides(config, overrides)
     config = interpolate_environment(config, resolved_config_path)
+    cli_paths = frozenset(
+        declared[0].path
+        for key, value in (overrides or {}).items()
+        if (declared := service_override(key, value)) is not None
+    )
+    try:
+        normalized_config = normalize_service_config(config, cli_paths=cli_paths)
+    except ValueError as exc:
+        raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
+    settings_changed = normalized_config != config
+    config = normalized_config
     # Structure first, so a bad stack fails before a model download, a run dir, or a child process.
     services = validate_services(config, resolved_config_path)
     # Resolved against the operator's config, before any override copy
@@ -427,7 +452,7 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
             sys.path.append(str(source_root))
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
-    if overrides or paths_changed:
+    if overrides or paths_changed or settings_changed:
         temp_config_path = _write_override_config(config)
         resolved_config_path = temp_config_path
     run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
@@ -529,11 +554,11 @@ def _prepare_profile(recipe: str, model: str | None, environ: MutableMapping[str
     environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
 
 
-def build_serve_parser() -> argparse.ArgumentParser:
+def build_serve_parser(*, service_arguments: bool = True) -> argparse.ArgumentParser:
     """``reef serve``'s own arguments: the service child's parser plus the profile and model flags.
 
     Only the launcher takes them; ``python -m reef.service`` still refuses ``--recipe``."""
-    parser = build_parser()
+    parser = build_parser(service_arguments=service_arguments)
     parser.add_argument(
         "--recipe",
         default=None,
@@ -550,7 +575,12 @@ def build_serve_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = build_serve_parser()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--help" in argv or "-h" in argv:
+        build_serve_parser().parse_args(argv)
+    # Discover the file/profile without applying defaults or converting
+    # public values before YAML and environment references are available.
+    parser = build_serve_parser(service_arguments=False)
     args, extras = parser.parse_known_args(argv)
     try:
         overrides = _parse_overrides(extras)
