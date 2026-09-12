@@ -1,24 +1,23 @@
 Choose a recipe for agent learning
 ==================================
 
-A recipe is picked along two axes: the **task type** your workload is, and
-**what the recipe evolves**, model weights or the agent harness. Recipes that
-evolve model weights need GPUs and the training stack in `Train model weights
-from agent feedback <evolve-your-model.rst>`__; harness recipes need only a
-model endpoint.
+Pick a recipe by the **task type** of your workload and by **what it
+evolves**, model weights or the agent harness. Weight recipes need GPUs and
+the training stack in `Train model weights from agent feedback
+<evolve-your-model.rst>`__, while harness recipes need only a model endpoint.
 
-Reefine ships with ``reef-infra``; the other implementations live in the
+Reefine ships with ``reef-infra``, and the other implementations live in the
 repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
 ``recipes/basic/`` is the record-only starting stack and stays outside the
 catalog, and beta recipes join it once they publish learning results. The root
 `README <../../README.md#recipes-and-examples>`__ and `recipes/README.md
-<../../recipes/README.md>`__ present the same catalog.
+<../../recipes/README.md>`__ show the same catalog.
 
 Scientific discovery
 --------------------
 
-One hard problem, repeated attempts, and a measurable objective. The recipe
-trains on the attempts it generates itself, at test time.
+One hard problem with a measurable objective, where the recipe makes repeated
+attempts and trains on those attempts at test time.
 
 .. list-table::
    :header-rows: 1
@@ -39,14 +38,11 @@ trains on the attempts it generates itself, at test time.
      - `Guidance-TTT <../../recipes/tttd/examples/guidance_ttt/README.md>`__
      - `Guidance-TTT on TriMul <../../recipes/tttd/examples/guidance_ttt/README.md>`__
 
-No recipe evolves the harness for this task type yet. CORAL TTT targets it and
-is in beta; see the beta recipes below.
-
 Continual learning on a task stream
 -----------------------------------
 
-Independent tasks, each scored by a verifier. The recipe learns from the
-feedback on each task as the stream goes by.
+A stream of independent tasks that a verifier scores one by one, so the recipe
+learns from each score before the next task arrives.
 
 .. list-table::
    :header-rows: 1
@@ -80,8 +76,8 @@ feedback on each task as the stream goes by.
 Learning from usage
 -------------------
 
-Real interaction with no explicit score, or delayed feedback. The recipe reads
-the signal out of the traffic it already serves.
+Real interaction where no one reports a score or the feedback arrives late, so
+the recipe reads the signal out of the traffic it already serves.
 
 .. list-table::
    :header-rows: 1
@@ -120,7 +116,7 @@ point deployments configured with different recipes at the same repository.
        batch-size: 1
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
-Reefine ships in Reef; other learning methods are imported only when selected. The ``recipes/`` tree in
+Reefine ships in Reef, and other learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
@@ -152,4 +148,4 @@ Beta recipes
 `coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
 **beta** until complete, reproducible learning results are published. Both
 live under ``recipes/beta/coral/``. Integration and smoke tests validate the
-wiring; they do not establish learning performance.
+wiring but do not establish learning performance.

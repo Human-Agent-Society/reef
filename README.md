@@ -244,19 +244,19 @@ Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --mo
 ## Recipes and examples
 
 Pick a recipe by the **task type** of your workload and by **what it should
-evolve**: model weights or the agent harness. Recipes that evolve model
-weights need the GPU training stack; harness recipes need only a model
-endpoint. Each recipe below links to its guide, and each measured benchmark
-links to its results page; the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
-adds the code and example for every recipe. Reefine ships with `reef-infra`;
-the other implementations live in this repository's `recipes/` cookbook, are
-selected by dotted class reference, and do not ship in the Reef wheel.
+evolve**, model weights or the agent harness. Weight recipes need the GPU
+training stack, while harness recipes need only a model endpoint. Each recipe
+below links to its guide and each measured benchmark links to its results
+page, and the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
+adds the code and example for every recipe. Reefine ships with `reef-infra`,
+and the other implementations live in this repository's `recipes/` cookbook,
+selected by dotted class reference and not shipped in the Reef wheel.
 
 | Task type | Task shape | Evolves the model | Evolves the harness | Standard benchmarks |
 |---|---|---|---|---|
-| Scientific discovery | One hard problem, repeated attempts, a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing (n = 26, 32)](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
-| Continual learning on a task stream | A stream of independent tasks, each scored by a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), [Terminal-Bench 30-task subset](recipes/meta_harness/RESULTS.md). |
-| Learning from usage | Real interaction with no explicit score, or delayed feedback | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Measured: the [OpenClaw-RL simulated student](recipes/openclawrl/examples/openclawrl/README.md#results). |
+| Scientific discovery | Repeated attempts at one hard problem with a measurable objective | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing (n = 26, 32)](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
+| Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md), [IMOAnswerBench](recipes/sao/examples/sao/README.md#results), [Terminal-Bench 30-task subset](recipes/meta_harness/RESULTS.md). |
+| Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Measured: the [OpenClaw-RL simulated student](recipes/openclawrl/examples/openclawrl/README.md#results). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
 outside the catalog. For a small walkthrough of feedback, candidate edits, and

@@ -11,28 +11,24 @@ pip install -e .
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 (`run.py`).
 
-The catalog below groups recipes by the **task type** they serve, then by
-**what they evolve**: model weights or the agent harness. Recipes that evolve
-model weights need the GPU training stack; harness recipes need only a model
-endpoint. Reefine ships with `reef-infra`; every other recipe here is a
-cookbook package. [Basic](#basic) is the record-only starting stack and stays
-outside the catalog, and [beta recipes](#beta-recipes) join it once they
-publish learning results. The root [README](../README.md#recipes-and-examples)
-and the [recipes guide](../docs/user-guide/recipes.rst) present the same
-catalog.
+The catalog below groups recipes by the **task type** they serve and by
+**what they evolve**, model weights or the agent harness. Weight recipes need
+the GPU training stack, while harness recipes need only a model endpoint.
+Reefine ships with `reef-infra` and every other recipe here is a cookbook
+package. [Basic](#basic) is the record-only starting stack and stays outside
+the catalog, and [beta recipes](#beta-recipes) join it once they publish
+learning results. The root [README](../README.md#recipes-and-examples) and the
+[recipes guide](../docs/user-guide/recipes.rst) show the same catalog.
 
 ## Scientific discovery
 
-One hard problem, repeated attempts, and a measurable objective. The recipe
-trains on the attempts it generates itself, at test time.
+One hard problem with a measurable objective, where the recipe makes repeated
+attempts and trains on those attempts at test time.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
 | TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [TTT-Discover on circle packing and Erdős minimum overlap](tttd/examples/tttd/README.md) |
 | Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [Guidance-TTT on TriMul](tttd/examples/guidance_ttt/README.md) |
-
-No recipe evolves the harness for this task type yet. CORAL TTT targets it and
-is in [beta](#beta-recipes).
 
 [TTT-Discover](tttd/examples/tttd/README.md) separates a normal, service-agnostic rollout
 harness from its Reef adapter. It demonstrates grouped discovery rollouts,
@@ -47,8 +43,8 @@ to Reef's training or inference-token capture path.
 
 ## Continual learning on a task stream
 
-Independent tasks, each scored by a verifier. The recipe learns from the
-feedback on each task as the stream goes by.
+A stream of independent tasks that a verifier scores one by one, so the recipe
+learns from each score before the next task arrives.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
@@ -81,17 +77,16 @@ improvements and commits the population with Reef's serving state. See the
 [Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
 
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
-turns a person's plain-language request into a harness update: the served
-model proposes the change, the gate scores it, and code extensions wait for a
+turns a plain-language request into a harness update. The served model
+proposes the change and the gate scores it, and code extensions wait for a
 promote before they run. `reef serve --recipe reefine` starts its profile
-without a checkout; the [Reefine tutorial](../tutorials/reefine/README.md)
-records a bug-fix flow, a research loop, and a measurement of which requests
-won the gate.
+without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
+records a bug-fix flow, a research loop, and which requests won the gate.
 
 ## Learning from usage
 
-Real interaction with no explicit score, or delayed feedback. The recipe reads
-the signal out of the traffic it already serves.
+Real interaction where no one reports a score or the feedback arrives late, so
+the recipe reads the signal out of the traffic it already serves.
 
 | Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
@@ -104,8 +99,7 @@ personal-agent experiment as a reef-eval task stream: a simulated student brings
 reef, and the metric is the number of sessions before the agent's answers
 match the student's taste. The method (session correlation, PRM judging, the
 hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
-contains only the harness side: the task stream, the Hermes agent wrapper,
-the student service, and the analysis scripts.
+contains only the harness side.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
@@ -167,7 +161,7 @@ the verifier reward back at trial end (`harness/`), the loop written out
 [CORAL TTT](beta/coral/README.md) and its
 [`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
 under `recipes/beta/coral/` until complete, reproducible learning results are
-published. Integration and smoke tests validate the wiring; they do not
+published. Integration and smoke tests validate the wiring but do not
 establish learning performance. See the recipe's
 [validation instructions](beta/coral/README.md#verifying-without-gpus).
 
