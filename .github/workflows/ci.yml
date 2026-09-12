@@ -138,6 +138,10 @@ jobs:
       # install the submodule pin so coordinated protocol changes are tested
       # before the matching client release reaches PyPI.
       - run: uv pip install --system --python python ./third_party/reef-client
+      # Subprocess tests change directory and clear PYTHONPATH. Install Reef
+      # so their selected recipes can import it outside the source checkout.
+      # Dependencies are prepared above; keep the CPU-only stack unchanged.
+      - run: uv pip install --system --python python --no-deps --editable .
       # Exercise the CPU-only Megatron LoRA helpers without making Torch a
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.

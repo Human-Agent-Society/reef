@@ -111,6 +111,17 @@ def interpolate_config(config: Mapping[str, Any], value: str) -> str:
     raise DeployConfigError("config interpolation exceeded 64 levels")
 
 
+def interpolate_config_values(config: Mapping[str, Any], value: Any) -> Any:
+    """Expand references in structured values without stringifying containers."""
+    if isinstance(value, str):
+        return interpolate_config(config, value)
+    if isinstance(value, Mapping):
+        return {key: interpolate_config_values(config, item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [interpolate_config_values(config, item) for item in value]
+    return value
+
+
 def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dict[str, Any]:
     """Read a config relative to the working directory; optionally defer interpolation."""
     path = Path(config_path).expanduser().resolve()

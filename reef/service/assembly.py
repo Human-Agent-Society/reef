@@ -150,10 +150,8 @@ def _training_recipe(
 ) -> Recipe:
     """Build a weight-training recipe on the Ray training runtime the settings name."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
-    # The recipe owns its config fields: service_config parses the recipe-owned
-    # slice of the flat reef section (rejecting keys no config field consumes)
-    # and from_environment resolves them, so this builder never names
-    # recipe-specific keys.
+    # Translate the legacy layout, then resolve the recipe fields once before
+    # connecting its runtime. Construction consumes those same resolved values.
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
     if settings.evaluation_settings is not None:
         recipe_config["evaluation"] = dict(settings.evaluation_settings)
@@ -168,7 +166,7 @@ def _training_recipe(
         connector=connector,
     )
     try:
-        return recipe_type.from_environment(env, config=recipe_config, runtime=runtime)
+        return recipe_type.from_resolved_config(recipe_config, resolved_recipe_data, environ=env, runtime=runtime)
     except BaseException:
         with suppress(Exception):
             runtime.shutdown()
@@ -191,13 +189,28 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
     if settings.evaluation_settings is not None:
         raise ValueError("the top-level evaluation section requires a weight-training recipe")
     if ":" in selected:
-        return build_recipe(
-            selected,
-            env,
-            config=_recipe_owned_settings(settings),
-            runtime=_upstream_runtime(settings),
+        config = _recipe_owned_settings(settings)
+        runtime_config = config.get("runtime")
+        runtime = (
+            RuntimeRegistry().build(
+                runtime_config,
+                model_path=settings.model_path or settings.upstream_model or "",
+                recipe_config=config,
+                environ=env,
+            )
+            if runtime_config
+            else _upstream_runtime(settings)
         )
-    return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
+        try:
+            return build_recipe(selected, env, config=config, runtime=runtime)
+        except BaseException:
+            if runtime is not None:
+                with suppress(Exception):
+                    runtime.shutdown()
+            raise
+    return build_named_recipe(
+        selected, env, default_runtime=_upstream_runtime(settings), preset_config=settings.preset_config
+    )
 
 
 def build_dispatcher(

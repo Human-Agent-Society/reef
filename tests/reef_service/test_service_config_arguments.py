@@ -160,7 +160,7 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
     assert settings.training_settings == {"global_batch_size": 2}
     assert settings.evaluation_settings == {"module": "example:Evaluator"}
     assert settings.wandb_config == {"enabled": False}
-    assert settings.recipe_settings["batch_size"] == "4"
+    assert settings.recipe_settings["batch_size"] == 4
     assert "batch_size" not in parse_service_arguments(normalized)
     assert normalized["execution"] == {"services": {"backend": "uni"}}
 

@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.recipe.base import Recipe
-from reef.recipe.config import load_recipe_config
+from reef.recipe.config import load_recipe_config, recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.registry import RuntimeRegistry
@@ -72,6 +72,7 @@ def build_named_recipe(
     config_directory: str | Path | None = None,
     default_runtime: InferenceRuntime | None = None,
     runtime_registry: RuntimeRegistry | None = None,
+    preset_config: Mapping[str, Any] | None = None,
 ) -> Recipe:
     """Build the recipe a deployment names by its public name.
 
@@ -83,7 +84,9 @@ def build_named_recipe(
     runtime; without one the recipe gets ``default_runtime`` and may omit
     ``model.path`` to use that runtime's model. Dotted references are
     not names: they are operator configuration for :func:`build_recipe`, so a
-    name never triggers an import.
+    name never triggers an import. ``preset_config`` carries the already merged
+    preset when a deployment file is both the stack and named recipe, so CLI
+    overrides are not lost by reloading the original file.
     """
     if not RECIPE_NAME.fullmatch(name):
         raise RecipeConfigError(f"invalid recipe name {name!r}")
@@ -91,7 +94,7 @@ def build_named_recipe(
     configured = config_directory or values.get("REEF_RECIPE_CONFIG_DIR") or None
     directory = None if configured is None else Path(configured)
     path = None if directory is None else directory / f"{name}.yaml"
-    if path is None or not path.exists():
+    if preset_config is None and (path is None or not path.exists()):
         if name == "recipe":
             return build_recipe(name, values, runtime=default_runtime)
         available = {"recipe"}
@@ -101,7 +104,12 @@ def build_named_recipe(
             f"unknown deployment recipe {name!r}; available recipes: {', '.join(sorted(available))}"
         )
 
-    settings = load_recipe_config(path)
+    if preset_config is not None:
+        settings = recipe_config_from_mapping(preset_config)
+    elif path is not None:
+        settings = load_recipe_config(path)
+    else:
+        raise RecipeConfigError(f"recipe {name!r} has no configuration")
     runtime_config = settings["runtime"]
     if "path" not in settings["model"] and not runtime_config and default_runtime is not None:
         settings["model"]["path"] = getattr(default_runtime, "model_path", None)

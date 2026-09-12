@@ -36,6 +36,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import ReefError
 from reef.runtime.base import InferenceRuntime
 
@@ -56,6 +57,31 @@ class RuntimeFactory(ABC):
     """
 
     kind: str
+
+    def config_type(self) -> type | None:
+        """Return this adapter's settings dataclass, or None for legacy factories.
+
+        Declarations use ``reef.core.config.config_option``. Discovery reads
+        metadata only; it must not connect services or allocate resources.
+        """
+        return None
+
+    def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+        """Parse only this selected adapter's configuration."""
+        settings_type = self.config_type()
+        if settings_type is None:
+            return dict(config)
+        try:
+            values = parse_config_values(
+                config_arguments(settings_type, prefix=("runtime",)),
+                {key: value for key, value in config.items() if key != "type"},
+                environ=environ,
+            )
+            # Component constructors retain range and cross-field validation.
+            settings_type(**values)
+            return {"type": config.get("type", self.kind), **values}
+        except ValueError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
 
     @abstractmethod
     def __call__(
@@ -180,7 +206,10 @@ class RuntimeRegistry:
             available = ", ".join(self.names)
             raise RuntimeConfigError(f"unknown runtime type {runtime_type!r}; available runtimes: {available}")
         recipe_context = {} if recipe_config is None else recipe_config
-        return factory(config, model_path, recipe_context, os.environ if environ is None else environ)
+        values = os.environ if environ is None else environ
+        if isinstance(factory, RuntimeFactory):
+            config = factory.parse_config(config, values)
+        return factory(config, model_path, recipe_context, values)
 
 
 def config_string(config: Mapping[str, Any], name: str) -> str:

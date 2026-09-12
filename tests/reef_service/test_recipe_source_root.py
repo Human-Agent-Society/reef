@@ -111,7 +111,7 @@ def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, 
     """End to end: a service started from an example directory imports the
     cookbook package without the launcher exporting ``PYTHONPATH``."""
     root, config_path = _checkout(tmp_path, package="probe_recipes")
-    (root / "probe_recipes" / "method.py").write_text("class Recipe: ...\n")
+    (root / "probe_recipes" / "method.py").write_text("from reef.recipe import Recipe\n")
     marker = tmp_path / "imported_from.txt"
     probe = "import probe_recipes.method as m, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(m.__file__)"
     config_path.write_text(

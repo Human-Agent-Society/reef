@@ -117,6 +117,33 @@ registry.
 
    reef serve -c path/to/my-method.yaml
 
+Declare each method setting once with ``config_field``:
+
+.. code:: python
+
+   from dataclasses import dataclass
+   from reef.recipe import WeightTrainingRecipe, config_field
+
+   @dataclass(frozen=True)
+   class MyMethodRecipe(WeightTrainingRecipe):
+       batch_size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
+       temperature: float = config_field(0.5, allow_nonfinite=False)
+       tags: tuple[str, ...] = config_field(())
+
+The shared parser reads annotations, defaults, help and environment fallback
+from these declarations. Supported types are ``str``, ``int``, ``float``,
+``bool``, ``tuple[str, ...]``, ``Mapping[str, Any]`` / ``dict[str, Any]``, and
+optional forms. Object fields can use ``config_field(default_factory=dict)``.
+Keep range and cross-field checks in ``__post_init__``. Do not repeat scalar
+conversion in the service layer or recipe hooks.
+
+``WeightTrainingRecipe.service_config`` translates the flat deployment layout
+and rejects unknown fields; it no longer converts scalar values. The service
+resolves those fields before connecting the runtime and passes them to
+``from_resolved_config``. ``from_environment`` uses that same resolution path
+for standalone recipe construction. Custom construction hooks should consume
+the resolved values; ``_recipe_kwargs`` continues to own non-field sections.
+
 Gate a candidate
 ~~~~~~~~~~~~~~~~
 

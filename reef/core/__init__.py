@@ -1,5 +1,8 @@
 """Shared value types, contracts, and root errors: the bottom of the dependency graph.
 
+``config`` holds field declarations and value parsing shared by service,
+recipe and runtime components; it does not discover or import components.
+
 Nothing here implements storage behavior or I/O. Record storage interfaces
 belong to ``reef.storage.records``; concrete record and artifact adapters build on the
 shared identities and wire types defined here.
