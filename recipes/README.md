@@ -26,10 +26,10 @@ catalog.
 One hard problem, repeated attempts, and a measurable objective. The recipe
 trains on the attempts it generates itself, at test time.
 
-| Recipe | Evolves | Code | Docs | Example and results |
+| Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
-| TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [example](tttd/examples/tttd/README.md) · [results](tttd/examples/tttd/README.md#formal-8x64-results) |
-| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [example](tttd/examples/guidance_ttt/README.md) · [results](tttd/examples/guidance_ttt/results/README.md) |
+| TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [TTT-Discover on circle packing and Erdős minimum overlap](tttd/examples/tttd/README.md) |
+| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [Guidance-TTT on TriMul](tttd/examples/guidance_ttt/README.md) |
 
 No recipe evolves the harness for this task type yet. CORAL TTT targets it and
 is in [beta](#beta-recipes).
@@ -50,12 +50,12 @@ to Reef's training or inference-token capture path.
 Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
-| Recipe | Evolves | Code | Docs | Example and results |
+| Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
-| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [example](sao/examples/sao/README.md) · [results](sao/examples/sao/README.md#results) |
-| GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [example](gepa/examples/aime/README.md) · [results](gepa/examples/aime/README.md#the-validation-contract) |
-| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [results](meta_harness/RESULTS.md) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [example](../tutorials/reefine/README.md) · [results](../tutorials/reefine/README.md#runs) |
+| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md) |
+| GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
+| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [Meta-Harness on Terminal-Bench](meta_harness/README.md) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
@@ -93,10 +93,10 @@ won the gate.
 Real interaction with no explicit score, or delayed feedback. The recipe reads
 the signal out of the traffic it already serves.
 
-| Recipe | Evolves | Code | Docs | Example and results |
+| Recipe | Evolves | Code | Docs | Example |
 |---|---|---|---|---|
-| OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [example](openclawrl/examples/openclawrl/README.md) · [results](openclawrl/examples/openclawrl/README.md#results) |
-| SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [example](skillclaw/README.md) · [results](skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary) |
+| OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
+| SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
 
 [OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
 personal-agent experiment as a reef-eval task stream: a simulated student brings

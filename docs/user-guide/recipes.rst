@@ -27,17 +27,17 @@ trains on the attempts it generates itself, at test time.
      - Evolves
      - Code
      - Docs
-     - Example and results
+     - Example
    * - TTT-Discover
      - model weights
      - ``recipes/tttd/``
      - `TTT-Discover <recipes/tttd.rst>`__
-     - `example <../../recipes/tttd/examples/tttd/README.md>`__ · `results <../../recipes/tttd/examples/tttd/README.md#formal-8x64-results>`__
+     - `TTT-Discover on circle packing and Erdős minimum overlap <../../recipes/tttd/examples/tttd/README.md>`__
    * - Guidance-TTT
      - guidance-model weights; the executor stays frozen
      - ``recipes/tttd/``
      - `Guidance-TTT <../../recipes/tttd/examples/guidance_ttt/README.md>`__
-     - `example <../../recipes/tttd/examples/guidance_ttt/README.md>`__ · `results <../../recipes/tttd/examples/guidance_ttt/results/README.md>`__
+     - `Guidance-TTT on TriMul <../../recipes/tttd/examples/guidance_ttt/README.md>`__
 
 No recipe evolves the harness for this task type yet. CORAL TTT targets it and
 is in beta; see the beta recipes below.
@@ -55,27 +55,27 @@ feedback on each task as the stream goes by.
      - Evolves
      - Code
      - Docs
-     - Example and results
+     - Example
    * - SAO
      - model weights
      - ``recipes/sao/``
      - `SAO <recipes/sao.rst>`__
-     - `example <../../recipes/sao/examples/sao/README.md>`__ · `results <../../recipes/sao/examples/sao/README.md#results>`__
+     - `SAO on IMOAnswerBench <../../recipes/sao/examples/sao/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``
      - `GEPA <recipes/gepa.rst>`__
-     - `example <../../recipes/gepa/examples/aime/README.md>`__ · `results <../../recipes/gepa/examples/aime/README.md#the-validation-contract>`__
+     - `GEPA on AIME 2025 <../../recipes/gepa/examples/aime/README.md>`__
    * - Meta-Harness
      - harness: complete compositions
      - ``recipes/meta_harness/``
      - `Meta-Harness <../../recipes/meta_harness/README.md>`__
-     - `results <../../recipes/meta_harness/RESULTS.md>`__
+     - `Meta-Harness on Terminal-Bench <../../recipes/meta_harness/README.md>`__
    * - Reefine
      - harness: skills, rules, agent commands, and pi extensions
      - ``reef/recipe/reefine/``
      - `Reefine <recipes/reefine.rst>`__
-     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__
+     - `Reefine on reef-pi <../../tutorials/reefine/README.md>`__
 
 Learning from usage
 -------------------
@@ -90,17 +90,17 @@ the signal out of the traffic it already serves.
      - Evolves
      - Code
      - Docs
-     - Example and results
+     - Example
    * - OpenClaw-RL
      - model weights
      - ``recipes/openclawrl/``
      - `OpenClaw-RL <recipes/openclawrl.rst>`__
-     - `example <../../recipes/openclawrl/examples/openclawrl/README.md>`__ · `results <../../recipes/openclawrl/examples/openclawrl/README.md#results>`__
+     - `OpenClaw-RL on the GSM8K homework stream <../../recipes/openclawrl/examples/openclawrl/README.md>`__
    * - SkillClaw
      - harness skill pool
      - ``recipes/skillclaw/``
      - `SkillClaw <recipes/skillclaw.rst>`__
-     - `example <../../recipes/skillclaw/README.md>`__ · `results <../../recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary>`__
+     - `SkillClaw on WildClawBench <../../recipes/skillclaw/README.md>`__
 
 How a recipe is selected
 ------------------------
