@@ -10,14 +10,14 @@ import yaml
 from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides
-from reef.service.deploy.component_config import (
+from reef.service.deploy.config_utils import DeployConfigError, load_config
+from reef.service.deploy.deployment_config import (
     component_config_arguments,
     normalize_component_config,
     normalize_component_layout,
     translate_layout,
     translate_references,
 )
-from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 

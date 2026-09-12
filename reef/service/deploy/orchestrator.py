@@ -42,13 +42,6 @@ from reef.service.deploy.cli import (
     native_override,
     object_override_path,
 )
-from reef.service.deploy.component_config import (
-    component_config_arguments,
-    normalize_component_config,
-    normalize_component_layout,
-    translate_layout,
-    translate_references,
-)
 from reef.service.deploy.config_utils import (
     PROJECT_ROOT,
     DeployConfigError,
@@ -57,6 +50,13 @@ from reef.service.deploy.config_utils import (
     interpolate_environment,
     load_config,
     recipe_source_root,
+)
+from reef.service.deploy.deployment_config import (
+    component_config_arguments,
+    normalize_component_config,
+    normalize_component_layout,
+    translate_layout,
+    translate_references,
 )
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths

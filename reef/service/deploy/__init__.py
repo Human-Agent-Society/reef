@@ -9,7 +9,7 @@ readiness and cleanup machinery. HTTP assembly lives in :mod:`reef.service.assem
 Module responsibilities:
     config_utils: YAML loading, environment interpolation and recipe source paths.
     service_config: Typed shared settings consumed by HTTP app assembly.
-    component_config: Selected component schemas, public layout and validation.
+    deployment_config: Selected component schemas, public layout and validation.
     cli: CLI help, dotted override syntax and precedence.
     inference / training: Component-specific process and runtime assembly.
     execution: Process definition validation and executor selection.

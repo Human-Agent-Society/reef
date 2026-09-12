@@ -20,8 +20,8 @@ from reef.runtime.executor.config import executor_settings
 from reef.runtime.registry import RuntimeFactory
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.component_config import component_config_arguments, normalize_component_config
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
+from reef.service.deploy.deployment_config import component_config_arguments, normalize_component_config
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 
@@ -388,7 +388,11 @@ def test_profile_can_omit_its_runtime_with_an_empty_object(extension):
 
 
 def test_versioned_recipe_layout_uses_selected_schema(extension):
-    from reef.service.deploy.component_config import normalize_component_layout, translate_layout, translate_references
+    from reef.service.deploy.deployment_config import (
+        normalize_component_layout,
+        translate_layout,
+        translate_references,
+    )
 
     config = translate_layout(
         {

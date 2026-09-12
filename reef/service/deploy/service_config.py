@@ -284,7 +284,7 @@ def parse_service_arguments(
     of the earlier adapter; precedence is already present in the mapping.
     """
     if "schema-version" in config:
-        from reef.service.deploy.component_config import translate_layout
+        from reef.service.deploy.deployment_config import translate_layout
 
         config = translate_layout(config)
     arguments = service_config_arguments()
@@ -310,7 +310,7 @@ def normalize_service_config(
     no Reef HTTP child at all.
     """
     if "schema-version" in config:
-        from reef.service.deploy.component_config import translate_layout
+        from reef.service.deploy.deployment_config import translate_layout
 
         config = translate_layout(config)
     values = parse_service_arguments(config, cli_paths=cli_paths)
@@ -352,7 +352,7 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
 def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     """Translate the config's ``reef`` section into HTTP service settings."""
     if "schema-version" in config:
-        from reef.service.deploy.component_config import (
+        from reef.service.deploy.deployment_config import (
             component_config_arguments,
             normalize_component_layout,
             translate_layout,

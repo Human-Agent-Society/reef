@@ -17,7 +17,7 @@ import yaml
 from reef.core.config import ConfigArgument
 from reef.core.errors import DeployConfigError
 from reef.runtime.executor.arguments import normalize_native_options
-from reef.service.deploy.component_config import component_config_arguments, deployment_config_arguments
+from reef.service.deploy.deployment_config import component_config_arguments, deployment_config_arguments
 from reef.service.deploy.service_config import service_config_arguments, service_override
 
 _DESCRIPTION = """reef serve — connect an external provider or start a configured stack.

@@ -264,8 +264,9 @@ Deployment modules
   recipe source packages. It does not download models or validate process graphs.
 * ``service_config.py`` declares shared HTTP, storage and runtime fields and
   converts effective values into ``ServiceConfig`` for app assembly.
-* ``component_config.py`` loads selected recipe/runtime declarations, translates
-  the versioned public layout and validates component values.
+* ``deployment_config.py`` declares ``DeploymentConfig`` defaults, loads selected
+  recipe/runtime declarations, translates the versioned public layout and
+  validates component values.
 * ``cli.py`` builds help and applies dotted command-line overrides before shared
   type conversion. CLI values take precedence over YAML.
 * ``inference.py`` assembles provider or local inference processes and resolves

@@ -26,7 +26,9 @@ _MISSING = object()
 
 
 @dataclass(frozen=True)
-class DeploymentSettings:
+class DeploymentConfig:
+    """Deployment-wide defaults; selected components declare their own fields."""
+
     run_dir: str = field(
         default=".reef/run",
         metadata=config_metadata("Service log directory.", path=("run_dir",), public_path=("reef", "run_dir")),
@@ -40,7 +42,7 @@ class DeploymentSettings:
 
 
 def deployment_config_arguments() -> tuple[ConfigArgument, ...]:
-    return config_arguments(DeploymentSettings)
+    return config_arguments(DeploymentConfig)
 
 
 def _take(values: dict[str, Any], path: tuple[str, ...]) -> Any:
