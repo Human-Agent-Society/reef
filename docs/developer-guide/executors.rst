@@ -408,7 +408,8 @@ preflight live in ``reef.train.slime_backend.driver``. The service layer resolve
 the recipe and passes its declared loss family into that integration, keeping
 recipe discovery out of the training package.
 
-For non-colocated full-weight training, resources connect one Ray client job
+For managed full-weight and LoRA training, including colocated deployments,
+resources connect one Ray client job
 and use Slime's existing placement helper once for coordinated model allocation.
 Inference borrows those reservations and owns ``SlimeInferenceWorker`` as a
 separate Ray control actor. It reserves one CPU and zero model GPUs; model
@@ -430,9 +431,8 @@ representations remain private to its adapters. Weight transfer remains directly
 between training workers and engines. This protocol identifies the supported
 attachment vocabulary; it is not a general engine capability negotiation API.
 
-LoRA, colocated and external-engine modes select an explicit combined plan
-before startup. They keep their existing lifecycle; a failure in the separate
-path never falls back to combined ownership. Direct ``start_bridge`` callers
+External-engine mode selects an explicit combined plan before startup.
+A failure in the separate path never falls back to combined ownership. Direct ``start_bridge`` callers
 remain supported, and ``reef.service.slime_driver`` remains a compatibility CLI
 for explicit process stacks. It delegates lifecycle orchestration to the same
 Reef owner.
@@ -540,11 +540,46 @@ inference, restore checkpoint values and version identity, retain pending commit
 barriers and keep serving paused after a damaged-checkpoint restart. These tests
 use CPU backend fixtures; they do not validate GPU checkpoint loading.
 
+Colocated memory and LoRA recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Colocated inference and training share the GPU reservations produced by one
+placement call; separating their control actors does not duplicate GPUs.
+Before training workers initialize, the inference owner fences generation,
+performs optional weight checks and releases inference memory. The borrowed
+training batch manager does not repeat this preparation.
+
+Cold startup releases weights, KV cache and CUDA graphs even when
+``training.options.keep-lora-base-resident`` is enabled. Once training has
+initialized and offloaded, recovery restores the frozen inference base before
+registering each scenario's committed adapter. It restores the pending
+scenario's publication last. A ``READY_TO_COMMIT`` checkpoint stays paused
+until Reef acknowledges the commit; recovery does not repeat training.
+
+Later colocated steps pause inference and release its memory before training.
+With ``keep-lora-base-resident``, only KV cache and CUDA graphs are released;
+otherwise weights are released too. Publication restores weights as needed,
+transfers the update and restores KV/graphs. Commit acknowledgement permits
+generation to resume. Keeping the base resident still requires enough physical
+memory for that base and the active training workload.
+
+``reef.runtime.inference_memory`` tracks acknowledged release/resume operations
+per engine. Repeated operations skip regions already in the requested state.
+A failed operation leaves memory state uncertain and prevents reuse until that
+engine is replaced. SGLang supplies the concrete memory API adapter. This also
+handles engines whose native recovery already resumed weights but left KV and
+graphs released.
+
+CPU tests cover startup order, scenario adapter restoration, memory transitions
+and commit gating. Actual CUDA allocation, LoRA IPC/NCCL transfers and combined
+mode throughput still require validation in the supported GPU environment.
+
 Managed deployment recovery
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The managed driver automatically supervises separate full-weight inference and
-training plans. A plan supplies a nonblocking ``DeploymentHealth.poll()`` and a
+The managed driver automatically supervises separate inference and training
+plans for full-weight, LoRA, colocated and LoRA-plus-colocated deployments.
+A plan supplies a nonblocking ``DeploymentHealth.poll()`` and a
 ``ModelPlanSource`` rebuilds components from the original resolved configuration.
 Slime probes retain one outstanding health RPC per component. An operation that
 queues behind a long weight transfer is not treated as a dead actor. Training
@@ -558,12 +593,15 @@ health checks. The policy allows three restarts within five minutes, with
 interruptible one-, two- and four-second delays. Cleanup failure, invalid
 recovery state or replacement startup failure stops the driver and leaves
 readiness absent. An ambiguous ``RUNNING`` optimizer step is never replayed.
+Slime also refuses cold restart from ``REJECTING``/``REJECTED``: the latest
+training checkpoint contains a declined candidate, not the committed serving
+weights. Restore the committed checkpoint before restarting those deployments.
 
 This is a cold rebuild of the model deployment. It recreates the inference
 controller, routers, engines and training workers; it does not attach a new
 controller to surviving engine handles. The external Ray cluster and HTTP
-service remain running. LoRA, colocated, external-engine and explicit legacy
-process stacks keep their existing compatibility lifecycle.
+service remain running. External-engine and explicit legacy process stacks
+keep their existing compatibility lifecycle.
 
 Owned Ray jobs install a POSIX process lease before model workers initialize.
 A watchdog retires a worker's process group after owner loss, including native

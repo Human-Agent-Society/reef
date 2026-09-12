@@ -81,7 +81,7 @@ class ReefRolloutManagerImpl(SlimeInferenceControl):
         self._owns_serving = serving is None
         self._closed = False
         if serving is None:
-            # Compatibility path for direct bridge callers and colocated stacks.
+            # Compatibility path for direct bridge callers and external stacks.
             serving = Executor.create(
                 ExecutorConfig(
                     backend=rollout_executor_class(args),
@@ -214,10 +214,10 @@ def create_rollout_manager(args, pg, *, serving: Executor | None = None):
         options["enable_tensor_transport"] = True
     manager = ReefRolloutManager.options(**options).remote(args, pg, serving)
     try:
-        if args.check_weight_update_equal:
+        if serving is None and args.check_weight_update_equal:
             ray.get(manager.check_weights.remote(action="snapshot"))
             ray.get(manager.check_weights.remote(action="reset_tensors"))
-        if args.offload_rollout:
+        if serving is None and args.offload_rollout:
             ray.get(manager.offload.remote())
         return manager
     except BaseException:

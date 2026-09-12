@@ -461,6 +461,11 @@ class TrainBridgeActorImpl:
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
             self._manager_call("recover_updatable_engines")
+        if self._colocate and self._lora:
+            # Cold startup releases everything before training initializes.
+            # Restore the frozen base before registering scenario adapters,
+            # including runs that only release KV/graphs on later steps.
+            self._manager_call("onload_weights")
         if marker_status == "REJECTING":
             if marker is None:
                 raise RuntimeError("REJECTING marker status has no marker payload")
@@ -543,6 +548,8 @@ class TrainBridgeActorImpl:
         if not pending and active is None:
             return
         self._pause_generation()
+        if self._colocate:
+            self._manager_call("onload_weights")
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(

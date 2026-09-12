@@ -94,11 +94,12 @@ native training flags belong in ``training.options`` and engine flags in ``infer
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
 bridge, then starts HTTP and obtains the inference connection from that bridge.
-For managed, non-colocated full-weight training, the backend-neutral Reef model driver owns separate
+For managed full-weight and LoRA training, including colocated configurations,
+the backend-neutral Reef model driver owns separate
 resource, inference and training components. The training batch
 manager borrows that controller; it does not launch or shut down inference.
-Slime's launch/placement helpers still implement the engine integration. LoRA,
-colocated and external-engine paths retain their existing combined lifecycle.
+Slime's launch/placement helpers still implement the engine integration.
+External-engine paths retain their existing combined lifecycle.
 HTTP and the driver share the Ray address, namespace, actor name and resolved
 model path. With no Ray address, Reef owns the shared runtime and stops it on
 exit; an existing cluster is left running. Model topology, optimizer settings
@@ -185,15 +186,22 @@ This continues `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425
 Training GPU capacity remains in ``training.options.actor-num-*``; the shared
 physical node size remains ``training.options.num-gpus-per-node``. Inference
 and training share one allocation plan, with no duplicate model-GPU
-reservations. Non-colocated full-weight training borrows Reef-owned inference;
-LoRA and colocated modes use the new config fields with their existing combined
-lifecycle. The separate inference control actor requires one additional Ray
+reservations. Full-weight, LoRA and colocated training borrow Reef-owned
+inference. Use ``training.options.colocate`` to share GPU reservations; native
+training and inference offload must both be enabled.
+``training.options.keep-lora-base-resident`` retains the frozen inference base
+during later colocated LoRA steps; cold startup still releases all inference
+memory before training initializes. The separate inference control actor requires
+one additional Ray
 CPU and zero GPUs. The HTTP endpoint is still discovered through the training
-bridge. Managed separate full-weight deployments automatically rebuild both
+bridge. Managed deployments, including LoRA and colocated modes, automatically
+rebuild both
 components after failure, rerun checkpoint recovery and rediscover the endpoint
 without restarting the HTTP service. Explicit gateway URLs stay fixed. This
 recovery does not replay ambiguous optimizer steps and stops if old resources
-cannot be confirmed retired. See `Worker executors <../developer-guide/executors.rst>`__ for the
+cannot be confirmed retired. A rejected Slime candidate also requires restoring
+the committed checkpoint before restart; its training checkpoint must not be
+used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
 recovery policy and compatibility limits.
 
 Reef coordinates native inference and training, alongside its HTTP service.

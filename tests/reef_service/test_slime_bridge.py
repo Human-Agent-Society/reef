@@ -1679,12 +1679,15 @@ def test_start_bridge_rejects_configuration_without_local_inference(
 
 
 @pytest.mark.unit
-def test_start_bridge_rejects_ambiguous_marker_before_creating_workers(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("status", ["RUNNING", "REJECTING", "REJECTED"])
+def test_start_bridge_rejects_ambiguous_marker_before_creating_workers(tmp_path, monkeypatch, status) -> None:
     root = tmp_path / "checkpoints"
     template = str(root / "hf" / "{rollout_id}")
+    checkpoint = root / "hf" / "0"
+    checkpoint.mkdir(parents=True)
     write_marker(
         root / "hf" / ".reef-latest-job.json",
-        {"status": "RUNNING", "job_id": "job", "rollout_id": 0},
+        {"status": status, "job_id": "job", "rollout_id": 0, "checkpoint_path": str(checkpoint)},
     )
     monkeypatch.setattr(
         bridge,
@@ -1693,7 +1696,7 @@ def test_start_bridge_rejects_ambiguous_marker_before_creating_workers(tmp_path,
     )
     args = _bridge_args(save_hf=template, save=str(root / "megatron"))
 
-    with pytest.raises(RuntimeError, match="ambiguous"):
+    with pytest.raises(RuntimeError, match="ambiguous" if status == "RUNNING" else "restore the committed checkpoint"):
         bridge.start_bridge(args, retention=RetentionConfig(max_storage_bytes=100))
 
 

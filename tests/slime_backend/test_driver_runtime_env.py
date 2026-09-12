@@ -64,13 +64,19 @@ def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path
     ]
 
 
-@pytest.mark.parametrize("mode", ["managed", "colocate", "lora", "external"])
+@pytest.mark.parametrize(
+    "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
+)
 def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode):
     from types import SimpleNamespace
     from reef.train.slime_backend import driver
     from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
 
-    args = SimpleNamespace(colocate=mode == "colocate", rollout_external=mode == "external")
+    args = SimpleNamespace(
+        colocate="colocate" in mode,
+        rollout_external=mode == "external",
+        keep_lora_base_resident=mode == "lora-colocate-keep-base",
+    )
 
     class Algorithm:
         def parse_driver_options(self, arguments):
@@ -95,7 +101,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
     ):
         monkeypatch.setattr(driver, name, lambda *args: None)
     monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda *args: None)
-    monkeypatch.setattr(bridge, "prepare_bridge", lambda *args, **kwargs: SimpleNamespace(lora=mode == "lora"))
+    monkeypatch.setattr(bridge, "prepare_bridge", lambda *args, **kwargs: SimpleNamespace(lora="lora" in mode))
 
     def unexpected(**kwargs):
         pytest.fail("plan construction must not connect or allocate resources")
@@ -103,8 +109,9 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
     monkeypatch.setattr(bridge.ray, "init", unexpected)
     plan = driver.create_model_plan({}, loss_family="loss")
     plan.validate()
-    assert (plan.inference is not None) == (mode == "managed")
-    assert plan.resources.allocate_models == (mode == "managed")
+    assert (plan.inference is not None) == (mode != "external")
+    assert plan.resources.allocate_models == (mode != "external")
+    assert (plan.health is not None) == (mode != "external")
     assert plan.resources.placement_groups == {}
     assert plan.resources.runtime_env == {"env_vars": {"PYTHONPATH": "/repo"}}
-    assert (plan.training.inference_protocol is not None) == (mode == "managed")
+    assert (plan.training.inference_protocol is not None) == (mode != "external")

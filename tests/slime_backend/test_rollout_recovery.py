@@ -618,7 +618,8 @@ def test_training_manager_borrows_inference_without_launching_or_disposing_it(mo
     assert executor.closed
 
 
-def test_manager_startup_probe_failure_disposes_batch_actor_without_closing_borrowed_inference(monkeypatch):
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_manager_only_prepares_inference_when_it_owns_it(monkeypatch, borrowed):
     _, module = _load_manager_module(monkeypatch)
     executor = _RecordingRolloutExecutor(module.ExecutorConfig(backend=_RecordingRolloutExecutor))
     implementation = module.ReefRolloutManagerImpl(types.SimpleNamespace(), None, serving=executor)
@@ -638,10 +639,15 @@ def test_manager_startup_probe_failure_disposes_batch_actor_without_closing_borr
     )
     monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: events.append(target))
     args = types.SimpleNamespace(check_weight_update_equal=True, offload_rollout=False)
-    with pytest.raises(RuntimeError, match="probe failed"):
-        module.create_rollout_manager(args, None, serving=executor)
-    assert events == [actor]
-    assert implementation._closed
+    if borrowed:
+        assert module.create_rollout_manager(args, None, serving=executor) is actor
+        assert events == []
+        assert not implementation._closed
+    else:
+        with pytest.raises(RuntimeError, match="probe failed"):
+            module.create_rollout_manager(args, None)
+        assert events == [actor]
+        assert implementation._closed
     assert not executor.closed
     executor.shutdown()
 
@@ -743,3 +749,55 @@ def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(mo
     worker = types.SimpleNamespace(args=types.SimpleNamespace(), updatable_rollout_engines=[None, engine])
     module._SlimeInferenceEngines(worker).pause()
     assert paused == ["retract"]
+
+
+@pytest.mark.parametrize("offload", [False, True])
+def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, offload):
+    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+
+    args = types.SimpleNamespace(
+        reef_rollout_executor_backend=_RecordingRolloutExecutor,
+        check_weight_update_equal=True,
+        offload_rollout=offload,
+        keep_lora_base_resident=True,
+    )
+    worker = SlimeInferenceWorker(args, "placement")
+    worker.prepare_training_connection()
+    expected = [
+        ("prepare_training_connection", (), {}),
+        ("check_weights", ("snapshot",), {}),
+        ("check_weights", ("reset_tensors",), {}),
+    ]
+    if offload:
+        expected.append(("offload", (None,), {}))
+    assert worker._serving.calls == expected
+    worker.prepare_training_connection()
+    expected.append(("prepare_training_connection", (), {}))
+    if offload:
+        expected.append(("offload", (None,), {}))
+    assert worker._serving.calls == expected
+    worker.shutdown()
+    assert worker._serving.closed
+
+
+@pytest.mark.parametrize("failure", ["check_weights", "offload"])
+def test_inference_preparation_failure_is_not_acknowledged(monkeypatch, failure):
+    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+
+    args = types.SimpleNamespace(
+        reef_rollout_executor_backend=_RecordingRolloutExecutor,
+        check_weight_update_equal=True,
+        offload_rollout=True,
+    )
+    worker = SlimeInferenceWorker(args, "placement")
+
+    def fail(*args):
+        raise RuntimeError("cannot prepare inference")
+
+    monkeypatch.setattr(worker, failure, fail)
+    with pytest.raises(RuntimeError, match="cannot prepare"):
+        worker.prepare_training_connection()
+    assert not worker._prepared
+    assert "continue_generation_after_update" not in [call[0] for call in worker._serving.calls]
+    worker.shutdown()
+    assert worker._serving.closed

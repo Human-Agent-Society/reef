@@ -83,10 +83,25 @@ class SlimeInferenceWorker(SlimeInferenceControl):
             )
         )
         super().__init__(serving)
+        self._args = args
+        self._prepared = False
         self._closed = False
 
     def check_health(self) -> None:
         self._serving.check_health(timeout=30)
+
+    def prepare_training_connection(self) -> None:
+        """Fence serving and release shared memory before training workers exist."""
+        super().prepare_training_connection()
+        if not self._prepared and getattr(self._args, "check_weight_update_equal", False):
+            self.check_weights("snapshot")
+            self.check_weights("reset_tensors")
+        if getattr(self._args, "offload_rollout", False):
+            # Every trainer attachment needs the whole allocation, even when
+            # later LoRA steps keep the frozen base resident. The engine skips
+            # regions already released by an earlier attachment attempt.
+            self.offload()
+        self._prepared = True
 
     def shutdown(self) -> None:
         if self._closed:

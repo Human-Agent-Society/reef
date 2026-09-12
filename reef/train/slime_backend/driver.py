@@ -223,9 +223,7 @@ def create_model_plan(
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
-    separate = (
-        not prepared.lora and not getattr(args, "colocate", False) and not getattr(args, "rollout_external", False)
-    )
+    separate = not getattr(args, "rollout_external", False)
     inference = SlimeInferenceService(args) if separate else None
     training = SlimeTrainingService(
         args,

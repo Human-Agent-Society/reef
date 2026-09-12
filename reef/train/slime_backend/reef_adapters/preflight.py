@@ -186,6 +186,13 @@ def prepare_checkpoint_storage(args, retention: RetentionConfig) -> CheckpointSt
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
         raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+    if marker is not None and marker["status"] in {"REJECTING", "REJECTED"}:
+        # The newest training checkpoint still contains the declined candidate;
+        # it cannot reconstruct the incumbent engines or committed adapters.
+        raise RuntimeError(
+            f"training job {marker['job_id']} is {marker['status']}; "
+            "restore the committed checkpoint before restarting inference"
+        )
     storage_plan = storage.validate_capacity(active_rollouts=marker_rollouts(marker))
     if storage_plan["blocked"]:
         reasons = "; ".join(storage_plan["reasons"])

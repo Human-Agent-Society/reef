@@ -16,6 +16,7 @@ job identity/replay, training/checkpoint ordering and commit-gated inference
 resumption; concrete backends provide model operations and weight transport.
 ``inference_control`` coordinates engine pause/recovery and transport reconnect;
 ``health_monitor`` drains engine probes before lifecycle changes;
+``inference_memory`` pairs acknowledged engine memory release/resume operations;
 ``weight_update`` supplies the transport lock's failure/phase semantics.
 
 Training batches and candidate evaluation contracts come from ``reef.core``.

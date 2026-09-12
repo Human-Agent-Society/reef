@@ -790,7 +790,7 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
 
 
 @pytest.mark.unit
-def test_release_memory_occupation_passes_tags_and_defaults_to_everything(
+def test_memory_transitions_pair_cold_startup_with_keep_base_training(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_sglang_engine_module(monkeypatch)
@@ -802,10 +802,41 @@ def test_release_memory_occupation_passes_tags_and_defaults_to_everything(
 
     engine.release_memory_occupation()
     engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+    engine.resume_memory_occupation(["weights"])
+    engine.resume_memory_occupation(["weights"])
+    engine.resume_memory_occupation()
+    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+    engine.resume_memory_occupation()
 
     assert calls == [
         ("flush_cache", None),
-        ("release_memory_occupation", None),
+        ("release_memory_occupation", {"tags": ["weights", "kv_cache", "cuda_graph"]}),
+        ("resume_memory_occupation", {"tags": ["weights"]}),
+        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
         ("flush_cache", None),
         ("release_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
+        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
     ]
+
+
+@pytest.mark.parametrize("failure", ["release_memory_occupation", "resume_memory_occupation"])
+def test_uncertain_memory_transition_requires_engine_replacement(monkeypatch, failure):
+    module = _load_sglang_engine_module(monkeypatch)
+    engine = object.__new__(module.ReefSGLangEngine)
+    calls = []
+
+    def request(route, payload):
+        calls.append(route)
+        return {"success": route != failure}
+
+    engine._make_request = request
+    engine.flush_cache = lambda: None
+    with pytest.raises(RuntimeError, match=failure):
+        engine.release_memory_occupation()
+        engine.resume_memory_occupation()
+    before = list(calls)
+    with pytest.raises(RuntimeError, match="uncertain"):
+        engine.resume_memory_occupation()
+    with pytest.raises(RuntimeError, match="uncertain"):
+        engine.release_memory_occupation()
+    assert calls == before

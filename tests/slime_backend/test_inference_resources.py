@@ -72,8 +72,8 @@ def resource_runtime(monkeypatch):
     return state
 
 
-def plan_for(state):
-    args = SimpleNamespace(rollout_num_gpus=4, rollout_num_gpus_per_engine=2)
+def plan_for(state, *, colocate=False):
+    args = SimpleNamespace(rollout_num_gpus=4, rollout_num_gpus_per_engine=2, colocate=colocate)
     allocation = resources.SlimeDeploymentResources(
         args,
         ray_address="external",
@@ -98,14 +98,16 @@ def plan_for(state):
     return ModelDeploymentPlan(allocation, resources.SlimeInferenceService(args), Training())
 
 
-def test_deployment_allocates_once_and_closes_training_inference_then_reservations(resource_runtime):
-    plan = plan_for(resource_runtime)
+@pytest.mark.parametrize("colocate", [False, True])
+def test_deployment_allocates_once_and_closes_training_inference_then_reservations(resource_runtime, colocate):
+    plan = plan_for(resource_runtime, colocate=colocate)
     owner = ModelDeployment(plan)
     assert resource_runtime.events == []
     owner.start()
     config = resource_runtime.config
     assert config.options["num_gpus"] == 0 and config.options["num_cpus"] == 1
     assert config.workers[0].args[1] is resource_runtime.placements["rollout"]
+    assert resource_runtime.args.colocate == colocate
     assert resource_runtime.args.rollout_num_gpus == 4
     assert resource_runtime.args.rollout_num_gpus_per_engine == 2
     assert resource_runtime.ray_options == {

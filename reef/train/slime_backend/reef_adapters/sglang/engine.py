@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
+from functools import cached_property
 from typing import Any
 
 import requests
 from slime.backends.sglang_utils.sglang_engine import SGLangEngine
 from urllib3.exceptions import NewConnectionError
 
+from reef.runtime.inference_memory import InferenceMemory
 from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled, sglang_lora_target_modules
 from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
     require_lora_distributed_request_schema,
@@ -222,15 +225,15 @@ class ReefSGLangEngine(SGLangEngine):
             },
         )
 
-    def release_memory_occupation(self, tags: list[str] | None = None):
-        """Release GPU memory, restricted to ``tags`` when given.
+    @cached_property
+    def _memory(self) -> InferenceMemory:
+        return InferenceMemory(_SGLangMemoryOperations(self), ("weights", "kv_cache", "cuda_graph"))
 
-        Slime's engine always releases everything. SGLang's route takes the
-        same tags its resume side does, so a caller that knows some region is
-        unchanged can leave it resident.
-        """
-        self.flush_cache()
-        return self._make_request("release_memory_occupation", {"tags": list(tags)} if tags else None)
+    def release_memory_occupation(self, tags: list[str] | None = None):
+        self._memory.release(tags or None)
+
+    def resume_memory_occupation(self, tags: list[str] | None = None):
+        self._memory.resume(tags or None)
 
     def unload_lora_adapter(self, lora_name: str):
         return self._make_request("unload_lora_adapter", {"lora_name": lora_name})
@@ -263,6 +266,25 @@ class ReefSGLangEngine(SGLangEngine):
         if not isinstance(minutes, int | float) or isinstance(minutes, bool) or minutes <= 0:
             raise ValueError("distributed_timeout_minutes must be a positive number")
         return float(minutes) * 60
+
+
+class _SGLangMemoryOperations:
+    """Keep native tag names and HTTP acknowledgement at the SGLang boundary."""
+
+    def __init__(self, engine: ReefSGLangEngine) -> None:
+        self.engine = engine
+
+    def _change(self, endpoint: str, regions: Sequence[str]) -> None:
+        result = self.engine._make_request(endpoint, {"tags": list(regions)})
+        if isinstance(result, dict) and result.get("success") is False:
+            raise RuntimeError(f"SGLang refused {endpoint}: {result!r}")
+
+    def release(self, regions: Sequence[str]) -> None:
+        self.engine.flush_cache()
+        self._change("release_memory_occupation", regions)
+
+    def resume(self, regions: Sequence[str]) -> None:
+        self._change("resume_memory_occupation", regions)
 
 
 def install_sglang_extensions() -> None:
