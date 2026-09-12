@@ -45,6 +45,7 @@ from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.service.deploy.config import config_value, load_config
+from reef.service.deploy.options import native_arguments
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
@@ -305,7 +306,11 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     actor_name = os.environ.get("REEF_RAY_ACTOR_NAME", DEFAULT_ACTOR_NAME)
     config = load_config(_required_environment("REEF_CONFIG"))
     loss_family, recipe, spec = _resolve_training_recipe(config)
-    combined_args = [*(load_args_file(args_file) if args_file else []), *direct_args]
+    combined_args = [
+        *native_arguments(config.get("reef", {}).get("training_backend_options", {})),
+        *(load_args_file(args_file) if args_file else []),
+        *direct_args,
+    ]
     retention, remaining_args = _retention_options(combined_args)
     loss_family_config, slime_args = spec.parse_driver_options(remaining_args)
     args = _parse_slime_args(slime_args)

@@ -5,7 +5,7 @@ Usage:
   reef serve -c path/to/stack.yaml             # start a configured stack
   reef connect                               # link an existing runtime to the console
 
-`reef serve` starts a record-only provider deployment without YAML, or reads
+`reef serve` starts local inference or a provider deployment without YAML, or reads
 a config's `services` list and starts its processes in dependency order.
 Run `reef serve --help` for config options.
 
@@ -25,7 +25,7 @@ def _help_text():
     return """\
 usage: reef <command> [options]
 
-  serve  Connect an external provider or start a configured stack
+  serve  Start inference, connect a provider, or run a configured stack
   connect  Connect an existing Reef runtime to the API platform
 
   -c CONFIG   Optional config file; omitted means configuration-free startup

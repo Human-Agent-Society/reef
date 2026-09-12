@@ -111,11 +111,10 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-As a minimal example, start Reef as a pure inference server
-(planned in [RFC #414](https://github.com/Human-Agent-Society/reef/issues/414)):
+As a minimal example, start Reef as a pure inference server:
 
 ```bash
-uv run reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct
+uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ### Weight-training deployment

@@ -109,11 +109,10 @@ python3 -c "import reef; print(reef.__version__)"
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
 
-作为最小示例，将 Reef 启动为纯推理服务
-（[RFC #414](https://github.com/Human-Agent-Society/reef/issues/414) 中规划的功能）：
+作为最小示例，将 Reef 启动为纯推理服务：
 
 ```bash
-uv run reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct
+uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ### 模型权重训练部署

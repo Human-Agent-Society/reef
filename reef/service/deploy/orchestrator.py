@@ -46,6 +46,13 @@ from reef.service.deploy.config import (
     validate_services,
 )
 from reef.service.deploy.execution import service_executor_config, service_executor_selection
+from reef.service.deploy.layout import (
+    deployment_config_arguments,
+    normalize_component_layout,
+    translate_layout,
+    translate_references,
+)
+from reef.service.deploy.options import native_override, normalize_native_options
 from reef.service.deploy.provider import assemble_provider_services, provider_config
 from reef.service.deploy.settings import build_parser, normalize_service_config, service_override
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
@@ -130,6 +137,21 @@ def _apply_overrides(
     """
     config = copy.deepcopy(config)
     for key, raw_value in overrides.items():
+        native = native_override(key)
+        if native is not None:
+            path, option = native
+            options_node = config
+            for part in path[:-1]:
+                options_node = options_node.setdefault(part, {})
+            current = options_node.get(path[-1], {})
+            options = normalize_native_options(_coerce_value(current) if isinstance(current, str) else current)
+            options[option] = (
+                _coerce_value(raw_value)
+                if raw_value in {"true", "false", "null"} or raw_value.startswith(("[", "{"))
+                else str(raw_value)
+            )
+            options_node[path[-1]] = options
+            continue
         declared = service_override(key, raw_value)
         if declared is None:
             for candidate in arguments:
@@ -145,6 +167,11 @@ def _apply_overrides(
         if declared is not None:
             argument, raw_value = declared
             key = ".".join(argument.path)
+        if declared is None:
+            for public, internal in (("recipe.runtime.", "reef.runtime."), ("recipe.config.", "reef.data.")):
+                if key.startswith(public):
+                    key = internal + key[len(public) :].replace("-", "_")
+                    break
         if "." not in key and declared is None:
             key = f"reef.{key}"
         parts = key.split(".")
@@ -491,16 +518,35 @@ def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None 
         if config_path
         else provider_config(overrides or {}, os.environ)
     )
-    _log(f"config: {resolved_config_path}" if config_path else "config: command line (external provider)")
+    versioned = config.get("schema-version") == 2
+    config = translate_layout(config)
+    standard = config_path is None or (versioned and "services" not in config)
+    _log(f"config: {resolved_config_path}" if config_path else "config: command line")
     selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
     if source_root is not None:
         _log(f"recipe package resolves from {source_root}")
     try:
         arguments = component_config_arguments(selected)
+        if versioned:
+            config = normalize_component_layout(config, arguments)
+            for key, value in (overrides or {}).items():
+                if (
+                    service_override(key, value) is None
+                    and native_override(key) is None
+                    and not any(f"--{key}" in (*argument.flags, *argument.negative_flags) for argument in arguments)
+                ):
+                    raise DeployConfigError(f"unknown configuration flag --{key}")
         config = _apply_overrides(config, overrides or {}, arguments=arguments)
+        if versioned:
+            config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
         normalized_config = normalize_component_config(normalize_service_config(config), arguments)
-        if config_path is None:
+        if standard:
+            provider_config(overrides or {}, os.environ)
+            if normalized_config.get("reef", {}).get("recipe") != "recipe":
+                raise DeployConfigError(
+                    "automatic serving uses recipe.implementation: recipe; other recipes need services"
+                )
             assemble_provider_services(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
@@ -510,7 +556,7 @@ def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None 
     paths_changed = resolve_model_paths(config)
     temp_config_path: Path | None = None
     try:
-        if config_path is None or overrides or paths_changed or settings_changed:
+        if versioned or config_path is None or overrides or paths_changed or settings_changed:
             temp_config_path = _write_override_config(config)
             resolved_config_path = temp_config_path
         run_dir = Path(config_value(config, "run_dir", default="/tmp/reef-stack") or "/tmp/reef-stack")
@@ -628,6 +674,9 @@ def build_serve_parser(
     if config is not None:
         for argument in component_config_arguments(config):
             argument.add_to(parser)
+    elif service_arguments:
+        for argument in deployment_config_arguments():
+            argument.add_to(parser)
     parser.add_argument(
         "--recipe",
         default=None,
@@ -649,9 +698,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         bootstrap = build_serve_parser(service_arguments=False)
         selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
         help_config = None
-        if selection.config or selection.recipe or any(arg.startswith("--reef.recipe") for arg in extras):
+        if (
+            selection.config
+            or selection.recipe
+            or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras)
+        ):
             path = Path(selection.config or (profile_path(selection.recipe) if selection.recipe else "reef.yaml"))
-            config = load_config(path, interpolate_env=False) if selection.config or selection.recipe else {}
+            config = (
+                translate_layout(load_config(path, interpolate_env=False))
+                if selection.config or selection.recipe
+                else {}
+            )
             help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
         build_serve_parser(config=help_config).parse_args(argv)
     # Discover the file/profile without applying defaults or converting

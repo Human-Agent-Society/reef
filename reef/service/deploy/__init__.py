@@ -1,7 +1,7 @@
-"""``reef serve`` — start an external provider or a configured stack.
+"""``reef serve`` — start managed inference, connect a provider, or run a configured stack.
 
-Without a selected file, upstream settings assemble the standard record-only
-service. Configuration parsing and process lifecycle use the same deployment
+Without a selected file, inference settings assemble the standard record-only
+service, optionally with a managed SGLang process. Configuration parsing and process lifecycle use the same deployment
 path as explicitly configured stacks.
 
 ``reef serve -c <stack>.yaml`` reads the config's ``services``

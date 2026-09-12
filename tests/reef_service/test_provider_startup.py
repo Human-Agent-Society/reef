@@ -185,7 +185,7 @@ def test_invalid_readiness_commands_are_rejected(ready):
         (["--model", "ollama/demo", "--port", "nope"], "reef.port"),
         (["--model", "ollama/demo", "--host", ""], "must be non-empty"),
         (["--model", "ollama/demo", "--no-config"], "unknown option"),
-        (["--model", "ollama/demo", "--model-path", "org/model"], "requires a configured stack"),
+        (["--model", "ollama/demo", "--model-path", "org/model"], "cannot be combined"),
         (["--model", "ollama/demo", "--reef.recipe", "missing.module:Recipe"], "core recipe"),
         (["--model", "ollama/demo", "--upstream-modle", "typo"], "unknown option"),
         (["--model", "ollama/demo", "--services", "[]"], "unknown option"),

@@ -1,4 +1,4 @@
-"""Assemble the standard external-provider deployment from service settings."""
+"""Assemble standard local-inference or external-provider service deployments."""
 
 from __future__ import annotations
 
@@ -10,6 +10,9 @@ from urllib.parse import urlsplit
 
 from reef.runtime.adapters.inference_proxy import PROVIDER_APIS
 from reef.service.deploy.config import DeployConfigError
+from reef.service.deploy.inference import http_readiness_command, prepare_inference
+from reef.service.deploy.layout import deployment_config_arguments
+from reef.service.deploy.options import native_override
 from reef.service.deploy.settings import service_override, service_settings_from_config
 from reef.service.profiles import profile_names
 
@@ -22,7 +25,6 @@ _ENVIRONMENT_FIELDS = {
     "token": "REEF_TOKEN",
 }
 _CONFIGURED_FIELDS = {
-    "model_path",
     "inference_url",
     "inference_backend_factory",
     "inference_backend_config",
@@ -31,19 +33,29 @@ _CONFIGURED_FIELDS = {
     "ray_actor_name",
     "train_timeout_s",
     "training_settings",
+    "training_backend_options",
     "evaluation_settings",
 }
 
 
 def provider_config(overrides: Mapping[str, str], environ: Mapping[str, str]) -> dict[str, Any]:
-    """Supply standard defaults; the orchestrator applies and parses overrides."""
+    """Supply standard serving defaults; the orchestrator parses overrides."""
     for key, value in overrides.items():
+        native = native_override(key)
+        if native is not None and native[0] == ("reef", "inference_options"):
+            continue
         declared = service_override(key, value)
+        if declared is None:
+            declared = next(
+                ((argument, value) for argument in deployment_config_arguments() if f"--{key}" in argument.flags), None
+            )
         if declared is None:
             raise DeployConfigError(f"unknown option --{key} for provider startup; use -c for a custom stack")
         argument, _ = declared
         if argument.name == "host" and not value.strip():
             raise DeployConfigError("--host must be non-empty")
+        if argument.name == "model_path" and not value.strip():
+            raise DeployConfigError("--model-path must be non-empty")
         if argument.name in _CONFIGURED_FIELDS:
             raise DeployConfigError(f"--{key} requires a configured stack (-c); provider startup uses an upstream")
         if argument.name == "recipe" and value != "recipe":
@@ -59,11 +71,28 @@ def provider_config(overrides: Mapping[str, str], environ: Mapping[str, str]) ->
 
 def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
+    unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
+    if unsupported or "training" in config or "evaluation" in config:
+        raise DeployConfigError("training and custom runtime settings require an explicit services stack")
     settings = service_settings_from_config(config)
+    local_service = None
+    if settings.model_path:
+        # Validate the public bind and timeout before checking GPU dependencies.
+        if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
+            raise DeployConfigError("local inference requires a valid --port and positive --inference-timeout-s")
+        local_service = prepare_inference(config, settings)
+        settings = service_settings_from_config(config)
+    elif (
+        settings.inference_backend is not None
+        or settings.tensor_parallel_size is not None
+        or settings.inference_options
+    ):
+        raise DeployConfigError("--inference-backend and --tensor-parallel-size require --model-path")
     if not settings.upstream_url or not settings.upstream_model:
         raise DeployConfigError(
             "provider startup requires --upstream-url and --upstream-model (or their REEF_UPSTREAM_* variables).\n"
             "  Example: reef serve --upstream-url http://localhost:8000 --upstream-model my-model\n"
+            "  Or start local inference: reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct\n"
             f"  Alternatively pass -c <file> or --recipe <name>; recipes with a profile: {', '.join(profile_names())}"
         )
     try:
@@ -96,13 +125,10 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
             "executor": "uni",
             "command": [python, "-m", "reef.service"],
             "endpoint": endpoint,
-            "ready": [
-                python,
-                "-c",
-                "import sys, urllib.request; "
-                "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=5).close()",
-                f"{endpoint}/healthz",
-            ],
-            "ready_timeout": 30,
+            "ready": http_readiness_command(python, f"{endpoint}/healthz"),
+            "ready_timeout": config.get("ready_timeout", 30),
         }
     ]
+    if local_service is not None:
+        config["services"][0]["depends_on"] = [local_service["name"]]
+        config["services"].insert(0, local_service)
