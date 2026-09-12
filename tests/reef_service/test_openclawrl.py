@@ -12,6 +12,7 @@ from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.processors.computed import JudgingWorker
 from reef.train.slime_backend.backend import SlimeTrainingBackend
@@ -318,7 +319,7 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
     assert isinstance(surface.inference, WeightInferenceHooks)
-    trainer = recipe.build("s", __import__("reef.records", fromlist=["RecordStore"]).RecordStore())
+    trainer = recipe.build("s", SQLiteRecordStore())
     assert isinstance(trainer.training_backend, SlimeTrainingBackend)
     assert trainer.training_backend.step_preparer == "openclawrl"
     trainer.close()

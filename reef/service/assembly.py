@@ -26,8 +26,10 @@ from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.registry import RuntimeRegistry
+from reef.scenario.store import ScenarioStoreFactory
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.settings import ServiceSettings, service_owned_keys
+from reef.storage.factory import PostgresScenarioStoreFactory, SQLiteScenarioStoreFactory
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -204,7 +206,16 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
+    scenario_store_factory: ScenarioStoreFactory | None = None
     try:
+        if settings.record_backend == "postgres":
+            scenario_store_factory = PostgresScenarioStoreFactory(
+                _require_non_empty(settings.record_database_url, "reef.record_database_url"),
+                Path(settings.agent_record_dir),
+                schema=settings.record_database_schema,
+            )
+        else:
+            scenario_store_factory = SQLiteScenarioStoreFactory(Path(settings.agent_record_dir))
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
         backend_factory = GitLFSRepositoryBackend.factory(
             _repository_location(settings.artifact_repository),
@@ -224,10 +235,14 @@ def build_dispatcher(
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
             agent_record_dir=Path(settings.agent_record_dir),
+            scenario_store_factory=scenario_store_factory,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
         )
     except BaseException:
+        if scenario_store_factory is not None:
+            with suppress(Exception):
+                scenario_store_factory.close()
         if recipe.runtime is not None:
             with suppress(Exception):
                 recipe.runtime.shutdown()

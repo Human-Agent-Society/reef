@@ -1,8 +1,8 @@
-"""Shared value types and the root error hierarchy: the bottom of the dependency graph.
+"""Shared value types, contracts, and root errors: the bottom of the dependency graph.
 
-Nothing here has storage behavior or I/O; the packages above supply that
-(``records.py`` stores records, ``artifact/`` stores artifacts) while
-sharing these definitions.
+Nothing here implements storage behavior or I/O. Record storage interfaces
+belong to ``reef.records``; concrete record and artifact adapters build on the
+shared identities and wire types defined here.
 
 The admission bar is concrete: a type belongs here only when at least two
 packages that do not depend on each other need it, and it carries no I/O.

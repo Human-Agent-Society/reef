@@ -4,6 +4,14 @@ Testing
 Reef's tests are one repository suite. Most of it runs without a GPU; the parts
 that import the training runtime need the supported container.
 
+PostgreSQL record tests require ``uv pip install -e '.[postgres]'`` and a dedicated
+test database. Set ``REEF_TEST_POSTGRES_URL`` to its PostgreSQL URL, then run
+``pytest tests/reef_service/test_record_store_contract.py tests/reef_service/test_postgres_records.py``.
+Each test creates and drops a randomly named ``reef_test_*`` schema, so the test
+role needs schema-creation permission. Without the variable these integration
+cases skip; with it configured, connection or driver errors fail the tests.
+CI supplies PostgreSQL 16 and runs these cases on all supported Python versions.
+
 Run the full suite
 ------------------
 

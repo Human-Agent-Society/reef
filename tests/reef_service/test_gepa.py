@@ -27,8 +27,10 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
+from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend.strategies import Mutation, resolve_episode_scorer
 from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 from reef.train.trainer import Trainer
@@ -657,7 +659,7 @@ def test_the_config_boots_the_recipe_and_binds_both_seams(tmp_path: Path) -> Non
     assert built.feedback is feedback_hook
     # Unbound until build: the archive is per scenario, so the seams cannot
     # be filled at config time.
-    assert isinstance(built.build("demo", RecordStore()), Trainer)
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)
 
 
 def test_scenario_archive_path_cannot_escape_its_directory(tmp_path: Path) -> None:
@@ -746,6 +748,7 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
     scenario_name = "../gepa-demo"
     try:
@@ -792,7 +795,9 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     data_dir = tmp_path / "agent-record"
-    dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    dispatcher = Dispatcher(
+        built, factory, agent_record_dir=data_dir, scenario_store_factory=SQLiteScenarioStoreFactory(data_dir)
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None
@@ -811,7 +816,8 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
         assert second.state[ARCHIVE_STATE_KEY] != committed
         assert json.loads(archive_path.read_text()) == committed
 
-        commit_log = scenario.commit_log
+        assert isinstance(scenario.store, CommitLogScenarioStore)
+        commit_log = scenario.store.commit_log
         assert commit_log is not None
 
         def fail_append(record):
@@ -824,7 +830,9 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     finally:
         dispatcher.close()
 
-    recovered_dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    recovered_dispatcher = Dispatcher(
+        built, factory, agent_record_dir=data_dir, scenario_store_factory=SQLiteScenarioStoreFactory(data_dir)
+    )
     try:
         recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")
         assert recovered is not None

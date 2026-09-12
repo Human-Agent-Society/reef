@@ -75,6 +75,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: reef
+          POSTGRES_PASSWORD: reef_test
+          POSTGRES_DB: reef_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U reef -d reef_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      REEF_TEST_POSTGRES_URL: postgresql://reef:reef_test@localhost:5432/reef_test
     strategy:
       fail-fast: false
       matrix:
@@ -114,7 +128,7 @@ jobs:
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx
+      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx "psycopg[binary]>=3.1,<4"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which

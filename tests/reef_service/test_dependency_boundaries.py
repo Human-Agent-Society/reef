@@ -108,6 +108,74 @@ def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
     assert _imports_of(imported, "reef.train") == []
 
 
+def test_record_contracts_and_retention_policy_do_not_import_database_adapters() -> None:
+    module = importlib.import_module("reef.records")
+    tree = ast.parse(inspect.getsource(module))
+
+    imported = _imported_modules(tree, package="reef")
+    for dependency in (
+        "reef.scenario",
+        "reef.train",
+        "reef.storage",
+        "reef.artifact",
+        "sqlite3",
+        "sqlalchemy",
+        "alembic",
+    ):
+        assert _imports_of(imported, dependency) == []
+
+
+def test_sql_record_implementations_do_not_depend_on_scenario_or_training() -> None:
+    for module_name in ("reef.storage.sql_records", "reef.storage.sqlite"):
+        module = importlib.import_module(module_name)
+        tree = ast.parse(inspect.getsource(module))
+
+        imported = _imported_modules(tree, package="reef.storage")
+        assert _imports_of(imported, "reef.scenario") == [], module_name
+        assert _imports_of(imported, "reef.train") == [], module_name
+
+
+def test_shared_sql_record_operations_do_not_select_sqlite() -> None:
+    module = importlib.import_module("reef.storage.sql_records")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.storage")
+    for dependency in ("reef.storage.sqlite", "sqlite3", "sqlalchemy.dialects.sqlite"):
+        assert _imports_of(imported, dependency) == []
+
+
+def test_dispatcher_does_not_select_a_record_backend() -> None:
+    module = importlib.import_module("reef.dispatcher")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef")
+    for dependency in ("reef.storage", "sqlite3", "sqlalchemy", "psycopg"):
+        assert _imports_of(imported, dependency) == []
+
+    for constructor in (module.Dispatcher, module.build_default_dispatcher):
+        parameter = inspect.signature(constructor).parameters["scenario_store_factory"]
+        assert parameter.default is inspect.Parameter.empty
+
+
+def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> None:
+    allowed_domains = {
+        "reef.scenario.state": ("reef.core",),
+        "reef.scenario.store": ("reef.core", "reef.records", "reef.scenario.state"),
+    }
+    for module_name, allowed in allowed_domains.items():
+        module = importlib.import_module(module_name)
+        tree = ast.parse(inspect.getsource(module))
+        imported = _imported_modules(tree, package="reef.scenario")
+        for dependency in imported:
+            assert dependency.partition(".")[0] in sys.stdlib_module_names or any(
+                dependency == domain or dependency.startswith(domain + ".") for domain in allowed
+            ), f"{module_name} imports {dependency}"
+
+
+def test_scenario_package_does_not_import_storage_implementations() -> None:
+    for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for dependency in ("reef.storage", "sqlite3", "sqlalchemy", "alembic"):
+            assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
+
+
 def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> None:
     # The most-repeated layering rule: Reef's backend-agnostic core talks to
     # training through the abstract reef.train surface (types, trainer,
@@ -120,6 +188,7 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         "reef/core",
         "reef/service",
         "reef/scenario",
+        "reef/storage",
         "reef/artifact",
         "reef/recipe",
         "reef/runtime",

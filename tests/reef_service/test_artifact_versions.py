@@ -17,6 +17,8 @@ from reef.runtime.inference import InferenceBackend
 from reef.scenario import ReleaseNotRestorable
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService, create_app
+from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 from ._policy_recipe import TestPolicyRecipe
 
@@ -142,6 +144,7 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "agent-record",
         experiment_tracker=experiment_tracker,
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
     return value, runtime, backend_factory
 
@@ -179,7 +182,7 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
         == "w1"
     )
     assert runtime.restored == ["w1"]
-    record = value.get_or_create_scenario("math").commit_log.records()[-1]
+    record = value.get_or_create_scenario("math").store.history()[-1]
     assert record.operation == "rollback"
     assert record.rollback_target_release_id == target_version
     assert record.artifact_ref == published
@@ -210,8 +213,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
         value.rollback("math", created)
 
     assert scenario.scenario_step == 1
-    assert scenario.commit_log is not None
-    recorded = scenario.commit_log.records()[-1]
+    assert scenario.store.durable
+    recorded = scenario.store.history()[-1]
     assert recorded.step == 2
     assert recorded.operation == "rollback"
 
@@ -219,8 +222,8 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
 
     assert published == recorded.artifact_ref
     assert scenario.scenario_step == 2
-    assert scenario.commit_log.records()[-1] == recorded
-    assert len(scenario.commit_log.records()) == 2
+    assert scenario.store.history()[-1] == recorded
+    assert len(scenario.store.history()) == 2
 
 
 @pytest.mark.unit
@@ -256,7 +259,10 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
 
     scenario = value.get_or_create_scenario("math")
     assert scenario is not None
-    path = scenario.commit_log.path
+    assert isinstance(scenario.store, CommitLogScenarioStore)
+    journal = scenario.store.commit_log
+    assert journal is not None
+    path = journal.path
     records = path.read_text(encoding="utf-8").splitlines()
     path.write_text("\n".join(records[:-1]) + "\n", encoding="utf-8")
 
@@ -268,10 +274,11 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
     assert recovered is not None
-    adopted = recovered.commit_log.records()[-1]
+    adopted = recovered.store.history()[-1]
 
     assert adopted.operation == "rollback"
     assert adopted.operation_verified is True
@@ -296,6 +303,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
     assert [version["operation"] for version in recovered.releases()] == [

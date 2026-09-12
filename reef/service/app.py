@@ -14,6 +14,7 @@ from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
 from reef.service.request_service import InferenceRetryPolicy, RequestService
 from reef.service.routes import register_routes
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
@@ -44,7 +45,7 @@ def create_app(
     record_retention: RecordRetention | None = None,
 ):
     request_service = RequestService(
-        dispatcher or build_default_dispatcher(),
+        dispatcher or build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()),
         retry_policy=inference_retry_policy,
     )
     request_service_key = web.AppKey("reef_request_service", RequestService)

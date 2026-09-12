@@ -14,6 +14,7 @@ from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, T
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 from ._policy_recipe import TestPolicyRecipe
 
@@ -183,6 +184,7 @@ def start_dispatcher(tmp_path: Path):
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "agent-record",
             experiment_tracker=experiment_tracker,
+            scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
         )
         opened.append((runtime, dispatcher))
         return runtime, dispatcher

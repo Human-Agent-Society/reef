@@ -14,8 +14,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
-from reef.records import RecordConflict, RecordStore
+from reef.records import RecordConflict
 from reef.service.app import create_app
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 
 HEADERS = {"x-reef-scenario": "idempotency"}
 
@@ -27,7 +29,9 @@ def _report(**extra):
 @pytest.mark.unit
 def test_report_accepts_and_echoes_client_agent_record_id() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
 
         first = await client.post("/reef/report", json=_report(agent_record_id="grader:turn-1"), headers=HEADERS)
@@ -53,7 +57,9 @@ def test_report_accepts_and_echoes_client_agent_record_id() -> None:
 @pytest.mark.unit
 def test_report_rejects_non_string_agent_record_id_without_storing() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         for bad in (123, "", "   ", None):
             response = await client.post("/reef/report", json=_report(agent_record_id=bad), headers=HEADERS)
@@ -65,7 +71,7 @@ def test_report_rejects_non_string_agent_record_id_without_storing() -> None:
 
 @pytest.mark.unit
 def test_store_dedups_identical_content_across_timestamps() -> None:
-    store = RecordStore()
+    store = SQLiteRecordStore()
     payload = {"score": 1.0}
     first = AgentRecord.create(
         scenario="s", request_type=RequestType.REPORT, payload=payload, agent_record_id="fixed", created_at=1.0

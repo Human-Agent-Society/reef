@@ -1,82 +1,27 @@
-"""Durable scenario snapshot metadata: schema, serialization, and parsing.
+"""Assemble and parse artifact snapshot metadata for a scenario.
 
 A scenario registration lives in the artifact backend's metadata under
 ``SCENARIO_SNAPSHOT_METADATA_KEY``. The snapshot pins the durable binding
 (scenario name and base artifact) plus enough recovery state
 (scenario step, algorithm state, record-consumption progress) for a
-checkpoint to resume training after a crash. This module is the format
-counterpart of ``commit_log.py``: the log journals every commit, the
-snapshot summarizes the last checkpointed one.
+checkpoint to resume training after a crash. ``state`` owns the shared snapshot
+and record-progress values. This adapter builds their metadata envelope from a
+prepared training commit and parses the envelope read from the artifact backend.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
 from reef.artifact.artifact import ArtifactRef, decode_artifact_ref, encode_artifact_ref
+from reef.scenario.state import RecordProgress, ScenarioSnapshot, parse_record_progress
 from reef.train.types import PreparedCommit
 
 SCENARIO_SNAPSHOT_METADATA_KEY = "scenario_snapshot"
 SCENARIO_SNAPSHOT_KIND = "reef-scenario/4"
-
-
-@dataclass(frozen=True)
-class RecordProgress:
-    """Record-consumption watermark pinned by a snapshot or commit record.
-
-    ``consumed_ids`` names the rows the step's batch consumed.
-    """
-
-    high_water_sequence: int
-    high_water_offset: int
-    compacted_ids: frozenset[str] = frozenset()
-    consumed_ids: frozenset[str] = frozenset()
-
-
-def parse_record_progress(value: object, *, context: str) -> RecordProgress:
-    """Validate one record_progress mapping; shared by snapshot and commit-log parsing.
-
-    ``context`` prefixes every error message (e.g. ``"scenario snapshot"`` or
-    ``"commit record"``). Raises ``ValueError``; callers with their own error
-    types translate it.
-    """
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{context} record_progress must be an object")
-    for name in ("high_water_sequence", "high_water_offset"):
-        field = value.get(name)
-        if not isinstance(field, int) or isinstance(field, bool) or field < 0:
-            raise ValueError(f"{context} record_progress.{name} must be a non-negative integer")
-    compacted_ids = value.get("compacted_ids")
-    if not isinstance(compacted_ids, list) or any(not isinstance(item, str) for item in compacted_ids):
-        raise ValueError(f"{context} record_progress.compacted_ids must be a list of strings")
-    consumed_ids = value.get("consumed_ids")
-    if not isinstance(consumed_ids, list) or any(not isinstance(item, str) for item in consumed_ids):
-        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
-    return RecordProgress(
-        high_water_sequence=value["high_water_sequence"],
-        high_water_offset=value["high_water_offset"],
-        compacted_ids=frozenset(compacted_ids),
-        consumed_ids=frozenset(consumed_ids),
-    )
-
-
-@dataclass(frozen=True)
-class ScenarioSnapshot:
-    """Parsed, validated scenario registration metadata."""
-
-    scenario: str
-    base_artifact: ArtifactRef
-    scenario_step: int
-    algorithm_state: Mapping[str, Any] | None
-    record_progress: RecordProgress | None
-    training_job_id: str | None = None
-    operation: str | None = None
-    rollback_target_release_id: str | None = None
-    metrics: Mapping[str, Any] | None = None
 
 
 def snapshot_metadata_for(

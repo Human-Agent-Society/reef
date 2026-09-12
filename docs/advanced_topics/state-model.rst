@@ -9,6 +9,11 @@ It includes a record id, a scenario, an inference payload (for inference
 exchange) or feedback (for report), and necessary metadata (e.g. request type
 or artifact identifier used for serving).
 
+``RecordStore`` defines record append, replay, compaction, and audit operations.
+It does not know about trainers, artifact publication, or committed scenario
+steps. ``SQLiteRecordStore`` and ``PostgresRecordStore`` share SQL record operations
+while supplying their own database connections, schemas, and transactions.
+
 Compaction retires records from training while retaining their bodies for audit.
 It retires only rows the processor marks releasable, and Reef recomputes that
 set from current state on every read. Separate retention maintenance physically
@@ -67,17 +72,72 @@ a new ``release_id``, keeping step numbers monotonic.
 Commit ordering
 ---------------
 
-Each scenario has an append-only JSONL commit log, and the fsynced append is the
-commit point. A committed step records its step number, artifact ref, checkpoint
-flag, algorithm state, record high-water mark, compaction retirements, and
-metrics. Every other store is derived from that log, and the ordering around the
-append is fixed per step kind, so a crash in any gap replays cleanly.
+``ScenarioStore`` owns a scenario's committed state and its ``RecordStore``.
+It validates step progression and settles record consumption with each commit.
+Deployment assembly selects a store factory; ``ScenarioFactory`` opens it and
+supplies the store to ``Scenario``, which coordinates trainer and artifact
+operations. The default ``SQLiteScenarioStoreFactory`` assembles
+``SQLiteRecordStore`` with ``CommitLogScenarioStore``. The commit log store accepts
+any ``RecordStore`` and keeps commits in append-only JSONL; its fsynced append
+remains the commit point. A committed step
+records its step number, artifact ref, checkpoint flag, algorithm state, record
+high-water mark, consumed record IDs, compaction retirements, metrics, and
+training job identity. Existing databases and logs require no conversion.
+
+``commit_step(expected_step=..., commit=...)`` validates the expected scenario
+step before accepting its successor. Identical retries return the original
+commit; different content for that step or a stale expected step conflicts.
+The default adapter appends the commit before applying SQLite compaction.
+These are separate writes: once the append is durable, a compaction failure
+does not undo the commit. Retrying the same commit or running startup recovery
+repairs the remaining compaction. A database adapter may settle both in one
+database transaction while preserving this public contract.
+
+``ScenarioCommitProtocol`` keeps artifact operations outside the store. For a
+durable store, the order is:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 75
+
+   * - Commit kind
+     - Order after trainer preparation
+   * - Live weights
+     - Prepare the live ref, commit the store, advance the serving head,
+       apply trainer state.
+   * - Saved checkpoint or rollback
+     - Publish durable bytes, commit the store, install the committed heads,
+       synchronize the backend pointer, apply trainer state.
+   * - Local saved artifact
+     - Stage bytes, commit the store, advance the process-local head,
+       apply trainer state.
+   * - No artifact
+     - Commit the store, apply trainer state; keep the artifact head.
+   * - Pending checkpoint
+     - Publish durable bytes, commit the store, apply trainer state;
+       leave serving and checkpoint heads in place.
+
+Without a durable store, live and local saved releases advance the serving
+head before settling the in-memory commit. A conflicting head therefore
+rejects the step before its records are compacted. In-memory commit history
+supports retries only for the lifetime of that session.
+
+Recovery reconciles the store with checkpoint snapshot metadata before
+restoring the trainer. A committed checkpoint ahead of the backend pointer
+repairs that pointer. An older checkpoint snapshot ahead of the local log can
+be adopted into the log. Recovery repairs compaction, replays retained records
+through the committed watermark while excluding every committed step's
+consumed IDs, and restores the read cursor. The watermark is a read position:
+retained records behind it can still belong to an incomplete batch.
 
 Runtime work happens outside the transaction, so the training step must succeed
-before its batch is acknowledged. A publish that fails discards the staged
-artifact and reloads from durable state, replaying the uncompacted records. Each
-scenario needs exactly one logical Reef writer, and external training operations
-must be idempotent or reconcilable after a crash.
+before its batch is acknowledged. After an ambiguous commit error, history is
+authoritative: callers must reconcile or retry the same commit before
+publishing another version. Each scenario still needs exactly one logical Reef
+writer; expected-step validation does not provide distributed leases or make
+external training operations atomic. Those operations must be idempotent or
+reconcilable after a crash. See the `Python storage contract
+<../reference/python-api.rst#scenario-stores>`__ for custom adapters.
 
 These guarantees require persistent storage. `Configuration
 <../reference/configuration.rst>`__ lists the paths, and `Operate a deployment

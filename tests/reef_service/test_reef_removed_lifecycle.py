@@ -104,7 +104,7 @@ def test_old_naming_modules_are_removed(module: str) -> None:
         "AgentDataStore",
         "AgentDataCodec",
         "AgentDataConflict",
-        # Inlined into RecordStore as private methods; never a public class again.
+        # Inlined into SQLiteRecordStore as private methods; never a public class again.
         "RecordCodec",
     ],
 )
@@ -140,6 +140,7 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
     # Test-only accessors migrated to canonical paths.
     assert not hasattr(Dispatcher, "recipes")
     assert not hasattr(Scenario, "checkpoint_strategy")
+    assert not hasattr(Scenario, "commit_log")
     # Capabilities are explicit fields rather than inferred method overrides.
     assert not hasattr(Surface, "kind")
     assert not hasattr(Surface, "validator")
