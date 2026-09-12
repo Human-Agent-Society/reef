@@ -22,7 +22,7 @@ Starting Reef
 Requests
 --------
 
-**401 invalid service token.** The ``Authorization: Bearer`` value is not one of ``service.token`` / ``service.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
+**401 invalid service token.** The ``Authorization: Bearer`` value is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
 
 **400 missing or empty x-reef-scenario.** Every inference, report, and harness read needs the header.
 

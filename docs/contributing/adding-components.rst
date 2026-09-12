@@ -77,6 +77,11 @@ Implementation
 - Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
+- Implement ``TrainingDeployment`` in the integration to own process preparation
+  and its runtime connection. In-process integrations can extend
+  ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
+  ``reef.training_backends`` entry-point group; see `Training backend deployment
+  <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
 - Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
   into framework payloads inside the integration.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add

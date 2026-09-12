@@ -3,7 +3,7 @@
 # what the agent can do, not only what it is told.
 
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
@@ -18,8 +18,8 @@ recipe:
       adapter: native
       # The native variant of the method beside this file (harness/): the same
       # grader, a proposer whose vocabulary is skills, tools and hooks.
-      propose: harness.native_evolution:propose
-      evaluate: harness.native_evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.native_evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.native_evolution:evaluate
       # No binary: the native loop is reef's own. run.sh puts a reef-native
       # launcher for this checkout on PATH; an installed reef ships the script.
       tasks:
@@ -77,8 +77,3 @@ storage:
 execution:
   evolution:
     workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz

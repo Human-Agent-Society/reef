@@ -78,7 +78,7 @@ from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
-from reef.service.deploy.config import load_config
+from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
 from reef.storage.sqlite import SQLiteScenarioStorage

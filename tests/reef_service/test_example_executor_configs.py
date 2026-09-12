@@ -7,10 +7,9 @@ import yaml
 from reef_service.config_helpers import deployment_layout
 
 from reef.recipe.config import recipe_config_from_mapping
+from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.executor.config import role_executor_settings, select_executor
-from reef.service.deploy.config import validate_services
-from reef.service.deploy.execution import service_executor_selection
-from reef.service.deploy.options import native_arguments
+from reef.service.deploy.execution import service_executor_selection, validate_services
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_CONFIGS = (
@@ -60,7 +59,9 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in path.with_name("run.sh").read_text()
     if "tttd" in relative:
         assert config["training"]["num_gpus"] == 2
-        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "${training.num_gpus}"
+        assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == str(
+            config["training"]["num_gpus"]
+        )
         assert config["reef"]["training_backend_options"]["colocate"] is True
     elif "sao" in relative:
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "1"
@@ -112,29 +113,29 @@ def test_gepa_allows_backend_selection_without_default_resource_boilerplate():
     assert execution["backend"] == "${REEF_GEPA_EXECUTOR}"
 
 
-def test_openclawrl_shares_one_ray_gpu_pool_without_double_reserving_driver_gpus():
+def test_openclawrl_isolates_external_models_from_reef_training():
     root = ROOT / "recipes/openclawrl/examples/openclawrl"
     config = deployment_layout(yaml.safe_load((root / "serve.yaml").read_text()))
-    compose = yaml.safe_load((root / "docker-compose.yaml").read_text())
-    services = validate_services(config, "serve.yaml")
-    by_name = {service["name"]: service for service in services}
-    order = [service["name"] for service in services]
-    assert "ray-head" not in by_name
-    assert "ray" not in config and "ray_address" not in config["reef"]
-    assert compose["services"]["reef"]["environment"]["RAY_ADDRESS"] == "${RAY_ADDRESS:-}"
-    devices = compose["services"]["reef"]["deploy"]["resources"]["reservations"]["devices"][0]
-    assert devices["device_ids"] == [str(gpu) for gpu in range(1, 8)]
-    assert not any("cuda" in service or "RAY_ADDRESS" in service.get("env", {}) for service in services)
-    for name in ("prm-sglang", "user-llm-sglang"):
-        service = by_name[name]
-        assert service["resources"] == {"num_gpus": 1}
-        assert not service.get("depends_on")
-        assert order.index(name) < order.index("slime-driver")
-        assert name in by_name["slime-driver"]["depends_on"]
-        assert "CUDA_VISIBLE_DEVICES" not in service.get("env", {})
-    assert "cuda_visible_devices" not in config["training"]["prm"]
-    assert "cuda_visible_devices" not in config["training"]["user_llm"]
-    assert not by_name["slime-driver"].get("resources")
+    compose = yaml.safe_load((root / "docker-compose.yaml").read_text())["services"]
+    driver, http = validate_services(config, "serve.yaml")
+    assert [driver["name"], http["name"]] == ["slime-driver", "reef"]
+    assert not driver.get("resources") and not driver.get("depends_on")
+    assert http["depends_on"] == ["slime-driver"]
+    assert compose["reef"]["environment"]["RAY_ADDRESS"] == "${RAY_ADDRESS:-}"
+    pools = {
+        name: set(service["deploy"]["resources"]["reservations"]["devices"][0]["device_ids"])
+        for name, service in compose.items()
+    }
+    assert pools == {"prm": {"1"}, "user-model": {"2"}, "reef": {"3", "4", "5", "6", "7"}}
+    for name in ("prm", "user-model"):
+        command = compose[name]["command"]
+        assert command[:3] == ["python", "-m", "sglang.launch_server"]
+        assert int(command[command.index("--tp") + 1]) == len(pools[name])
+        assert "RAY_ADDRESS" not in compose[name].get("environment", {})
+    prm = compose["prm"]["command"]
+    assert config["reef"]["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
+    assert config["reef"]["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
+    assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
     flags = dict(
         argument.removeprefix("--").split("=", 1)
         for argument in native_arguments(config["reef"]["training_backend_options"])
@@ -142,8 +143,5 @@ def test_openclawrl_shares_one_ray_gpu_pool_without_double_reserving_driver_gpus
     )
     training_gpus = int(flags["actor-num-nodes"]) * int(flags["actor-num-gpus-per-node"])
     rollout_gpus = int(flags["rollout-num-gpus"])
-    assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 7)
-    assert (
-        training_gpus + rollout_gpus + sum(service.get("resources", {}).get("num_gpus", 0) for service in services)
-        == 7
-    )
+    assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 5)
+    assert training_gpus + rollout_gpus == len(pools["reef"])

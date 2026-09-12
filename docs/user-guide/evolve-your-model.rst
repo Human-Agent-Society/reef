@@ -1,8 +1,9 @@
 Train model weights from agent feedback
 =======================================
 
-Weight training runs three processes. Reef hot-swaps each accepted update into
-the serving engine, so inference keeps answering across the update.
+Weight training coordinates the driver, model workers and HTTP service. Reef
+hot-swaps each accepted update into the serving engine, so inference keeps
+answering across the update.
 
 +--------------------------+-----------------------------------------------+
 | Process                  | Owns                                          |
@@ -54,7 +55,10 @@ Start from a config
 -------------------
 
 Each weight-training example ships a complete ``serve.yaml`` that starts the
-services in the required order and manages the shared Ray runtime. Copy the closest one and edit it.
+processes in the required order and manages the shared Ray runtime. Reef
+assembles the Slime driver and HTTP process, discovers the inference connection
+through the bridge, and stops the stack on exit. Method-specific dependencies
+are implemented by the Recipe. Copy the closest example and edit it.
 
 - `SAO rollout training <recipes/sao.rst>`__ uses
   ``recipes/sao/examples/sao/serve.yaml``, the smallest: two GPUs, one actor
@@ -75,7 +79,7 @@ What to review
 
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
-   service.token | the bearer token the service accepts
+   reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
    training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
@@ -109,7 +113,7 @@ Run the example
      --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
 Any config value can be overridden on the command line. Startup takes several
-minutes; wait for all three services to report ready.
+minutes; wait for the driver and HTTP service to report ready.
 
 .. code:: bash
 
@@ -168,8 +172,8 @@ Reef routes to that scenario's own adapter revision.
    --megatron-lora-target-modules linear_qkv linear_proj linear_fc1 linear_fc2
    --max-loaded-loras=3
 
-Add those to the ``slime-driver`` entry's command in your config's ``services``
-list, and size the engine's adapter table for the scenarios you will train, plus
+Add these native flags to ``training.options`` (without leading ``--``),
+and size the engine's adapter table for the scenarios you will train, plus
 one slot for the revision being published. The training thread takes turns
 between scenarios; each keeps its own adapter and optimizer state, and a restart
 recovers every one of them. ``/reef/status`` lists each scenario with its

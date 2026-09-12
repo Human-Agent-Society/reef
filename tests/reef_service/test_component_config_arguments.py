@@ -19,10 +19,10 @@ from reef.runtime import InferenceProxyRuntime, RuntimeConfigError, RuntimeRegis
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.registry import RuntimeFactory
 from reef.service.deploy import orchestrator
-from reef.service.deploy.components import component_config_arguments, normalize_component_config
-from reef.service.deploy.config import DeployConfigError, interpolate_environment
-from reef.service.deploy.orchestrator import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.settings import normalize_service_config, service_settings_from_config
+from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
+from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
+from reef.service.deploy.deployment_config import component_config_arguments, normalize_component_config
+from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 
 @dataclass(frozen=True)
@@ -107,7 +107,7 @@ def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, 
     assert yaml_values[field] == cli_values[field] == backend[field]
     assert type(yaml_values[field]) is type(cli_values[field]) is type(backend[field])
     restored = yaml.safe_load(yaml.safe_dump(cli_config))
-    child_values = service_settings_from_config(restored).recipe_settings
+    child_values = service_config_from_mapping(restored).recipe_settings
     assert resolve_config_field_values(ExtensionRecipe, {field: child_values[field]}, {})[field] == cli_values[field]
 
 
@@ -261,7 +261,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
     from reef_service.runtime_stubs import StubTrainingRuntime
 
     from reef.service import assembly
-    from reef.service.deploy.settings import ServiceSettings
+    from reef.service.deploy.service_config import ServiceConfig
 
     resolved = []
     original = assembly.resolve_config_field_values
@@ -277,7 +277,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         return StubTrainingRuntime(max_staleness=kwargs["max_staleness"])
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
-    settings = ServiceSettings(
+    settings = ServiceConfig(
         recipe="reef_config_extension:Training",
         model_path="model",
         ray_address="local",
@@ -353,7 +353,7 @@ def test_profile_overrides_reach_the_recipe_without_reloading_original_yaml(exte
         },
         ["--data.label", "001", "--runtime.label", "true", "--no-runtime.enabled"],
     )
-    child = service_settings_from_config(yaml.safe_load(yaml.safe_dump(combined)))
+    child = service_config_from_mapping(yaml.safe_load(yaml.safe_dump(combined)))
     recipe = _serving_recipe("example", child, {"REEF_RECIPE_CONFIG_DIR": str(tmp_path)}, None)
     assert recipe.label == "001"
     assert recipe.runtime.parsed_config["label"] == "true"
@@ -388,14 +388,17 @@ def test_profile_can_omit_its_runtime_with_an_empty_object(extension):
 
 
 def test_versioned_recipe_layout_uses_selected_schema(extension):
-    from reef.service.deploy.layout import normalize_component_layout, translate_layout, translate_references
+    from reef.service.deploy.deployment_config import (
+        normalize_component_layout,
+        translate_layout,
+        translate_references,
+    )
 
     config = translate_layout(
         {
             "schema-version": 2,
             "recipe": {"implementation": "reef_config_extension:Training", "config": {"label": "001", "count": 2}},
-            "inference": {"model-path": "org/model"},
-            "services": [{"name": "reef", "command": ["echo", "${recipe.config.count}"]}],
+            "inference": {"model-path": "org/model", "options": {"custom": "${recipe.config.count}"}},
         }
     )
     arguments = component_config_arguments(config)
@@ -404,4 +407,4 @@ def test_versioned_recipe_layout_uses_selected_schema(extension):
     config = normalize_component_config(normalize_service_config(config), arguments)
     assert config["reef"]["count"] == 5 and config["reef"]["label"] == "001"
     assert "data" not in config["reef"]
-    assert translate_references(config, arguments)["services"][0]["command"][1] == "${reef.count}"
+    assert translate_references(config, arguments)["reef"]["inference_options"]["custom"] == "${reef.count}"

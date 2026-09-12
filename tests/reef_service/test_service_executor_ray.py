@@ -14,7 +14,7 @@ import pytest
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.service.deploy.config import validate_services
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import RayProcessWorker
 

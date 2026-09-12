@@ -50,6 +50,12 @@ def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
 
     if type(config["schema-version"]) is not int or config["schema-version"] != 2:
         raise RecipeConfigError("unsupported recipe schema-version; expected 2")
+    if "service" in config or "services" in config:
+        raise RecipeConfigError(
+            "schema-version 2 does not accept service/services; use reef settings and automatic assembly"
+        )
+    if isinstance(config.get("execution"), Mapping) and "services" in config["execution"]:
+        raise RecipeConfigError("execution.services belongs to legacy process stacks")
     recipe = config.get("recipe")
     if not isinstance(recipe, Mapping) or not isinstance(recipe.get("implementation"), str):
         raise RecipeConfigError("recipe.implementation must name a recipe class")
@@ -82,7 +88,7 @@ def _public_recipe_config(config: Mapping[str, Any]) -> dict[str, Any]:
     inference = config.get("inference", {})
     if not isinstance(inference, Mapping):
         raise RecipeConfigError("inference must be an object")
-    if "service" not in config and "services" not in config:
+    if "reef" not in config:
         model = inference.get(
             "upstream-model", inference.get("upstream_model", inference.get("model-path", inference.get("model_path")))
         )

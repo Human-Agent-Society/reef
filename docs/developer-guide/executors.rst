@@ -323,8 +323,10 @@ guess GPU needs. Slime training/rollout still require specialized Ray launchers.
 Whole-stack deployment configuration
 ------------------------------------
 
-All services in ``services`` use the same Executor factory as the model
-workers. The orchestrator only handles dependencies, readiness, endpoint
+Version 2 has no public process list: Reef assembles native inference/training
+and HTTP processes using the same Executor factory as the model workers.
+Method services are deployed independently; recipes consume their endpoints. The explicit ``services`` and
+``execution.services`` examples below apply only to unversioned legacy stacks. The orchestrator only handles dependencies, readiness, endpoint
 publication, log tailing, failure detection and reverse-order shutdown. It
 does not contain local process or Ray placement operations.
 
@@ -353,7 +355,7 @@ Installing Ray, setting ``RAY_ADDRESS``, or initializing Ray outside a placement
 group does not by itself change a service to Ray. The selector does not import
 or initialize Ray to probe it, count GPUs, change TP/PP, or retry a failed backend
 using another backend. Resource requests must describe the intended scheduling.
-Standalone SGLang/PRM commands still control their own model parallelism. ``auto``
+Standalone SGLang commands still control their own model parallelism. ``auto``
 is also the default ``ExecutorConfig.backend`` for the low-level worker factory
 and coordinator runtime. A service controller is not a model rank: Slime's
 specialized Ray requirement and service resource reservations remain
@@ -368,42 +370,10 @@ necessarily Ray actor options. The reserved Slime launch arguments (``args``,
 ``pg``, rank/GPU layout, role) come from the model configuration and cannot be
 overridden by profile options.
 
-For example, to move a standalone PRM service onto a Ray GPU worker:
-
-.. code:: yaml
-
-   schema-version: 2
-   execution:
-     training: ray
-     rollout: ray
-
-   executors:
-     gpu_service:
-       backend: ray
-       options:
-         num_cpus: 1
-
-   recipe:
-     implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
-     config:
-       prm-url: ${endpoints.prm-sglang}
-
-   services:
-     - name: prm-sglang
-       executor: gpu_service
-       resources:
-         num_gpus: 1
-       command: >-
-         python -m sglang.launch_server --model-path=/models/prm
-         --host 0.0.0.0 --port 23001 --tp 1
-       endpoint: http://{host}:23001
-       ready: curl -sf http://127.0.0.1:23001/health
-       ready_timeout: 600
-
-     - name: reef
-       command: [python, -m, reef.service]
-       depends_on: [prm-sglang]
-       ready: curl -sf http://127.0.0.1:8900/healthz
+OpenClawRL's PRM and user model are outside this lifecycle. Their deployment
+commands, readiness checks and resource allocation live in the example's Docker
+Compose file. Reef receives only recipe client parameters such as
+``recipe.config.prm-url``; no auxiliary process definitions are added to its stack.
 
 Ray executors share a process-wide runtime, initialized only when needed.
 Without an external address, Reef starts a local cluster using the deployment's

@@ -133,7 +133,7 @@ export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
-  --service.port "8900"
+  --reef.port "8900"
 
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```

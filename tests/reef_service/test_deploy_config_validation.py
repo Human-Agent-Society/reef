@@ -9,7 +9,8 @@ import pytest
 
 import reef.service.deploy.orchestrator as orchestrator
 from reef.cli import main as cli_main
-from reef.service.deploy.config import DeployConfigError, load_config, validate_services
+from reef.service.deploy.config_utils import DeployConfigError, load_config
+from reef.service.deploy.execution import validate_services
 from reef.service.deploy.process import _command_argv
 
 VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"
@@ -27,7 +28,7 @@ def test_relative_config_uses_working_directory_not_installation(tmp_path: Path,
     installed.mkdir()
     _write(installed, "reef: {recipe: wrong}\n")
     _write(tmp_path, "reef: {recipe: selected}\n")
-    monkeypatch.setattr("reef.service.deploy.config.PROJECT_ROOT", installed)
+    monkeypatch.setattr("reef.service.deploy.config_utils.PROJECT_ROOT", installed)
     monkeypatch.chdir(tmp_path)
 
     assert load_config("stack.yaml")["reef"]["recipe"] == "selected"
