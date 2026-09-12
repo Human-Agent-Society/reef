@@ -12,9 +12,8 @@ Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 (`run.py`).
 
 The catalog below groups recipes by the **task type** they serve, then by
-**what they evolve**: model weights or the agent harness. Each task type lists
-the standard benchmarks its examples have measured. Recipes that evolve model
-weights need the GPU training stack; harness recipes need only a model
+**what they evolve**: model weights or the agent harness. Recipes that evolve
+model weights need the GPU training stack; harness recipes need only a model
 endpoint. Reefine ships with `reef-infra`; every other recipe here is a
 cookbook package. [Basic](#basic) is the record-only starting stack and stays
 outside the catalog, and [beta recipes](#beta-recipes) join it once they
@@ -26,9 +25,6 @@ catalog.
 
 One hard problem, repeated attempts, and a measurable objective. The recipe
 trains on the attempts it generates itself, at test time.
-
-Measured benchmarks: TriMul (Guidance-TTT); circle packing (n = 26 and 32)
-and Erdős minimum overlap (TTT-Discover).
 
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
@@ -54,10 +50,6 @@ to Reef's training or inference-token capture path.
 Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
-Measured benchmarks: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO),
-and the Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades
-three fixed coding tasks rather than a standard benchmark.
-
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
 | SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [example](sao/examples/sao/README.md) · [results](sao/examples/sao/README.md#results) |
@@ -68,8 +60,7 @@ three fixed coding tasks rather than a standard benchmark.
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
 run in order by `run.py`, each driving six scored rollouts through Reef with a
-verifiable binary reward, and every scored rollout is one training step. Its
-README keeps a comparison against GRPO(+DIS) at Qwen3-30B-A3B scale.
+verifiable binary reward, and every scored rollout is one training step.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
@@ -101,9 +92,6 @@ won the gate.
 
 Real interaction with no explicit score, or delayed feedback. The recipe reads
 the signal out of the traffic it already serves.
-
-Measured benchmarks: the OpenClaw-RL simulated-student homework stream,
-72 GSM8K sessions (OpenClaw-RL).
 
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|

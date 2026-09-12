@@ -284,7 +284,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [Evolve your harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/): evolve a harness instead of model weights
 - [Evolve your model](https://reefinfra.ai/docs/user-guide/evolve-your-model/): configure and operate a training deployment
 - [Recipes](https://reefinfra.ai/docs/user-guide/recipes/): the catalog of cookbook
-  recipes by task type, with the benchmarks each has measured
+  recipes by task type, with code, docs, example, and results for each
 - [The core loop](https://reefinfra.ai/docs/getting-started/core-loop/): The core loop of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 

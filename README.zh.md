@@ -266,7 +266,7 @@ recipe 链接到其指南，每个已测 benchmark 链接到其结果页；[Reci
 - [编写 recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/)：配置 Reef 如何处理数据、产出更新
 - [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训练权重，改进 harness
 - [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：配置并运维训练部署
-- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：按任务类型整理的 cookbook recipe 目录，以及各自测过的 benchmark
+- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：按任务类型整理的 cookbook recipe 目录，含各自的代码、文档、示例和结果
 - [核心循环](https://reefinfra.ai/docs/getting-started/core-loop/)：Reef 的核心循环
 - [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档所用术语的解释
 
