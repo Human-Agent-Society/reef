@@ -137,6 +137,8 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
 
 def test_in_process_serving_boots_on_cpu_without_loading_slime_or_ray(tmp_path):
     marker = tmp_path / "runtime"
+    # Supply only the cookbook to the child; keep Reef resolved from the installed wheel.
+    (tmp_path / "recipes").symlink_to(Path(__file__).resolve().parents[2] / "recipes", target_is_directory=True)
     distribution = tmp_path / "reef_test_backend-0.0.0.dist-info"
     distribution.mkdir()
     (distribution / "METADATA").write_text("Name: reef-test-backend\nVersion: 0.0.0\n")
