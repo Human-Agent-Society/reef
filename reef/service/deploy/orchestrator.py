@@ -19,6 +19,7 @@ import threading
 import time
 from collections.abc import Mapping, MutableMapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import suppress
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -54,6 +55,10 @@ def _log(msg: str) -> None:
 
 class InvalidOverrideError(ValueError):
     """A leftover ``reef serve`` argument is not a valid ``--key`` override."""
+
+
+class DeployStartupError(RuntimeError):
+    """A deployment failed to start; includes its reason and local log location."""
 
 
 def _parse_overrides(extras: list[str]) -> dict[str, str]:
@@ -177,8 +182,18 @@ class _Stack:
         while not self._stopping.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(f"service {service['name']!r} did not become ready")
-            ready = executor.rpc(0, "probe", args=(service["name"], min(5, remaining)), timeout=min(5, remaining) + 2)
+                timeout = service.get("ready_timeout", self.ready_timeout_default)
+                raise TimeoutError(f"service {service['name']!r} did not become ready within {timeout}s")
+            try:
+                ready = executor.rpc(
+                    0, "probe", args=(service["name"], min(5, remaining)), timeout=min(5, remaining) + 2
+                )
+            except Exception:
+                # A failed probe can be the first observation of a child's exit.
+                # Preserve its last output without replacing the startup error.
+                with suppress(Exception):
+                    self._drain_log(service["name"])
+                raise
             self._drain_log(service["name"])
             if ready:
                 return
@@ -396,9 +411,7 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
 
 def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None) -> int:
-    resolved_config_path = Path(config_path)
-    if not resolved_config_path.is_absolute():
-        resolved_config_path = PROJECT_ROOT / resolved_config_path
+    resolved_config_path = Path(config_path).expanduser().resolve()
     config = load_config(resolved_config_path, interpolate_env=False)
     if overrides:
         config = _apply_overrides(config, overrides)
@@ -429,15 +442,25 @@ def _run_orchestrator(config_path: str, overrides: dict[str, str] | None = None)
         resolved_config_path,
         source_root=source_root,
     )
+
+    def interrupt_startup(signum: int, frame: FrameType | None) -> None:
+        _log("received signal during startup, shutting down")
+        raise KeyboardInterrupt
+
+    # block() installs the steady-state handler only after every service is
+    # ready. Until then, interruption must unwind start() and stop its peers.
+    previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
     try:
-        stack.start()
+        try:
+            stack.start()
+        except Exception as exc:
+            raise DeployStartupError(f"deployment startup failed: {exc}\n  logs: {run_dir.resolve()}/*.log") from exc
         stack.block()
     except KeyboardInterrupt:
-        # SIGINT during startup (before block() registers its handler) still
-        # triggers the default KeyboardInterrupt; shutdown ran via finally.
-        # Swallow it so the operator sees a clean exit, not a traceback.
+        # Startup signals unwind the launch tasks before final cleanup.
         stack._stopping.set()
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         stack.shutdown()
         if temp_config_path is not None:
             temp_config_path.unlink(missing_ok=True)
@@ -485,7 +508,7 @@ def _resolve_config(config: str | None, recipe: str | None, environ: Mapping[str
             raise DeployConfigError(str(exc)) from exc
     if environ.get("REEF_CONFIG"):
         return environ["REEF_CONFIG"]
-    if (PROJECT_ROOT / "reef.yaml").is_file():
+    if Path("reef.yaml").is_file():
         return "reef.yaml"
     raise DeployConfigError(
         "no config: pass one with -c <file>, or start a recipe's profile with --recipe <name>; "

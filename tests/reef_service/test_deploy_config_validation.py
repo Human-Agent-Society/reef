@@ -22,6 +22,63 @@ def _write(tmp_path: Path, text: str) -> Path:
 
 
 @pytest.mark.unit
+def test_relative_config_uses_working_directory_not_installation(tmp_path: Path, monkeypatch) -> None:
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    _write(installed, "reef: {recipe: wrong}\n")
+    _write(tmp_path, "reef: {recipe: selected}\n")
+    monkeypatch.setattr("reef.service.deploy.config.PROJECT_ROOT", installed)
+    monkeypatch.chdir(tmp_path)
+
+    assert load_config("stack.yaml")["reef"]["recipe"] == "selected"
+    (tmp_path / "stack.yaml").unlink()
+    with pytest.raises(DeployConfigError, match="config not found") as caught:
+        load_config("stack.yaml")
+    assert str(tmp_path / "stack.yaml") in str(caught.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("source", ["argument", "environment", "default"])
+def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Path, monkeypatch, source) -> None:
+    captured = {}
+
+    class StackStub:
+        exit_code = 0
+
+        def __init__(self, config, services, run_dir, ready_timeout_default, config_path, source_root=None):
+            captured["path"] = config_path
+            captured["config"] = load_config(config_path)
+            captured["run_dir"] = run_dir.resolve()
+
+        def start(self):
+            pass
+
+        def block(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("REEF_CONFIG", raising=False)
+    monkeypatch.setattr(orchestrator, "_Stack", StackStub)
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
+    path = tmp_path / ("reef.yaml" if source == "default" else "stack.yaml")
+    path.write_text("run_dir: work/stack\n" + VALID)
+    if source == "environment":
+        monkeypatch.setenv("REEF_CONFIG", path.name)
+    arguments = ["serve", "-c", path.name] if source == "argument" else ["serve"]
+
+    with pytest.raises(SystemExit) as caught:
+        cli_main(arguments)
+
+    assert caught.value.code == 0
+    assert captured["path"] == path
+    assert captured["config"]["services"][0]["name"] == "worker"
+    assert captured["run_dir"] == tmp_path / "work" / "stack"
+
+
+@pytest.mark.unit
 def test_malformed_yaml_is_a_config_error_naming_the_path(tmp_path: Path) -> None:
     path = _write(tmp_path, "services: [unclosed\n")
     with pytest.raises(DeployConfigError, match="not valid YAML") as caught:
@@ -39,6 +96,16 @@ def test_non_object_root_is_a_config_error(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_empty_file_loads_as_an_empty_config(tmp_path: Path) -> None:
     assert load_config(_write(tmp_path, "")) == {}
+
+
+@pytest.mark.unit
+def test_directory_is_reported_as_an_unreadable_config(tmp_path: Path, capsys) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli_main(["serve", "-c", str(tmp_path)])
+    assert caught.value.code == 2
+    message = capsys.readouterr().err
+    assert f"cannot read config {tmp_path}" in message
+    assert "Traceback" not in message
 
 
 @pytest.mark.unit

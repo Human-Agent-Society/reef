@@ -68,7 +68,7 @@ def main(argv=None):
         _connect_main(rest)
         return
 
-    from reef.service.deploy import DeployConfigError
+    from reef.service.deploy import DeployConfigError, DeployStartupError
     from reef.service.deploy import main as _serve_main
 
     try:
@@ -77,6 +77,9 @@ def main(argv=None):
         # Deploy config errors are typed library errors; the CLI owns the exit.
         print(f"[reef] ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    except DeployStartupError as exc:
+        print(f"[reef] ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

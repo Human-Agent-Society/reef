@@ -112,10 +112,8 @@ def interpolate_config(config: Mapping[str, Any], value: str) -> str:
 
 
 def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dict[str, Any]:
-    """Read a deployment config; defer interpolation when applying CLI overrides."""
-    path = Path(config_path)
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
+    """Read a config relative to the working directory; optionally defer interpolation."""
+    path = Path(config_path).expanduser().resolve()
     if not path.exists():
         raise DeployConfigError(f"config not found: {path}\n  pass a deployment stack with: reef serve -c <path>")
     try:
@@ -123,6 +121,8 @@ def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dic
             config = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
         raise DeployConfigError(f"config {path} is not valid YAML: {exc}") from exc
+    except OSError as exc:
+        raise DeployConfigError(f"cannot read config {path}: {exc.strerror}") from exc
     if config is None:
         config = {}
     if not isinstance(config, dict):

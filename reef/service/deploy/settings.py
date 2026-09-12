@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-c",
         "--config",
         default=None,
-        help="Config file path (default: reef.yaml or $REEF_CONFIG).",
+        help="Config file path, relative to the working directory (default: $REEF_CONFIG or ./reef.yaml).",
     )
     return parser
 
