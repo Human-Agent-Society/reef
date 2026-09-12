@@ -41,6 +41,16 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=1,
         help="Adapter slots the SGLang engine keeps loaded on the shared base model (>= 1).",
     )
+    parser.add_argument(
+        "--keep-lora-base-resident",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Release only the KV cache and CUDA graphs on a colocated LoRA training step, "
+            "leaving the frozen base weights on the GPU. Off by default: it trades the "
+            "per-step base copy for holding that memory for the whole run."
+        ),
+    )
     parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(

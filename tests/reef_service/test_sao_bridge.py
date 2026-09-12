@@ -244,6 +244,15 @@ class _FakeRolloutManager:
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
         self.pause_generation_for_update = _RemoteMethod(lambda: None)
         self.continue_generation_after_update = _RemoteMethod(lambda: None)
+        self.memory_calls: list[str] = []
+        self.release_tags: list[object] = []
+        self.offload = _RemoteMethod(self._offload)
+        self.onload_weights = _RemoteMethod(lambda: self.memory_calls.append("onload_weights"))
+        self.onload_kv = _RemoteMethod(lambda: self.memory_calls.append("onload_kv"))
+
+    def _offload(self, tags=None) -> None:
+        self.release_tags.append(tags)
+        self.memory_calls.append("offload")
 
 
 class _RecordingGroup:

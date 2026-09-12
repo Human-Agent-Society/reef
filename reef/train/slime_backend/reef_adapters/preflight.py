@@ -49,6 +49,20 @@ def validate_bridge_args(args, spec: SlimeAlgorithm | None) -> None:
         raise ValueError("the Reef bridge requires --offload-train and --offload-rollout with --colocate")
     if getattr(args, "offload_rollout", False) and not colocate:
         raise ValueError("the Reef bridge does not support --offload-rollout because Reef needs serving to stay live")
+    if getattr(args, "keep_lora_base_resident", False):
+        # Only a frozen base may stay resident. Full-weight training rewrites
+        # the served weights, which is exactly what releasing them is for, and
+        # a non-colocated engine never releases anything to begin with.
+        # Spelled out rather than calling megatron_lora_enabled, which would
+        # put torch on this module's import path. It is the same predicate:
+        # start_bridge derives its own `lora` from that helper, and the helper
+        # is this comparison, so the two cannot disagree.
+        if int(getattr(args, "megatron_lora_rank", 0) or 0) <= 0:
+            raise ValueError("--keep-lora-base-resident requires LoRA training; set --megatron-lora-rank")
+        if not colocate:
+            raise ValueError(
+                "--keep-lora-base-resident applies to colocated training; without --colocate nothing is released"
+            )
     save = getattr(args, "save", None)
     if not isinstance(save, str) or not save.strip():
         raise ValueError("the Reef bridge requires --save for Megatron recovery checkpoints")

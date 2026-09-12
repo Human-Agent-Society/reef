@@ -403,9 +403,14 @@ class _FakeRolloutManager:
         self.recover_updatable_engines = _RemoteMethod(lambda: self._record("recover_engines"))
         self.pause_generation_for_update = _RemoteMethod(lambda: self._record("pause_generation"))
         self.continue_generation_after_update = _RemoteMethod(lambda: self._record("continue_generation"))
-        self.offload = _RemoteMethod(lambda: self._record("offload"))
+        self.release_tags: list[object] = []
+        self.offload = _RemoteMethod(self._offload)
         self.onload_weights = _RemoteMethod(lambda: self._record("onload_weights"))
         self.onload_kv = _RemoteMethod(lambda: self._record("onload_kv"))
+
+    def _offload(self, tags=None) -> None:
+        self.release_tags.append(tags)
+        self._record("offload")
 
     def _record(self, event: str) -> None:
         self.lifecycle_calls.append(event)
@@ -693,6 +698,11 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
         "onload_kv",
     ]
     assert actor.health()["phase"] == "awaiting_commit"
+
+    # Default: the base is released with everything else, so the step passes no
+    # tags and the weights half of the restore runs.
+    assert manager.release_tags == [None]
+
     assert actor.health()["completed_train_steps"] == 1
     assert actor.health()["last_train_rollout_id"] == 0
     assert result.training_job_id is not None

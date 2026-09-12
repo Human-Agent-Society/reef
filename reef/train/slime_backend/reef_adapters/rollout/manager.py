@@ -106,8 +106,8 @@ class ReefRolloutManagerImpl:
     def get_updatable_engines_and_lock(self):
         return self._serving.rpc(0, "get_updatable_engines_and_lock", timeout=14_400)
 
-    def offload(self):
-        return self._serving.rpc(0, "offload", timeout=14_400)
+    def offload(self, tags=None):
+        return self._serving.rpc(0, "offload", args=(tags,), timeout=14_400)
 
     def onload(self, tags=None):
         return self._serving.rpc(0, "onload", args=(tags,), timeout=14_400)
