@@ -158,8 +158,9 @@ with no GPU.
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
-copy ``recipes/basic/external-provider.yaml``, set
-``reef.recipe: recipes.sao.recipe:SAORecipe``, and serve the new config.
+start from ``recipes/sao/examples/sao/serve.yaml``. It selects
+``recipe.implementation: recipes.sao.recipe:SAORecipe`` and configures the
+training driver and model workers.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 

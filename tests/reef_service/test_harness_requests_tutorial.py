@@ -14,11 +14,11 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 

@@ -416,8 +416,8 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     # The legacy retry deadline follows the request timeout unless supplied.
     if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
-    # Built-in profiles use one file as both a stack and a named preset.
-    preset = dict(config) if "implementation" in config and ":" not in values["recipe"] else None
+    # Preserve shared execution settings for presets and directly selected recipes.
+    preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
     return ServiceSettings(**values, recipe_settings=_reef_section(config), preset_config=preset)
 
 

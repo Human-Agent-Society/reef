@@ -13,7 +13,6 @@ from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
-from reef.service.deploy.config import interpolate_config
 from reef.service.deploy.settings import ServiceSettings
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -185,7 +184,9 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     if not config_path.exists():
         pytest.skip("repo-owned stack: shipped with the repo, not with the package")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    config = deploy.load_config(config_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(config_path)
     service = next(item for item in config["services"] if item["name"] == "reef")
     args = deploy.service_settings_from_config(config)
 
@@ -205,7 +206,9 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     ],
 )
 def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> None:
-    config = deploy.load_config(deploy.PROJECT_ROOT / relative_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
 
     assert "max_staleness" not in config["reef"]
 
@@ -217,12 +220,13 @@ def test_cookbook_training_configs_leave_max_staleness_unset(relative_path) -> N
 )
 def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    config = deploy.load_config(deploy.PROJECT_ROOT / relative_path)
+    from reef_service.config_helpers import load_deployment
+
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
     retention = config["training"]["checkpoint_retention"]
-    command = interpolate_config(
-        config,
-        next(service["command"] for service in config["services"] if service["name"] == "slime-driver"),
-    )
+    from reef.service.deploy.options import native_arguments
+
+    command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
 
     assert retention["max_storage_fraction"] == 0.8
     assert retention["min_free_space_fraction"] == 0.1

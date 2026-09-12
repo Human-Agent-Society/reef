@@ -156,19 +156,19 @@ and record retention. Direct Python construction uses ``SQLiteRecordStore``
 for SQLite records and requires ``store=...`` for a ``Scenario``; see the
 `record API <../reference/python-api.rst#record-storage-and-audit>`__ for migration.
 
-Choose the record backend in the deployment's ``reef`` section. SQLite remains
+Choose the record backend in the deployment's ``storage`` section. SQLite remains
 the default and requires no new settings. To use PostgreSQL, install the driver
 with ``uv pip install 'reef-infra[postgres]'`` (or ``uv pip install -e '.[postgres]'``
 from a checkout), then configure:
 
 .. code-block:: yaml
 
-   reef:
-     recipe: recipe
-     record_backend: postgres
-     record_database_url: ${REEF_RECORD_DATABASE_URL}
-     record_database_schema: reef_records
-     agent_record_dir: .reef/agent-record
+   schema-version: 2
+   storage:
+     record-backend: postgres
+     record-database-url: ${REEF_RECORD_DATABASE_URL}
+     record-database-schema: reef_records
+     agent-record-dir: .reef/agent-record
 
 Set ``REEF_RECORD_DATABASE_URL`` to a PostgreSQL connection URL, such as
 ``postgresql://reef:password@db.example.com/reef?sslmode=require``. The database

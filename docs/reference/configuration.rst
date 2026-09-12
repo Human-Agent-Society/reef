@@ -89,9 +89,8 @@ The public layout groups fields by their owner:
 Without ``services``, version 2 assembles the core record-only recipe with a
 managed SGLang process or an external provider. Training and custom runtime
 settings require an explicit ``services`` list. Version 2 keeps that advanced
-process escape hatch for custom stacks. ``training.config`` holds legacy
-stack-template variables such as checkpoint directories and ``slime_flags``;
-new native backend flags belong in ``training.options``.
+process escape hatch for custom stacks. ``training.config`` holds stack-template variables such as checkpoint directories
+and example workload sizes; native backend flags belong in ``training.options``.
 
 Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
@@ -234,6 +233,14 @@ retain generic YAML coercion; the ``services`` layout is unchanged.
 Component configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
 
+Shipped examples and profiles use version 2, including standalone recipe files
+loaded by embedding scripts. ``recipe_config_from_mapping`` / ``load_recipe_config``
+translate their public envelope into the existing recipe construction contract.
+Recipes may declare opaque sections in ``config_sections``; for example, Cordis
+owns ``recipe.config.evolution``. Those sections use object/leaf CLI overrides,
+then their recipe validates the payload. Executor placement remains shared with
+the deployment and reaches dotted recipes as well as named presets.
+
 After selecting ``recipe.implementation`` (legacy ``reef.recipe``), Reef loads that class's declarations without
 constructing the recipe. A dotted weight-training recipe exposes its fields
 as ``--recipe.config.batch-size``, with legacy aliases
@@ -345,8 +352,12 @@ actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
 LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
 a PRM engine and a student model.
 
-The ``reef`` section
---------------------
+Legacy ``reef`` section
+----------------------
+
+The fields below describe the unversioned compatibility contract. New files
+use ``recipe.implementation``, ``service``, ``inference`` and ``storage`` as
+shown above; the repository examples all use version 2.
 
 .. config::
 
@@ -421,6 +432,11 @@ ignored.
 
 Recipe configuration
 --------------------
+
+Version 2 puts declared recipe fields under ``recipe.config`` and the runtime
+under ``recipe.runtime``. Harness settings live in ``recipe.config.evolution``.
+The ``data``, ``evolution`` and ``runtime`` paths below also name the existing
+Python recipe contract and remain accepted by legacy presets.
 
 ``data.training_mode`` is shared by all recipes and defaults to ``auto``.
 In ``auto``, the recipe's processor decides when its data can form a batch,
@@ -659,15 +675,15 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
-   training.checkpoint_dir | where Megatron and HF checkpoints are written
-   training.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
-   training.checkpoint_retention | storage-fraction bounds and the retention policy
-   training.slime_flags | GPU layout, optimizer, sequence length, and loss settings, as one literal string
+   training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
+   training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
+   training.config.checkpoint_dir | where Megatron and HF checkpoints are written
+   training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
+   training.config.checkpoint_retention | storage-fraction bounds and the retention policy
+   training.options | native backend flags as a mapping: GPU layout, optimizer, sequence length, and loss settings
 
 Slime fills architecture flags such as layer counts and hidden sizes from
-``reef.model_path``. Do not put them in the config.
+``inference.model-path``. Do not put them in the config.
 
 The ``evaluation`` section
 --------------------------
@@ -724,7 +740,7 @@ store on the cluster.
 
    There is no API-key field here. Reef rejects Slime's ``--wandb-key`` flag and
    never writes a credential into metrics or run config. Do not put one in the
-   YAML, in ``slime_flags``, in a tag, or in a run name.
+   YAML, in ``training.options``, in a tag, or in a run name.
 
 ``online`` sends data to the project. ``offline`` makes no network calls and
 writes syncable data below ``directory`` for a later ``wandb sync``.

@@ -194,10 +194,10 @@ asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
 
 ### A larger model
 
-Change `reef.model_path`, the GPU counts and parallelism flags, and
+Change `inference.model-path`, the GPU counts and parallelism flags, and
 `--seq-length` and `--rollout-max-response-len` in `serve.yaml`. The
 objective flags are the paper's reasoning-domain values and do not change
-with model size. `reef.batch_size` and `training.global_batch_size` must stay
+with model size. `recipe.config.batch-size` and `training.config.global_batch_size` must stay
 equal, because each rollout sample is its own data-parallel unit.
 
 ## Paper fidelity

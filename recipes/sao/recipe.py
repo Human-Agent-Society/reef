@@ -27,7 +27,7 @@ class SAORecipe(WeightTrainingRecipe):
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
     parameters belong to the training backend. For Slime they are configured by
-    ``training.slime_flags``; this recipe only owns Reef-side batching and
+    ``training.options``; this recipe only owns Reef-side batching and
     checkpoint cadence.
 
     ``batch_size`` must equal the Slime driver's ``--global-batch-size``: each
@@ -54,5 +54,5 @@ class SAORecipe(WeightTrainingRecipe):
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:
         if settings.get("optimization"):
             raise RecipeConfigError(
-                "SAO objective options are backend-owned; configure the Slime implementation with training.slime_flags"
+                "SAO objective options are backend-owned; configure the Slime implementation with training.options"
             )

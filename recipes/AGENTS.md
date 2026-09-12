@@ -104,25 +104,30 @@ trial result, not in the training scenario's report contract.
 Reef service config. The minimal record-only config (no training stack) is:
 
 ```yaml
-reef:
+schema-version: 2
+service:
   host: 127.0.0.1
   port: ${REEF_PORT}
-  recipe: ${REEF_RECIPE}
   token: ${REEF_TOKEN}
-  agent_record_dir: ${REEF_WORK}/agent-record
-  artifact_repository: ${REEF_WORK}/artifacts.git
-  artifact_work_dir: ${REEF_WORK}/artifact-work
-  artifact_cache_dir: ${REEF_WORK}/artifact-cache
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+recipe:
+  implementation: recipe
+storage:
+  agent-record-dir: ${REEF_WORK}/agent-record
+  artifact-repository: ${REEF_WORK}/artifacts.git
+  artifact-work-dir: ${REEF_WORK}/artifact-work
+  artifact-cache-dir: ${REEF_WORK}/artifact-cache
 ```
 
-For a training example (GPU + Ray + Slime/Megatron + SGLang), see
-`tttd/serve.yaml` — it adds `training:` and `services:` blocks for the
-training stack under the same `reef:` section.
+Keep shipped Reef configuration in the versioned public layout. Training
+examples put native driver flags in `training.options` and retain explicit
+`services` for their worker topology; see
+`recipes/tttd/examples/tttd/serve.yaml`. Recipe fields and owned sections go
+under `recipe.config`. Docker Compose and third-party task files retain their
+own schemas. Legacy Reef layouts belong in compatibility tests.
 
 ## `run.sh`
 

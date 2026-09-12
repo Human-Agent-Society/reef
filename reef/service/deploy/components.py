@@ -47,6 +47,33 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             replace(argument, public_path=("recipe", "config", argument.name))
             for argument in config_arguments(recipe_type, prefix=prefix)
         )
+        if issubclass(recipe_type, WeightTrainingRecipe):
+            # The legacy service contract projects this control into artifact
+            # settings rather than the recipe's data fields; keep its default there.
+            arguments.append(
+                ConfigArgument(
+                    "checkpoint_every_n_versions",
+                    (*prefix, "checkpoint_every_n_versions"),
+                    "int",
+                    True,
+                    None,
+                    "Artifact checkpoint interval in published versions.",
+                    public_path=("recipe", "config", "checkpoint_every_n_versions"),
+                )
+            )
+        section_prefix = prefix[:-1] if prefix[-1:] == ("data",) else prefix
+        arguments.extend(
+            ConfigArgument(
+                section,
+                (*section_prefix, section),
+                "object",
+                False,
+                {},
+                f"Recipe-owned {section} configuration.",
+                public_path=("recipe", "config", section),
+            )
+            for section in recipe_type.config_sections
+        )
     runtime_prefix = ("runtime",) if prefix == ("data",) else ("reef", "runtime")
     arguments.append(
         ConfigArgument(

@@ -101,11 +101,11 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
 def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path, selector):
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
     if selector == "worker":
-        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
@@ -120,7 +120,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     assert config["execution"]["evolution"]["backend"] == "auto"
     config["execution"]["evolution"]["workers"] = 1
-    config["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
+    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
@@ -198,7 +198,7 @@ def test_driver_keeps_custom_task_hooks(load, monkeypatch):
     def feedback(task, output, score):
         return "custom"
 
-    config["evolution"].update(evaluate=scorer, feedback=feedback)
+    config["recipe"]["config"]["evolution"].update(evaluate=scorer, feedback=feedback)
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     assert recipe.score_episode("problem", pi_episode("anything")) == 0.5
@@ -290,7 +290,9 @@ def test_the_pins_a_report_names_stay_exact(aime):
 def test_the_seed_composition_carries_the_quickstart_envelope():
     import yaml
 
-    seed = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["evolution"]["seed"]
+    seed = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["recipe"]["config"]["evolution"][
+        "seed"
+    ]
     entries = {str(entry["id"]): entry for entry in seed}
 
     assert entries["rules"]["config"]["text"].startswith("You are a helpful assistant.")

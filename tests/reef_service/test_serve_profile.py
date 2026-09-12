@@ -153,13 +153,15 @@ def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_
     }.items():
         monkeypatch.setenv(key, value)
     path = profile_path("harness-evolve")
-    config = load_config(path)
+    from reef.service.deploy.orchestrator import resolve_deployment_config
+
+    config = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
     validate_services(config, path)
     reef_service = next(service for service in config["services"] if service["name"] == "reef")
     assert reef_service["env"]["REEF_RECIPE_CONFIG_DIR"] == str(PROFILES_DIR)
     method_root = Path(reef_service["env"]["PYTHONPATH"].split(os.pathsep)[0])
     assert (method_root / "harness" / "evolution.py").is_file()
-    assert config["reef"]["recipe"] == "harness-evolve" and config["reef"]["port"] == 8900
+    assert config["reef"]["recipe"] == "reef.recipe.cordis:CordisRecipe" and config["reef"]["port"] == 8900
     assert "token" not in config["reef"]  # loopback only; a copy of the file adds one
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith(".reef/harness-evolve/")

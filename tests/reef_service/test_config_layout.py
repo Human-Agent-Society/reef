@@ -166,3 +166,42 @@ def test_whole_native_object_then_leaf_override_and_flag_values():
 def test_public_references_keep_opaque_key_spelling():
     config = {"reef": {"inference_options": {"custom-key": 2}}, "reference": "${inference.options.custom-key}"}
     assert translate_references(config, ())["reference"] == "${reef.inference_options.custom-key}"
+
+
+def test_shipped_reef_yamls_use_the_public_layout():
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    configs = []
+    for directory in ("recipes", "tutorials", "reef/service/profiles", "tests/packaging"):
+        for path in (root / directory).rglob("*.yaml"):
+            if "work" in path.relative_to(root).parts:
+                continue
+            text = path.read_text()
+            if not re.search(r"(?m)^(schema-version|reef|implementation):", text):
+                continue
+            configs.append(path)
+            config = yaml.safe_load(text)
+            assert config.get("schema-version") == 2, path
+            assert not {"reef", "implementation", "data", "evolution"} & config.keys(), path
+    assert len(configs) >= 15
+
+
+def test_declared_recipe_sections_support_leaf_overrides():
+    config = {
+        "reef": {
+            "recipe": "reef.recipe.cordis:CordisRecipe",
+            "data": {"training_mode": "auto"},
+            "evolution": {"adapter": "pi", "tasks": ["one"], "episode_workers": 2},
+        }
+    }
+    arguments = component_config_arguments(config)
+    result = _apply_overrides(
+        config,
+        {"recipe.config.evolution.episode_workers": "4", "recipe.config.training-mode": "manual"},
+        arguments=arguments,
+    )
+    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "episode_workers": 4}
+    assert result["reef"]["data"]["training_mode"] == "manual"
+    assert config["reef"]["evolution"]["episode_workers"] == 2

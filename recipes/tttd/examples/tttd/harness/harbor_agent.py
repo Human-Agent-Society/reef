@@ -39,10 +39,10 @@ SEARCH_STATE_PATH = Path(__file__).resolve().parents[1] / "work" / TASK / "tttd-
 # trains only after exactly groups_per_step x rollouts_per_group reports
 # arrive, so a harness that disagreed would fail on the training timeout.
 _STACK = yaml.safe_load((Path(__file__).resolve().parents[1] / "serve.yaml").read_text())
-GROUPS_PER_STEP = _STACK["reef"]["groups_per_step"]
-ROLLOUTS_PER_GROUP = _STACK["reef"]["rollouts_per_group"]
-STEPS = _STACK["training"]["steps"]
-MAX_NEW_TOKENS = _STACK["training"]["max_new_tokens"]
+GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
+ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
+STEPS = _STACK["training"]["config"]["steps"]
+MAX_NEW_TOKENS = _STACK["training"]["config"]["max_new_tokens"]
 MAX_WORKERS = 256 if TASK.startswith("circle_packing") else 512  # packing needs the headroom
 
 

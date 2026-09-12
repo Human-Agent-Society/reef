@@ -129,8 +129,8 @@ export MODEL_PATH="Qwen/Qwen2.5-1.5B-Instruct"
 export REEF_TOKEN="reef-local"
 
 reef serve -c recipes/sao/examples/sao/serve.yaml \
-  --reef.model_path "$MODEL_PATH" \
-  --reef.port "8900"
+  --inference.model-path "$MODEL_PATH" \
+  --service.port "8900"
 
 curl -f http://127.0.0.1:8900/healthz          # ready to serve
 ```

@@ -125,9 +125,9 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def translate_recipe_fields(config: dict[str, Any], arguments: tuple[ConfigArgument, ...]) -> dict[str, Any]:
-    """Translate a weight recipe's declared config from its public namespace."""
+    """Translate selected recipe fields and owned sections from their public namespace."""
     recipe_arguments = [argument for argument in arguments if argument.public_path[:2] == ("recipe", "config")]
-    if not recipe_arguments or recipe_arguments[0].path[:-1] != ("reef",):
+    if not recipe_arguments:
         return config
     resolved = copy.deepcopy(config)
     recipe_values = resolved.get("reef", {}).pop("data", {})

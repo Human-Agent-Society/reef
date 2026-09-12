@@ -7,6 +7,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.config import ConfigArgument
 from reef.service.deploy.config import DeployConfigError
 
 _OPTION_PATHS = {
@@ -65,3 +66,19 @@ def native_arguments(options: Any, *, reserved: set[str] | None = None) -> list[
             encoded = json.dumps(value) if isinstance(value, Mapping) else str(value)
             arguments.append(f"{flag}={encoded}")
     return arguments
+
+
+def object_override_path(key: str, arguments: tuple[ConfigArgument, ...]) -> tuple[str, ...] | None:
+    """Locate a leaf in a declared opaque object; its component owns value validation."""
+    prefixes: list[tuple[str, tuple[str, ...]]] = []
+    for argument in arguments:
+        if argument.kind == "object":
+            public = ".".join(argument.public_path or argument.path)
+            prefixes.extend((name + ".", argument.path) for name in (public, public.replace("_", "-")))
+    for prefix, path in sorted(prefixes, key=lambda item: len(item[0]), reverse=True):
+        if key.startswith(prefix):
+            suffix = tuple(key[len(prefix) :].split("."))
+            if not all(suffix):
+                raise DeployConfigError("object override paths must have non-empty fields")
+            return (*path, *suffix)
+    return None

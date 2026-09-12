@@ -11,7 +11,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger
@@ -41,6 +41,9 @@ class Recipe:
     add their own fields, override ``build`` and, when needed, narrow the
     ``runtime`` field.
     """
+
+    config_sections: ClassVar[tuple[str, ...]] = ()
+    """Opaque config sections validated by the recipe alongside its declared fields."""
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None

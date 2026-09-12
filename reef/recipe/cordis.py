@@ -17,7 +17,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
@@ -240,6 +240,8 @@ class CordisRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     worker_gpus: float | None = None
+    config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
+
     batch_size: int = config_field(1)
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")

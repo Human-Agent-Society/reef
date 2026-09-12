@@ -11,7 +11,7 @@
 # Reduced-model smoke: 2 GPUs, Qwen2.5-1.5B-Instruct. Scale seq-length,
 # model, and GPU counts up for a real run; the objective settings below are the
 # paper's reasoning-domain values and do not change with model size. Changing
-# the model family means updating the model-specific flags in slime_flags
+# the model family means updating the model-specific flags in training.options
 # (--padded-vocab-size, --add-qkv-bias, --normalization, ...) to match: Reef
 # derives only size and topology flags from the HF config, and e.g. Qwen3
 # models have no QKV bias, so pointing model_path at one while these flags
@@ -19,60 +19,41 @@
 #
 # Started by run.sh; state under ./work.
 
-# The stack's pid and log files. Without this they land in the shared
-# /tmp/reef-stack, beside every other example's.
-run_dir: work/stack
-
-# Service processes launch locally; Slime owns distributed GPU model workers.
-execution:
-  training: ray
-  rollout: ray
-
-reef:
+schema-version: 2
+service:
   host: 127.0.0.1
-  model_path: ~/models/Qwen2.5-1.5B-Instruct
   port: 8900
-  recipe: recipes.sao.recipe:SAORecipe
   token: reef-local
-  batch_size: 1                        # MUST equal training.global_batch_size
-  max_staleness: 18
-  checkpoint_every_n_versions: 1
-  ray_namespace: reef
-  ray_actor_name: reef-train-bridge
+  run-dir: work/stack
+
+inference:
+  model-path: ~/models/Qwen2.5-1.5B-Instruct
+  # SAO's DIS ratio uses the rollout log-probabilities as its behaviour proxy,
+  # so the rollout must be captured token-natively from the engine. Reef never
+  # re-tokenizes a completion to reconstruct policy tensors.
+  backend-factory: >-
+    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+recipe:
+  implementation: recipes.sao.recipe:SAORecipe
+  config:
+    batch-size: 1                      # MUST equal training.config.global_batch_size
+    max-staleness: 18
+    checkpoint-every-n-versions: 1
+training:
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
   # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
   # actor step, a checkpoint save, and a weight publish, so it outlasts an
   # inference request by a wide margin. Match the bridge ceiling instead of
   # the client default to avoid a stale RUNNING marker.
-  train_timeout_s: 14400
-  # SAO's DIS ratio uses the rollout log-probabilities as its behaviour proxy,
-  # so the rollout must be captured token-natively from the engine. Reef never
-  # re-tokenizes a completion to reconstruct policy tensors.
-  inference_backend_factory: >-
-    reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
-  artifact_repository: work/artifacts.git
-  artifact_work_dir: work/artifact-work
-  artifact_cache_dir: work/artifact-cache
-  agent_record_dir: work/agent-record
-
-observability:
-  wandb:
-    enabled: false                     # omitted or false means no tracking
-    project: reef
-    # entity: your-team
-    # group_prefix: sao               # produces group sao/<scenario>
-    # name_prefix: sao
-    tags: []
-    mode: online                       # online, offline, or disabled
-    directory: work/wandb
-    upload_checkpoints: false
-
-training:
-  sglang_port: "30000"
-  # Relative paths resolve against the directory reef serve runs from. The
-  # checkpoint preflight requires roughly 16x the HF model size free on this
-  # filesystem before the stack boots (the critic doubles the training state).
-  checkpoint_dir: work/checkpoints
-  global_batch_size: 1
+  timeout-s: 14400
+  config:
+    sglang_port: "30000"
+    # Relative paths resolve against the directory reef serve runs from. The
+    # checkpoint preflight requires roughly 16x the HF model size free on this
+    # filesystem before the stack boots (the critic doubles the training state).
+    checkpoint_dir: work/checkpoints
+    global_batch_size: 1
   # SAO objective as slime flags: --use-critic creates the value-model group;
   # the algorithm spec sets --custom-advantage-function-path (skip-observation
   # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)
@@ -86,42 +67,80 @@ training:
   # the cold-start problem the paper's value-training designs exist to avoid.
   # Warmup steps still commit one training release per rollout; the actor's
   # weights first move on step 11.
-  slime_flags: >-
-    --padded-vocab-size=151936
-    --position-embedding-type=rope
-    --swiglu --disable-bias-linear --add-qkv-bias
-    --normalization=RMSNorm
-    --actor-num-nodes=1 --actor-num-gpus-per-node=1 --rollout-num-gpus=1
-    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=2
-    --tensor-model-parallel-size=1 --pipeline-model-parallel-size=1
-    --seq-length=4096 --rollout-max-response-len=2048
-    --optimizer=adam --lr=1e-6 --lr-decay-style=constant
-    --loss-type=policy_loss --use-rollout-logprobs
-    --use-critic
-    --eps-clip=0.3 --eps-clip-high=5.0
-    --critic-steps-per-actor=2
-    --critic-lr=5e-6
-    --num-critic-only-steps=10
-    --sao-length-adaptive-lambda --sao-lambda-alpha=1.5
-    --gamma=1.0 --lambd=1.0
-    --entropy-coef=0.0 --n-samples-per-prompt=1
+  options:
+    megatron-to-hf-mode: "bridge"
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    sglang-router-port: "${training.config.sglang_port}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    add-qkv-bias: true
+    normalization: "RMSNorm"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "1"
+    rollout-num-gpus: "1"
+    rollout-num-gpus-per-engine: "1"
+    num-gpus-per-node: "2"
+    tensor-model-parallel-size: "1"
+    pipeline-model-parallel-size: "1"
+    seq-length: "4096"
+    rollout-max-response-len: "2048"
+    optimizer: "adam"
+    lr: "1e-6"
+    lr-decay-style: "constant"
+    loss-type: "policy_loss"
+    use-rollout-logprobs: true
+    use-critic: true
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    critic-steps-per-actor: "2"
+    critic-lr: "5e-6"
+    num-critic-only-steps: "10"
+    sao-length-adaptive-lambda: true
+    sao-lambda-alpha: "1.5"
+    gamma: "1.0"
+    lambd: "1.0"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "1"
+storage:
+  artifact-repository: work/artifacts.git
+  artifact-work-dir: work/artifact-work
+  artifact-cache-dir: work/artifact-cache
+  agent-record-dir: work/agent-record
+
+
+# Service processes launch locally; Slime owns distributed GPU model workers.
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: sao               # produces group sao/<scenario>
+    # name_prefix: sao
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: work/wandb
+    upload_checkpoints: false
 
 services:
   - name: slime-driver
-    command: >-
-      "${REEF_PYTHON}" -m reef.service.slime_driver
-      --megatron-to-hf-mode bridge
-      --hf-checkpoint=${reef.model_path}
-      --load=${training.checkpoint_dir}/megatron
-      --save=${training.checkpoint_dir}/megatron
-      --save-interval=100
-      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
-      --sglang-router-port=${training.sglang_port}
-      --num-rollout=100000000
-      --rollout-batch-size=${training.global_batch_size}
-      --global-batch-size=${training.global_batch_size}
-      --micro-batch-size=1
-      ${training.slime_flags}
+    command:
+      - ${REEF_PYTHON}
+      - -m
+      - reef.service.slime_driver
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     ready_timeout: 900
     env:
@@ -130,5 +149,5 @@ services:
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready: curl -sf http://127.0.0.1:${service.port}/healthz
     depends_on: [slime-driver]

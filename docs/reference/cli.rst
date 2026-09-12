@@ -53,25 +53,25 @@ and evaluator, so it runs from a reef checkout; it listens on
 Overriding config values
 ------------------------
 
-Any ``--key value`` pair the parser does not recognize is applied as a config
-override, so a stack can be retargeted without editing its file. Values are
-YAML-coerced, so ints and bools arrive as ints and bools.
+Canonical CLI paths match ``schema-version: 2`` YAML. Declared fields use the
+same type parser for both inputs; explicit CLI values override YAML. Opaque
+component objects support leaf overrides, validated by their owning component.
 
 .. code:: bash
 
    reef serve -c path/to/training.yaml \
-     --model_path ~/models/Qwen2.5-1.5B-Instruct \
-     --training.checkpoint_dir /tmp/ckpt
+     --inference.model-path ~/models/Qwen2.5-1.5B-Instruct \
+     --training.config.checkpoint_dir /tmp/ckpt
 
-A bare key targets the ``reef`` section. A dotted key targets any other section.
-Use it to move a stack's state without editing its config:
+Use public namespaces to move a stack's state without editing its config.
+Legacy bare and ``reef.*`` aliases remain accepted for compatibility:
 
 .. code:: bash
 
    reef serve -c recipes/basic/external-provider.yaml \
-     --agent_record_dir .reef/agent-record \
-     --artifact_work_dir .reef/artifact-work \
-     --artifact_cache_dir .reef/artifact-cache
+     --storage.agent-record-dir .reef/agent-record \
+     --storage.artifact-work-dir .reef/artifact-work \
+     --storage.artifact-cache-dir .reef/artifact-cache
 
 Where it writes
 ---------------

@@ -50,6 +50,7 @@ from reef.dispatcher import Dispatcher
 from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
@@ -97,8 +98,7 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     deployment. The method never sees the endpoint or the key.
     """
     config = load_config(HERE / "gepa.yaml")
-    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
-    sections.update({key: config[key] for key in ("execution", "executors") if key in config})
+    sections = recipe_config_from_mapping(config)
     evolution = dict(sections["evolution"])
     evolution["tasks"] = tasks
     # Importable functions alone do not carry the driver's populated globals

@@ -52,9 +52,14 @@ from reef.service.deploy.layout import (
     translate_layout,
     translate_references,
 )
-from reef.service.deploy.options import native_override, normalize_native_options
+from reef.service.deploy.options import native_override, normalize_native_options, object_override_path
 from reef.service.deploy.provider import assemble_provider_services, provider_config
-from reef.service.deploy.settings import build_parser, normalize_service_config, service_override
+from reef.service.deploy.settings import (
+    build_parser,
+    normalize_service_config,
+    service_config_arguments,
+    service_override,
+)
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -167,6 +172,10 @@ def _apply_overrides(
         if declared is not None:
             argument, raw_value = declared
             key = ".".join(argument.path)
+        if declared is None:
+            object_path = object_override_path(key, (*service_config_arguments(), *arguments))
+            if object_path is not None:
+                key = ".".join(object_path)
         if declared is None:
             for public, internal in (("recipe.runtime.", "reef.runtime."), ("recipe.config.", "reef.data.")):
                 if key.startswith(public):
@@ -511,17 +520,14 @@ def _component_selection(
     return selected, source_root
 
 
-def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
-    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
-    config = (
-        load_config(resolved_config_path, interpolate_env=False)
-        if config_path
-        else provider_config(overrides or {}, os.environ)
-    )
+def resolve_deployment_config(
+    config: dict[str, Any], overrides: dict[str, str] | None, source: str | Path, *, standard: bool = False
+) -> tuple[dict[str, Any], Path | None]:
+    """Resolve the public layout and selected schemas without starting processes or downloading models."""
+    resolved_config_path = Path(source).resolve()
     versioned = config.get("schema-version") == 2
     config = translate_layout(config)
-    standard = config_path is None or (versioned and "services" not in config)
-    _log(f"config: {resolved_config_path}" if config_path else "config: command line")
+    standard = standard or (versioned and "services" not in config)
     selected, source_root = _component_selection(config, overrides or {}, resolved_config_path)
     if source_root is not None:
         _log(f"recipe package resolves from {source_root}")
@@ -533,6 +539,7 @@ def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None 
                 if (
                     service_override(key, value) is None
                     and native_override(key) is None
+                    and object_override_path(key, (*service_config_arguments(), *arguments)) is None
                     and not any(f"--{key}" in (*argument.flags, *argument.negative_flags) for argument in arguments)
                 ):
                     raise DeployConfigError(f"unknown configuration flag --{key}")
@@ -550,6 +557,21 @@ def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None 
             assemble_provider_services(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
+    return normalized_config, source_root
+
+
+def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
+    config = (
+        load_config(resolved_config_path, interpolate_env=False)
+        if config_path
+        else provider_config(overrides or {}, os.environ)
+    )
+    versioned = config.get("schema-version") == 2
+    _log(f"config: {resolved_config_path}" if config_path else "config: command line")
+    normalized_config, source_root = resolve_deployment_config(
+        config, overrides, resolved_config_path, standard=config_path is None
+    )
     settings_changed = normalized_config != config
     config = normalized_config
     services = validate_services(config, resolved_config_path)

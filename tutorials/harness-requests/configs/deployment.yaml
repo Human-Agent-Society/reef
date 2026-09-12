@@ -4,91 +4,94 @@
 # tutorials/evolve-your-harness with its state under tutorials/harness-requests/work/,
 # training_mode manual and the gate's selection set to always. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
-implementation: reef.recipe.cordis:CordisRecipe
-# The recipe uses the upstream runtime's model for evaluation as well as serving.
-
-evolution:
-  adapter: pi
-  # The other tutorial's method package: its propose answers a request with any kind pi renders.
-  propose: harness.evolution:propose
-  evaluate: harness.evolution:evaluate
-  # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
-  requests: true
-  # The notice at session start offers the update once the head moved.
-  version_check: true
-  # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
-  review_kinds: [code_extension]
-  # A workflow change does not move the three arithmetic tasks, so every pairing ties and the score
-  # comparison would reject; the demo publishes on any verdict and records it (RFC #308's tasks are the fix).
-  selection: always
-  # Every step's proposer calls, parsed proposal and gate episodes, so a row can be read back.
-  step_record_dir: tutorials/harness-requests/work/deployment/steps
-  # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
-  proposals_dir: tutorials/harness-requests/work/deployment/proposals
-  # No binary: at startup reef installs the descriptor's pinned pi under
-  # ~/.local/share/reef-harness/pi, shared with the client install script.
-  # Set evolution.binary to a path to use an install of your own instead.
-  tasks:
-  - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000?
-    Reply with the count as a plain integer alone on the last line.'
-  - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not
-    approximate). Reply with the value as a plain integer alone on the last line.'
-  - '[csv] Compute the median of the value column in this csv:
-
-    id,value
-
-    1,12
-
-    2,47
-
-    3,3
-
-    4,88
-
-    5,21
-
-    6,56
-
-    7,9
-
-    8,74
-
-    9,30
-
-    Reply with the median as a plain integer alone on the last line.'
-  seed:
-  - id: answer-style
-    name: skill
-    config:
-      name: answer-style
-      text: '# answer-style
-
-
-        Starter skill. The evolution loop replaces this placeholder with
-
-        concrete guidance learned from failing tasks.
-
-        '
-data:
-  batch_size: 1
-  max_score: 0.0
-  # One step per instruction and no failure driven step between them: the measurement counts a step per request.
-  training_mode: manual
-
-reef:
+schema-version: 2
+service:
   host: 127.0.0.1
   port: 8901
-  recipe: deployment
   token: reef-local
-  upstream_url: ${REEF_UPSTREAM_URL:?}
-  upstream_model: ${REEF_UPSTREAM_MODEL:?}
-  upstream_api_key: ${REEF_UPSTREAM_API_KEY}
-  agent_record_dir: tutorials/harness-requests/work/deployment/agent-record
-  artifact_repository: tutorials/harness-requests/work/deployment/artifacts.git
-  artifact_work_dir: tutorials/harness-requests/work/deployment/artifact-work
-  artifact_cache_dir: tutorials/harness-requests/work/deployment/artifact-cache
+  run-dir: tutorials/harness-requests/work/deployment/stack
 
-run_dir: tutorials/harness-requests/work/deployment/stack
+recipe:
+  implementation: reef.recipe.cordis:CordisRecipe
+  # The recipe uses the upstream runtime's model for evaluation as well as serving.
+
+  config:
+    evolution:
+      adapter: pi
+      # The other tutorial's method package: its propose answers a request with any kind pi renders.
+      propose: harness.evolution:propose
+      evaluate: harness.evolution:evaluate
+      # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+      requests: true
+      # The notice at session start offers the update once the head moved.
+      version_check: true
+      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
+      review_kinds: [code_extension]
+      # A workflow change does not move the three arithmetic tasks, so every pairing ties and the score
+      # comparison would reject; the demo publishes on any verdict and records it (RFC #308's tasks are the fix).
+      selection: always
+      # Every step's proposer calls, parsed proposal and gate episodes, so a row can be read back.
+      step_record_dir: tutorials/harness-requests/work/deployment/steps
+      # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
+      proposals_dir: tutorials/harness-requests/work/deployment/proposals
+      # No binary: at startup reef installs the descriptor's pinned pi under
+      # ~/.local/share/reef-harness/pi, shared with the client install script.
+      # Set evolution.binary to a path to use an install of your own instead.
+      tasks:
+        - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
+          integer alone on the last line.'
+        - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
+          as a plain integer alone on the last line.'
+        - '[csv] Compute the median of the value column in this csv:
+
+          id,value
+
+          1,12
+
+          2,47
+
+          3,3
+
+          4,88
+
+          5,21
+
+          6,56
+
+          7,9
+
+          8,74
+
+          9,30
+
+          Reply with the median as a plain integer alone on the last line.'
+      seed:
+        - id: answer-style
+          name: skill
+          config:
+            name: answer-style
+            text: '# answer-style
+
+
+              Starter skill. The evolution loop replaces this placeholder with
+
+              concrete guidance learned from failing tasks.
+
+              '
+    batch-size: 1
+    max-score: 0.0
+    # One step per instruction and no failure driven step between them: the measurement counts a step per request.
+    training-mode: manual
+
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+storage:
+  agent-record-dir: tutorials/harness-requests/work/deployment/agent-record
+  artifact-repository: tutorials/harness-requests/work/deployment/artifacts.git
+  artifact-work-dir: tutorials/harness-requests/work/deployment/artifact-work
+  artifact-cache-dir: tutorials/harness-requests/work/deployment/artifact-cache
 
 services:
   - name: reef
@@ -97,4 +100,4 @@ services:
       REEF_RECIPE_CONFIG_DIR: tutorials/harness-requests/configs
       # The method package is the other tutorial's; this directory adds no Python of its own.
       PYTHONPATH: "${PWD}/tutorials/evolve-your-harness:${PWD}"
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready: curl -sf http://127.0.0.1:${service.port}/healthz

@@ -19,6 +19,7 @@ import yaml
 from reef.core import AgentRecord, RequestType
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe import RecipeConfigError
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.train.cordis_backend import Mutation
@@ -322,11 +323,11 @@ def test_driver_preserves_executor_profiles(driver, monkeypatch, selector):
     monkeypatch.setenv("REEF_PI_BINARY", "pi")
     monkeypatch.setenv("REEF_SC_SKILLS", "")
     config = driver.load_config(EXAMPLE_DIR / "skillclaw.yaml")
-    config["evolution"]["seed_skills"] = ""
+    config["recipe"]["config"]["evolution"]["seed_skills"] = ""
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
     if selector == "worker":
-        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr(driver, "read_key", lambda: "dummy")
@@ -354,7 +355,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     monkeypatch.setenv("REEF_SC_SKILLS", str(skills))
     config = load_config(EXAMPLE_DIR / "skillclaw.yaml")
-    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    sections = recipe_config_from_mapping(config)
     assert sections["implementation"] == "recipes.skillclaw.recipe:SkillClawRecipe"
 
     built = build_recipe(str(sections["implementation"]), {}, config=sections, runtime=runtime())
@@ -674,7 +675,7 @@ def test_the_recipe_yaml_is_valid_yaml_after_interpolation(monkeypatch) -> None:
     monkeypatch.delenv("REEF_SC_SKILLS", raising=False)
     config = load_config(EXAMPLE_DIR / "skillclaw.yaml")
     assert yaml.safe_load(yaml.safe_dump(config)) == config
-    assert config["evolution"]["seed_skills"] == ""  # unset env seeds no skills
+    assert config["recipe"]["config"]["evolution"]["seed_skills"] == ""  # unset env seeds no skills
 
 
 def test_mutation_type_is_the_mechanisms(skillclaw, example, monkeypatch) -> None:

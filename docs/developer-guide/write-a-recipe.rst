@@ -99,16 +99,18 @@ Copy a weight-training config as described in `Evolve your model
 
 .. code:: yaml
 
-   reef:
-     recipe: "my_pkg.my_method:MyMethodRecipe"
-     batch_size: 4
+   schema-version: 2
+   recipe:
+     implementation: "my_pkg.my_method:MyMethodRecipe"
+     config:
+       batch-size: 4
 
 This fragment shows only the new keys; keep the model, storage, runtime, and
 ``services`` settings from the config you copied. Set
-``training.global_batch_size`` to the same value, and add the driver flags your
+``training.config.global_batch_size`` to the same value, and add the driver flags your
 loss family requires (`the mapping
 <loss-families.rst#family-to-driver-flags>`__).
-The driver reads the same ``reef.recipe`` value from the deployment config and
+The driver reads the same ``recipe.implementation`` value from the deployment config and
 gets the loss family from the class's ``training_spec()``. Do not repeat either
 value in the driver environment. Reef has no global recipe-implementation
 registry.
@@ -126,7 +128,8 @@ Declare each method setting once with ``config_field``:
 
    @dataclass(frozen=True)
    class MyMethodRecipe(WeightTrainingRecipe):
-       batch_size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
+       config:
+       batch-size: int = config_field(4, env="MY_BATCH_SIZE", help="Samples in one update.")
        temperature: float = config_field(0.5, allow_nonfinite=False)
        tags: tuple[str, ...] = config_field(())
 

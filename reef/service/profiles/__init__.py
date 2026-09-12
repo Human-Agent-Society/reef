@@ -1,8 +1,8 @@
 """The profiles ``reef serve --recipe <name>`` starts without a config file.
 
-A profile is one deployment yaml a built in recipe carries, read both as the
-stack config and as the named preset ``reef.recipe`` selects, so the recipe's
-sections and the service's sections live in one file. ``REEF_RECIPE_CONFIG_DIR``
+A profile is one versioned deployment YAML, with its selected class under
+``recipe.implementation`` and component values under ``recipe.config``. It
+can also be read as a named recipe preset through the public layout adapter. ``REEF_RECIPE_CONFIG_DIR``
 still names a directory of the operator's own presets; a profile is only ever
 selected by name on the command line.
 """

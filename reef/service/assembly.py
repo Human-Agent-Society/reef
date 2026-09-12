@@ -190,6 +190,14 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
         raise ValueError("the top-level evaluation section requires a weight-training recipe")
     if ":" in selected:
         config = _recipe_owned_settings(settings)
+        if settings.preset_config is not None:
+            config.update(
+                {
+                    key: settings.preset_config[key]
+                    for key in ("execution", "executors")
+                    if key in settings.preset_config
+                }
+            )
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
