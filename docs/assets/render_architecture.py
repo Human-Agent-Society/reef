@@ -18,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-W, H = 1200, 560
+W, H = 1200, 550
 CYCLE = 12  # seconds for one lap of serve, observe, grow, commit
 
 THEMES = {
@@ -27,7 +27,7 @@ THEMES = {
         "ink": "#14110e",
         "line": "#3c3630",
         "muted": "#7d766e",
-        "faint": "#c9c2b8",
+        "faint": "#b8b0a6",
         "accent": "#a03729",
     },
     "dark": {
@@ -35,7 +35,7 @@ THEMES = {
         "ink": "#f7f4f0",
         "line": "#cfc8bf",
         "muted": "#a49c93",
-        "faint": "#4b443c",
+        "faint": "#5d554c",
         "accent": "#d99183",
     },
 }
@@ -47,30 +47,35 @@ FONTS_CSS = (
 USER_AGENT = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120 Safari/537.36"
 
 # The two rows of the diagram: what serves a request, and what learns from it.
+# Each box is a title and two lines of description.
 SERVING = [
-    ("Harness", "agent, prompts, tools", "reef-client"),
-    ("Scenario", "freezes the release, records the interaction", "reef/scenario"),
-    ("Inference", "provider-native model requests", "SGLang · vLLM · OpenAI-compatible"),
+    ("Harness", "agent, prompts and tools", "receipt-linked feedback"),
+    ("Scenario", "freezes the release", "stores the interaction"),
+    ("Inference", "provider-native requests", "OpenAI, Anthropic compatible"),
 ]
 LEARNING = [
-    ("Records", "matches feedback to interactions", "reef/records"),
-    ("Trainer", "runs the recipe on eligible records", "reef/train · recipes/*"),
-    ("Evaluation", "selects or rejects the candidate", "reef/train/evaluation"),
-    ("Release", "accepted artifact and its history", "reef/artifact · reef/surface"),
+    ("Records", "matches feedback to", "recorded interactions"),
+    ("Trainer", "runs the recipe", "weights or harness"),
+    ("Evaluation", "evaluates the candidate", "selects or rejects it"),
+    ("Release", "accepted artifact with", "its parent history"),
 ]
 STEPS = [
-    ("Serve", "request served, interaction recorded"),
-    ("Observe", "feedback matched to the interaction"),
-    ("Grow", "recipe trains weights or the harness"),
-    ("Commit", "candidate evaluated, release published"),
+    ("Serve", "request served and recorded"),
+    ("Observe", "feedback matched to records"),
+    ("Grow", "recipe trains on records"),
+    ("Commit", "evaluated, then published"),
 ]
-# Which boxes light up in each step (indexes into SERVING, then LEARNING).
+# Which step lights each box up.
 PHASE_OF = {"Harness": 1, "Scenario": 1, "Inference": 1, "Records": 2, "Trainer": 3, "Evaluation": 4, "Release": 4}
 
-Y1, Y2, BH = 62, 300, 104
-ROW1 = [(60, 320), (440, 320), (820, 320)]
-ROW2 = [(60, 235), (340, 235), (620, 235), (900, 235)]
-STRIP_Y = 508
+# Type scale.
+TITLE, BODY, LABEL, NOTE, CAPS = 24, 17, 16, 15, 14
+STEP_NAME, STEP_DESC, BADGE_R = 22, 17, 16
+
+Y1, Y2, BH = 54, 286, 122
+ROW1 = [(40, 344), (428, 344), (816, 344)]
+ROW2 = [(40, 253), (329, 253), (618, 253), (907, 253)]
+STRIP_Y = 500
 
 
 def font_files(cache: Path) -> list[tuple[str, int, bytes]]:
@@ -105,11 +110,15 @@ def text(x, y, s, size, weight=500, fill="", anchor="start", cls="", mono=False,
     )
 
 
-def cap(x, y, s, fill, size=11):
+def cap(x, y, s, fill, size=CAPS):
     return text(x, y, s.upper(), size, 500, fill, extra=f' letter-spacing="{size * 0.1}"')
 
 
-def arrow(p, x, y, direction, color, size=7):
+def label(x, y, s, fill, anchor="middle", size=LABEL):
+    return text(x, y, s, size, 400, fill, anchor, mono=True)
+
+
+def arrow(x, y, direction, color, size=7):
     r = {"right": 0, "down": 90, "left": 180, "up": 270}[direction]
     return (
         f'<path d="M{-size} {-size * 0.55} L0 0 L{-size} {size * 0.55}" fill="none" stroke="{color}" '
@@ -118,7 +127,7 @@ def arrow(p, x, y, direction, color, size=7):
     )
 
 
-def box(p, x, y, w, name, sub, mod):
+def box(p, x, y, w, name, line1, line2):
     phase = PHASE_OF[name]
     return "".join(
         [
@@ -126,9 +135,9 @@ def box(p, x, y, w, name, sub, mod):
                 f'<rect class="hi{phase}" x="{x}" y="{y}" width="{w}" height="{BH}" rx="10" fill="{p["card"]}" '
                 f'stroke="{p["line"]}" stroke-width="1.3"/>'
             ),
-            text(x + 18, y + 36, name, 17, 600, p["ink"]),
-            text(x + 18, y + 60, sub, 13, 500, p["muted"]),
-            text(x + 18, y + 86, mod, 11, 400, p["muted"], mono=True),
+            text(x + 18, y + 42, name, TITLE, 600, p["ink"]),
+            text(x + 18, y + 72, line1, BODY, 500, p["muted"]),
+            text(x + 18, y + 98, line2, BODY, 500, p["muted"]),
         ]
     )
 
@@ -137,7 +146,7 @@ def dot(p, path_id, t0, t1):
     """A dot that runs along a connector between two moments of the cycle (fractions of CYCLE)."""
     e = 0.004
     return (
-        f'<circle r="4" fill="{p["accent"]}" opacity="0">'
+        f'<circle r="4.5" fill="{p["accent"]}" opacity="0">'
         f'<animateMotion dur="{CYCLE}s" repeatCount="indefinite" calcMode="linear" '
         f'keyPoints="0;0;1;1" keyTimes="0;{t0};{t1};1"><mpath xlink:href="#{path_id}"/></animateMotion>'
         f'<animate attributeName="opacity" dur="{CYCLE}s" repeatCount="indefinite" '
@@ -165,7 +174,7 @@ def styles(p, fonts):
     frames = []
     for n in range(1, 5):
         a, b = (n - 1) * 25, n * 25
-        on, off = f"stroke:{p['accent']};stroke-width:1.6", f"stroke:{p['line']};stroke-width:1.3"
+        on, off = f"stroke:{p['accent']};stroke-width:1.8", f"stroke:{p['line']};stroke-width:1.3"
         fill_on, fill_off = f"fill:{p['accent']}", f"fill:{p['card']}"
         num_on, num_off = f"fill:{p['card']}", f"fill:{p['accent']}"
         name_on, name_off = f"fill:{p['ink']}", f"fill:{p['muted']}"
@@ -198,81 +207,71 @@ def render(theme: str, fonts) -> str:
         styles(p, fonts),
     ]
 
-    # serving row
-    o.append(cap(60, 46, "serving", p["faint"]))
-    for (x, w), (name, sub, mod) in zip(ROW1, SERVING, strict=True):
-        o.append(box(p, x, Y1, w, name, sub, mod))
+    # serving row; the request labels sit above the row and the return labels below it
+    o.append(cap(40, 34, "serving", p["faint"]))
+    for (x, w), (name, line1, line2) in zip(ROW1, SERVING, strict=True):
+        o.append(box(p, x, Y1, w, name, line1, line2))
     for k in range(2):
         gx0, gx1 = ROW1[k][0] + ROW1[k][1], ROW1[k + 1][0]
-        top, bot = Y1 + 36, Y1 + 70
+        top, bot = Y1 + 42, Y1 + 80
         o.append(
             f'<path id="fwd{k}" d="M{gx0 + 2} {top} H{gx1 - 4}" stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
         )
-        o.append(arrow(p, gx1 - 3, top, "right", p["line"]))
+        o.append(arrow(gx1 - 3, top, "right", p["line"]))
         o.append(
             f'<path id="back{k}" d="M{gx1 - 2} {bot} H{gx0 + 4}" stroke="{p["muted"]}" stroke-width="1.3" fill="none"/>'
         )
-        o.append(arrow(p, gx0 + 3, bot, "left", p["muted"]))
+        o.append(arrow(gx0 + 3, bot, "left", p["muted"]))
         cx = (gx0 + gx1) / 2
-        o.append(text(cx, top - 9, ("request", "proxy")[k], 11, 400, p["muted"], "middle", mono=True))
-        o.append(text(cx, bot + 16, ("receipt", "reply")[k], 11, 400, p["muted"], "middle", mono=True))
+        o.append(label(cx, Y1 - 14, ("request", "proxy")[k], p["muted"]))
+        o.append(label(cx, Y1 + BH + 24, ("receipt", "reply")[k], p["muted"]))
 
-    # learning row
-    o.append(cap(60, Y2 - 16, "learning", p["faint"]))
-    for (x, w), (name, sub, mod) in zip(ROW2, LEARNING, strict=True):
-        o.append(box(p, x, Y2, w, name, sub, mod))
+    # learning row; the hand-off labels sit below the row
+    o.append(cap(40, Y2 - 18, "learning", p["faint"]))
+    for (x, w), (name, line1, line2) in zip(ROW2, LEARNING, strict=True):
+        o.append(box(p, x, Y2, w, name, line1, line2))
     labels = ["batch", "candidate", "accepted"]
     for k in range(3):
         gx0, gx1 = ROW2[k][0] + ROW2[k][1], ROW2[k + 1][0]
-        y = Y2 + 40
+        y = Y2 + 46
         o.append(
             f'<path id="learn{k}" d="M{gx0 + 2} {y} H{gx1 - 4}" stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
         )
-        o.append(arrow(p, gx1 - 3, y, "right", p["line"]))
-        o.append(text((gx0 + gx1) / 2, Y2 + BH + 20, labels[k], 11, 400, p["muted"], "middle", mono=True))
+        o.append(arrow(gx1 - 3, y, "right", p["line"]))
+        o.append(label((gx0 + gx1) / 2, Y2 + BH + 24, labels[k], p["muted"]))
     ex, ew = ROW2[2]
-    o.append(
-        text(
-            ex + ew / 2,
-            Y2 + BH + 38,
-            "rejected: the current release keeps serving",
-            11,
-            400,
-            p["faint"],
-            "middle",
-            mono=True,
-        )
-    )
+    o.append(label(ex + ew / 2, Y2 + BH + 48, "rejected: keep the current release", p["faint"], size=NOTE))
+    lx, lw = ROW2[3]
+    o.append(label(lx + lw / 2, Y2 + BH + 48, "harness pulls the release", p["faint"], size=NOTE))
 
     # scenario -> records, and release -> scenario
     sx, sw = ROW1[1]
     rx, rw = ROW2[0]
-    lx, lw = ROW2[3]
     down_x, up_x = sx + 60, sx + sw - 60
     o.append(
-        f'<path id="observe" d="M{down_x} {Y1 + BH + 2} V236 H{rx + rw / 2} V{Y2 - 4}" '
+        f'<path id="observe" d="M{down_x} {Y1 + BH + 2} V244 H{rx + rw / 2} V{Y2 - 4}" '
         f'stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
     )
-    o.append(arrow(p, rx + rw / 2, Y2 - 3, "down", p["line"]))
-    o.append(text((down_x + rx + rw / 2) / 2, 230, "records · feedback", 11, 400, p["muted"], "middle", mono=True))
+    o.append(arrow(rx + rw / 2, Y2 - 3, "down", p["line"]))
+    o.append(label((down_x + rx + rw / 2) / 2, 237, "records · feedback", p["muted"]))
     o.append(
-        f'<path id="commit" d="M{lx + lw / 2} {Y2 - 2} V210 H{up_x} V{Y1 + BH + 4}" '
+        f'<path id="commit" d="M{lx + lw / 2} {Y2 - 2} V216 H{up_x} V{Y1 + BH + 4}" '
         f'stroke="{p["accent"]}" stroke-width="1.4" fill="none"/>'
     )
-    o.append(arrow(p, up_x, Y1 + BH + 3, "up", p["accent"]))
-    o.append(text((lx + lw / 2 + up_x) / 2, 204, "served next", 11, 400, p["accent"], "middle", mono=True))
+    o.append(arrow(up_x, Y1 + BH + 3, "up", p["accent"]))
+    o.append(label(lx + lw / 2 - 90, 209, "served next", p["accent"]))
 
     # the step strip
     for k, (name, desc) in enumerate(STEPS):
         n = k + 1
-        x = 73 + k * 280
+        x = 40 + BADGE_R + k * 285
         o.append(
-            f'<circle class="bf{n}" cx="{x}" cy="{STRIP_Y}" r="13" fill="{p["card"]}" '
+            f'<circle class="bf{n}" cx="{x}" cy="{STRIP_Y}" r="{BADGE_R}" fill="{p["card"]}" '
             f'stroke="{p["accent"]}" stroke-width="1.5"/>'
         )
-        o.append(text(x, STRIP_Y + 5, str(n), 13, 600, p["accent"], "middle", cls=f"bn{n}"))
-        o.append(text(x + 26, STRIP_Y + 6, name, 16, 600, p["muted"], cls=f"nm{n}"))
-        o.append(text(x + 26, STRIP_Y + 28, desc, 12, 500, p["muted"]))
+        o.append(text(x, STRIP_Y + 6, str(n), 16, 600, p["accent"], "middle", cls=f"bn{n}"))
+        o.append(text(x + BADGE_R + 14, STRIP_Y + 7, name, STEP_NAME, 600, p["muted"], cls=f"nm{n}"))
+        o.append(text(x + BADGE_R + 14, STRIP_Y + 34, desc, STEP_DESC, 500, p["muted"]))
 
     # the moving dots, one lap per cycle
     for path_id, t0, t1 in [
