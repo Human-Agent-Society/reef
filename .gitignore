@@ -213,6 +213,7 @@ _examples_synced/
 
 # example run state
 recipes/*/work/
+recipes/*/examples/*/work/
 tutorials/*/work/
 recipes/basic/work/
 

@@ -1,0 +1,38 @@
+# The Reef training stack for CEO-Bench (Reef, Ray, Slime/Megatron, SGLang) in
+# the reef image. run.sh supplies image, paths, GPU pool, and a per-run token.
+# The simulator roles are external services (the benchmark's Anthropic
+# defaults, or a local OpenAI-compatible server) and are not started here.
+services:
+  reef:
+    image: ${REEF_IMAGE}
+    container_name: reef-ceobench
+    command: reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve.yaml
+    # Host networking: the task container reaches Reef on the machine's IP,
+    # and slime binds the training engines' router to that same IP.
+    network_mode: host
+    ipc: host
+    shm_size: 32gb
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Four actor GPUs (critic colocated) and one rollout GPU.
+              device_ids: ["${REEF_GPU_0:-0}", "${REEF_GPU_1:-1}", "${REEF_GPU_2:-2}", "${REEF_GPU_3:-3}", "${REEF_GPU_4:-4}"]
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+      - ${RUN_DIR}:/var/lib/reef
+      - ${REEF_ROOT}:/workspace/Reef
+    environment:
+      RAY_ADDRESS: ${RAY_ADDRESS:-}
+      REEF_TOKEN: ${REEF_TOKEN}
+      PYTHONPATH: /workspace/Reef:/root/Megatron-LM
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:28900/healthz"]
+      interval: 10s
+      timeout: 5s
+      # The stack boots in a few minutes on H100s; 120 x 10s is the ceiling.
+      retries: 120
+      start_period: 30s

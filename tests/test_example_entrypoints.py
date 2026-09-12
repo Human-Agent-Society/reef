@@ -26,6 +26,7 @@ EXAMPLE_DIRS = {
     "sao": ROOT / "recipes" / "sao" / "examples" / "sao",
     "tttd": ROOT / "recipes" / "tttd" / "examples" / "tttd",
     "guidance_ttt": ROOT / "recipes" / "tttd" / "examples" / "guidance_ttt",
+    "ceobench": ROOT / "recipes" / "sao" / "examples" / "ceobench",
 }
 REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),

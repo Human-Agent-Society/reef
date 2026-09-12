@@ -1,0 +1,24 @@
+version = "1.0"
+
+[metadata]
+author_name = "Reef"
+benchmark = "ceobench"
+difficulty = "hard"
+category = "long-horizon"
+tags = ["reef", "harbor", "ceobench"]
+license_note = "zlab-princeton/ceobench-src carries no license file; the image clones a pinned commit at build time and ships none of it"
+
+[verifier]
+timeout_sec = 600.0
+
+[agent]
+# A 500-day episode is hundreds of agent turns; the harness runs it as one
+# exec inside this container, so the whole episode fits in this window.
+timeout_sec = 172800.0
+
+[environment]
+build_timeout_sec = 1800.0
+cpus = 4
+memory_mb = 8192
+storage_mb = 20480
+gpus = 0

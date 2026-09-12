@@ -56,6 +56,14 @@ run in order by `run.py`, each driving six scored rollouts through Reef with a
 verifiable binary reward, and every scored rollout is one training step. Its
 README keeps a comparison against GRPO(+DIS) at Qwen3-30B-A3B scale.
 
+[SAO on CEO-Bench](sao/examples/ceobench/README.md) runs
+[CEO-Bench](https://ceobench.com), a 500-day simulated startup, as one Harbor
+task with the benchmark's own bash agent served by Reef. The harness routes
+the agent role through a reef-client sidecar, keeps the two simulator roles
+outside Reef, scores the run from its `world.nmdb`, and reports the episode
+score against every turn. It demonstrates how to bring a third-party agent
+loop to Reef by base URL alone.
+
 [TTT-Discover](tttd/examples/tttd/README.md) separates a normal, service-agnostic rollout
 harness from its Reef adapter. It demonstrates grouped discovery rollouts,
 continuous evaluation, exact inference-to-report references, and

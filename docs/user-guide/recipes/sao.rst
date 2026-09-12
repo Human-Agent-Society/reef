@@ -95,6 +95,25 @@ The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
 critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
 ``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
 
+CEO-Bench
+~~~~~~~~~
+
+The `CEO-Bench example <../../../recipes/sao/examples/ceobench>`__ trains the
+same recipe on `CEO-Bench <https://ceobench.com>`__, a 500-day simulated
+startup played through the benchmark's own bash agent. The agent role reaches
+Reef by base URL through a reef-client sidecar, the two simulator roles stay
+outside Reef, and the verifier reads final cash, survival days, and bankruptcy
+from the run's ``world.nmdb``. The episode score is reported against every
+agent turn, so one episode is many SAO steps; the example's README records
+the reward-shaping choice and its smoke run.
+
+.. code:: bash
+
+   cd recipes/sao/examples/ceobench
+   hf download Qwen/Qwen3-4B-Thinking-2507 --local-dir ~/models/Qwen3-4B-Thinking-2507
+   export ANTHROPIC_API_KEY=...        # the simulator roles' provider
+   CEOBENCH_DAYS=500 CEOBENCH_SEEDS=42,43,44 ./run.sh
+
 Results
 -------
 

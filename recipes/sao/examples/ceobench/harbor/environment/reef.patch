@@ -1,0 +1,113 @@
+diff --git a/src/saas_bench/agents/bash_agent/agent.py b/src/saas_bench/agents/bash_agent/agent.py
+index d36de40..e4601a6 100644
+--- a/src/saas_bench/agents/bash_agent/agent.py
++++ b/src/saas_bench/agents/bash_agent/agent.py
+@@ -82,6 +82,10 @@ class BashAgent(BaseAgent):
+         base_url = str(getattr(client, 'base_url', '') or '')
+         _non_responses_hosts = ('generativelanguage.googleapis.com', 'api.together.xyz')
+         self.supports_responses_api = not any(h in base_url for h in _non_responses_hosts)
++        # SAAS_BENCH_OPENAI_CHAT_COMPLETIONS=1 pins OpenAI-compatible endpoints
++        # that only implement /v1/chat/completions to that API.
++        if os.environ.get("SAAS_BENCH_OPENAI_CHAT_COMPLETIONS") == "1":
++            self.supports_responses_api = False
+ 
+         # Build system prompt
+         self.system_prompt = system_prompt or self._default_system_prompt()
+diff --git a/src/saas_bench/customer_llm.py b/src/saas_bench/customer_llm.py
+index e5dff0a..9ccbf2b 100644
+--- a/src/saas_bench/customer_llm.py
++++ b/src/saas_bench/customer_llm.py
+@@ -521,8 +521,8 @@ Output ONLY the post text, nothing else."""
+                 ],
+             )
+             post_text = response.content[0].text.strip()
+-            input_tokens = response.usage.input_tokens
+-            output_tokens = response.usage.output_tokens
++            input_tokens = response.usage.input_tokens or 0
++            output_tokens = response.usage.output_tokens or 0
+         else:
+             # Fallback to OpenAI
+             print(f"[WARN] Social post using OpenAI fallback (provider={social_provider}, model={social_model}). Set social_post_llm_provider='bedrock' or 'anthropic' for Haiku 4.5.")
+@@ -536,8 +536,8 @@ Output ONLY the post text, nothing else."""
+                 max_output_tokens=1000,
+             )
+             post_text = response.output_text.strip()
+-            input_tokens = response.usage.input_tokens
+-            output_tokens = response.usage.output_tokens
++            input_tokens = response.usage.input_tokens or 0
++            output_tokens = response.usage.output_tokens or 0
+ 
+         # Debug: Log if empty response
+         if not post_text:
+@@ -758,8 +758,8 @@ Output JSON:
+                     ],
+                 )
+                 response_text = response.content[0].text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+             else:
+                 # Fallback to OpenAI
+                 print(f"[WARN] Negotiation response using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
+@@ -773,8 +773,8 @@ Output JSON:
+                     max_output_tokens=300
+                 )
+                 response_text = response.output_text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+ 
+             self._log_cost(day, 'customer_negotiation', input_tokens, output_tokens, model=enterprise_model)
+ 
+@@ -914,8 +914,8 @@ Output ONLY the message text."""
+                     ],
+                 )
+                 text = response.content[0].text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+             else:
+                 # Fallback to OpenAI
+                 print(f"[WARN] Initial outreach using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
+@@ -929,8 +929,8 @@ Output ONLY the message text."""
+                     max_output_tokens=150
+                 )
+                 text = response.output_text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+ 
+             self._log_cost(day, 'customer_initial_outreach', input_tokens, output_tokens, model=enterprise_model)
+ 
+@@ -1139,8 +1139,8 @@ REASON: <one sentence why>"""
+     )
+ 
+     text = response.content[0].text.strip()
+-    input_tokens = response.usage.input_tokens
+-    output_tokens = response.usage.output_tokens
++    input_tokens = response.usage.input_tokens or 0
++    output_tokens = response.usage.output_tokens or 0
+ 
+     # Parse structured response: "SCORE: <number>\nREASON: <text>"
+     effect = 0.0
+diff --git a/src/saas_bench/server_entry.py b/src/saas_bench/server_entry.py
+index fa76401..8d854a6 100644
+--- a/src/saas_bench/server_entry.py
++++ b/src/saas_bench/server_entry.py
+@@ -125,6 +125,12 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
+ 
+ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
+     """Validate and serialize simulator-side LLM provider/model config."""
++    # SAAS_BENCH_<FIELD> overrides the simulator roles' provider and model
++    # without rebuilding the bundle, e.g. SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER.
++    for attr in _SIMULATOR_LLM_CONFIG_FIELDS:
++        override = os.environ.get(f"SAAS_BENCH_{attr.upper()}")
++        if override:
++            setattr(config, attr, override)
+     valid_providers = {"bedrock", "anthropic", "openai"}
+     for attr in ("social_post_llm_provider", "enterprise_llm_provider"):
+         provider = getattr(config, attr)
