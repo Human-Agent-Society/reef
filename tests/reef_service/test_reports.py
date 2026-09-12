@@ -16,7 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.train import ProcessorContext
 
 
@@ -186,7 +186,7 @@ def _dispatcher(recipe: Recipe, name: str) -> Dispatcher:
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 

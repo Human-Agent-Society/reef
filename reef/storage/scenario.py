@@ -1,6 +1,6 @@
 """Assemble record backends and JSONL commits for scenario storage.
 
-Factories own backend resources, commit log paths, archival, and retention.
+Storage services own backend resources, commit log paths, archival, and retention.
 Domain code receives a scenario store without depending on these storage choices.
 """
 
@@ -13,14 +13,14 @@ import uuid
 from pathlib import Path
 from threading import RLock
 
-from reef.records import RecordRetention
-from reef.scenario.store import ScenarioStoreFactory
+from reef.scenario.store import ScenarioStorage
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore
+from reef.storage.records import RecordRetention
 from reef.storage.sqlite import SQLiteRecordRetention, SQLiteRecordStore
 
 
-class SQLiteScenarioStoreFactory(ScenarioStoreFactory):
+class SQLiteScenarioStorage(ScenarioStorage):
     """Open existing hashed SQLite and JSONL paths and manage their lifecycle."""
 
     def __init__(self, directory: Path | None = None) -> None:
@@ -88,7 +88,7 @@ class SQLiteScenarioStoreFactory(ScenarioStoreFactory):
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("scenario store factory is closed")
+            raise RuntimeError("scenario storage is closed")
 
     @staticmethod
     def _scenario_key(scenario: str) -> str:
@@ -97,7 +97,7 @@ class SQLiteScenarioStoreFactory(ScenarioStoreFactory):
         return hashlib.sha256(scenario.encode("utf-8")).hexdigest()
 
 
-class PostgresScenarioStoreFactory(ScenarioStoreFactory):
+class PostgresScenarioStorage(ScenarioStorage):
     """Combine pooled PostgreSQL records with generation-specific local commit logs."""
 
     def __init__(self, database_url: str, directory: Path, *, schema: str = "reef_records") -> None:
@@ -157,7 +157,7 @@ class PostgresScenarioStoreFactory(ScenarioStoreFactory):
 
     def _ensure_open(self) -> None:
         if self._closed:
-            raise RuntimeError("scenario store factory is closed")
+            raise RuntimeError("scenario storage is closed")
 
 
-__all__ = ["PostgresScenarioStoreFactory", "SQLiteScenarioStoreFactory"]
+__all__ = ["PostgresScenarioStorage", "SQLiteScenarioStorage"]

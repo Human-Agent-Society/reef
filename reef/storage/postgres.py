@@ -34,7 +34,7 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
-from reef.records import RecordRetention
+from reef.storage.records import RecordRetention
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
 

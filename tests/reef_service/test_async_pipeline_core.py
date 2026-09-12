@@ -14,7 +14,7 @@ from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, T
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 from ._policy_recipe import TestPolicyRecipe
 
@@ -184,7 +184,7 @@ def start_dispatcher(tmp_path: Path):
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "agent-record",
             experiment_tracker=experiment_tracker,
-            scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         )
         opened.append((runtime, dispatcher))
         return runtime, dispatcher
@@ -240,7 +240,7 @@ def _wait_for_error(dispatcher: Dispatcher) -> str:
 def test_empty_checkpoint_result_fails_closed() -> None:
     # The invariant lives on the result type, so a completed job that cannot
     # name its exported checkpoint cannot be constructed at all -- it can never
-    # reach the commit protocol and be published as a durable version.
+    # reach the committer and be published as a durable version.
     with pytest.raises(ValueError, match="must report the checkpoint path"):
         TrainingJobResult(outcome="complete", runtime_load_id="v1", checkpoint_path="")
 

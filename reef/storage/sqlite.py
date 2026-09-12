@@ -32,7 +32,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
-from reef.records import RecordRetention
+from reef.storage.records import RecordRetention
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
 _METADATA = MetaData()
@@ -244,7 +244,7 @@ class SQLiteRecordStore(SQLRecordStore):
 class SQLiteRecordRetention:
     """Apply a deployment's body-retention limits to its SQLite record files.
 
-    The scenario storage factory serializes cleanup with file archival.
+    The scenario storage service serializes cleanup with file archival.
     """
 
     def __init__(self, retention: RecordRetention) -> None:

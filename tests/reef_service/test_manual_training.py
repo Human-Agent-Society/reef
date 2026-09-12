@@ -18,7 +18,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
 from reef.runtime.base import TrainingRuntime
 from reef.service.app import create_app
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
@@ -882,7 +882,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
     dispatcher = Dispatcher(
         replace(_recipe(tmp_path, propose), training_mode="manual"),
         factory,
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("s")

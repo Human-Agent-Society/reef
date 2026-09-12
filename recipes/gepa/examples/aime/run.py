@@ -51,13 +51,13 @@ from reef.harness import render_composition, run_episode
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config import load_config
 from reef.service.wire import SCENARIO_HEADER
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.records import RecordStore
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.train.cordis_backend.execution import evaluation_selection
 
 HERE = Path(__file__).resolve().parent
@@ -202,7 +202,7 @@ class RunService:
             InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             agent_record_dir=run_dir / "reef-data",
-            scenario_store_factory=SQLiteScenarioStoreFactory(run_dir / "reef-data"),
+            scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
         self._app = create_app(
             self.dispatcher,

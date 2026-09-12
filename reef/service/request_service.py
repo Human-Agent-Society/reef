@@ -468,7 +468,7 @@ class RequestService:
         scenario: Scenario,
         release_id: str | None = None,
     ) -> dict[str, Any]:
-        artifact, gate = scenario.artifact_snapshot(release_id)
+        artifact, gate = scenario.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         if tree is None:
             raise ArtifactNotFound(
@@ -603,7 +603,7 @@ class RequestService:
             before_entries = logged or ()
             tree = scenario.surface.files
             try:
-                artifact, _ = scenario.artifact_snapshot(before)
+                artifact, _ = scenario.artifact_with_metrics(before)
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None

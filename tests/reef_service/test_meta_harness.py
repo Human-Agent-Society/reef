@@ -23,7 +23,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend.strategies import Mutation
 from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
@@ -473,7 +473,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario_name = "../general-meta-harness"
     try:
@@ -576,7 +576,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
@@ -604,7 +604,7 @@ def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("failed-evaluation")
@@ -634,9 +634,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     records = tmp_path / "records"
-    dispatcher = Dispatcher(
-        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
-    )
+    dispatcher = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
     try:
         scenario = dispatcher.get_or_create_scenario("commit-failure")
@@ -667,9 +665,7 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     # A stale/corrupt mirror is never loaded as search state.  Recovery gets
     # the prior durable commit and rewrites the mirror from that value.
     mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(
-        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
-    )
+    restarted = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     try:
         recovered = restarted.get_or_create_scenario("commit-failure")
         assert recovered is not None
@@ -692,7 +688,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         agent_record_dir=tmp_path / "records",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("publish-failure")
@@ -715,7 +711,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
             assert isinstance(scenario.store, CommitLogScenarioStore)
             monkeypatch.setattr(scenario.store.commit_log, "append", fail)
         else:
-            monkeypatch.setattr(scenario._commit_protocol, "_activate", fail)
+            monkeypatch.setattr(scenario._committer, "_activate", fail)
         with pytest.raises(RuntimeError, match="unavailable"):
             scenario.commit(result)
         assert scenario.trainer.state == previous

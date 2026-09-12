@@ -150,7 +150,7 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
 @pytest.mark.unit
 def test_naming_unification_renames_are_complete() -> None:
     """One concept, one name: the renamed-away spellings must stay gone."""
-    import reef.records
+    import reef.storage.records
     import reef.surface.base
     from reef.recipe.base import WeightTrainingRecipe
     from reef.scenario.scenario import Scenario

@@ -25,7 +25,7 @@ import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 pytestmark = pytest.mark.unit
 
@@ -37,7 +37,7 @@ def _dispatcher() -> Dispatcher:
     return Dispatcher(
         Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 

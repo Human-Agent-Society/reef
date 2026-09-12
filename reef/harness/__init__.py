@@ -24,7 +24,7 @@ The map, one subpackage per job:
 The evolution loop itself, propose, gate and publish, is
 ``reef.train.cordis_backend``; versioning (staging, publishing, the commit
 log, recovery and rollback) is reef's artifact stack (``reef.artifact``,
-``reef.scenario.commit_protocol``), not here.
+``reef.scenario.committer``), not here.
 
 Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to
 a client program; this package evolves the *harness composition itself* by

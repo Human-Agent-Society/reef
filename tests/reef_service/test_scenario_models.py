@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,8 +17,9 @@ from reef.dispatcher import Dispatcher
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
-from reef.scenario.model_config import ScenarioModelConfig
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.runtime.model_config import ModelConfig
+from reef.storage.model_config import read_model_config, write_model_config
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.types import TraceBatch, TraceSample
@@ -134,7 +136,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
@@ -188,10 +190,8 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
 
 
 def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
-    alpha_config = ScenarioModelConfig(tmp_path / "alpha.json")
-    beta_config = ScenarioModelConfig(tmp_path / "beta.json")
-    alpha_config.save(configure(platform, "alpha", "openai"))
-    beta_config.save(configure(platform, "beta", "anthropic"))
+    alpha_config = ModelConfig.from_value(configure(platform, "alpha", "openai"))
+    beta_config = ModelConfig.from_value(configure(platform, "beta", "anthropic"))
     recipe = make_recipe(platform, tmp_path)
     alpha = recipe.with_model_config(alpha_config)
     beta = recipe.with_model_config(beta_config)
@@ -203,39 +203,53 @@ def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
         )
     assert {path.split("/")[1] for path, _, _ in platform["calls"]} == {"alpha", "beta"}
     first = alpha.model_bindings()
-    alpha_config.save(configure(platform, "alpha", "anthropic", "2"))
+    alpha_config.runtime = ModelConfig.from_value(configure(platform, "alpha", "anthropic", "2")).runtime
     second = alpha.model_bindings()
     assert first.served.api_key == "scoped-alpha-1"
     assert second.served.api_key == "scoped-alpha-2"
     assert all(binding.api == "anthropic" for binding in second.values())
     assert beta.model_bindings().served.api_key == "scoped-beta-1"
     with pytest.raises(ValueError):
-        alpha_config.save({"url": "bad", "model": "bad"})
+        alpha_config.runtime = ModelConfig.from_value({"url": "bad", "model": "bad"}).runtime
     assert alpha.model_bindings().served.api_key == "scoped-alpha-2"
     assert not any("/managed/" in path for path, _, _ in platform["calls"])
 
 
+def test_recipe_uses_model_config_without_a_persistence_interface(platform, tmp_path):
+    config = ModelConfig.from_value(configure(platform, "alpha", "openai"))
+    recipe = make_recipe(platform, tmp_path).with_model_config(config)
+    first = recipe.model_bindings()
+    config.runtime = InferenceProxyRuntime.from_model_config(configure(platform, "alpha", "anthropic", "2"))
+    second = recipe.model_bindings()
+    assert first.served.api_key == "scoped-alpha-1"
+    assert all(binding.api == "anthropic" for binding in second.values())
+    assert all(binding.api_key == "scoped-alpha-2" for binding in second.values())
+    config.runtime = None
+    assert recipe.model_bindings().served.api_key == "platform-key"
+
+
 def test_model_settings_persist_privately_and_corruption_fails_recovery(platform, tmp_path):
-    path = tmp_path / "model.json"
-    config = ScenarioModelConfig(path)
-    config.save(configure(platform, "alpha", "openai"))
+    value = configure(platform, "alpha", "openai")
+    write_model_config(tmp_path, "alpha", value)
+    path = next(tmp_path.glob("*-model.json"))
     assert path.stat().st_mode & 0o777 == 0o600
-    recovered = ScenarioModelConfig(path)
+    assert read_model_config(tmp_path, "alpha") == value
+    recovered = ModelConfig.from_value(read_model_config(tmp_path, "alpha"))
     assert recovered.runtime.api_key == "scoped-alpha-1"
     assert "scoped-alpha-1" not in json.dumps(recovered.view())
-    with pytest.raises(ValueError):
-        config.save({"url": "http://user:secret@host", "model": "bad"})
-    assert ScenarioModelConfig(path).runtime.api_key == "scoped-alpha-1"
-    config.save(None)
-    assert ScenarioModelConfig(path).runtime is None
+    assert "scoped-alpha-1" not in repr(recovered)
+    write_model_config(tmp_path, "alpha", None)
+    assert ModelConfig.from_value(read_model_config(tmp_path, "alpha")).runtime is None
     path.write_text("{broken")
     with pytest.raises(ValueError):
-        ScenarioModelConfig(path)
+        read_model_config(tmp_path, "alpha")
+    path.write_text(json.dumps({"url": "http://user:secret@host", "model": "bad"}))
+    with pytest.raises(ValueError):
+        ModelConfig.from_value(read_model_config(tmp_path, "alpha"))
 
 
 def test_model_auth_failure_never_falls_back(platform, tmp_path):
-    config = ScenarioModelConfig()
-    config.save(configure(platform, "alpha", "openai"))
+    config = ModelConfig.from_value(configure(platform, "alpha", "openai"))
     recipe = make_recipe(platform, tmp_path).with_model_config(config)
     bindings = recipe.model_bindings()
     platform["fail_models"] = True
@@ -262,7 +276,7 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     async def run():
@@ -341,24 +355,63 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     records = tmp_path / "records"
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = make_recipe(platform, tmp_path)
-    first = Dispatcher(
-        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
-    )
+    first = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
     first.close()
-    recovered = Dispatcher(
-        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
-    )
+    recovered = Dispatcher(recipe, factory, agent_record_dir=records, scenario_storage=SQLiteScenarioStorage(records))
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert scenario.runtime.api_key == "scoped-alpha-1"
         assert scenario.trainer.training_backend._models["judge"].api_key == "scoped-alpha-1"
+        config = scenario.model_config
+        previous_runtime = config.runtime
+        reloaded = recovered._registry.reload("alpha")
+        assert reloaded is not scenario
+        assert reloaded.model_config is config
+        recovered.configure_scenario_model("alpha", configure(platform, "alpha", "openai", "2"))
+        assert reloaded.runtime.api_key == "scoped-alpha-2"
+        assert previous_runtime.api_key == "scoped-alpha-1"
         model_file = next(records.glob("*-model.json"))
         assert model_file.stat().st_mode & 0o777 == 0o600
         recovered.delete_scenario("alpha")
         assert not model_file.exists()
         assert list((records / "archived").glob("*/*-model.json"))
         recreated = recovered.get_or_create_scenario("alpha")
+        assert recreated.model_config is not config
         assert recreated.runtime.api_key == "platform-key"
     finally:
         recovered.close()
+
+
+def test_model_update_write_failure_keeps_active_config_and_saved_value(platform, tmp_path, monkeypatch):
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    records = tmp_path / "records"
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher = Dispatcher(
+        make_recipe(platform, tmp_path),
+        factory,
+        agent_record_dir=records,
+        scenario_storage=SQLiteScenarioStorage(records),
+    )
+    try:
+        original = configure(platform, "alpha", "openai")
+        scenario = dispatcher.configure_scenario_model("alpha", original, create=True)
+        runtime = scenario.runtime
+
+        def fail_replace(source, destination):
+            raise OSError("injected model file write failure")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "replace", fail_replace)
+            with pytest.raises(OSError, match="injected model file write failure"):
+                dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic", "2"))
+        assert scenario.runtime is runtime
+        assert read_model_config(records, "alpha") == original
+        assert not list(records.glob(".model-*"))
+        with pytest.raises(ValueError):
+            dispatcher.configure_scenario_model("alpha", {"url": "http://user:secret@host", "model": "bad"})
+        assert scenario.runtime is runtime
+        assert read_model_config(records, "alpha") == original
+    finally:
+        dispatcher.close()

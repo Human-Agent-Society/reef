@@ -25,7 +25,7 @@ from recipes.coral.middleware import ReefGatewayMiddleware
 from recipes.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 
 class _EchoBackend(InferenceBackend):
@@ -95,7 +95,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
         reef_client = TestClient(
             TestServer(
                 reef_service.create_app(
-                    build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()),
+                    build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
                     inference_backend=_EchoBackend(),
                 )
             )

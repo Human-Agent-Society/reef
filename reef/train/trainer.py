@@ -6,7 +6,7 @@ long-running work happens outside scenario locks.
 Backends expose prepare/evaluate/settle phases; the trainer executes one
 configured candidate evaluator between preparation and settlement, defaulting
 to backend evaluation plus ``AlwaysSelectMixin``. Commit and compaction are split
-so the scenario commit protocol can make the commit record durable before any
+so the scenario committer can make the commit record durable before any
 row is deleted.
 """
 
@@ -21,7 +21,7 @@ from reef.core.records_types import RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
-from reef.records import RecordStore
+from reef.storage.records import RecordStore
 from reef.train.backend import PreparedStep, StepExecution, TrainingBackend
 from reef.train.evaluation.contracts import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin

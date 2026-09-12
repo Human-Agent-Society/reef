@@ -18,7 +18,7 @@ from reef.scenario import ReleaseNotRestorable
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import RequestService, create_app
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 from ._policy_recipe import TestPolicyRecipe
 
@@ -144,7 +144,7 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "agent-record",
         experiment_tracker=experiment_tracker,
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     return value, runtime, backend_factory
 
@@ -274,7 +274,7 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
     assert recovered is not None
@@ -303,7 +303,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     recovered = restarted.get_or_create_scenario("math")
     assert [version["operation"] for version in recovered.releases()] == [

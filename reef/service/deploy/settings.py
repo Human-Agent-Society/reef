@@ -18,10 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from reef.records import RecordRetention
 from reef.service.cors import console_origins
 from reef.service.deploy.config import config_value, interpolate_config, load_config
 from reef.storage.postgres import postgres_url, validate_postgres_schema
+from reef.storage.records import RecordRetention
 
 _DESCRIPTION = """reef serve — start a stack from a config.
 

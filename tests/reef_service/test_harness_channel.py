@@ -43,7 +43,7 @@ from reef.service.install_script import (
     composition_checksum,
     render_install_script,
 )
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -181,7 +181,7 @@ def _dispatcher(
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -1616,7 +1616,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
-        scenario_store_factory=SQLiteScenarioStoreFactory(None),
+        scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("weights-only")
 

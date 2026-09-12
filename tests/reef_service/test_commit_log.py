@@ -27,10 +27,9 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
-from reef.scenario.state import CommitRecord
+from reef.scenario.commits import CommitRecord
 from reef.storage.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
@@ -426,7 +425,7 @@ def build_training_dispatcher(
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
 
@@ -498,7 +497,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     return dispatcher, backend
 
@@ -648,7 +647,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_record_dir,
-            scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+            scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         )
 
     first_runtime = RecordingRuntime()
@@ -761,7 +760,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypa
 def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     """Crash window: checkpoint published to the release chain, record never appended.
 
-    The checkpoint head is then ahead of the log. Its snapshot metadata carries
+    The checkpoint head is then ahead of the log. Its metadata metadata carries
     the same record fields, so recovery adopts it and heals the log.
     """
     initial = tmp_path / "initial"
@@ -798,7 +797,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert recovered.scenario_step == 1
     assert recovered.trainer.state == {"steps": 1}
     # The healed log carries the adopted checkpoint record, with the record
-    # high-water mark taken from the checkpoint's snapshot metadata.
+    # high-water mark taken from the checkpoint's metadata metadata.
     records = CommitLog(path).records()
     assert len(records) == 1
     adopted = records[0]
@@ -817,7 +816,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_checkpoint_snapshot_metadata_doubles_as_a_commit_record(tmp_path) -> None:
+def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime = RecordingRuntime()
@@ -834,10 +833,10 @@ def test_checkpoint_snapshot_metadata_doubles_as_a_commit_record(tmp_path) -> No
     wait_for_step(dispatcher, 1)
 
     backend = dispatcher.get_or_create_scenario("math").repository.backend
-    snapshot = backend.metadata()[SCENARIO_SNAPSHOT_METADATA_KEY]
-    assert snapshot["scenario_step"] == 1
-    assert snapshot["algorithm_state"] == {"steps": 1}
-    assert snapshot["record_progress"] == {
+    metadata = backend.metadata()["scenario_commit_record"]
+    assert metadata["scenario_step"] == 1
+    assert metadata["algorithm_state"] == {"steps": 1}
+    assert metadata["record_progress"] == {
         "high_water_sequence": 2,
         "high_water_offset": 2,
         "compacted_ids": ["i1", "r1"],
@@ -1021,7 +1020,7 @@ def build_harness_evolve_dispatcher(
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
 
@@ -1178,7 +1177,7 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
     assert result is not None
     pending = scenario.trainer.pending_batch
     assert pending is not None
-    protocol = scenario._commit_protocol
+    committer = scenario._committer
 
     if failure_point == "commit_log":
         assert isinstance(scenario.store, CommitLogScenarioStore)
@@ -1186,10 +1185,10 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
         method_name = "append"
         assert target is not None
     elif failure_point == "activation":
-        target = protocol
+        target = committer
         method_name = "_activate"
     else:
-        target = protocol._artifacts
+        target = committer._artifacts
         method_name = failure_point
     original = getattr(target, method_name)
     calls_before_failure = 2 if failure_point == "activation" else 1
@@ -1301,7 +1300,7 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
     assert pending is not None
 
     if failure_point == "advance":
-        target = scenario._commit_protocol._artifacts
+        target = scenario._committer._artifacts
         method_name = "advance"
     else:
         assert isinstance(scenario.store, CommitLogScenarioStore)

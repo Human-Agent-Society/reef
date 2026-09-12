@@ -6,15 +6,14 @@ from collections.abc import Iterable
 
 from aiohttp import web
 
-from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.records import RecordRetention
+from reef.dispatcher import Dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
 from reef.service.request_service import InferenceRetryPolicy, RequestService
 from reef.service.routes import register_routes
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
@@ -35,7 +34,7 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
 
 
 def create_app(
-    dispatcher: Dispatcher | None = None,
+    dispatcher: Dispatcher,
     *,
     tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
@@ -43,11 +42,9 @@ def create_app(
     inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
-):
-    request_service = RequestService(
-        dispatcher or build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()),
-        retry_policy=inference_retry_policy,
-    )
+) -> web.Application:
+    """Build the HTTP app around an existing dispatcher; close it only when requested."""
+    request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     request_service_key = web.AppKey("reef_request_service", RequestService)
     app = web.Application(middlewares=[create_authentication_middleware(tokens), translate_errors])
     configure_browser_access(app, console_origins)
@@ -65,12 +62,12 @@ def create_app(
             try:
                 yield
             finally:
-                # Let an in-flight SQLite batch finish before closing the dispatcher.
+                # Let an in-flight retention sweep finish before closing the dispatcher.
                 stopped.set()
                 await task
 
         app.cleanup_ctx.append(maintain_records)
-    if dispatcher is None or close_dispatcher:
+    if close_dispatcher:
 
         async def cleanup(app: web.Application) -> None:
             await asyncio.to_thread(app[request_service_key].dispatcher.close)

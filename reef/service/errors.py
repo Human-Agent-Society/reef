@@ -15,9 +15,9 @@ from aiohttp import web
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core.errors import ReefError, UnknownScenario
-from reef.records import RecordConflict
 from reef.runtime.inference import UpstreamStatusError
 from reef.service.request_service import InferenceRetryTimeout
+from reef.storage.records import RecordConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)

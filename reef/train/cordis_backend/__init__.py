@@ -14,7 +14,7 @@ default policy selects a candidate with more task wins than losses.
 
 Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact
-set, so ``ScenarioCommitProtocol`` stages and publishes it through
+set, so ``ScenarioCommitter`` stages and publishes it through
 ``Repository``. The composition tree state travels in the algorithm state
 (``"entries"`` key), which the commit log and snapshot metadata persist and
 recover.

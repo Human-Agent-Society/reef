@@ -10,7 +10,7 @@ from reef.core import UnknownScenario
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.service.app import create_app
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:
@@ -22,7 +22,7 @@ def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
         allow_implicit_creation=allow_implicit_creation,
-        scenario_store_factory=SQLiteScenarioStoreFactory(None),
+        scenario_storage=SQLiteScenarioStorage(None),
     )
 
 
@@ -102,7 +102,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
 
 
 def test_delete_scenario_refuses_names_that_are_paths() -> None:
-    value = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+    value = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
     for name in ("", ".", "..", "a/b"):
         with pytest.raises(UnknownScenario):
             value.delete_scenario(name)
@@ -119,7 +119,7 @@ def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(record_dir),
+        scenario_storage=SQLiteScenarioStorage(record_dir),
     )
     assert value.get_or_create_scenario("delivery") is not None
     before = {path.name for path in record_dir.iterdir() if path.is_file()}
@@ -137,9 +137,7 @@ def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
 @pytest.mark.unit
 def test_delete_scenario_over_http() -> None:
     async def run() -> None:
-        client = TestClient(
-            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
-        )
+        client = TestClient(TestServer(create_app(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))))
         await client.start_server()
         try:
             created = await client.post("/reef/scenarios", json={"name": "delivery"})

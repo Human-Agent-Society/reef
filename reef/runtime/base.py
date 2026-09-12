@@ -46,7 +46,7 @@ class TrainingJobResult:
 
     def __post_init__(self) -> None:
         # Fail closed at the boundary: a completed job that cannot name the
-        # checkpoint it exported would otherwise reach the commit protocol and
+        # checkpoint it exported would otherwise reach the committer and
         # be published as a durable version pointing at nothing.
         if self.outcome in {"complete", "checkpoint"} and not self.checkpoint_path:
             raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported")

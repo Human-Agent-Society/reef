@@ -3,12 +3,14 @@ from __future__ import annotations
 import importlib.util
 import inspect
 
+import pytest
+
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.scenario.checkpoint_strategy import EveryNVersions
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -21,25 +23,21 @@ def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> No
     assert "checkpoint_strategy" not in parameters
 
 
-def test_artifact_state_and_snapshot_are_not_parallel_public_types() -> None:
+def test_artifact_state_and_metadata_are_not_parallel_public_types() -> None:
     assert importlib.util.find_spec("reef.scenarios") is None
 
 
 def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
     assert not hasattr(scenario, "recipe")
     assert scenario.repository.base_artifact.release_id
-    assert scenario._commit_protocol.checkpoint_strategy is not None
+    assert scenario._committer.checkpoint_strategy is not None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
 
 
 def test_scenario_step_is_owned_by_scenario() -> None:
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
     assert not hasattr(scenario.repository.base_artifact, "scenario")
     assert scenario.scenario_step == 0
@@ -50,9 +48,7 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
 
 def test_scenario_owns_scenario_scoped_repository() -> None:
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
     repository = scenario.repository
 
@@ -72,65 +68,69 @@ def test_each_scenario_keeps_recipe_derived_checkpoint_policy(tmp_path) -> None:
     fast_dispatcher = Dispatcher(
         Recipe(name="fast", checkpoint_strategy=EveryNVersions(1)),
         backend_factory,
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     slow_dispatcher = Dispatcher(
         Recipe(name="slow", checkpoint_strategy=EveryNVersions(3)),
         backend_factory,
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     fast = fast_dispatcher.get_or_create_scenario("fast")
     slow = slow_dispatcher.get_or_create_scenario("slow")
 
-    assert fast._commit_protocol.checkpoint_strategy.n == 1
-    assert slow._commit_protocol.checkpoint_strategy.n == 3
+    assert fast._committer.checkpoint_strategy.n == 1
+    assert slow._committer.checkpoint_strategy.n == 3
 
 
-def test_scenario_snapshot_round_trips() -> None:
-    from reef.scenario.snapshot import ScenarioSnapshot, parse_snapshot_metadata
+def test_scenario_metadata_round_trips() -> None:
+    from reef.scenario.commits import parse_scenario_metadata
 
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
-    metadata = scenario.to_snapshot_metadata()
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    metadata = scenario.to_metadata()
 
     assert metadata["format"] == "reef-scenario/4"
     assert "scenario" not in metadata["base_artifact"]
     assert metadata["scenario_step"] == 0
     assert metadata["operation"] == "training"
     assert "recipe" not in metadata
-    assert parse_snapshot_metadata(metadata) == ScenarioSnapshot(
-        scenario="math",
-        base_artifact=scenario.repository.base_artifact,
-        scenario_step=0,
-        algorithm_state=None,
-        record_progress=None,
-        training_job_id=None,
-        operation="training",
-        rollback_target_release_id=None,
+    checkpoint_head = scenario.repository.require_current_artifact()
+    assert parse_scenario_metadata(metadata, checkpoint_head=checkpoint_head) == (
+        "math",
+        scenario.repository.base_artifact,
+        None,
     )
 
-    # Snapshots written before recipe identity was removed remain readable;
+    # Metadata written before recipe identity was removed remain readable;
     # the deployment recipe now supplies those capabilities during recovery.
-    assert parse_snapshot_metadata({**metadata, "recipe": "legacy-name"}) == parse_snapshot_metadata(metadata)
+    assert parse_scenario_metadata(
+        {**metadata, "recipe": "legacy-name"}, checkpoint_head=checkpoint_head
+    ) == parse_scenario_metadata(metadata, checkpoint_head=checkpoint_head)
 
 
-def test_rollback_snapshot_preserves_its_operation() -> None:
-    from reef.scenario.snapshot import parse_snapshot_metadata
+def test_rollback_metadata_preserves_its_operation() -> None:
+    from reef.scenario.commits import parse_scenario_metadata
 
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
     assert scenario is not None
-    metadata = scenario.to_snapshot_metadata()
+    metadata = scenario.to_metadata()
     metadata["operation"] = "rollback"
     metadata["rollback_target_release_id"] = "checkpoint-v1"
 
-    snapshot = parse_snapshot_metadata(metadata)
+    metadata["scenario_step"] = 1
+    metadata["record_progress"] = {
+        "high_water_sequence": 0,
+        "high_water_offset": 0,
+        "compacted_ids": [],
+        "consumed_ids": [],
+    }
+    _, _, checkpoint = parse_scenario_metadata(
+        metadata, checkpoint_head=scenario.repository.require_current_artifact()
+    )
 
-    assert snapshot.operation == "rollback"
-    assert snapshot.rollback_target_release_id == "checkpoint-v1"
+    assert checkpoint is not None
+    assert checkpoint.operation == "rollback"
+    assert checkpoint.rollback_target_release_id == "checkpoint-v1"
 
 
 def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) -> None:
@@ -141,7 +141,7 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     first = build_default_dispatcher(
         backend_factory=backend,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     record = AgentRecord.create(
         agent_record_id="persisted",
@@ -155,7 +155,7 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     second = build_default_dispatcher(
         backend_factory=backend,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
     assert second.get_or_create_scenario("math").records.replay("math") == (record,)
@@ -169,7 +169,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     first = build_default_dispatcher(
         backend_factory=backend,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     first.accept_record(
         AgentRecord.create(
@@ -186,7 +186,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     second = build_default_dispatcher(
         backend_factory=backend,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     recovered = second.get_or_create_scenario("math")
 
@@ -206,9 +206,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
 
 
 def test_scenario_close_closes_processor_before_records() -> None:
-    scenario = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
     calls: list[str] = []
 
     def _spy(name: str, original):
@@ -230,7 +228,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
 
 
 def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
-    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
     scenario = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = scenario.close
@@ -242,7 +240,7 @@ def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
 
 
 def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
-    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
     dropped = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = dropped.close
@@ -253,3 +251,110 @@ def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
     assert closed == ["dropped"]
     assert recovered is not dropped
     assert dispatcher.get_or_create_scenario("math") is recovered
+
+
+@pytest.mark.parametrize("operation", [None, "training", "rollback", "promote"])
+def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> None:
+    from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
+    from reef.scenario.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
+
+    base = ArtifactRef("base-content", "base-release", None)
+    head = ArtifactRef("checkpoint-content", "checkpoint-release", base.release_id)
+    # Persisted reef-scenario/4 metadata contains registration and recovery
+    # fields; the containing artifact supplies the checkpoint release identity.
+    metadata = {
+        "format": "reef-scenario/4",
+        "scenario": "math",
+        "base_artifact": encode_artifact_ref(base),
+        "scenario_step": 3,
+        "algorithm_state": {"steps": 3},
+        "record_progress": {
+            "high_water_sequence": 7,
+            "high_water_offset": 5,
+            "compacted_ids": ["old-record"],
+            "consumed_ids": ["trained-record"],
+        },
+        "metrics": {"loss": 0.25},
+    }
+    if operation is not None:
+        metadata["operation"] = operation
+    if operation in ("rollback", "promote"):
+        metadata["rollback_target_release_id"] = base.release_id
+    else:
+        metadata["training_job_id"] = "job-3"
+
+    name, registered_base, checkpoint = parse_scenario_metadata(metadata, checkpoint_head=head)
+
+    assert name == "math"
+    assert registered_base == base
+    assert isinstance(checkpoint, CommitRecord)
+    assert checkpoint.artifact_ref == head
+    assert checkpoint.step == 3
+    assert checkpoint.checkpoint is True
+    assert checkpoint.pending is False
+    assert checkpoint.algorithm_state == {"steps": 3}
+    assert checkpoint.high_water_sequence == 7
+    assert checkpoint.high_water_offset == 5
+    assert checkpoint.compacted_ids == frozenset({"old-record"})
+    assert checkpoint.consumed_ids == frozenset({"trained-record"})
+    assert checkpoint.operation == (operation or "training")
+    assert checkpoint.operation_verified is (operation is not None)
+    assert checkpoint.rollback_target_release_id == metadata.get("rollback_target_release_id")
+    assert checkpoint.training_job_id == metadata.get("training_job_id")
+    assert checkpoint.metrics == {"loss": 0.25}
+
+    encoded = scenario_metadata_for(
+        name=name,
+        base_artifact=registered_base,
+        scenario_step=checkpoint.step,
+        algorithm_state=checkpoint.algorithm_state,
+        record_progress=RecordProgress(
+            checkpoint.high_water_sequence,
+            checkpoint.high_water_offset,
+            checkpoint.compacted_ids,
+            checkpoint.consumed_ids,
+        ),
+        operation=checkpoint.operation,
+        rollback_target_release_id=checkpoint.rollback_target_release_id,
+        metrics=checkpoint.metrics,
+        training_job_id=checkpoint.training_job_id,
+    )
+    assert encoded == {**metadata, "operation": operation or "training"}
+
+    metadata["algorithm_state"]["steps"] = 99
+    metadata["metrics"]["loss"] = 99
+    assert checkpoint.algorithm_state == {"steps": 3}
+    assert checkpoint.metrics == {"loss": 0.25}
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({"record_progress": None}, "requires record_progress"),
+        ({"scenario_step": True}, "scenario_step must be non-negative"),
+        (
+            {"operation": "rollback", "rollback_target_release_id": "base", "training_job_id": "job"},
+            "cannot carry training_job_id",
+        ),
+    ],
+)
+def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:
+    from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
+    from reef.scenario.commits import parse_scenario_metadata
+
+    base = ArtifactRef("base", "base", None)
+    metadata = {
+        "format": "reef-scenario/4",
+        "scenario": "math",
+        "base_artifact": encode_artifact_ref(base),
+        "scenario_step": 1,
+        "record_progress": {
+            "high_water_sequence": 0,
+            "high_water_offset": 0,
+            "compacted_ids": [],
+            "consumed_ids": [],
+        },
+        **changes,
+    }
+    with pytest.raises(ValueError, match=message):
+        parse_scenario_metadata(metadata, checkpoint_head=base)

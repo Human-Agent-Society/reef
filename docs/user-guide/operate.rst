@@ -145,13 +145,13 @@ writer's head. Restart also synchronizes the head before loading the scenario.
 
 The record store, commit logs, and repository live under ``.reef/`` by default (``agent_record_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: its record store, commit log, proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain.
 
-The bundled ``SQLiteScenarioStoreFactory`` combines SQLite records with a
+The bundled ``SQLiteScenarioStorage`` combines SQLite records with a
 ``CommitLogScenarioStore`` for JSONL commits, preserving existing databases and
 log formats. Embedded
-deployments must supply a ``ScenarioStoreFactory`` subclass through
-``Dispatcher(..., scenario_store_factory=...)``; the `Python storage contract
+deployments must supply a ``ScenarioStorage`` subclass through
+``Dispatcher(..., scenario_storage=...)``; the `Python storage contract
 <../reference/python-api.rst#scenario-stores>`__ describes the required commit,
-recovery, and lifecycle behavior. The selected factory also performs archival
+recovery, and lifecycle behavior. The storage service also performs archival
 and record retention. Direct Python construction uses ``SQLiteRecordStore``
 for SQLite records and requires ``store=...`` for a ``Scenario``; see the
 `record API <../reference/python-api.rst#record-storage-and-audit>`__ for migration.

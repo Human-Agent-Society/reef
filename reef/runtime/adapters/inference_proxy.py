@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
 from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import (
@@ -55,6 +56,35 @@ class InferenceProxyRuntime(InferenceRuntime):
             timeout_s=self.inference_timeout_s,
             error_label="inference provider",
         )
+
+    @classmethod
+    def from_model_config(cls, value: object) -> InferenceProxyRuntime | None:
+        """Validate a per-scenario model override and build its proxy runtime."""
+        if value is None:
+            return None
+        if not isinstance(value, Mapping) or set(value) - {"url", "model", "api", "api_key"}:
+            raise ValueError("model must be null or an object with url, model, api and api_key")
+        for name in ("url", "model"):
+            item = value.get(name)
+            if not isinstance(item, str) or not item.strip() or any(ord(c) < 32 for c in item):
+                raise ValueError(f"model.{name} must be a non-empty string without control characters")
+        parsed = urlparse(value["url"])
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.netloc
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("model.url must be an HTTP(S) URL without credentials, query or fragment")
+        api = value.get("api", "openai")
+        if api not in PROVIDER_APIS:
+            raise ValueError("model.api must be openai, responses or anthropic")
+        key = value.get("api_key")
+        if key is not None and (not isinstance(key, str) or any(ord(c) < 32 for c in key)):
+            raise ValueError("model.api_key must be a string without control characters")
+        return cls(base_url=value["url"].strip(), model_path=value["model"].strip(), api=api, api_key=key)
 
     @property
     def model_path(self) -> str:

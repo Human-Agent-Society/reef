@@ -17,11 +17,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
-from reef.records import RecordStore
-from reef.scenario.state import RECORD_KIND, CommitLogError, CommitRecord, ScenarioSnapshot
+from reef.scenario.commits import RECORD_KIND, CommitLogError, CommitRecord
 from reef.scenario.store import ScenarioStore, ScenarioStoreConflict
+from reef.storage.records import RecordStore
 
 
 class CommitLog:
@@ -303,32 +302,36 @@ class CommitLogScenarioStore(ScenarioStore):
             self._compact(commit)
             return commit
 
-    def recover(self, *, snapshot: ScenarioSnapshot, checkpoint_head: ArtifactRef) -> CommitRecord | None:
+    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         with self._locked():
-            if snapshot.scenario != self._scenario:
-                raise ReefError(f"snapshot belongs to scenario {snapshot.scenario!r}, not {self._scenario!r}")
+            if checkpoint is not None:
+                if checkpoint.scenario != self._scenario:
+                    raise ReefError(f"checkpoint belongs to scenario {checkpoint.scenario!r}, not {self._scenario!r}")
+                if not checkpoint.checkpoint or checkpoint.pending:
+                    raise ReefError("recovery requires an activated checkpoint commit")
+            checkpoint_step = 0 if checkpoint is None else checkpoint.step
             records = self._history()
             log_label = "<no commit log>" if self._commit_log is None else str(self._commit_log.path)
-            applicable = [record for record in records if record.step > snapshot.scenario_step]
+            applicable = [record for record in records if record.step > checkpoint_step]
             for previous, current in itertools.pairwise(applicable):
                 if current.step != previous.step + 1:
                     raise ReefError(
                         f"commit log {log_label} jumps from step {previous.step} to {current.step}; the log is corrupt"
                     )
-            if applicable and applicable[0].step != snapshot.scenario_step + 1:
+            if applicable and applicable[0].step != checkpoint_step + 1:
                 raise ReefError(
                     f"commit log {log_label} resumes at step {applicable[0].step}, "
-                    f"expected {snapshot.scenario_step + 1} after the checkpointed step "
-                    f"{snapshot.scenario_step}; the log is corrupt"
+                    f"expected {checkpoint_step + 1} after the checkpointed step "
+                    f"{checkpoint_step}; the log is corrupt"
                 )
             last_step = records[-1].step if records else 0
-            if snapshot.scenario_step > last_step:
-                head = self._adopt_snapshot(snapshot, checkpoint_head, records)
+            if checkpoint is not None and checkpoint_step > last_step:
+                head = checkpoint
                 self._append(head)
                 records = (*records, head)
             elif applicable:
                 head = applicable[-1]
-            elif records and last_step == snapshot.scenario_step:
+            elif records and last_step == checkpoint_step:
                 head = records[-1]
             else:
                 head = None
@@ -336,7 +339,7 @@ class CommitLogScenarioStore(ScenarioStore):
             # commits before the checkpoint from which the trainer is restored.
             for record in records:
                 self._compact(record)
-            self._initial_step = snapshot.scenario_step if head is None else head.step
+            self._initial_step = checkpoint_step if head is None else head.step
             return head
 
     def close(self) -> None:
@@ -407,35 +410,6 @@ class CommitLogScenarioStore(ScenarioStore):
         return {key: value for key, value in left.to_dict().items() if key != "recorded_at"} == {
             key: value for key, value in right.to_dict().items() if key != "recorded_at"
         }
-
-    def _adopt_snapshot(
-        self, snapshot: ScenarioSnapshot, checkpoint_head: ArtifactRef, records: tuple[CommitRecord, ...]
-    ) -> CommitRecord:
-        progress = snapshot.record_progress
-        return CommitRecord(
-            scenario=self._scenario,
-            step=snapshot.scenario_step,
-            artifact_ref=checkpoint_head,
-            checkpoint=True,
-            algorithm_state=snapshot.algorithm_state,
-            high_water_sequence=(
-                progress.high_water_sequence
-                if progress is not None
-                else (records[-1].high_water_sequence if records else 0)
-            ),
-            high_water_offset=(
-                progress.high_water_offset
-                if progress is not None
-                else (records[-1].high_water_offset if records else 0)
-            ),
-            compacted_ids=progress.compacted_ids if progress is not None else frozenset(),
-            consumed_ids=progress.consumed_ids if progress is not None else frozenset(),
-            operation=snapshot.operation or "training",
-            operation_verified=snapshot.operation is not None,
-            rollback_target_release_id=snapshot.rollback_target_release_id,
-            metrics=snapshot.metrics,
-            training_job_id=snapshot.training_job_id,
-        )
 
 
 __all__ = ["RECORD_KIND", "CommitLog", "CommitLogError", "CommitLogScenarioStore", "CommitRecord"]

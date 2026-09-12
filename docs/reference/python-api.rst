@@ -218,57 +218,74 @@ The same type serves both sides: a producer constructs it and calls
 Scenario stores
 ---------------
 
-``RecordStore`` in ``reef.records`` is the abstract base for appending, reading,
+``RecordStore`` in ``reef.storage.records`` is the abstract base for appending, reading,
 and retiring records. ``ScenarioStore`` composes a ``RecordStore`` with committed
 scenario state, settling each step and its record progress together. Recipes
 and trainers use the record interface; ``Scenario`` coordinates training and
 artifact publication through its supplied scenario store.
 
 Storage implementations explicitly subclass ``RecordStore``,
-``ScenarioStore``, and ``ScenarioStoreFactory`` and override their abstract
+``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
 bundled ``SQLiteRecordStore``, ``CommitLogScenarioStore``, and
-``SQLiteScenarioStoreFactory`` inherit those bases, respectively.
+``SQLiteScenarioStorage`` inherit those bases, respectively.
 
 .. code:: python
 
    from pathlib import Path
 
    from reef.dispatcher import Dispatcher
-   from reef.storage.factory import SQLiteScenarioStoreFactory
+   from reef.storage.scenario import SQLiteScenarioStorage
 
-   store_factory = SQLiteScenarioStoreFactory(Path(".reef/agent-record"))
+   storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
    dispatcher = Dispatcher(
        recipe,
        repository_backend_factory,
        agent_record_dir=Path(".reef/agent-record"),
-       scenario_store_factory=store_factory,
+       scenario_storage=storage,
    )
 
-``Dispatcher`` requires ``scenario_store_factory`` and passes it to scenario
+``Dispatcher`` requires ``scenario_storage`` and passes it to scenario
 creation. It never selects or imports a record storage implementation. The
 ``build_default_dispatcher`` convenience helper also requires this argument.
 Deployment assembly chooses SQLite or PostgreSQL from ``reef.record_backend``;
-embedded callers supply their chosen factory explicitly. For ephemeral records
-and commits, pass ``SQLiteScenarioStoreFactory()`` without a directory. Passing
+embedded callers supply their chosen storage service explicitly. For ephemeral records
+and commits, pass ``SQLiteScenarioStorage()`` without a directory. Passing
 a directory preserves SQLite schemas, JSONL format, and scenario filenames.
 
-With an explicit store factory, ``agent_record_dir`` independently selects the
+With an explicit storage service, ``agent_record_dir`` independently selects the
 local directory for scenario model settings. Configure it to retain those
 settings across restarts even when records and commits use a remote adapter.
 
+``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
+``reef.runtime.model_config``. ``ModelConfig.from_value(value)`` validates the
+model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
+``None`` for the recipe default. ``view()`` returns the credential-redacted
+API representation. The type holds no file path and performs no file I/O.
+It replaces ``ScenarioModelConfig`` and the former read-only configuration
+protocol; there is no separate configuration collection class.
+
+The scenario registry caches one configuration object per scenario and passes
+it to the factory during creation and recovery. Recipes retain that object so
+new work observes updates while already resolved runtime snapshots remain
+unchanged. Use ``Dispatcher.configure_scenario_model`` to persist updates;
+it validates the value and recipe compatibility and writes the private JSON
+file before replacing the active runtime. ``reef.storage.model_config`` owns
+file reads, atomic writes, and archival. Existing file paths, JSON values,
+and owner-only permissions remain unchanged.
+
 Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``records=...`` and ``commit_log=...`` arguments with one store opened by a
-``ScenarioStoreFactory``. The supplied trainer must use that store's ``records``.
+``ScenarioStorage``. The supplied trainer must use that store's ``records``.
 ``Scenario`` does not choose a storage backend. Read committed history through
 ``scenario.store.history()`` and persistence capability through
 ``scenario.store.durable``; the former ``scenario.commit_log`` property has been
 removed. The concrete commit log store's ``commit_log`` is for backend diagnostics.
 
-The abstract bases ``ScenarioStore`` and ``ScenarioStoreFactory`` are exported from
+The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
 ``reef.scenario``, alongside ``ScenarioStoreConflict``. Concrete storage classes
 live under ``reef.storage``: ``commit_log.CommitLogScenarioStore`` accepts a
-``RecordStore`` and a JSONL ``CommitLog``; ``factory.SQLiteScenarioStoreFactory``
+``RecordStore`` and a JSONL ``CommitLog``; ``scenario.SQLiteScenarioStorage``
 assembles it with ``sqlite.SQLiteRecordStore``. The scenario package depends only
 on storage contracts. Direct commit log callers now import ``CommitLog`` from
 ``reef.storage.commit_log``; ``reef.scenario.commit_log`` is removed. The session
@@ -295,8 +312,9 @@ contract is:
    * - ``commit_step(expected_step=..., commit=...)``
      - Settle the ``CommitRecord`` and its record compaction, returning the
        canonical accepted record. Its step must equal ``expected_step + 1``.
-   * - ``recover(snapshot=..., checkpoint_head=...)``
-     - Reconcile checkpoint metadata with history, repair interrupted record
+   * - ``recover(checkpoint=...)``
+     - Accept a checkpoint ``CommitRecord`` (``None`` at initial registration),
+       reconcile it with history, repair interrupted record
        compaction, and return the head ``CommitRecord`` or ``None`` for a fresh
        scenario.
    * - ``close()``
@@ -324,27 +342,27 @@ out of training. A future database adapter can commit the step and record
 progress together in one database transaction.
 
 Artifact bytes and backend head movement remain outside ``ScenarioStore``.
-``ScenarioCommitProtocol`` owns their order around store settlement, including
+``ScenarioCommitter`` owns their order around store settlement, including
 pending releases, rollback, and checkpoint reconciliation. See `Commit ordering
 <../advanced_topics/state-model.rst#commit-ordering>`__. Step validation does not
 provide distributed leases or authorize multiple active training writers.
 
-The factory exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
+The storage service exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
 ``prune(days=..., max_bytes=...)``, and ``close()``. Archive retires that scenario's
 stored state so its name can be reused; prune applies retained-body limits to
 active and archived state. Custom backends implement those operations instead
 of exposing local file paths. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
-dispatcher closes its factory on shutdown. Application assembly should use
-the scenario store factory; direct record store construction is described below.
+dispatcher closes its storage service on shutdown. Application assembly should use
+the scenario storage service; direct record store construction is described below.
 
 Record storage and audit
 ------------------------
 
-``reef.records`` defines ``RecordStore``, record result and error types, and
+``reef.storage.records`` defines ``RecordStore``, record result and error types, and
 ``RecordRetention``. It has no dependency on scenario coordination, training,
 or concrete storage adapters. Both ``reef.RecordStore`` and
-``reef.records.RecordStore`` refer to this abstract base.
+``reef.storage.records.RecordStore`` refer to this abstract base.
 
 ``reef.storage.sql_records.SQLRecordStore`` implements the shared SQLAlchemy
 Core record operations. ``reef.storage.sqlite.SQLiteRecordStore`` inherits
@@ -376,11 +394,11 @@ SQLite leaves it empty because each store owns a database.
 The URL constructor owns its pool. To share a pool across sessions, construct
 ``PostgresRecordDatabase(url, schema=...)`` and pass that object instead of a URL;
 close sessions before closing the database. Both close operations are idempotent.
-``PostgresScenarioStoreFactory(url, directory, schema=...)`` combines PostgreSQL
+``PostgresScenarioStorage(url, directory, schema=...)`` combines PostgreSQL
 records with ``CommitLogScenarioStore`` and local JSONL logs. Pass it through
-``Dispatcher(..., scenario_store_factory=...)`` for embedded use. Scenario code
+``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
 continues to depend only on the abstract store contracts. Deployment configuration
-selects this factory with ``reef.record_backend: postgres``; see
+selects this storage service with ``reef.record_backend: postgres``; see
 `operation settings <../user-guide/operate.rst>`__ for connection and storage setup.
 
 Writes lock their store generation before allocating append sequences and hold
@@ -404,11 +422,11 @@ be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
    with SQLiteRecordStore(Path(".reef/records.sqlite3")) as records:
        retained = records.audit_page("math")
 
-``RecordRetention`` in ``reef.records`` holds and validates the
+``RecordRetention`` in ``reef.storage.records`` holds and validates the
 ``days`` and ``max_bytes`` limits. Store factories apply those limits through
 their ``prune`` method.
 
-``reef.records.RecordStore`` separates the training record set from retained
+``reef.storage.records.RecordStore`` separates the training record set from retained
 trace history. ``compact(scenario, ids)`` sets ``compacted_at`` and keeps the
 original payload, response, references, and artifact reference. Hash tombstones
 and optional compaction receipts are committed atomically with that transition.
@@ -451,7 +469,7 @@ For example, inspect one trace without making it available to training again:
        references = entry.item.references
        retired_at = entry.compacted_at
 
-With the default SQLite factory, the HTTP service runs background retention at
+With the default SQLite storage service, the HTTP service runs background retention at
 startup and every 60 seconds.
 It removes bodies older than 7 days, then the oldest remaining bodies to meet
 a shared 20 GiB budget across scenario databases in ``agent_record_dir``,
@@ -460,30 +478,33 @@ and artifact references. Limits are configurable in `Configuration <configuratio
 
 For embedded Python deployments, use
 ``dispatcher.prune_record_archives(RecordRetention(days=7, max_bytes=20 * 1024**3))``
-with ``RecordRetention`` imported from ``reef.records``. This runs one sweep
-through the configured store factory and serializes it with scenario archival.
+with ``RecordRetention`` imported from ``reef.storage.records``. This runs one sweep
+through the configured storage service and serializes it with scenario archival.
 Standalone ``SQLiteRecordStore`` and ``Dispatcher`` construction do not start a
-maintenance task. ``create_app``
-accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
+maintenance task. ``create_app(dispatcher, ...)`` requires an existing dispatcher
+and accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
+It closes the dispatcher on cleanup only when ``close_dispatcher=True``.
+The deployment assembly selects the storage backend and passes the dispatcher
+to the HTTP app; ``create_app`` never creates a default backend.
 
 The former ``RecordRetention.prune(directory)`` method has been removed: the
 retention value no longer opens databases or accepts a filesystem path. Use
 ``dispatcher.prune_record_archives(retention)`` for a running dispatcher. For
-standalone SQLite maintenance, pass the directory to the factory:
+standalone SQLite maintenance, pass the directory to the storage service:
 
 .. code:: python
 
    from pathlib import Path
 
-   from reef.records import RecordRetention
-   from reef.storage.factory import SQLiteScenarioStoreFactory
+   from reef.storage.records import RecordRetention
+   from reef.storage.scenario import SQLiteScenarioStorage
 
    retention = RecordRetention(days=7, max_bytes=20 * 1024**3)
-   store_factory = SQLiteScenarioStoreFactory(Path(".reef/agent-record"))
+   storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
    try:
-       purged = store_factory.prune(days=retention.days, max_bytes=retention.max_bytes)
+       purged = storage.prune(days=retention.days, max_bytes=retention.max_bytes)
    finally:
-       store_factory.close()
+       storage.close()
 
 The caller must serialize standalone maintenance with any scenario file moves.
 

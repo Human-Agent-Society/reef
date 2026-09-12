@@ -12,8 +12,8 @@ from typing import Any
 
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.records import RecordStore
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
+from reef.storage.records import RecordStore
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 from reef.train.trainer import Trainer
 

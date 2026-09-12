@@ -29,7 +29,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend.strategies import Mutation, resolve_episode_scorer
 from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
@@ -748,7 +748,7 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     scenario_name = "../gepa-demo"
     try:
@@ -796,7 +796,7 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     data_dir = tmp_path / "agent-record"
     dispatcher = Dispatcher(
-        built, factory, agent_record_dir=data_dir, scenario_store_factory=SQLiteScenarioStoreFactory(data_dir)
+        built, factory, agent_record_dir=data_dir, scenario_storage=SQLiteScenarioStorage(data_dir)
     )
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
@@ -831,7 +831,7 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
         dispatcher.close()
 
     recovered_dispatcher = Dispatcher(
-        built, factory, agent_record_dir=data_dir, scenario_store_factory=SQLiteScenarioStoreFactory(data_dir)
+        built, factory, agent_record_dir=data_dir, scenario_storage=SQLiteScenarioStorage(data_dir)
     )
     try:
         recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")

@@ -779,7 +779,7 @@ class CordisBackend(TrainingBackend):
         self._review_kinds = frozenset(review_kinds)
         self._seed = tuple(dict(entry) for entry in seed)
         # Selected compositions render into temporary source trees before the
-        # scenario commit protocol copies them into repository-owned storage.
+        # scenario committer copies them into repository-owned storage.
         # Track only trees created by this backend so a durable commit can
         # remove its source without touching caller-owned Artifact.local paths.
         self._rendered_publications: dict[int, Artifact] = {}

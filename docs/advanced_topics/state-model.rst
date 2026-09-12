@@ -74,9 +74,10 @@ Commit ordering
 
 ``ScenarioStore`` owns a scenario's committed state and its ``RecordStore``.
 It validates step progression and settles record consumption with each commit.
-Deployment assembly selects a store factory; ``ScenarioFactory`` opens it and
-supplies the store to ``Scenario``, which coordinates trainer and artifact
-operations. The default ``SQLiteScenarioStoreFactory`` assembles
+Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` handles
+registration and release selection, then ``recover_scenario`` opens a session
+and returns the complete ``Scenario``. The scenario owns that session and
+coordinates trainer and artifact operations. The default ``SQLiteScenarioStorage`` assembles
 ``SQLiteRecordStore`` with ``CommitLogScenarioStore``. The commit log store accepts
 any ``RecordStore`` and keeps commits in append-only JSONL; its fsynced append
 remains the commit point. A committed step
@@ -93,7 +94,7 @@ does not undo the commit. Retrying the same commit or running startup recovery
 repairs the remaining compaction. A database adapter may settle both in one
 database transaction while preserving this public contract.
 
-``ScenarioCommitProtocol`` keeps artifact operations outside the store. For a
+``ScenarioCommitter`` keeps artifact operations outside the store. For a
 durable store, the order is:
 
 .. list-table::
@@ -122,9 +123,11 @@ head before settling the in-memory commit. A conflicting head therefore
 rejects the step before its records are compacted. In-memory commit history
 supports retries only for the lifetime of that session.
 
-Recovery reconciles the store with checkpoint snapshot metadata before
-restoring the trainer. A committed checkpoint ahead of the backend pointer
-repairs that pointer. An older checkpoint snapshot ahead of the local log can
+Artifact metadata stores scenario registration and checkpoint commit data
+under ``scenario_commit_record``. Recovery decodes it into a ``CommitRecord`` and
+reconciles it with the store before restoring the trainer. Initial registration
+has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
+repairs that pointer. An older checkpoint ahead of the local log can
 be adopted into the log. Recovery repairs compaction, replays retained records
 through the committed watermark while excluding every committed step's
 consumed IDs, and restores the read cursor. The watermark is a read position:

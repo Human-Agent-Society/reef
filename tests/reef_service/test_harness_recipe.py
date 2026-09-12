@@ -28,7 +28,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import create_app
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.scenario import SQLiteScenarioStorage
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import (
     CordisBackend,
@@ -782,7 +782,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
     try:
@@ -805,7 +805,7 @@ def test_successful_publish_discards_its_render_source_but_keeps_the_committed_t
 
 
 def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path) -> None:
-    """The decisive #476 run against the real commit protocol: a proposal
+    """The decisive #476 run against the real committer: a proposal
     smuggling an inline key lands as a rejected mutation, the stored commit
     record bytes carry no key material, and a process restart recovers the
     committed state and keeps stepping."""
@@ -825,7 +825,7 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         built,
         factory,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476")
@@ -847,7 +847,7 @@ def test_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_path: Path)
         built,
         factory,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
@@ -906,7 +906,7 @@ def test_disabled_keyed_proposal_leaves_no_key_material_in_commit_records(tmp_pa
         built,
         factory,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("leak-476-disabled")
@@ -941,7 +941,7 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         built,
         factory,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("pregate-476")
@@ -965,7 +965,7 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
         built,
         factory,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(agent_record_dir),
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     try:
         recovered = restarted.get_or_create_scenario("pregate-476")
@@ -2182,7 +2182,7 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("review")
@@ -2203,13 +2203,13 @@ def test_review_publish_holds_the_win_as_a_pending_release_until_promoted(tmp_pa
         assert tree is not None
         pending_files = tree.read_files(scenario.artifact_for_version(row["release_id"]))
         assert pending_files is not None and any("marker" in text for text in pending_files.values())
-        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
         assert not served_files or not any("marker" in text for text in served_files.values())
 
         promoted = dispatcher.promote("review", row["release_id"])
         assert promoted.release_id != row["release_id"]
         assert scenario.current_artifact_ref() == promoted
-        served_files = tree.read_files(scenario.artifact_snapshot()[0])
+        served_files = tree.read_files(scenario.artifact_with_metrics()[0])
         assert served_files is not None and any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
         assert last.operation == "promote" and last.rollback_target_release_id == row["release_id"]
@@ -2288,7 +2288,7 @@ def test_promote_http_route_serves_a_pending_release(tmp_path: Path) -> None:
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
 
     async def run() -> None:
@@ -2352,7 +2352,7 @@ def test_a_pending_step_published_as_live_weights_is_rejected(tmp_path: Path) ->
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("live-pending")
