@@ -195,40 +195,34 @@ current version without restarting Reef.
 
 Improve harness skills using a model API instead of GPUs.
 
-Pass the model at startup using `REEF_UPSTREAM_MODEL`; no YAML edit is needed.
-[deployment.yaml](tutorials/evolve-your-harness/configs/deployment.yaml) uses this
-variable for both serving and evaluation. From your Reef checkout and activated
-Python environment, replace the model ID and API key below with your provider's values:
+The harness evolve recipe carries its own profile, so the model is the one thing
+you name. From your Reef checkout and activated Python environment:
 
 ```bash
-export REEF_UPSTREAM_URL="https://api.openai.com"  # No /v1 suffix
-export REEF_UPSTREAM_MODEL="REPLACE_WITH_YOUR_PROVIDER_MODEL_ID"
-export REEF_UPSTREAM_API_KEY="your-openai-api-key"
-reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
+reef serve --recipe harness-evolve --model ollama/gemma4:26b
 ```
 
-Use the exact model ID accepted by your provider, not the placeholder above.
-An unset or empty `REEF_UPSTREAM_MODEL` is reported at startup.
+`ollama/` and `openai/` prefixes fill the endpoint and the key (`openai/` reads
+`REEF_UPSTREAM_API_KEY`); any other spelling is the model ID as is, with the
+endpoint from `REEF_UPSTREAM_URL`. The profile listens on `127.0.0.1:8900` with
+no token and keeps its state under `.reef/harness-evolve/`. To change anything
+else, copy [the profile](reef/service/profiles/harness-evolve.yaml) and pass
+your copy with `-c`.
 
-For another provider, use its base URL, model name, and API key. This config deploys Reef on `8901` with `reef-local` as its access token.
-
-In another terminal, install the harness and run a task:
+In another terminal with the same Python environment activated (the install
+bakes that terminal's `python3` into `reef-pi`), install the harness and run a task:
 
 ```bash
-export REEF_TOKEN="reef-local"   # the script writes it into the installed harness's
-                                 # model binding, where reef-pi reads it back
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" \
-  'http://localhost:8901/reef/harness/install?adapter=pi' | bash
+curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
 reef-pi -p "fix the failing test in auth.py"
 
 # After running your tests, report the actual result:
 reef-pi report --score 0 --feedback "missed the empty-token case"
 ```
 
-If you already installed the harness with `your-model-name`, set `REEF_UPSTREAM_MODEL`,
-stop and restart `reef serve` with the command above, then rerun the harness install
-command before retrying `reef-pi`. Installation writes the model ID into the local
-harness configuration.
+To change the model, restart `reef serve` with another `--model` and rerun the
+install command before `reef-pi`: installation writes the model ID into the
+local harness configuration.
 
 Failed reports trigger a candidate skill update. Reef evaluates it against the
 current harness on the tutorial's three coding tasks and publishes it only if
@@ -287,7 +281,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 Working on continual self-improving agent?
 
 - [Join Discord](https://discord.gg/5y8e5f937k) to share your recipes, ask implementation questions, and discuss new features.
-- [Join the WeChat group](docs/community/wechat.md) by scanning the QR code.
+- [Join the WeChat group](docs/community/wechat.md): the group is full, so add the assistant and it will invite you.
 - Join the [GitHub Discussions](https://github.com/orgs/Human-Agent-Society/discussions) to ask questions, share ideas, and connect with the community.
 - Start contributing with the [contribution guide](CONTRIBUTING.md).
 - Propose designs through an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml).

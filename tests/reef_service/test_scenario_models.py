@@ -17,9 +17,8 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
 from reef.scenario.model_config import ScenarioModelConfig
-from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonSelector
+from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
 from reef.train.types import TraceBatch, TraceSample
 
 
@@ -150,7 +149,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         assert prepared.candidate is not None
         # Updates between proposal and evaluation must not mix providers within the step.
         dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api, "2"))
-        plugin = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        plugin = ScoreComparisonPlugin(backend)
         evaluation = plugin.evaluate(prepared.candidate)
         result = backend.settle_step(prepared, plugin.decide(prepared.candidate, evaluation))
         assert result.metrics["selected"] is True

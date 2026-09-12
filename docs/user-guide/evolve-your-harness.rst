@@ -368,6 +368,18 @@ From a Reef checkout:
    cd tutorials/evolve-your-harness
    ./run.sh
 
+To run the same recipe as a plain deployment, without the example's driver,
+start its profile and name the model:
+
+.. code:: bash
+
+   reef serve --recipe harness-evolve --model ollama/gemma4:26b
+
+The profile is the harness evolve recipe's own default (loopback, port 8900,
+no token, state under ``.reef/harness-evolve/``); it points at this
+tutorial's proposer and evaluator, so it runs from a reef checkout. `The CLI
+reference <../reference/cli.rst>`__ has the ``--model`` spellings.
+
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
 them there to point at your own. The model name appears twice, as
@@ -463,7 +475,10 @@ no endpoint or credential, and the binding takes its token from
 through the interpreter that imported reef when the script ran and reads the
 token back from the binding, so the shell that runs it later needs neither
 on its own. The wrapper keeps
-the receipts from a run, so ``report`` only needs the result. Pinning,
+the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
+(the interpreter and its imports, the service and its token, the binary,
+the tools on PATH, the installed release against the served head) and exits
+0 when they all hold. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 

@@ -32,14 +32,9 @@ from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
-from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
+from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import (
-    DefaultCandidateEvaluationPlugin,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
+from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
@@ -998,10 +993,7 @@ class _HarnessEvolveTestRecipe(Recipe):
                 context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
             ),
             training_backend=training_backend,
-            candidate_evaluator=DefaultCandidateEvaluationPlugin(
-                training_backend,
-                ScoreComparisonSelector(),
-            ),
+            candidate_evaluator=ScoreComparisonPlugin(training_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

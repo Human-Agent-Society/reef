@@ -23,7 +23,7 @@ minibatch order) say so in `harness/aime.py`.
 | Evaluate the parent on a train minibatch, with traces | the served composition's own recorded traffic: the driver runs the minibatch through the service, so `propose` gets the transcripts free |
 | Reflect on one component and propose a rewrite | `models["reflection"]` (gpt-5) with GEPA's own prompt, over `Inputs` / `Generated Outputs` / `Feedback` records |
 | Accept the child iff it beats the parent on the minibatch | the proposer runs its own episodes and returns `None` on a reject, which skips the step |
-| Full validation pass, then Pareto update | the mechanism's `evolution.tasks` is the validation set; `GEPASelector.decide` reads the per-task scores it produced |
+| Full validation pass, then Pareto update | the mechanism's `evolution.tasks` is the validation set; `GEPASelectorMixin.decide` reads the per-task scores it produced |
 | Serve the argmax-mean candidate | select on a strict mean improvement over the served composition, which publishes the tree for `GET /reef/harness` |
 
 The request envelope is reproduced by seed nodes rather than by a custom Pi

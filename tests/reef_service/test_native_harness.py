@@ -42,11 +42,10 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonSelector
+from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
-from reef.train.evaluation.evaluators import AlwaysSelect
+from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.types import TraceBatch, TraceSample
 
 TOOL = (
@@ -656,7 +655,7 @@ def test_native_harness_runs_through_the_evolution_gate(tmp_path: Path, fake_mod
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_files
     assert "native/hooks/loop_guard.py" in prepared.candidate.candidate_files
-    evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+    evaluator = ScoreComparisonPlugin(backend)
     decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
     result = backend.settle_step(prepared, decision)
     # Both trees complete the scripted task, so the verdict is a tie and nothing publishes.
@@ -1002,7 +1001,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_gate(tmp_path: Pat
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_files["native/graphs/main.json"]) == SEED_GRAPH
         assert "check" in json.loads(prepared.candidate.candidate_files["native/graphs/main.json"])["stages"]
-        evaluator = DefaultCandidateEvaluationPlugin(backend, ScoreComparisonSelector())
+        evaluator = ScoreComparisonPlugin(backend)
         decision = evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
         settled = backend.settle_step(prepared, decision)
         assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
@@ -2110,7 +2109,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
     batch = TraceBatch("demo:trace:tree", (TraceSample("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None and "native/tree.json" not in prepared.candidate.candidate_files
-    evaluator = DefaultCandidateEvaluationPlugin(backend, AlwaysSelect())
+    evaluator = BackendAlwaysSelectPlugin(backend)
     settled = backend.settle_step(
         prepared, evaluator.decide(prepared.candidate, evaluator.evaluate(prepared.candidate))
     )
