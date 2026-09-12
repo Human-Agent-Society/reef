@@ -145,13 +145,18 @@ paths must mean the same thing to the host docker daemon.
 ./run.sh
 ```
 
+The launcher waits for Reef's health endpoint and stops waiting if Reef
+exits. Configure service startup deadlines with `ready_timeout` in
+`serve.yaml`; startup errors are in `work/reef.log`. Exiting or interrupting
+the script also stops its Reef process.
+
 `run.sh` starts `reef serve -c serve.yaml` with its state under `./work`,
 waits for `/healthz`, and runs `run.py`. `serve.yaml` describes a two-GPU
 stack: one Megatron actor with the critic colocated on it, and one SGLang
 rollout engine, serving `Qwen2.5-1.5B-Instruct`. On the first start Reef
 loads the Hugging Face weights directly and writes the Megatron checkpoint
 that later starts load. Ray, Slime, Megatron, and SGLang take minutes to come
-up; `work/reef.log` has the service log if the wait never ends.
+up; `work/reef.log` has the service log if startup fails.
 
 Reef starts and stops the shared Ray runtime automatically; no `ray start`
 or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to

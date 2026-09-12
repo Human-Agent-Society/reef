@@ -11,7 +11,7 @@ settings.
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.service.deploy.config import PROJECT_ROOT, DeployConfigError, load_config
-from reef.service.deploy.orchestrator import main
+from reef.service.deploy.orchestrator import DeployStartupError, main
 from reef.service.deploy.settings import ServiceSettings, build_parser, run_service, service_settings_from_config
 
 
@@ -30,6 +30,7 @@ def build_dispatcher(settings, **kwargs):
 __all__ = [
     "PROJECT_ROOT",
     "DeployConfigError",
+    "DeployStartupError",
     "GitLFSRepositoryBackend",
     "ServiceSettings",
     "build_app",

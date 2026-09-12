@@ -5,6 +5,14 @@ A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
 every process in its ``services`` list in dependency order, and hands the
 ``reef`` section to the HTTP service.
 
+Relative config paths, including ``REEF_CONFIG``, resolve from the directory
+where you run the command. With no ``-c`` or ``--recipe``, Reef reads
+``REEF_CONFIG`` if set, otherwise ``./reef.yaml`` in that directory. It does
+not search the Reef installation for your config. From outside a checkout,
+pass an absolute path to a cookbook config. Relative state paths still use
+the launch directory, and an explicit ``services[].cwd`` controls that
+service's working directory.
+
 .. code:: yaml
 
    reef:
@@ -25,6 +33,21 @@ itself with ``${dotted.path}``. Any value can be overridden on the command line:
 a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
+
+If a service exits before readiness or exceeds its ``ready_timeout``, Reef
+stops the stack and reports the service, the failure reason, and the local
+log directory. An exited service's message includes its exit code. CLI
+startup failures exit with status 1; invalid configuration exits with status
+2. Child output is retained in the logs and forwarded to the terminal.
+Interrupting startup with SIGINT or SIGTERM also stops the services already
+launched, including when they are still loading a model.
+
+The basic and SAO example ``run.sh`` launchers wait for the HTTP health
+endpoint and stop waiting if Reef exits. Startup deadlines are configured
+through the deployment YAML's ``ready_timeout``; the scripts do not add a
+second deadline. Each HTTP probe has a five-second timeout. Startup errors
+are recorded in ``work/reef.log``, and exiting the script stops the Reef
+process it started.
 
 Use ``${VAR:?}`` for a required environment variable, for example
 ``upstream_model: ${REEF_UPSTREAM_MODEL:?}``. If it is unset, empty, or only

@@ -82,7 +82,11 @@ def test_the_config_is_resolved_explicit_first_then_the_environment_then_reef_ya
         _resolve_config("mine.yaml", "harness-evolve", {})
     with pytest.raises(DeployConfigError, match="recipes with a profile: harness-evolve"):
         _resolve_config(None, "weights", {})
-    monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    (installed / "reef.yaml").write_text("reef: {}\n")
+    monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", installed)
     with pytest.raises(DeployConfigError, match="--recipe <name>; recipes with a profile: harness-evolve"):
         _resolve_config(None, None, {})
     (tmp_path / "reef.yaml").write_text("reef: {}\n")
