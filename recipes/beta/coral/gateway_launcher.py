@@ -37,8 +37,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from recipes.coral.journal import CallJournal
-from recipes.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.journal import CallJournal
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
 
 
 def attach_reef_adapter(

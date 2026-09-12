@@ -2,7 +2,7 @@
 """Run CORAL test-time training against a live Reef stack.
 
 This is the piece that imports CORAL. The adapter modules under
-``recipes/coral/`` stay import-free of it so they test standalone; this
+``recipes/beta/coral/`` stay import-free of it so they test standalone; this
 entry point drives the real CORAL runtime against Reef:
 
 1. loads the real CORAL task in ``task/`` (task.yaml, seed repo, packaged
@@ -38,9 +38,9 @@ from pathlib import Path
 
 from coral.agent.manager import AgentManager  # CORAL: pinned commit, see README
 from coral.config import CoralConfig
-from recipes.coral.bundle import build_result_bundle
-from recipes.coral.gateway_launcher import attach_reef_adapter_to_agent_manager
-from recipes.coral.watcher import AttemptWatcher
+from recipes.beta.coral.bundle import build_result_bundle
+from recipes.beta.coral.gateway_launcher import attach_reef_adapter_to_agent_manager
+from recipes.beta.coral.watcher import AttemptWatcher
 
 DEFAULT_REEF_URL = "http://127.0.0.1:8900"
 SCENARIO = "coral-demo"

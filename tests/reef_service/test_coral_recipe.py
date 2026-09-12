@@ -14,7 +14,7 @@ from reef.train.algos import base as algos_base
 
 
 def _recipe_cls():
-    from recipes.coral.recipe import CoralRecipe
+    from recipes.beta.coral.recipe import CoralRecipe
 
     return CoralRecipe
 
@@ -22,7 +22,7 @@ def _recipe_cls():
 def test_training_spec_binds_processor_and_grouped_machinery():
     recipe_cls = _recipe_cls()
     spec = recipe_cls.training_spec()
-    from recipes.coral.processor import CoralProcessor
+    from recipes.beta.coral.processor import CoralProcessor
 
     assert spec.processor is CoralProcessor
     assert spec.step_preparer == "tttd"

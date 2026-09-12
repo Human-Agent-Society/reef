@@ -18,7 +18,7 @@ SERVICE_CONFIGS = (
     "recipes/basic/external-provider.yaml",
     "recipes/openclawrl/examples/openclawrl/serve.yaml",
     "recipes/sao/examples/sao/serve.yaml",
-    "recipes/coral/examples/coral_demo/serve.yaml",
+    "recipes/beta/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",
@@ -34,7 +34,7 @@ EVOLUTION_CONFIGS = (
 
 TRAINING_CONFIGS = (
     "recipes/sao/examples/sao/serve.yaml",
-    "recipes/coral/examples/coral_demo/serve.yaml",
+    "recipes/beta/coral/examples/coral_demo/serve.yaml",
     "recipes/tttd/examples/tttd/serve.yaml",
     "recipes/tttd/examples/guidance_ttt/serve.yaml",
 )

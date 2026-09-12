@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
-from recipes.coral.journal import CallJournal
-from recipes.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.journal import CallJournal
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
 
 
 class CaptureDownstream:

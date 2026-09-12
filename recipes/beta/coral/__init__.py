@@ -14,11 +14,11 @@
 The runnable example lives in ``examples/coral_demo``.
 """
 
-from recipes.coral.journal import CallJournal, CallRecord
-from recipes.coral.middleware import ReefGatewayMiddleware
-from recipes.coral.recipe import CoralRecipe
-from recipes.coral.reporter import AttemptReport, report_attempt
-from recipes.coral.watcher import AttemptWatcher, FinalizedAttempt
+from recipes.beta.coral.journal import CallJournal, CallRecord
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.recipe import CoralRecipe
+from recipes.beta.coral.reporter import AttemptReport, report_attempt
+from recipes.beta.coral.watcher import AttemptWatcher, FinalizedAttempt
 
 __all__ = [
     "AttemptReport",

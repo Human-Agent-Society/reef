@@ -3,7 +3,7 @@
 # Setup (once): pip install -e .[coral]  — see README. State goes to ./work.
 set -e
 cd "$(dirname "$0")"
-export PYTHONPATH="$(cd ../../../.. && pwd):${PYTHONPATH:-}"  # recipes.coral importable
+export PYTHONPATH="$(cd ../../../../.. && pwd):${PYTHONPATH:-}"  # recipes.beta.coral importable
 
 # The values serve.yaml cannot compute itself.
 export CORAL_TTT_STATE_DIR="$PWD/work/coral-demo"

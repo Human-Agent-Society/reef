@@ -11,7 +11,7 @@ Pinned upstream: [CORAL](https://github.com/Human-Agent-Society/CORAL) commit `0
 ## Quickstart (2 GPUs)
 
 ```bash
-cd recipes/coral/examples/coral_demo
+cd recipes/beta/coral/examples/coral_demo
 pip install -e .[coral]        # demo deps + CORAL at the pinned commit
 npm install -g opencode-ai     # or any CORAL runtime CLI; select with --runtime
 ./run.sh
@@ -49,12 +49,12 @@ CORAL AgentManager (real runtime: worktrees, agent CLIs, per-agent proxy keys,
    v
 CORAL gateway (identity: x-coral-agent-id, x-coral-session-id)
    v
-recipes.coral.middleware      stamps x-reef-scenario + x-reef-tag-coral-{run,agent,commit},
+recipes.beta.coral.middleware      stamps x-reef-scenario + x-reef-tag-coral-{run,agent,commit},
    v                          captures reef receipts -> journal
 LiteLLM -> reef serve         stores INFERENCE records with tags,
    v                          answers with x-reef-agent-record-id / receipt SSE frame
 CORAL grader daemon finalizes the attempt (.coral/**/attempts/*.json)
-   -> recipes.coral.watcher: resolves the attempt's captured references,
+   -> recipes.beta.coral.watcher: resolves the attempt's captured references,
       POST /reef/report {score, references, metadata.coral}, exactly once
    -> CoralProcessor groups siblings of one parent commit -> Slime LoRA step
    -> new revision served to the next attempts

@@ -7,7 +7,7 @@ code and diverged. This processor groups reports by parent commit and
 releases a group as one training unit once ``group_size`` scored siblings
 accrued.
 
-The reports it consumes are exactly what :mod:`reef_coral.reporter` emits:
+The reports it consumes are exactly what :mod:`recipes.beta.coral.reporter` emits:
 ``score``, ordered inference ``references``, and ``metadata.coral`` with
 ``agent_id``/``commit_hash``/``parent_hash``. Root attempts (no parent)
 compare against each other under a sentinel group — they all diverged from

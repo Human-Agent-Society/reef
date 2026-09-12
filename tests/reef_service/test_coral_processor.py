@@ -10,7 +10,7 @@ import pytest
 
 reef_types = pytest.importorskip("reef.train.types", reason="requires a reef checkout")
 
-from recipes.coral.processor import ROOT_GROUP, CoralProcessor
+from recipes.beta.coral.processor import ROOT_GROUP, CoralProcessor
 
 from reef.core import AgentRecord, RequestType
 from reef.train.types import GroupedPolicyBatch, ProcessorContext

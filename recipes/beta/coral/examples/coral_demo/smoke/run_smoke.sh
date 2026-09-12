@@ -8,12 +8,12 @@
 # whose agent is scripted). Needs an environment with coral AND reef
 # installed:
 #
-#   uv venv .venv && uv pip install -e .[coral] -e ../../../..
+#   uv venv .venv && uv pip install -e .[coral] -e ../../../../..
 #   ./smoke/run_smoke.sh
 set -e
 cd "$(dirname "$0")/.."
-REPO_ROOT="$(cd ../../../.. && pwd)"
-export PYTHONPATH="$REPO_ROOT:$PWD:${PYTHONPATH:-}"  # recipes.coral + smoke importable
+REPO_ROOT="$(cd ../../../../.. && pwd)"
+export PYTHONPATH="$REPO_ROOT:$PWD:${PYTHONPATH:-}"  # recipes.beta.coral + smoke importable
 export REEF_TOKEN="${REEF_TOKEN:-reef-local}"
 WORK="$PWD/work/smoke-$(date +%s)"
 mkdir -p "$WORK"
