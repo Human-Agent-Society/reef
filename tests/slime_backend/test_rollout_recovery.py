@@ -656,3 +656,80 @@ def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatc
     worker.health_monitoring_resume()
 
     assert resumed == []
+
+
+def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    worker = object.__new__(module.SlimeRayRolloutWorker)
+    worker.args = types.SimpleNamespace(rollout_external=False)
+    worker._closed = False
+    worker._routers = []
+    engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
+    worker.servers = {"actor": types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])}
+    lock = object()
+    worker.rollout_engine_lock = lock
+    calls = []
+
+    class Monitor:
+        def __init__(self, name, stuck):
+            self.name, self.stuck = name, stuck
+
+        def stop(self):
+            calls.append(self.name)
+            if self.stuck:
+                raise TimeoutError("in-flight probe")
+
+    stuck, drained = Monitor("stuck", True), Monitor("drained", False)
+    worker._health_monitors = [stuck, drained]
+    killed = []
+    monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: killed.append(target))
+    with pytest.raises(TimeoutError, match="in-flight"):
+        worker.shutdown()
+    assert not worker._closed
+    assert worker._health_monitors == [stuck]
+    assert calls == ["stuck", "drained"]
+    assert killed == []
+    assert worker.rollout_engine_lock is lock
+    stuck.stuck = False
+    worker.shutdown()
+    worker.shutdown()
+    assert worker._closed
+    assert worker._health_monitors == []
+    assert calls == ["stuck", "drained", "stuck"]
+    assert killed == [engine, lock]
+
+
+def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
+    from reef.runtime.health_monitor import EngineHealthMonitor, HealthMonitorConfig
+
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)
+    server = types.SimpleNamespace(server_groups=[group])
+    monkeypatch.setattr(module, "install_sglang_extensions", lambda: None)
+    monkeypatch.setattr(module, "start_rollout_servers", lambda args, pg: ({"actor": server}, []))
+    monkeypatch.setattr(module.SlimeRayRolloutWorker, "_new_rollout_engine_lock", lambda self: object())
+    configs = []
+
+    class RecordingMonitor(EngineHealthMonitor):
+        def __init__(self, checks, config):
+            configs.append(config)
+            super().__init__(checks, config)
+
+    monkeypatch.setattr(module, "EngineHealthMonitor", RecordingMonitor)
+    args = types.SimpleNamespace(
+        debug_train_only=False,
+        rollout_external=False,
+        use_fault_tolerance=True,
+        rollout_health_check_interval=10,
+        rollout_health_check_timeout=2,
+        rollout_health_check_first_wait=60,
+    )
+    worker = module.SlimeRayRolloutWorker(args, None)
+    try:
+        assert configs == [HealthMonitorConfig(interval=10, timeout=2, first_wait=60)]
+        assert len(worker._health_monitors) == 1
+        assert worker._health_monitors[0].is_checking_enabled()
+        worker.health_monitoring_pause()
+        assert not worker._health_monitors[0].is_checking_enabled()
+    finally:
+        worker.shutdown()

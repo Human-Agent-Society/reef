@@ -420,6 +420,7 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
         "from reef.runtime.inference_control import InferenceControl; "
+        "from reef.runtime.health_monitor import EngineHealthMonitor; "
         "from reef.runtime.weight_update import WeightUpdateLock"
     )
 

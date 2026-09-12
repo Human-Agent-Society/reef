@@ -9,11 +9,12 @@ from typing import Any
 import ray
 from slime.ray.rollout import start_rollout_servers
 from slime.ray.utils import add_default_ray_env_vars
-from slime.utils.health_monitor import RolloutHealthMonitor
 from slime.utils.http_utils import init_http_client
 from slime.utils.logging_utils import configure_logger
 
+from reef.runtime.health_monitor import EngineHealthMonitor, HealthMonitorConfig
 from reef.runtime.inference_control import InferenceControl
+from reef.train.slime_backend.reef_adapters.executors.health import SlimeEngineHealthChecks
 from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock
 from reef.train.slime_backend.reef_adapters.sglang.engine import install_sglang_extensions
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
@@ -50,7 +51,14 @@ class SlimeRayRolloutWorker:
             if not args.debug_train_only and args.use_fault_tolerance:
                 for server in self.servers.values():
                     for group in server.server_groups:
-                        monitor = RolloutHealthMonitor(group, args)
+                        monitor = EngineHealthMonitor(
+                            SlimeEngineHealthChecks(group),
+                            HealthMonitorConfig(
+                                interval=args.rollout_health_check_interval,
+                                timeout=args.rollout_health_check_timeout,
+                                first_wait=args.rollout_health_check_first_wait,
+                            ),
+                        )
                         self._health_monitors.append(monitor)
                         monitor.start()
                         monitor.resume()
@@ -62,10 +70,16 @@ class SlimeRayRolloutWorker:
         self._routers = [child for child in multiprocessing.active_children() if child not in children_before]
 
     def dispose(self):
-        for monitor in self._health_monitors:
-            with suppress(Exception):
+        failures = []
+        for monitor in list(self._health_monitors):
+            try:
                 monitor.stop()
-        self._health_monitors = []
+            except Exception as exc:
+                failures.append(exc)
+                continue
+            self._health_monitors.remove(monitor)
+        if failures:
+            raise failures[0]
 
     def _get_updatable_server(self):
         return next((server for server in self.servers.values() if server.update_weights), None)
@@ -182,6 +196,8 @@ class SlimeRayRolloutWorker:
         return ray.get([engine.check_weights.remote(action=action) for engine in self.rollout_engines])
 
     def check_health(self):
+        for monitor in self._health_monitors:
+            monitor.check_health()
         engines = [engine for server in self.servers.values() for engine in server.all_engines if engine is not None]
         if engines:
             ray.get([engine.__ray_ready__.remote() for engine in engines], timeout=30)
@@ -189,8 +205,9 @@ class SlimeRayRolloutWorker:
     def shutdown(self):
         if self._closed:
             return
-        self._closed = True
+        # A failed drain must prevent engine mutation and remain retryable.
         self.dispose()
+        self._closed = True
         # External engines and shared placement groups are borrowed resources.
         if not getattr(self.args, "rollout_external", False):
             engines = [

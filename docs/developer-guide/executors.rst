@@ -479,9 +479,33 @@ workers and engines. There is no tensor relay through the shared controller.
 This extraction does not make the Slime launch helper or attachment tuple a
 universal inference API. Complete controller-process restart/reconnection,
 backend-neutral engine launch and real GPU combinations remain separate work.
-Slime's native monitor still owns its probe threads: pausing stops scheduling
-new checks but does not drain a probe already in flight. That concurrency path
-needs validation before claiming independent restart of the full deployment.
+Standalone republication still needs pause-intent reconciliation with the
+commit gate before full deployment restart is supported.
+
+Engine health monitoring
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``reef.runtime.health_monitor.EngineHealthMonitor`` owns probe scheduling.
+``pause()`` disables new checks and waits for the active probe or retirement to
+finish before the owner can replace, offload or terminate engines. A late probe
+failure after pause begins is discarded. A drain timeout leaves checks disabled,
+raises to the owner and prevents the engine operation; shutdown retains the
+monitor so draining can be retried. An internal monitoring failure is reported
+by deployment health checks and prevents monitoring from resuming.
+
+The Slime adapter supplies ``EngineHealthChecks`` snapshots with one target per
+logical engine, including every node that must retire together. Both health and
+graceful-shutdown RPC waits are bounded. Retirement uses captured actor handles
+and clears a slot only if it still contains the captured actor. A stale probe
+cannot kill or erase a replacement engine. The adapter attempts every node even
+when a kill fails, then reports the failure.
+
+Existing ``training.options.rollout-health-check-interval``,
+``rollout-health-check-timeout`` and ``rollout-health-check-first-wait`` timings
+remain in use when ``training.options.use-fault-tolerance`` is enabled. The
+shared monitor imports no Ray, Slime or model framework. Other backends supply
+bounded probe/retirement targets and serialize lifecycle operations in their
+owning controller.
 
 Training-step coordination
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

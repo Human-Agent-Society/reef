@@ -26,7 +26,8 @@ class InferenceEngines(Protocol):
 class InferenceMonitor(Protocol):
     """Background engine monitoring must respect publication/recovery barriers."""
 
-    def pause(self) -> None: ...
+    def pause(self) -> None:
+        """Drain active checks and retirement before engine mutation; raise on timeout."""
 
     def resume(self) -> None: ...
 

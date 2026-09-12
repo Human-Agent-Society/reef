@@ -266,3 +266,48 @@ def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
         for actor in locks:
             ray.kill(actor, no_restart=True)
         ray.shutdown()
+
+
+def test_real_ray_probe_timeout_does_not_wait_for_engine_response(monkeypatch):
+    from threading import Event
+
+    from reef.train.slime_backend.reef_adapters.executors.health import SlimeEngineHealthChecks
+
+    ray = pytest.importorskip("ray")
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    ray.init(address="local", num_cpus=1, include_dashboard=False)
+
+    @ray.remote(max_concurrency=3)
+    class BlockedEngine:
+        def __init__(self):
+            self.entered = Event()
+            self.release = Event()
+
+        def health_generate(self, timeout):
+            self.entered.set()
+            self.release.wait(60)
+            return True
+
+        def probe_started(self):
+            return self.entered.wait(5)
+
+        def shutdown(self):
+            self.release.set()
+
+    engine = None
+    try:
+        engine = BlockedEngine.remote()
+        ray.get(engine.__ray_ready__.remote(), timeout=30)
+        group = SimpleNamespace(all_engines=[engine], nodes_per_engine=1)
+        target = SlimeEngineHealthChecks(group).targets()[0]
+        # Even an engine ignoring its HTTP timeout cannot hold the monitor's
+        # Ray wait forever. The queued probe remains live until retirement.
+        with pytest.raises(ray.exceptions.GetTimeoutError):
+            target.check(0.1)
+        assert ray.get(engine.probe_started.remote(), timeout=10)
+        target.retire(5)
+        assert group.all_engines == [None]
+    finally:
+        if engine is not None:
+            ray.kill(engine, no_restart=True)
+        ray.shutdown()

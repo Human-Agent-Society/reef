@@ -257,6 +257,11 @@ in the owning actor, and route legacy monitoring controls through the same pause
 state. Its ``resume`` is an internal operation authorized by the training commit
 gate, not a public serving action. Backend handles and weight transport remain
 inside adapters; an HTTP URL alone is not an update connection.
+Monitoring must drain active probes and retirement before engine mutation.
+``EngineHealthMonitor`` provides this barrier using backend ``EngineHealthChecks``
+snapshots. Each ``EngineHealthTarget`` must bound its probe/retirement operations
+by the supplied timeout and retire only its captured engine handles. A failed
+drain must block replacement or cleanup until draining succeeds.
 See `commit-gated weight publication <executors.rst#commit-gated-weight-publication>`__
 for retry and startup-recovery requirements.
 
