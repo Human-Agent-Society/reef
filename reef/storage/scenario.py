@@ -1,6 +1,6 @@
 """Storage boundary for a scenario's records, commits, and recovery.
 
-Artifact publication remains the responsibility of the commit protocol. A
+Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
 implementations may use a database transaction or a recoverable journal.
 """
@@ -9,11 +9,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
-from reef.records import RecordStore
-from reef.scenario.state import CommitRecord, ScenarioSnapshot
+from reef.storage.commits import CommitRecord
+from reef.storage.records import RecordStore
 
 
 class ScenarioStoreConflict(ReefError):
@@ -60,9 +58,10 @@ class ScenarioStore(ABC):
         """
 
     @abstractmethod
-    def recover(self, *, snapshot: ScenarioSnapshot, checkpoint_head: ArtifactRef) -> CommitRecord | None:
-        """Reconcile the checkpoint snapshot and history and replay compaction.
+    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
+        """Reconcile a checkpoint commit with history and replay compaction.
 
+        ``None`` denotes initial registration before any committed step.
         A checkpoint ahead of history is adopted durably before compaction.
         Validate scenario identity and continuity after the checkpoint. Return
         the committed head, or ``None`` at creation, without publishing artifacts.
@@ -73,12 +72,12 @@ class ScenarioStore(ABC):
         """Release this session's records and other resources exactly once."""
 
 
-class ScenarioStoreFactory(ABC):
+class ScenarioStorage(ABC):
     """Open sessions and maintain their storage without exposing file paths.
 
     The owner serializes archive and retention with lifecycle changes and
-    closes a scenario's sessions before archiving it. Factory closure releases
-    factory resources only; sessions remain owned by their scenarios.
+    closes a scenario's sessions before archiving it. Closing storage releases
+    shared resources only; sessions remain owned by their scenarios.
     """
 
     @property
@@ -100,7 +99,7 @@ class ScenarioStoreFactory(ABC):
 
     @abstractmethod
     def close(self) -> None:
-        """Release factory resources; repeated closes are harmless."""
+        """Release shared storage resources; repeated closes are harmless."""
 
 
-__all__ = ["ScenarioStore", "ScenarioStoreConflict", "ScenarioStoreFactory"]
+__all__ = ["ScenarioStorage", "ScenarioStore", "ScenarioStoreConflict"]

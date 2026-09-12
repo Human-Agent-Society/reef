@@ -11,11 +11,11 @@ from threading import Condition
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
+from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
+from reef.core.evaluation import SelectionDecision
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.inference import InferenceBackend
-from reef.train.evaluation.contracts import SelectionDecision
-from reef.train.types import TrainingBatch
 
 
 class RuntimeContractError(ReefError):
@@ -46,7 +46,7 @@ class TrainingJobResult:
 
     def __post_init__(self) -> None:
         # Fail closed at the boundary: a completed job that cannot name the
-        # checkpoint it exported would otherwise reach the commit protocol and
+        # checkpoint it exported would otherwise reach the committer and
         # be published as a durable version pointing at nothing.
         if self.outcome in {"complete", "checkpoint"} and not self.checkpoint_path:
             raise ValueError(f"a {self.outcome} training job must report the checkpoint path it exported")

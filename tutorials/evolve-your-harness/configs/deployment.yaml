@@ -3,7 +3,7 @@
 # This is the long-running pi deployment used by the root README. The separate
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
-implementation: reef.train.cordis_backend.recipe:CordisRecipe
+implementation: reef.recipe.cordis:CordisRecipe
 # The recipe uses the upstream runtime's model for evaluation as well as serving.
 execution:
   evolution:

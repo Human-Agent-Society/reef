@@ -19,12 +19,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import StaleCandidate
-from reef.scenario.checkpoint_strategy import EveryNVersions
-from reef.storage.factory import SQLiteScenarioStoreFactory
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -431,7 +430,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         SAORecipe(runtime),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         dispatcher.accept_record(_sao_inference("i1"))
@@ -477,7 +476,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         dispatcher.accept_record(_sao_inference("i1"))
@@ -514,7 +513,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
         SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     try:
         pre_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
@@ -554,7 +553,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
-            scenario_store_factory=SQLiteScenarioStoreFactory(agent_dir),
+            scenario_storage=SQLiteScenarioStorage(agent_dir),
         )
 
     first = _make_dispatcher()

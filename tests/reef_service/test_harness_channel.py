@@ -26,6 +26,7 @@ from reef_client.client import ReefClient
 
 import reef.harness.adapters
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
@@ -34,6 +35,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import Recipe
+from reef.recipe.cordis import CordisRecipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
@@ -43,11 +45,10 @@ from reef.service.install_script import (
     composition_checksum,
     render_install_script,
 )
-from reef.storage.factory import SQLiteScenarioStoreFactory
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
 
 # The fake harness scores itself, as in test_harness_recipe.py: its
 # trajectory carries the rules text, so the evaluator can rank a composition
@@ -181,7 +182,7 @@ def _dispatcher(
         local_artifact_dir=tmp_path / "local",
         # The commit log is what puts gate metrics on the release catalog.
         agent_record_dir=tmp_path / "agent-record",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "agent-record"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -1616,7 +1617,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
-        scenario_store_factory=SQLiteScenarioStoreFactory(None),
+        scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("weights-only")
 

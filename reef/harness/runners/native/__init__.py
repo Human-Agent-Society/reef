@@ -814,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-V", "--version", action="store_true", help="print the reef version and exit")
     args = parser.parse_args(argv)
     if args.version:
-        from reef import __version__
+        from reef.core.version import __version__
 
         print(f"reef-native {__version__}")
         return 0

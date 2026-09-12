@@ -12,8 +12,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.storage.factory import SQLiteScenarioStoreFactory
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.evaluation import (
@@ -848,7 +847,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         GroupedPgRecipe(training_runtime, name="grouped_pg"),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
         dispatcher.accept_record(inference(rid))

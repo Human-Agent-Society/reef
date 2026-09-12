@@ -1,7 +1,7 @@
-"""Scenario commit protocol coordinating training and artifact publication.
+"""Scenario committer coordinating training and artifact publication.
 
 Artifact storage and head movement live in ``reef.artifact``; the durable
-record values live in ``state`` and checkpoint metadata in ``snapshot``. This
+record values and checkpoint metadata formats live in ``commits``. This
 module owns the scenario-specific ordering across trainer state, store
 settlement, checkpoint policy, surfaces, and artifact
 operations.
@@ -9,7 +9,7 @@ operations.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass
@@ -20,20 +20,18 @@ from typing import Any, Literal
 from reef.artifact.artifact import (
     Artifact,
     ArtifactConflict,
-    ArtifactError,
     ArtifactNotFound,
     ArtifactPublicationError,
     ArtifactRef,
     LiveWeightArtifactRef,
-    is_local_release,
 )
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.core.errors import ReefError
+from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.checkpoint_strategy import CheckpointStrategy
-from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_metadata_for
-from reef.scenario.state import CommitRecord
-from reef.scenario.store import ScenarioStore, ScenarioStoreConflict
+from reef.scenario.releases import ScenarioReleases
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, RecordProgress, scenario_metadata_for
+from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.surface.base import ArtifactActivator
 from reef.train.trainer import Trainer
 from reef.train.types import (
@@ -53,8 +51,8 @@ class _ArtifactHeadSync:
     error: str | None = None
 
 
-class ScenarioCommitProtocol:
-    """Own one scenario's atomic commit, rollback, catalog, and recovery rules."""
+class ScenarioCommitter:
+    """Order one scenario's commit, rollback, and retry effects; delegate release queries."""
 
     def __init__(
         self,
@@ -79,13 +77,19 @@ class ScenarioCommitProtocol:
         self._trainer = trainer
         self._step = scenario_step
         self._store = store
-        self._creation_artifact = self._resolve_creation_artifact()
         self._lock = RLock()
         # Preparation holds the operation lock across proposer calls and
         # evaluation episodes, neither of which changes committed releases.
         # Readers share only the publication lock with commit and rollback.
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
+        self._releases = ScenarioReleases(
+            name=name,
+            artifacts=artifacts,
+            store=store,
+            publication_lock=self._publication_lock,
+            scenario_step=scenario_step,
+        )
         records = (
             (() if recovered_head_record is None else (recovered_head_record,))
             if not store.durable
@@ -96,7 +100,7 @@ class ScenarioCommitProtocol:
             None,
         )
         self._artifact_head_sync = _ArtifactHeadSync("synchronized", artifacts.checkpoint.release_id)
-        self._commit_status_snapshot = (scenario_step, self._latest_training_record, self._artifact_head_sync)
+        self._commit_status = (scenario_step, self._latest_training_record, self._artifact_head_sync)
 
     @property
     def lock(self) -> RLock:
@@ -120,8 +124,8 @@ class ScenarioCommitProtocol:
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
-        """Current step and latest training outcome from one non-blocking snapshot."""
-        step, record, head_sync = self._commit_status_snapshot
+        """Current step and latest training outcome read without blocking."""
+        step, record, head_sync = self._commit_status
         return {
             "scenario_step": step,
             "artifact_head_sync": asdict(head_sync),
@@ -140,47 +144,11 @@ class ScenarioCommitProtocol:
         if step != self._step + 1:
             raise ValueError(f"scenario step must advance from {self._step} to {self._step + 1}")
         self._step = step
-        self._commit_status_snapshot = (step, self._latest_training_record, self._artifact_head_sync)
+        self._commit_status = (step, self._latest_training_record, self._artifact_head_sync)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
-        """List committed releases newest first."""
         with self._publication_lock:
-            records = () if not self._store.durable else self._store.history()
-            rows = [
-                self._release_row(
-                    artifact_ref=self._creation_artifact,
-                    checkpoint=True,
-                    recorded_at=None,
-                    operation="creation",
-                    current=self._step == 0,
-                )
-            ]
-            rows.extend(
-                self._release_row(
-                    artifact_ref=record.artifact_ref,
-                    checkpoint=record.checkpoint,
-                    recorded_at=record.recorded_at,
-                    operation=record.operation,
-                    current=record.step == self._step,
-                    rollback_target_release_id=record.rollback_target_release_id,
-                    high_water_sequence=record.high_water_sequence,
-                    high_water_offset=record.high_water_offset,
-                    metrics=record.metrics,
-                    pending=record.pending,
-                )
-                for record in records
-            )
-            if not records and self._step > 0:
-                rows.append(
-                    self._release_row(
-                        artifact_ref=self._artifacts.current,
-                        checkpoint=True,
-                        recorded_at=None,
-                        operation="recovery",
-                        current=True,
-                    )
-                )
-            return tuple(reversed(rows))
+            return self._releases.releases(self._step)
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
@@ -191,7 +159,7 @@ class ScenarioCommitProtocol:
             current_ref = self._artifacts.current
             if current_ref.release_id == release_id:
                 return current_ref
-            target = self._find_release_id(release_id)
+            target = self._releases.find_release(release_id)
             if target is None:
                 raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
             target_ref, target_checkpoint = target
@@ -222,16 +190,23 @@ class ScenarioCommitProtocol:
                 surface.loader.load(source, self._binding.runtime)
             staged = artifacts.stage(next_step, source, parent=checkpoint)
             try:
-                snapshot_metadata = snapshot_metadata_for(
+                commit_metadata = scenario_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
-                    prepared=prepared,
+                    record_progress=RecordProgress(
+                        high_water_sequence=prepared.high_water_sequence,
+                        high_water_offset=prepared.high_water_offset,
+                        compacted_ids=prepared.compacted_ids,
+                        consumed_ids=prepared.consumed_ids,
+                    ),
+                    metrics=prepared.metrics,
+                    training_job_id=prepared.training_job_id,
                     operation=operation,
                     rollback_target_release_id=release_id,
                 )
-                snapshot_metadata["rollback"] = {
+                commit_metadata["rollback"] = {
                     "target_release_id": release_id,
                 }
                 published_ref = artifacts.publish(
@@ -239,7 +214,7 @@ class ScenarioCommitProtocol:
                     expected_parent=checkpoint,
                     metadata={
                         **dict(source.metadata),
-                        SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
+                        SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not durable,
                 )
@@ -358,26 +333,33 @@ class ScenarioCommitProtocol:
         checkpointed = pending or self._should_checkpoint(result)
         local_artifact = artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         try:
-            # A pending release is minted into the catalog but never activated and moves no head.
+            # A pending release is recorded but never activated and moves no head.
             # The engine must confirm the new revision before anything moves
             # the served head: the staged bytes load first, and the version
             # minted by publication then aliases them.
             if not pending:
                 self._activate(local_artifact)
             if checkpointed:
-                snapshot_metadata = snapshot_metadata_for(
+                commit_metadata = scenario_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
                     scenario_step=next_step,
                     algorithm_state=prepared.algorithm_state,
-                    prepared=prepared,
+                    record_progress=RecordProgress(
+                        high_water_sequence=prepared.high_water_sequence,
+                        high_water_offset=prepared.high_water_offset,
+                        compacted_ids=prepared.compacted_ids,
+                        consumed_ids=prepared.consumed_ids,
+                    ),
+                    metrics=prepared.metrics,
+                    training_job_id=prepared.training_job_id,
                 )
                 published_ref = artifacts.publish(
                     local_artifact,
                     expected_parent=checkpoint,
                     metadata={
                         **dict(publication.artifact.metadata),
-                        SCENARIO_SNAPSHOT_METADATA_KEY: snapshot_metadata,
+                        SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not pending and not durable,
                 )
@@ -443,7 +425,7 @@ class ScenarioCommitProtocol:
         else:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", checkpoint.release_id)
         finally:
-            self._commit_status_snapshot = (self._step, self._latest_training_record, self._artifact_head_sync)
+            self._commit_status = (self._step, self._latest_training_record, self._artifact_head_sync)
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         loader = self._binding.surface.loader
@@ -522,7 +504,7 @@ class ScenarioCommitProtocol:
         records = self._store.history()
         previous = next(
             (prior.artifact_ref for prior in reversed(records[:-1]) if not prior.pending),
-            self._creation_artifact,
+            self._releases.creation_artifact,
         )
         if record.checkpoint:
             self._install_committed_checkpoint(
@@ -560,145 +542,22 @@ class ScenarioCommitProtocol:
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 
-    def _find_release_id(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
-        records = () if not self._store.durable else self._store.history()
-        for record in reversed(records):
-            if record.artifact_ref.release_id == release_id:
-                return record.artifact_ref, record.checkpoint
-        if self._creation_artifact.release_id == release_id:
-            return self._creation_artifact, True
-        return None
-
-    def _resolve_creation_artifact(self) -> ArtifactRef:
-        """The artifact the scenario was forked from, for the release catalog.
-
-        A fresh scenario is still on it, so the chain head is the creation
-        artifact. After a recovery the fork point is reconstructed from the
-        first commit record: normally the durable parent of step 1's artifact
-        (a checkpoint, live, or local ref still knows its parent version); if
-        step 1 never recorded a durable parent (a plain non-checkpoint ref),
-        that ref itself is the earliest version the catalog can show. When
-        the parent has since disappeared from the backend, fall back to the
-        repository base artifact.
-        """
-        if self._step == 0:
-            return self._artifacts.current
-        records = () if not self._store.durable else self._store.history()
-        if records and records[0].step == 1:
-            first = records[0]
-            ref = first.artifact_ref
-            if (
-                first.checkpoint or isinstance(ref, LiveWeightArtifactRef) or is_local_release(ref.release_id)
-            ) and ref.parent_release_id is not None:
-                try:
-                    return self._artifacts.repository.backend.resolve_release(ref.parent_release_id)
-                except ArtifactNotFound:
-                    pass
-            elif not first.checkpoint:
-                return ref
-        return self._artifacts.base
-
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
-        """Metrics of the training step that published ``release_id``, if logged."""
-        if not self._store.durable:
-            return None
-        for record in self._store.history():
-            if record.artifact_ref.release_id == release_id and record.operation == "training":
-                return record.metrics
-        return None
+        return self._releases.metrics_for_version(release_id)
 
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries the training step that published ``release_id`` committed, if logged."""
-        if not self._store.durable:
-            return None
-        for record in self._store.history():
-            if record.artifact_ref.release_id == release_id and record.operation == "training":
-                entries = (record.algorithm_state or {}).get("entries")
-                if isinstance(entries, Sequence) and not isinstance(entries, str):
-                    return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
-                return None
-        return None
+        return self._releases.entries_for_version(release_id)
 
     def artifact_for_version(self, release_id: str) -> Artifact:
-        """Materialize a catalog version for a read-only content serve.
+        return self._releases.artifact_for_version(release_id)
 
-        The read-side counterpart of ``rollback``: the same catalog lookup,
-        but no head moves and no commit is written; the caller only wants the
-        version's file tree. Every failure is ``ArtifactNotFound`` naming the
-        version (not ``ReleaseNotRestorable``, which answers a rejected
-        write): to a reader, a version whose bytes are gone and a version
-        that was recorded but not kept are the same absent content.
-        """
-        if not isinstance(release_id, str) or not release_id.strip():
-            raise ValueError("release_id must be a non-empty string")
-        release_id = release_id.strip()
-        with self._publication_lock:
-            found = self._find_release_id(release_id)
-        if found is None:
-            raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
-        ref, _ = found
-        if isinstance(ref, LiveWeightArtifactRef):
-            raise ArtifactNotFound(
-                f"scenario {self._name!r} release {release_id!r} is live weights and has no file tree"
-            )
-        try:
-            return self._artifacts.resolve(ref)
-        except ArtifactError as exc:
-            raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}") from exc
-
-    def artifact_snapshot(
+    def artifact_with_metrics(
         self,
         release_id: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Capture one artifact and its metrics without waiting for preparation."""
-        with self._publication_lock:
-            artifact = (
-                Artifact(self._artifacts.current, self._artifacts.repository)
-                if release_id is None
-                else self.artifact_for_version(release_id)
-            )
-            metrics = self.metrics_for_version(artifact.ref.release_id)
-            return artifact, metrics
-
-    @staticmethod
-    def _release_row(
-        *,
-        artifact_ref: ArtifactRef,
-        checkpoint: bool,
-        recorded_at: float | None,
-        operation: str,
-        current: bool,
-        rollback_target_release_id: str | None = None,
-        high_water_sequence: int = 0,
-        high_water_offset: int = 0,
-        metrics: Mapping[str, Any] | None = None,
-        pending: bool = False,
-    ) -> dict[str, Any]:
-        row: dict[str, Any] = {
-            "release_id": artifact_ref.release_id,
-            "parent_release_id": artifact_ref.parent_release_id,
-            "content_id": artifact_ref.content_id,
-            "content_kind": "live_weights" if isinstance(artifact_ref, LiveWeightArtifactRef) else "saved_artifact",
-            "checkpoint": checkpoint,
-            "restorable": checkpoint and not isinstance(artifact_ref, LiveWeightArtifactRef),
-            "recorded_at": recorded_at,
-            "operation": operation,
-            "pending": pending,
-            "current": current,
-            "record_progress": {
-                "high_water_sequence": high_water_sequence,
-                "high_water_offset": high_water_offset,
-            },
-        }
-        if rollback_target_release_id is not None:
-            row["rollback_target_release_id"] = rollback_target_release_id
-        if isinstance(artifact_ref, LiveWeightArtifactRef):
-            row["runtime_load_id"] = artifact_ref.runtime_load_id
-        if metrics is not None:
-            row["metrics"] = dict(metrics)
-        return row
+        return self._releases.artifact_with_metrics(release_id)
 
 
 __all__ = [
-    "ScenarioCommitProtocol",
+    "ScenarioCommitter",
 ]

@@ -1,6 +1,6 @@
 """Built-in candidate-evaluation mixins and the default plugin.
 
-A :class:`~reef.train.evaluation.contracts.CandidateEvaluationPlugin` is a single
+A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
 publish it (``decide``). Rather than composing an evaluator object with a
 selector object, a plugin mixes in the methods it needs: a *decide* mixin
@@ -28,12 +28,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from reef.train.evaluation.contracts import (
-    CandidateEvaluationPlugin,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
+from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
 
 
 class AlwaysSelectMixin(CandidateEvaluationPlugin):

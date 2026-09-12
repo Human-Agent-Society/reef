@@ -13,11 +13,10 @@ from sqlalchemy.exc import OperationalError
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
-from reef.records import RecordConflict, RecordRetention
 from reef.service import assembly
 from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
-from reef.storage.factory import SQLiteScenarioStoreFactory
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.records import RecordConflict, RecordRetention
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:
@@ -31,7 +30,7 @@ BODY_BYTES = len('{"text":"海"}[]'.encode())
 
 @pytest.fixture
 def store_factory(tmp_path):
-    with closing(SQLiteScenarioStoreFactory(tmp_path)) as factory:
+    with closing(SQLiteScenarioStorage(tmp_path)) as factory:
         yield factory
 
 
@@ -150,9 +149,7 @@ def test_service_config_defaults_to_seven_days_and_twenty_gib_and_accepts_overri
 
 
 def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, monkeypatch, caplog):
-    dispatcher = build_default_dispatcher(
-        agent_record_dir=tmp_path, scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path)
-    )
+    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path, scenario_storage=SQLiteScenarioStorage(tmp_path))
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     monkeypatch.setattr("reef.service.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
     original = dispatcher.prune_record_archives
@@ -197,12 +194,10 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
 
 
 def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch):
-    dispatcher = build_default_dispatcher(
-        agent_record_dir=tmp_path, scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path)
-    )
+    dispatcher = build_default_dispatcher(agent_record_dir=tmp_path, scenario_storage=SQLiteScenarioStorage(tmp_path))
     dispatcher.get_or_create_scenario("math")
     started, release, deleting = Event(), Event(), Event()
-    original = SQLiteScenarioStoreFactory.prune
+    original = SQLiteScenarioStorage.prune
 
     def held(factory, *, days, max_bytes):
         started.set()
@@ -213,7 +208,7 @@ def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch)
         deleting.set()
         return dispatcher.delete_scenario("math")
 
-    monkeypatch.setattr(SQLiteScenarioStoreFactory, "prune", held)
+    monkeypatch.setattr(SQLiteScenarioStorage, "prune", held)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             pruning = executor.submit(dispatcher.prune_record_archives, RecordRetention())

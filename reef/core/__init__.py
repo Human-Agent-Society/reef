@@ -1,11 +1,14 @@
 """Shared value types, contracts, and root errors: the bottom of the dependency graph.
 
 Nothing here implements storage behavior or I/O. Record storage interfaces
-belong to ``reef.records``; concrete record and artifact adapters build on the
+belong to ``reef.storage.records``; concrete record and artifact adapters build on the
 shared identities and wire types defined here.
 
 The admission bar is concrete: a type belongs here only when at least two
 packages that do not depend on each other need it, and it carries no I/O.
+``batches`` and ``evaluation`` hold the values and candidate contracts shared
+by runtimes and training; ``requirements`` validates training-request requirements
+and reads their release-chain records.
 Anything with one consumer stays in that consumer — the ``x-reef-*`` header
 parsing and the HTTP report envelope live in ``service/wire.py`` — while the
 typed report *body* is ``reports/`` here because four packages parse it.

@@ -41,7 +41,7 @@ def _key(ctx: Any, host: NativeHost) -> str:
     """The entry's id, the key the tree order names, and the host learns the tree's order from the entry's loader.
 
     A plugin loaded outside a loader stands alone under its fiber id."""
-    from reef.train.cordis_backend.compose.loader import entry_of  # late: the training package imports the harness
+    from reef.harness.compose.loader import entry_of
 
     entry = entry_of(ctx)
     if entry is None:

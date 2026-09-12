@@ -18,10 +18,11 @@ import yaml
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
+from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend import CordisRecipe, Mutation
+from reef.train.cordis_backend import Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
 

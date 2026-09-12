@@ -1,8 +1,8 @@
-"""Persisted scenario values shared by storage and artifact metadata adapters.
+"""Scenario registration metadata, commit records, and their persisted formats.
 
-This module owns commit records, checkpoint snapshots, and record progress.
-It defines their existing validation and commit encoding without importing
-storage implementations, artifact operations, or the training lifecycle.
+Checkpoint recovery uses CommitRecord, the same value stored in the commit log.
+Initial registration has no commit. Encoding and validation depend only on core
+value types; training and storage operations remain with their callers.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from reef.core.errors import ReefError
 
 @dataclass(frozen=True)
 class RecordProgress:
-    """Record-consumption watermark pinned by a snapshot or commit record.
+    """Record-consumption watermark pinned by a commit record.
 
     ``consumed_ids`` names the rows the step's batch consumed.
     """
@@ -31,9 +31,9 @@ class RecordProgress:
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
-    """Validate one record_progress mapping; shared by snapshot and commit-log parsing.
+    """Validate one record_progress mapping; shared by checkpoint metadata and commit-log parsing.
 
-    ``context`` prefixes every error message (e.g. ``"scenario snapshot"`` or
+    ``context`` prefixes every error message (e.g. ``"scenario metadata"`` or
     ``"commit record"``). Raises ``ValueError``; callers with their own error
     types translate it.
     """
@@ -55,21 +55,6 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
         compacted_ids=frozenset(compacted_ids),
         consumed_ids=frozenset(consumed_ids),
     )
-
-
-@dataclass(frozen=True)
-class ScenarioSnapshot:
-    """Parsed, validated scenario registration metadata."""
-
-    scenario: str
-    base_artifact: ArtifactRef
-    scenario_step: int
-    algorithm_state: Mapping[str, Any] | None
-    record_progress: RecordProgress | None
-    training_job_id: str | None = None
-    operation: str | None = None
-    rollback_target_release_id: str | None = None
-    metrics: Mapping[str, Any] | None = None
 
 
 RECORD_KIND = "reef-commit/5"
@@ -240,11 +225,129 @@ class CommitRecord:
         return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.artifact_ref.release_id!r})"
 
 
+SCENARIO_METADATA_KEY = "scenario_commit_record"
+SCENARIO_METADATA_KIND = "reef-scenario/4"
+
+
+def scenario_metadata_for(
+    *,
+    name: str,
+    base_artifact: ArtifactRef,
+    scenario_step: int = 0,
+    algorithm_state: Mapping[str, Any] | None = None,
+    record_progress: RecordProgress | None = None,
+    metrics: Mapping[str, Any] | None = None,
+    training_job_id: str | None = None,
+    operation: str = "training",
+    rollback_target_release_id: str | None = None,
+) -> dict[str, object]:
+    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
+        raise ValueError("scenario_step must be non-negative")
+    metadata: dict[str, object] = {
+        "format": SCENARIO_METADATA_KIND,
+        "scenario": name,
+        "scenario_step": scenario_step,
+        "base_artifact": encode_artifact_ref(base_artifact),
+        "operation": operation,
+    }
+    if operation not in ("training", "rollback", "promote"):
+        raise ValueError("scenario metadata operation must be 'training' or 'rollback'")
+    if operation in ("rollback", "promote"):
+        if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
+            raise ValueError("rollback scenario metadata requires rollback_target_release_id")
+        metadata["rollback_target_release_id"] = rollback_target_release_id
+    elif rollback_target_release_id is not None:
+        raise ValueError("training scenario metadata must not carry rollback_target_release_id")
+    if algorithm_state is not None:
+        metadata["algorithm_state"] = dict(algorithm_state)
+    if record_progress is not None:
+        metadata["record_progress"] = {
+            "high_water_sequence": record_progress.high_water_sequence,
+            "high_water_offset": record_progress.high_water_offset,
+            "compacted_ids": sorted(record_progress.compacted_ids),
+            "consumed_ids": sorted(record_progress.consumed_ids),
+        }
+    if training_job_id is not None:
+        metadata["training_job_id"] = training_job_id
+    if metrics is not None:
+        metadata["metrics"] = deepcopy(dict(metrics))
+    return metadata
+
+
+def parse_scenario_metadata(
+    value: Mapping[str, Any], *, checkpoint_head: ArtifactRef
+) -> tuple[str, ArtifactRef, CommitRecord | None]:
+    """Read registration and a checkpoint commit; step zero has no commit."""
+    if value.get("format") != SCENARIO_METADATA_KIND:
+        raise ValueError(f"unsupported scenario metadata format: {value.get('format')!r}")
+    scenario = value.get("scenario")
+    if not isinstance(scenario, str) or not scenario:
+        raise ValueError("scenario metadata requires scenario")
+    raw_base = value.get("base_artifact")
+    if not isinstance(raw_base, Mapping):
+        raise ValueError("scenario metadata requires base_artifact")
+    try:
+        base_artifact = decode_artifact_ref(raw_base)
+    except ValueError as exc:
+        raise ValueError(f"invalid scenario metadata base_artifact: {exc}") from exc
+    scenario_step = value.get("scenario_step", 0)
+    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
+        raise ValueError("scenario metadata scenario_step must be non-negative")
+    algorithm_state = value.get("algorithm_state")
+    if algorithm_state is not None and not isinstance(algorithm_state, Mapping):
+        raise ValueError("scenario metadata algorithm_state must be an object")
+    raw_progress = value.get("record_progress")
+    record_progress: RecordProgress | None = None
+    if raw_progress is not None:
+        record_progress = parse_record_progress(raw_progress, context="scenario metadata")
+    training_job_id = value.get("training_job_id")
+    if training_job_id is not None and (not isinstance(training_job_id, str) or not training_job_id):
+        raise ValueError("scenario metadata training_job_id must be a non-empty string or null")
+    metrics = value.get("metrics")
+    if metrics is not None and not isinstance(metrics, Mapping):
+        raise ValueError("scenario metadata metrics must be an object or null")
+    operation = value.get("operation")
+    rollback_target_release_id = value.get("rollback_target_release_id")
+    if operation is not None and operation not in ("training", "rollback", "promote"):
+        raise ValueError("scenario metadata operation must be 'training' or 'rollback'")
+    if operation in ("rollback", "promote"):
+        if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
+            raise ValueError("rollback scenario metadata requires rollback_target_release_id")
+        if training_job_id is not None:
+            raise ValueError("rollback scenario metadata cannot carry training_job_id")
+    elif rollback_target_release_id is not None:
+        raise ValueError("non-rollback scenario metadata cannot carry rollback_target_release_id")
+    if scenario_step == 0:
+        return scenario, base_artifact, None
+    if record_progress is None:
+        raise ValueError("scenario metadata requires record_progress after step zero")
+    commit = CommitRecord(
+        scenario=scenario,
+        step=scenario_step,
+        artifact_ref=checkpoint_head,
+        checkpoint=True,
+        algorithm_state=algorithm_state,
+        high_water_sequence=record_progress.high_water_sequence,
+        high_water_offset=record_progress.high_water_offset,
+        compacted_ids=record_progress.compacted_ids,
+        consumed_ids=record_progress.consumed_ids,
+        training_job_id=training_job_id,
+        metrics=metrics,
+        operation=operation or "training",
+        operation_verified=operation is not None,
+        rollback_target_release_id=rollback_target_release_id,
+    )
+    return scenario, base_artifact, commit
+
+
 __all__ = [
     "RECORD_KIND",
+    "SCENARIO_METADATA_KEY",
+    "SCENARIO_METADATA_KIND",
     "CommitLogError",
     "CommitRecord",
     "RecordProgress",
-    "ScenarioSnapshot",
     "parse_record_progress",
+    "parse_scenario_metadata",
+    "scenario_metadata_for",
 ]

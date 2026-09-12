@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from reef.train.evaluation.contracts import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import TrainingBatch, TrainStepResult
 
 

@@ -24,7 +24,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
-from reef.records import AppendResult, RecordConflict, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
 
 
 @dataclass(frozen=True)

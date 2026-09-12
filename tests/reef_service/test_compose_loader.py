@@ -1,4 +1,4 @@
-"""Guarantees of reef.train.cordis_backend.compose.loader, one test per ported guarantee."""
+"""Guarantees of reef.harness.compose.loader, one test per ported guarantee."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ import logging
 
 import pytest
 
-from reef.train.cordis_backend import compose
-from reef.train.cordis_backend.compose import FiberState
-from reef.train.cordis_backend.compose.loader import Loader
+from reef.harness import compose
+from reef.harness.compose import FiberState
+from reef.harness.compose.loader import Loader
 
 
 def build(log):

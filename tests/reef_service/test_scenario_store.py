@@ -18,11 +18,10 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.scenario.state import CommitRecord, RecordProgress, ScenarioSnapshot
-from reef.scenario.store import ScenarioStoreConflict
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.commits import CommitRecord
+from reef.storage.scenario import ScenarioStoreConflict
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
 
 def record(record_id: str, *, scenario: str = "math") -> AgentRecord:
@@ -49,24 +48,9 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     )
 
 
-def snapshot(step: int = 0) -> ScenarioSnapshot:
-    return ScenarioSnapshot(
-        scenario="math",
-        base_artifact=ArtifactRef("base", "base", None),
-        scenario_step=step,
-        algorithm_state=None if step == 0 else {"step": step},
-        record_progress=(
-            None
-            if step == 0
-            else RecordProgress(step, step, frozenset({f"record-{step}"}), frozenset({f"record-{step}"}))
-        ),
-        operation="training",
-    )
-
-
 @pytest.fixture(params=[False, True], ids=["memory", "durable"])
 def store(request, tmp_path):
-    factory = SQLiteScenarioStoreFactory(tmp_path if request.param else None)
+    factory = SQLiteScenarioStorage(tmp_path if request.param else None)
     session = factory.open("math")
     yield session
     session.close()
@@ -157,11 +141,10 @@ def test_retry_repairs_compaction_after_the_commit_point(store, monkeypatch):
 
 def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
     store.records.append(record("record-2"))
-    checkpoint = replace(
-        snapshot(2), operation="rollback", rollback_target_release_id="base", metrics={"quality": 0.5}
-    )
-    head = store.recover(snapshot=checkpoint, checkpoint_head=commit(2).artifact_ref)
+    checkpoint = replace(commit(2), operation="rollback", rollback_target_release_id="base", metrics={"quality": 0.5})
+    head = store.recover(checkpoint=checkpoint)
 
+    assert head is checkpoint
     assert head.step == 2
     assert head.checkpoint is True
     assert head.operation == "rollback"
@@ -176,17 +159,24 @@ def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
     assert store.training_run_position() == (2, 1)
 
 
-def test_recover_keeps_unverified_legacy_snapshot_operation(store):
-    head = store.recover(snapshot=replace(snapshot(2), operation=None), checkpoint_head=commit(2).artifact_ref)
+def test_recover_keeps_unverified_checkpoint_operation(store):
+    head = store.recover(checkpoint=replace(commit(2), operation_verified=False))
 
     assert head.operation == "training"
     assert head.operation_verified is False
 
 
-def test_recovery_at_creation_is_empty_and_foreign_snapshot_is_rejected(store):
-    assert store.recover(snapshot=snapshot(), checkpoint_head=snapshot().base_artifact) is None
-    with pytest.raises(ReefError, match="snapshot belongs to scenario 'code'"):
-        store.recover(snapshot=replace(snapshot(), scenario="code"), checkpoint_head=snapshot().base_artifact)
+def test_recovery_at_creation_is_empty_and_foreign_checkpoint_is_rejected(store):
+    assert store.recover(checkpoint=None) is None
+    with pytest.raises(ReefError, match="checkpoint belongs to scenario 'code'"):
+        store.recover(checkpoint=commit(scenario="code"))
+
+
+@pytest.mark.parametrize("changes", [{"checkpoint": False}, {"pending": True}])
+def test_recovery_rejects_commits_that_are_not_active_checkpoints(store, changes):
+    with pytest.raises(ReefError, match="activated checkpoint"):
+        store.recover(checkpoint=replace(commit(), **changes))
+    assert store.history() == ()
 
 
 def test_training_position_ignores_promote_and_resets_on_rollback(store):
@@ -222,19 +212,19 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
     with pytest.raises(RuntimeError, match="store is closed"):
         store.commit_step(expected_step=0, commit=commit())
     with pytest.raises(RuntimeError, match="store is closed"):
-        store.recover(snapshot=snapshot(), checkpoint_head=snapshot().base_artifact)
+        store.recover(checkpoint=None)
     with pytest.raises(RuntimeError, match="store is closed"):
         _ = store.records
 
 
-def test_recovery_replays_all_compactions_even_before_snapshot(tmp_path):
+def test_recovery_replays_all_compactions_even_before_checkpoint(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
     with closing(CommitLogScenarioStore("math", SQLiteRecordStore(tmp_path / "records.sqlite3"), journal)) as session:
         for step in range(1, 4):
             session.records.append(record(f"record-{step}"))
             journal.append(commit(step))
 
-        head = session.recover(snapshot=snapshot(2), checkpoint_head=commit(2).artifact_ref)
+        head = session.recover(checkpoint=commit(2))
 
         assert head == commit(3)
         assert session.records.count("math") == 0
@@ -243,7 +233,7 @@ def test_recovery_replays_all_compactions_even_before_snapshot(tmp_path):
 
 
 def test_recovery_repairs_failed_compaction_after_reopening(tmp_path, monkeypatch):
-    factory = SQLiteScenarioStoreFactory(tmp_path)
+    factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
         session.records.append(record("record-1"))
 
@@ -255,7 +245,7 @@ def test_recovery_repairs_failed_compaction_after_reopening(tmp_path, monkeypatc
             session.commit_step(expected_step=0, commit=commit())
 
     with closing(factory.open("math")) as recovered:
-        assert recovered.recover(snapshot=snapshot(), checkpoint_head=snapshot().base_artifact) == commit()
+        assert recovered.recover(checkpoint=None) == commit()
         assert recovered.records.count("math") == 0
         assert recovered.records.get_for_audit("math", "record-1") is not None
     factory.close()
@@ -285,8 +275,8 @@ def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch
         assert session.records.count("math") == 0
 
 
-@pytest.mark.parametrize("steps,snapshot_step,message", [([2], 0, "resumes at step 2"), ([1, 3], 0, "jumps")])
-def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, snapshot_step, message):
+@pytest.mark.parametrize("steps,checkpoint_step,message", [([2], 0, "resumes at step 2"), ([1, 3], 0, "jumps")])
+def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, checkpoint_step, message):
     journal = CommitLog(tmp_path / "commits.jsonl")
     for step in steps:
         journal.append(commit(step))
@@ -294,7 +284,7 @@ def test_recovery_rejects_gaps_after_checkpoint(tmp_path, steps, snapshot_step, 
         closing(CommitLogScenarioStore("math", SQLiteRecordStore(), journal)) as session,
         pytest.raises(ReefError, match=message),
     ):
-        session.recover(snapshot=snapshot(snapshot_step), checkpoint_head=snapshot().base_artifact)
+        session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
 
 
 def test_recovery_rejects_journal_for_another_scenario(tmp_path):
@@ -304,7 +294,7 @@ def test_recovery_rejects_journal_for_another_scenario(tmp_path):
         closing(CommitLogScenarioStore("math", SQLiteRecordStore(), journal)) as session,
         pytest.raises(ReefError, match="holds records for 'code'"),
     ):
-        session.recover(snapshot=snapshot(), checkpoint_head=snapshot().base_artifact)
+        session.recover(checkpoint=None)
 
 
 def test_existing_initial_step_is_fenced_without_history():
@@ -315,8 +305,8 @@ def test_existing_initial_step_is_fenced_without_history():
 
 
 def test_conflicting_sessions_have_only_one_winner(tmp_path):
-    first_factory = SQLiteScenarioStoreFactory(tmp_path)
-    second_factory = SQLiteScenarioStoreFactory(tmp_path)
+    first_factory = SQLiteScenarioStorage(tmp_path)
+    second_factory = SQLiteScenarioStorage(tmp_path)
     with closing(first_factory.open("math")) as first, closing(second_factory.open("math")) as second:
         barrier = Barrier(2)
 
@@ -339,7 +329,7 @@ def test_conflicting_sessions_have_only_one_winner(tmp_path):
 
 
 def test_session_refreshes_cached_history_after_another_writer(tmp_path):
-    factory = SQLiteScenarioStoreFactory(tmp_path)
+    factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as first, closing(factory.open("math")) as second:
         first.commit_step(expected_step=0, commit=commit())
         assert first.history() == (commit(),)
@@ -353,7 +343,7 @@ def test_session_refreshes_cached_history_after_another_writer(tmp_path):
 
 
 def _commit_in_process(directory, started, ready, results, label):
-    factory = SQLiteScenarioStoreFactory(Path(directory))
+    factory = SQLiteScenarioStorage(Path(directory))
     with closing(factory.open("math")) as session:
         ready.put(True)
         if not started.wait(timeout=20):
@@ -372,7 +362,7 @@ def test_conflicting_processes_have_only_one_winner(tmp_path):
     ready = context.Queue()
     results = context.Queue()
     # Initialize schema first so this test targets commit fencing specifically.
-    factory = SQLiteScenarioStoreFactory(tmp_path)
+    factory = SQLiteScenarioStorage(tmp_path)
     factory.open("math").close()
     processes = [
         context.Process(target=_commit_in_process, args=(str(tmp_path), started, ready, results, label))
@@ -400,9 +390,9 @@ def test_conflicting_processes_have_only_one_winner(tmp_path):
     factory.close()
 
 
-def test_factory_preserves_paths_archives_and_recreates_without_old_history(tmp_path):
+def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_path):
     key = hashlib.sha256(b"math").hexdigest()
-    factory = SQLiteScenarioStoreFactory(tmp_path)
+    factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
         session.records.append(record("record-1"))
         session.commit_step(expected_step=0, commit=commit())
@@ -423,8 +413,8 @@ def test_factory_preserves_paths_archives_and_recreates_without_old_history(tmp_
     factory.close()
 
 
-def test_factory_retention_includes_archives_and_preserves_active_records(tmp_path):
-    factory = SQLiteScenarioStoreFactory(tmp_path)
+def test_storage_retention_includes_archives_and_preserves_active_records(tmp_path):
+    factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
         session.records.append(record("record-1"))
         session.records.append(record("active"))
@@ -440,8 +430,8 @@ def test_factory_retention_includes_archives_and_preserves_active_records(tmp_pa
     factory.close()
 
 
-def test_factory_close_preserves_existing_session_and_rejects_new_operations():
-    factory = SQLiteScenarioStoreFactory()
+def test_storage_close_preserves_existing_session_and_rejects_new_operations():
+    factory = SQLiteScenarioStorage()
     with closing(factory.open("math")) as session:
         assert factory.durable is False
         assert factory.archive("math") == ()
@@ -449,11 +439,11 @@ def test_factory_close_preserves_existing_session_and_rejects_new_operations():
         factory.close()
         factory.close()
         session.commit_step(expected_step=0, commit=commit())
-        with pytest.raises(RuntimeError, match="factory is closed"):
+        with pytest.raises(RuntimeError, match="storage is closed"):
             factory.open("math")
-        with pytest.raises(RuntimeError, match="factory is closed"):
+        with pytest.raises(RuntimeError, match="storage is closed"):
             factory.archive("math")
-        with pytest.raises(RuntimeError, match="factory is closed"):
+        with pytest.raises(RuntimeError, match="storage is closed"):
             factory.prune(days=7.0, max_bytes=1)
 
 
@@ -467,14 +457,14 @@ def test_import_and_in_memory_storage_do_not_require_posix_locks(tmp_path):
         sys.modules['fcntl'] = None
         import reef
         from reef.core.errors import ReefError
-        from reef.storage.factory import SQLiteScenarioStoreFactory
+        from reef.storage.sqlite import SQLiteScenarioStorage
 
-        with closing(SQLiteScenarioStoreFactory()) as factory:
+        with closing(SQLiteScenarioStorage()) as factory:
             with closing(factory.open('math')) as store:
                 assert store.history() == ()
                 assert store.records.count('math') == 0
 
-        with closing(SQLiteScenarioStoreFactory(Path(sys.argv[1]))) as factory:
+        with closing(SQLiteScenarioStorage(Path(sys.argv[1]))) as factory:
             with closing(factory.open('math')) as store:
                 try:
                     store.history()

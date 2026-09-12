@@ -102,7 +102,7 @@ def test_slime_rejects_unsupported_builtin_gpu_launchers(role, backend):
 
 def test_driver_auto_and_cli_auto_override_yaml(caplog):
     pytest.importorskip("ray")
-    from reef.train.slime_backend.reef_adapters.driver import _configure_executors
+    from reef.service.slime_driver import _configure_executors
 
     args = SimpleNamespace(reef_executor_backend="auto", reef_rollout_executor_backend="auto")
     with caplog.at_level("INFO"):

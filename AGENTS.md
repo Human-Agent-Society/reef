@@ -38,7 +38,8 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/service/` | HTTP, authentication, streaming, and deployment |
 | `reef/recipe/`, `reef/train/` | Recipe contracts, processors, training, evaluation, and backend integrations |
 | `reef/runtime/`, `reef/surface/` | Runtime contracts and delivery of published artifacts |
-| `reef/artifact/`, `reef/records.py` | Versioned artifacts, interaction records, and feedback |
+| `reef/artifact/` | Versioned artifacts and repositories |
+| `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |

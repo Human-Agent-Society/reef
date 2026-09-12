@@ -2,7 +2,7 @@
 
 Record stores append, replay, and retire interaction records. They do not know
 about scenario lifecycle, commits, artifact publication, or training. Concrete
-backends in ``reef.storage`` implement this interface.
+backends in this package implement this interface; importing it loads no database adapters.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class RecordRetention:
 
     The byte budget counts compacted JSON bodies only. It excludes active
     records, retry metadata, indexes, and storage overhead; it is not a physical
-    database size limit. Storage factories apply these limits.
+    database size limit. Storage services apply these limits.
     """
 
     days: float = 7.0

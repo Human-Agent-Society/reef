@@ -22,11 +22,12 @@ from reef.artifact.repository import (
 from reef.core.errors import ReefError, UnknownScenario
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.records import RecordRetention
 from reef.runtime.base import TrainingRuntime
+from reef.runtime.model_config import ModelConfig
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
-from reef.scenario.store import ScenarioStoreFactory
+from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
+from reef.storage.scenario import ScenarioStorage
 
 
 class ScenarioRegistry:
@@ -48,14 +49,16 @@ class ScenarioRegistry:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
-        scenario_store_factory: ScenarioStoreFactory,
+        scenario_storage: ScenarioStorage,
     ) -> None:
+        self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
+        self._model_configs: dict[str, ModelConfig] = {}
+        self._storage = scenario_storage
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
-            agent_record_dir=agent_record_dir,
-            scenario_store_factory=scenario_store_factory,
+            scenario_storage=scenario_storage,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
         )
         self._backend_factory = backend_factory
@@ -70,11 +73,6 @@ class ScenarioRegistry:
         self._preload_errors: dict[str, str] = {}
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
-
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self._recipe.build_surface("").files is not None
 
     @property
     def training_scenario_name(self) -> str | None:
@@ -206,13 +204,19 @@ class ScenarioRegistry:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             # Creating an existing scenario never overwrites its configuration.
             if not create or not exists:
-                self._scenario_factory.configure_model(scenario, value)
+                candidate = ModelConfig.from_value(value)
+                self._recipe.with_model_config(candidate)
+                current = self._model_config(scenario)
+                write_model_config(self._agent_record_dir, scenario, value)
+                current.runtime = candidate.runtime
             return self._resolve(scenario, release_id)
 
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(scenario, None)
+            recovered = self._scenario_factory.load_or_create(
+                scenario, None, model_config=self._model_config(scenario)
+            )
             with self._lock:
                 training_mode = self._training_modes.get(scenario)
             if training_mode is not None and recovered.trainer.training_mode != training_mode:
@@ -244,7 +248,7 @@ class ScenarioRegistry:
             self._training_scenarios = [name for name in self._training_scenarios if name != scenario]
             if self._training_scenario == scenario:
                 self._training_scenario = self._training_scenarios[0] if self._training_scenarios else None
-            self._scenario_factory.forget_model_config(scenario)
+            self._model_configs.pop(scenario, None)
             self._training_modes.pop(scenario, None)
             self._preload_errors.pop(scenario, None)
         return dropped
@@ -261,21 +265,19 @@ class ScenarioRegistry:
             self._scenario_locks.pop(scenario, None)
 
     def archive_store(self, scenario: str) -> tuple[str, ...]:
-        return self._scenario_factory.archive_store(scenario)
+        archived = self._storage.archive(scenario)
+        return (*archived, *archive_model_config(self._agent_record_dir, scenario))
 
-    def prune_records(self, retention: RecordRetention) -> int:
-        return self._scenario_factory.prune_records(retention)
-
-    def close_store_factory(self) -> None:
-        self._scenario_factory.close()
-
-    @property
-    def agent_record_dir(self) -> Path | None:
-        return self._scenario_factory.agent_record_dir
-
-    def close_all(self) -> tuple[Scenario, ...]:
+    def loaded_scenarios(self) -> tuple[Scenario, ...]:
+        """Return the currently loaded scenario instances as a tuple."""
         with self._lock:
             return tuple(self._scenarios.values())
+
+    def _model_config(self, scenario: str) -> ModelConfig:
+        if scenario not in self._model_configs:
+            value = read_model_config(self._agent_record_dir, scenario)
+            self._model_configs[scenario] = ModelConfig.from_value(value)
+        return self._model_configs[scenario]
 
     def _resolve(
         self,
@@ -287,7 +289,9 @@ class ScenarioRegistry:
         if current is not None:
             self._scenario_factory.validate_existing(current, release_id)
             return current
-        current = self._scenario_factory.load_or_create(scenario, release_id)
+        current = self._scenario_factory.load_or_create(
+            scenario, release_id, model_config=self._model_config(scenario)
+        )
         runtime = current.runtime
         training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
         with self._lock:

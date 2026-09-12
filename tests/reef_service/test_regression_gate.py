@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.train.evaluation import EvaluationResult, RegressionGateMixin, UpdateCandidate
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin
 
 
 class _GatedPlugin(RegressionGateMixin, CandidateEvaluationPlugin):

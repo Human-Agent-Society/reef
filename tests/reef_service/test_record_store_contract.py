@@ -12,8 +12,8 @@ from sqlalchemy import Column, Float, Integer, MetaData, Table, Text, create_eng
 from sqlalchemy.engine import Connection
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.records import AppendResult, RecordConflict, RecordStore
 from reef.storage.postgres import PostgresRecordStore
+from reef.storage.records import AppendResult, RecordConflict, RecordStore
 from reef.storage.sql_records import RecordTables, SQLRecordStore
 from reef.storage.sqlite import SQLiteRecordStore
 

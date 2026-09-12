@@ -33,7 +33,7 @@ class SavedArtifactPublication:
 class DurableWeightsPublication:
     """A backend train step whose weights are live and also exported on disk.
 
-    Both publication shapes are still open at this point: the commit protocol
+    Both publication shapes are still open at this point: the committer
     owns checkpoint policy, so it decides whether to import ``checkpoint_path``
     as a durable version or to publish ``runtime_load_id`` as live weights and
     leave the export unreferenced. Producers must not pre-empt that choice.

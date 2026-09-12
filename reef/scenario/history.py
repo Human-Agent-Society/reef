@@ -6,8 +6,8 @@ from itertools import islice
 from typing import Any
 
 from reef.core.artifact_ref import encode_artifact_ref
-from reef.records import StoredRecord
 from reef.scenario.scenario import Scenario
+from reef.storage.records import StoredRecord
 
 
 def record_metadata(stored: StoredRecord) -> dict[str, Any]:

@@ -74,7 +74,7 @@ import a concrete integration.
 |                      | lifecycle                                                | tied to aiohttp                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/scenario/``   | scenario binding, commit ordering,                       | training algorithms, repository            |
-|                      | recovery, checkpoint policy                              | implementations                            |
+|                      | recovery, and lifecycle                                  | implementations                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/recipe/``     | the contract a method implements, dotted                 | any particular method                      |
 |                      | class resolution, and runtime instance binding           |                                            |
@@ -102,6 +102,56 @@ import a concrete integration.
 | ``docker/``          | container and GPU environment setup                      | Python dependency declarations             |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 
+
+Package import direction
+------------------------
+
+Imports between the top-level Reef packages form a directed acyclic graph.
+``tests/reef_service/test_dependency_boundaries.py`` scans every Python file,
+including relative imports and imports inside functions. Importing the root
+``reef`` facade from an internal package also counts as a dependency; internal
+code imports the owning module directly.
+
+The following table records direct package dependencies (excluding each
+package's own submodules and third-party libraries):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 20 80
+
+   * - Package
+     - Imports
+   * - ``core``
+     - None
+   * - ``storage``, ``artifact``, ``observability``
+     - ``core``
+   * - ``surface``
+     - ``artifact``, ``core``
+   * - ``runtime``
+     - ``surface``, ``artifact``, ``core``
+   * - ``harness``
+     - ``runtime``, ``core``
+   * - ``train``
+     - ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+   * - ``recipe``
+     - ``train``, ``harness``, ``runtime``, ``surface``, ``storage``, ``observability``, ``core``
+   * - ``scenario``
+     - ``recipe``, ``train``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+   * - ``dispatcher``
+     - ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``artifact``, ``storage``, ``observability``, ``core``
+   * - ``service``
+     - ``dispatcher``, ``scenario``, ``recipe``, ``train``, ``harness``, ``runtime``, ``surface``, ``artifact``, ``storage``, ``observability``, ``core``
+   * - ``cli``
+     - ``service``, ``core``
+
+Shared batches and candidate evaluation contracts live in ``core/batches.py``
+and ``core/evaluation.py``. Request requirements and their release-chain
+interpretation live in ``core/requirements.py``. Storage owns commit record
+encoding; scenario owns commit ordering and recovery. Artifact admission lives
+with surface contracts, while checkpoint cadence is recipe policy.
+``recipe/cordis.py`` assembles the harness training backend, and
+``service/slime_driver.py`` starts the optional Slime process.
+
 The extension points those packages expose are in `Python API
 <../reference/python-api.rst>`__.
 
@@ -109,26 +159,41 @@ The extension points those packages expose are in `Python API
 - Is it a value or error needed by unrelated layers without behavior attached?
   Put it in ``reef/core/``.
 - Does it own scenario state, commit ordering, recovery, or rollback? Put it in
-  ``reef/scenario/``. ``state.py`` defines the persisted ``CommitRecord``,
-  ``ScenarioSnapshot``, and ``RecordProgress`` values without storage behavior.
-  ``store.py`` defines the ``ScenarioStore`` and ``ScenarioStoreFactory`` abstract
-  bases; ``snapshot.py`` adapts snapshot values to artifact metadata.
-  ``ScenarioFactory`` receives a store factory from deployment assembly and
-  supplies an opened store to ``Scenario``. The scenario package never imports
-  ``reef/storage``. ``Dispatcher`` also requires an injected store factory and
-  never imports or chooses a concrete record backend.
+  ``reef/scenario/``. ``reef/storage/commits.py`` defines the persisted ``CommitRecord`` and
+  ``RecordProgress`` values without storage behavior. Checkpoint recovery uses
+  the same ``CommitRecord`` type; initial registration has no commit.
+  ``reef/storage/scenario.py`` defines the ``ScenarioStore`` and ``ScenarioStorage``
+  abstract bases. ``storage/commits.py`` also encodes artifact metadata and decodes existing
+  checkpoint metadata into registration information and a ``CommitRecord``.
+  ``ScenarioFactory`` receives the storage service from deployment assembly
+  and handles registration, release selection, and recovery. It opens a
+  session, restores committed artifacts, builds the trainer, replays records,
+  and returns a complete ``Scenario``; failure closes its owned resources. ``committer.py`` owns writes and retry ordering;
+  ``releases.py`` owns release and artifact queries under the same publication
+  lock. ``history.py`` pages retained records and commits. ``registry.py`` owns
+  loaded instances, model configuration caching, updates, and scenario
+  archival coordination. Recipes, scenarios, and the factory use the concrete
+  ``ModelConfig`` in ``reef/runtime/model_config.py``. The factory receives
+  one configuration per creation or recovery; it owns no configuration cache.
+  The registry calls ``reef/storage/model_config.py`` functions directly for
+  the fixed local JSON files. This is its only storage implementation import:
+  records and commits still use an injected ``ScenarioStorage``.
+  ``Dispatcher`` calls the storage service directly for retention and closes
+  it after closing the loaded scenarios. It never imports or chooses a
+  concrete record backend.
 - Does it define shared record operations or retention limits? Put the contract
-  or value in ``reef/records.py``. It defines the ``RecordStore`` abstract base
+  or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
-  ``ScenarioStoreFactory`` owns archival and retention.
+  ``ScenarioStorage`` owns archival and retention.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
   PostgreSQL tables, pooled transactions, and retention. ``commit_log.py`` owns
   the JSONL ``CommitLog`` and ``CommitLogScenarioStore``, which accepts any
-  ``RecordStore``. ``factory.py`` assembles SQLite or PostgreSQL records with
-  the commit log store. Storage implementations depend on domain contracts, never the reverse.
+  ``RecordStore``. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  scenario storage services against the interfaces in ``scenario.py``.
+  Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes? Put it in
   ``reef/artifact/``. If it decides how consumers activate those bytes, put
   that behavior in ``reef/surface/`` instead.
@@ -136,8 +201,8 @@ The extension points those packages expose are in `Python API
   ``reef/runtime/``. Put implementation tied to a concrete training stack in
   its own ``reef/train/<integration>/`` subtree.
   ``reef/train/cordis_backend/`` is the general harness evolution engine;
-  its composition core derives from cordis 4.0.0-rc.8 with the conformance
-  map in its ``compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the
+  the shared composition engine lives in ``reef/harness/compose/``. It derives
+  from cordis 4.0.0-rc.8; see ``reef/harness/compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the
   weights counterpart.
 - Does it turn records and feedback into a batch or step signal? Put it in
   ``reef/train/processors/`` or ``reef/train/algos/``. A recipe selects and
@@ -181,9 +246,9 @@ harness wire contract is `HTTP API <../reference/http-api.rst>`__. The
 `top-level README <../../README.md>`__ shows how the cookbook methods sit
 beside ``reef/``.
 
-``reef/train/cordis_backend/`` is the general harness evolution engine; its
-composition core derives from cordis 4.0.0-rc.8 with the conformance map in
-its ``compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the weights
+``reef/train/cordis_backend/`` is the general harness evolution engine; the
+shared composition engine derives from cordis 4.0.0-rc.8 with the conformance
+map in ``reef/harness/compose/UPSTREAM.md``. ``reef/train/slime_backend/`` is the weights
 counterpart.
 
 Adding a new subpackage under ``reef/`` or a new method under ``recipes/``

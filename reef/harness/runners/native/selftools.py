@@ -20,8 +20,8 @@ from reef.harness.runners.native import ToolModule
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.release_client import ReleaseClient
 from reef.harness.runners.native.seed import SEED_GRAPH
+from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS, NATIVE_RESERVED_TOOL_NAMES, flat_entry_refusal
-from reef.train.cordis_backend.strategies import Mutation, MutationError
 
 #: The names reserved for built-in tools; a tree entry that takes one fails to mount.
 RESERVED_NAMES = NATIVE_RESERVED_TOOL_NAMES

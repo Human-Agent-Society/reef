@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from reef.core.errors import ReefError
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.reports import ScoredRolloutReport
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
@@ -32,9 +33,9 @@ from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.records import RecordStore
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
-from reef.scenario.model_config import ScenarioModelConfig
+from reef.runtime.model_config import ModelConfig
+from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonPlugin, tree_files
@@ -48,7 +49,6 @@ from reef.train.cordis_backend.strategies import (
     resolve_promoter,
     resolve_proposer,
 )
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
 
@@ -71,7 +71,7 @@ _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
 
 @dataclass(frozen=True)
 class _ScenarioModels:
-    config: ScenarioModelConfig
+    config: ModelConfig
     recipe: CordisRecipe
 
     def resolve(self) -> ModelBindings:
@@ -244,9 +244,9 @@ class CordisRecipe(Recipe):
     max_score: float = config_field(0.0)
     batch_policy: str = config_field("reports")
     name: str = field(default="harness_evolve", kw_only=True)
-    scenario_model: ScenarioModelConfig | None = field(default=None, repr=False, kw_only=True)
+    scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
 
-    def with_model_config(self, config: ScenarioModelConfig) -> CordisRecipe:
+    def with_model_config(self, config: ModelConfig) -> CordisRecipe:
         super().with_model_config(config)
         return replace(self, scenario_model=config)
 

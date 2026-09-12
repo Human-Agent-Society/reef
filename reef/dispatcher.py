@@ -33,12 +33,12 @@ from reef.observability import (
     TrainingExperimentEvent,
 )
 from reef.recipe.base import Recipe
-from reef.records import RecordRetention
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.base import RuntimeContractError, TrainingRuntime
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
-from reef.scenario.store import ScenarioStoreFactory
+from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -148,9 +148,10 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
-        scenario_store_factory: ScenarioStoreFactory,
+        scenario_storage: ScenarioStorage,
     ) -> None:
         self._recipe = recipe
+        self._storage = scenario_storage
         self._record_retention_lock = Lock()
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self._registry = ScenarioRegistry(
@@ -158,7 +159,7 @@ class Dispatcher:
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
-            scenario_store_factory=scenario_store_factory,
+            scenario_storage=scenario_storage,
             allow_implicit_creation=allow_implicit_creation,
             experiment_tracker=self._experiment_tracker,
         )
@@ -223,7 +224,7 @@ class Dispatcher:
     def prune_record_archives(self, retention: RecordRetention) -> int:
         """Apply deployment-wide retention without racing scenario file moves."""
         with self._record_retention_lock:
-            return self._registry.prune_records(retention)
+            return self._storage.prune(days=retention.days, max_bytes=retention.max_bytes)
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.
@@ -266,7 +267,9 @@ class Dispatcher:
         return moved
 
     def recipe_has_files(self) -> bool:
-        return self._registry.recipe_has_files()
+        """Whether the served recipe creates a file-serving surface."""
+        # Capability probe only: file serving does not depend on the scenario.
+        return self._recipe.build_surface("").files is not None
 
     def list_releases(self, scenario: str) -> tuple[dict[str, Any], ...]:
         with self._registry.lock_for(scenario):
@@ -914,7 +917,7 @@ class Dispatcher:
         for worker in local_workers:
             worker.thread.join()
         errors: list[BaseException] = []
-        for scenario in self._registry.close_all():
+        for scenario in self._registry.loaded_scenarios():
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.
@@ -923,7 +926,7 @@ class Dispatcher:
             except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
                 errors.append(exc)
         try:
-            self._registry.close_store_factory()
+            self._storage.close()
         except BaseException as exc:
             errors.append(exc)
         if self._recipe.runtime is not None:
@@ -945,7 +948,7 @@ def build_default_dispatcher(
     checkpoint_strategy: CheckpointStrategy | None = None,
     local_artifact_dir: Path | None = None,
     agent_record_dir: Path | None = None,
-    scenario_store_factory: ScenarioStoreFactory,
+    scenario_storage: ScenarioStorage,
 ) -> Dispatcher:
     """Build a Dispatcher serving the core record-only ``recipe``.
 
@@ -954,7 +957,7 @@ def build_default_dispatcher(
     from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
     provided. Record and commit storage must be supplied explicitly through
-    ``scenario_store_factory``; this helper does not select a record backend.
+    ``scenario_storage``; this helper does not select a record backend.
     """
     if backend_factory is None:
         root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
@@ -969,5 +972,5 @@ def build_default_dispatcher(
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         agent_record_dir=agent_record_dir,
-        scenario_store_factory=scenario_store_factory,
+        scenario_storage=scenario_storage,
     )

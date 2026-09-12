@@ -6,7 +6,7 @@ from abc import ABC
 from recipes.openclawrl import OpenClawRLRecipe
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend, RepositoryBackend
 from reef.recipe import Recipe
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 
 
 def test_local_interfaces_are_abstract_bases_with_explicit_implementations() -> None:

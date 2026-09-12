@@ -1,60 +1,46 @@
 """Scenario state, commit, and recovery contracts.
 
-A scenario is one durable training aggregate. Its lifecycle, and the module
-responsible for each piece:
+A scenario owns one runtime binding, trainer, artifact chain, and store session.
+The modules follow these responsibilities:
 
-- **values** — ``state`` defines persisted commits, snapshots, and record
-  progress without importing storage, artifact operations, or training.
-- **create** — ``factory`` forks a base artifact and persists a registration
-  snapshot through the ``snapshot`` metadata adapter; ``binding`` freezes the deployment-selected
-  admission, surface, runtime, and inference backend.
-- **train** — ``scenario`` exposes the trainer through lock-guarded methods
-  so every mutating path serializes against commit and rollback.
-- **commit** — ``commit_protocol`` prepares trainer state and orders artifact
-  publication around ``store`` settlement. The store validates the expected
-  step, records the commit, and applies record compaction. Only then does the
-  protocol expose trainer state. ``checkpoint_strategy`` decides when a step
-  publishes a durable checkpoint carrying fresh snapshot metadata.
-- **recover** — ``factory`` supplies the registration snapshot to ``store``,
-  which reconciles committed history and repairs interrupted compaction. The
-  factory restores artifact delivery and trainer memory from that result.
-- **rollback** — ``commit_protocol`` republishes an older checkpointed
-  version as a new fenced commit; history is never rewritten.
-- **read** — ``commit_protocol`` serializes catalog and artifact snapshots
-  with publication and rollback, but not with long-running step preparation.
-  Writers acquire the operation lock before the publication lock; readers
-  take only the publication lock and must not acquire the operation lock.
+- ``scenario`` exposes operations on one instance; ``binding`` freezes its
+  deployment-selected admission, surface, runtime, and inference backend.
+- ``registry`` owns loaded instances, per-scenario locks, model updates, and
+  scenario archival coordination. It caches concrete ``runtime.model_config.ModelConfig``
+  instances and calls ``storage.model_config`` functions for private JSON files.
+  Recipes and the factory receive only the current scenario's configuration.
+- ``factory`` registers the base artifact, validates release selectors,
+  opens storage, reconciles committed state, synchronizes and
+  activates the checkpoint, builds the trainer, and replays retained records.
+  It returns a complete ``Scenario`` and closes owned resources on failure.
+- ``committer`` orders commit, rollback, retries, and artifact publication
+  around store settlement. Trainer state is exposed only after settlement.
+  ``recipe.checkpoint_strategy`` selects steps that publish durable checkpoints.
+- ``releases`` queries releases, artifact content, and committed training metadata.
+  It shares the committer's publication lock. Writers take the operation lock
+  before the publication lock; readers never take the operation lock, so long
+  training preparation does not block serving. ``history`` pages retained
+  records and commits for the dispatcher.
+Persisted values and metadata encoding belong to ``reef.storage.commits``.
+Recovery reads a ``CommitRecord`` (none at initial registration). Storage
+contracts and implementations never import this package.
 
-The scenario aggregate does not retain recipe identity: the deployment's
-recipe configures its runtime binding through the factory, and the aggregate
-never reaches back. The application supplies a ``ScenarioStoreFactory`` and
-gives each scenario ownership of one session. Storage implementations are
-selected outside this package. Artifact publication and recovery ordering remain owned here;
-database connections, schemas, and journal files belong to ``reef.storage``.
+The aggregate never reaches back to its recipe; the factory and registry
+compose recipes at construction. Application assembly supplies
+its storage service; the dispatcher owns its lifecycle and each
+scenario owns one opened session. Artifact publication and recovery ordering
+remain in this package.
 """
 
-from reef.scenario.binding import AcceptAnyArtifact, ArtifactValidator, ScenarioBinding
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.binding import ScenarioBinding
+from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import ReleaseNotRestorable, Scenario
-from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY
-from reef.scenario.state import CommitRecord
-from reef.scenario.store import ScenarioStore, ScenarioStoreConflict, ScenarioStoreFactory
 
 __all__ = [
-    "SCENARIO_SNAPSHOT_METADATA_KEY",
-    "AcceptAnyArtifact",
-    "ArtifactValidator",
-    "CheckpointStrategy",
-    "CommitRecord",
-    "EveryNVersions",
     "ReleaseNotRestorable",
     "Scenario",
     "ScenarioBinding",
-    "ScenarioCommitProtocol",
+    "ScenarioCommitter",
     "ScenarioRegistry",
-    "ScenarioStore",
-    "ScenarioStoreConflict",
-    "ScenarioStoreFactory",
 ]

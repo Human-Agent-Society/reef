@@ -6,14 +6,14 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from typing import Any
 
+from reef.core.batches import TrainingBatch, policy_samples
+from reef.core.evaluation import SelectionDecision
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.inference import InferenceBackend, InferenceBackendFactory, build_http_inference_backend
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
-from reef.train.evaluation.contracts import SelectionDecision
-from reef.train.types import TrainingBatch, policy_samples
 
 
 class ExecutorTrainingRuntime(TrainingRuntime):

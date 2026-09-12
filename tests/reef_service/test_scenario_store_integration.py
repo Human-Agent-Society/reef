@@ -9,15 +9,15 @@ from typing import Any
 
 import pytest
 
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
-from reef.records import RecordRetention, RecordStore
-from reef.scenario.state import CommitRecord, ScenarioSnapshot
-from reef.scenario.store import ScenarioStore, ScenarioStoreFactory
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.commits import CommitRecord
+from reef.storage.records import RecordRetention, RecordStore
+from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
@@ -50,11 +50,11 @@ class OpaqueStore(ScenarioStore):
         self._events.append(("commit", self.scenario))
         return self._inner.commit_step(expected_step=expected_step, commit=commit)
 
-    def recover(self, *, snapshot: ScenarioSnapshot, checkpoint_head: ArtifactRef) -> CommitRecord | None:
+    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         self._events.append(("recover", self.scenario))
         if self._fail_recovery:
             raise RuntimeError("injected recovery failure")
-        return self._inner.recover(snapshot=snapshot, checkpoint_head=checkpoint_head)
+        return self._inner.recover(checkpoint=checkpoint)
 
     def close(self) -> None:
         self.close_count += 1
@@ -62,11 +62,11 @@ class OpaqueStore(ScenarioStore):
         self._inner.close()
 
 
-class OpaqueStoreFactory(ScenarioStoreFactory):
+class OpaqueStorage(ScenarioStorage):
     """The adapter owns its directory; Dispatcher sees only domain operations."""
 
     def __init__(self, directory: Path, *, fail_recovery: bool = False):
-        self._inner: ScenarioStoreFactory = SQLiteScenarioStoreFactory(directory)
+        self._inner: ScenarioStorage = SQLiteScenarioStorage(directory)
         self._fail_recovery = fail_recovery
         self.sessions: list[OpaqueStore] = []
         self.events: list[tuple[str, str]] = []
@@ -93,7 +93,7 @@ class OpaqueStoreFactory(ScenarioStoreFactory):
 
     def close(self) -> None:
         self.close_count += 1
-        self.events.append(("close_factory", ""))
+        self.events.append(("close_storage", ""))
         self._inner.close()
 
 
@@ -119,20 +119,20 @@ class IncompleteStore(ScenarioStore):
         pass
 
 
-class IncompleteStoreFactory(ScenarioStoreFactory):
+class IncompleteStorage(ScenarioStorage):
     def close(self) -> None:
         pass
 
 
-@pytest.mark.parametrize("implementation", (IncompleteRecords, IncompleteStore, IncompleteStoreFactory))
+@pytest.mark.parametrize("implementation", (IncompleteRecords, IncompleteStore, IncompleteStorage))
 def test_incomplete_storage_subclasses_cannot_be_instantiated(implementation: type) -> None:
     with pytest.raises(TypeError, match="abstract"):
         implementation()
 
 
 def test_sqlite_implementations_inherit_storage_bases(tmp_path: Path) -> None:
-    with closing(SQLiteScenarioStoreFactory(tmp_path)) as factory, closing(factory.open("math")) as store:
-        assert isinstance(factory, ScenarioStoreFactory)
+    with closing(SQLiteScenarioStorage(tmp_path)) as factory, closing(factory.open("math")) as store:
+        assert isinstance(factory, ScenarioStorage)
         assert isinstance(store, ScenarioStore)
         assert isinstance(store.records, RecordStore)
 
@@ -155,8 +155,8 @@ def trace(record_id: str, scenario: str = "math") -> AgentRecord:
 def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> None:
     repository_factory = backend_factory(tmp_path)
     directory = tmp_path / "private-store"
-    factory = OpaqueStoreFactory(directory)
-    dispatcher = Dispatcher(Recipe(), repository_factory, scenario_store_factory=factory)
+    factory = OpaqueStorage(directory)
+    dispatcher = Dispatcher(Recipe(), repository_factory, scenario_storage=factory)
     try:
         scenario = dispatcher.get_or_create_scenario("math")
         assert scenario is not None
@@ -178,8 +178,8 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
     assert factory.sessions[0].close_count == 1
     assert factory.close_count == 1
 
-    reopened_factory = OpaqueStoreFactory(directory)
-    reopened = Dispatcher(Recipe(), repository_factory, scenario_store_factory=reopened_factory)
+    reopened_factory = OpaqueStorage(directory)
+    reopened = Dispatcher(Recipe(), repository_factory, scenario_storage=reopened_factory)
     try:
         recovered = reopened.get_or_create_scenario("math")
         assert recovered is not None
@@ -191,17 +191,17 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         reopened.close()
 
 
-def test_injected_factory_owns_retention_archive_and_same_name_recreation(tmp_path: Path) -> None:
-    factory = OpaqueStoreFactory(tmp_path / "private-store")
+def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_path: Path) -> None:
+    factory = OpaqueStorage(tmp_path / "private-store")
     model_directory = tmp_path / "model-settings"
     dispatcher = Dispatcher(
-        Recipe(), backend_factory(tmp_path), agent_record_dir=model_directory, scenario_store_factory=factory
+        Recipe(), backend_factory(tmp_path), agent_record_dir=model_directory, scenario_storage=factory
     )
     try:
         math = dispatcher.get_or_create_scenario("math")
         code = dispatcher.get_or_create_scenario("code")
         assert math is not None and code is not None
-        math.model_config.save(None)
+        dispatcher.configure_scenario_model("math", None)
         model_path = next(model_directory.glob("*-model.json"))
         model_content = model_path.read_bytes()
         math.records.append(trace("first"))
@@ -232,14 +232,14 @@ def test_injected_factory_owns_retention_archive_and_same_name_recreation(tmp_pa
     finally:
         dispatcher.close()
     assert all(session.close_count == 1 for session in factory.sessions)
-    assert factory.events[-1] == ("close_factory", "")
+    assert factory.events[-1] == ("close_storage", "")
 
 
 @pytest.mark.parametrize("failure_point", ("recovery", "recipe"))
 def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point: str) -> None:
-    factory = OpaqueStoreFactory(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
+    factory = OpaqueStorage(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
     recipe = FailingRecipe() if failure_point == "recipe" else Recipe()
-    dispatcher = Dispatcher(recipe, backend_factory(tmp_path), scenario_store_factory=factory)
+    dispatcher = Dispatcher(recipe, backend_factory(tmp_path), scenario_storage=factory)
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
             dispatcher.get_or_create_scenario("math")
@@ -251,9 +251,45 @@ def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point
     assert factory.close_count == 1
 
 
-def test_trainer_teardown_failure_still_closes_store_and_factory(tmp_path: Path, monkeypatch) -> None:
-    factory = OpaqueStoreFactory(tmp_path / "private-store")
-    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_store_factory=factory)
+@pytest.mark.parametrize("failure_point", ("binding", "replay"))
+def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatch, failure_point: str) -> None:
+    storage = OpaqueStorage(tmp_path / "private-store")
+    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=storage)
+    closed_trainers: list[Trainer] = []
+    original_close = Trainer.close
+
+    def track_close(trainer: Trainer) -> None:
+        closed_trainers.append(trainer)
+        original_close(trainer)
+
+    def fail_restore(*args, **kwargs):
+        raise RuntimeError(f"injected {failure_point} failure")
+
+    try:
+        current = dispatcher.get_or_create_scenario("math")
+        assert current is not None
+        current.commit(TrainStepResult(state={}))
+        with monkeypatch.context() as patch:
+            patch.setattr(Trainer, "close", track_close)
+            if failure_point == "binding":
+                patch.setattr(Recipe, "build_artifact_validator", fail_restore)
+            else:
+                patch.setattr(Trainer, "restore_record_progress", fail_restore)
+            with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+                dispatcher._registry.reload("math")
+        assert dispatcher.get_or_create_scenario("math") is current
+        assert len(closed_trainers) == 1
+        assert closed_trainers[0] is not current.trainer
+        assert [session.close_count for session in storage.sessions] == [0, 1]
+    finally:
+        dispatcher.close()
+    assert [session.close_count for session in storage.sessions] == [1, 1]
+    assert storage.close_count == 1
+
+
+def test_trainer_teardown_failure_still_closes_store_and_storage(tmp_path: Path, monkeypatch) -> None:
+    factory = OpaqueStorage(tmp_path / "private-store")
+    dispatcher = Dispatcher(Recipe(), backend_factory(tmp_path), scenario_storage=factory)
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
     original_close = scenario.trainer.close
@@ -270,4 +306,4 @@ def test_trainer_teardown_failure_still_closes_store_and_factory(tmp_path: Path,
     scenario.close()
     assert factory.sessions[0].close_count == 1
     assert factory.close_count == 1
-    assert factory.events[-3:] == [("close_trainer", "math"), ("close", "math"), ("close_factory", "")]
+    assert factory.events[-3:] == [("close_trainer", "math"), ("close", "math"), ("close_storage", "")]

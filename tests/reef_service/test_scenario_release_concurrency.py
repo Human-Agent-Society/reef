@@ -16,7 +16,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_log import CommitLogScenarioStore
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PreparedStep, Trainer, TrainingBackend, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 
@@ -92,7 +92,7 @@ def local_scenario(tmp_path):
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "records",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
@@ -167,8 +167,8 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
             # A queued writer must wait on the operation lock without first
             # taking the publication lock and starving the read-side callers.
             catalog = executor.submit(scenario.releases)
-            latest = executor.submit(scenario.artifact_snapshot)
-            historical = executor.submit(scenario.artifact_snapshot, initial_ref.release_id)
+            latest = executor.submit(scenario.artifact_with_metrics)
+            historical = executor.submit(scenario.artifact_with_metrics, initial_ref.release_id)
             version = executor.submit(scenario.artifact_for_version, current_ref.release_id)
             old_version = executor.submit(scenario.artifact_for_version, initial_ref.release_id)
 
@@ -194,7 +194,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario, phase, 
         if operation == "commit":
             assert writer.result(timeout=2) == {"steps": 2}
             assert scenario.scenario_step == 2
-            assert scenario.artifact_snapshot()[1] == {"score": 2.0}
+            assert scenario.artifact_with_metrics()[1] == {"score": 2.0}
         else:
             with pytest.raises(ReefError, match="pending commit"):
                 writer.result(timeout=2)
@@ -237,11 +237,11 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_latest():
         readers_started[1].set()
-        return scenario.artifact_snapshot()
+        return scenario.artifact_with_metrics()
 
     def read_historical():
         readers_started[2].set()
-        return scenario.artifact_snapshot(previous_ref.release_id)
+        return scenario.artifact_with_metrics(previous_ref.release_id)
 
     def read_version():
         readers_started[3].set()
@@ -306,7 +306,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         second = _prepare(scenario)
-        monkeypatch.setattr(scenario._commit_protocol, "_should_checkpoint", lambda result: checkpoint)
+        monkeypatch.setattr(scenario._committer, "_should_checkpoint", lambda result: checkpoint)
 
         def unexpected_publish(*args, **kwargs):
             pytest.fail("a new release must not publish while its committed parent is unsynchronized")

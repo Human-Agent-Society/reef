@@ -22,8 +22,8 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from reef.core.errors import ReefError
+from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.runtime.base import TrainingRuntime
-from reef.train.evaluation.contracts import CandidateEvaluationPlugin
 
 
 class CandidateEvaluationConfigError(ReefError):

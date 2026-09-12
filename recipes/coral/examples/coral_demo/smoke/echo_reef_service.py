@@ -19,7 +19,7 @@ from aiohttp import web
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import create_app
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 CORRECT = """\
 def merge_sorted(a, b):
@@ -77,7 +77,7 @@ def main() -> None:
     parser.add_argument("--token", default="reef-local")
     args = parser.parse_args()
     app = create_app(
-        build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()),
+        build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
         tokens=args.token,
         inference_backend=CannedSolutionBackend(),
         close_dispatcher=True,

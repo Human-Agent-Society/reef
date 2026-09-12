@@ -6,7 +6,7 @@
 # The proposer and the evaluator are the tutorial's (tutorials/evolve-your-harness/harness/evolution.py):
 # reef serve puts that package on the service's PYTHONPATH from the checkout it runs in, so this profile
 # runs from a reef checkout.
-implementation: reef.train.cordis_backend.recipe:CordisRecipe
+implementation: reef.recipe.cordis:CordisRecipe
 
 evolution:
   adapter: pi

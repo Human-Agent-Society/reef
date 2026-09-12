@@ -35,6 +35,8 @@ from typing import Any, Protocol
 
 from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import HARNESS_RELEASE_FILE, CaptureProxy, WrapperError
+from reef.harness.compose import Context, FiberState
+from reef.harness.compose.loader import Loader
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, Session, _Loop, binding_from
 from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Tool, select_enforcer
@@ -43,11 +45,8 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.plugins import NATIVE_PLUGINS
 from reef.harness.runners.native.release_client import HeadWatch, ReleaseClient, ReleaseClientError
 from reef.harness.runners.native.selftools import RESERVED_NAMES, self_tools
+from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import flat_entry_refusal
-from reef.train.cordis_backend.backend import admit_mutations
-from reef.train.cordis_backend.compose import Context, FiberState
-from reef.train.cordis_backend.compose.loader import Loader
-from reef.train.cordis_backend.strategies import Mutation
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"

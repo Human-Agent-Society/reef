@@ -15,17 +15,16 @@ from typing import Any
 
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.records import RecordStore
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
+from reef.runtime.model_config import ModelConfig
 from reef.runtime.proxy import resolve_proxy_runtime
-from reef.scenario.binding import AcceptAnyArtifact, ArtifactValidator
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.model_config import ScenarioModelConfig
-from reef.surface.base import Surface
+from reef.storage.records import RecordStore
+from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_preparer
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
@@ -57,7 +56,7 @@ class Recipe:
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
 
-    def with_model_config(self, config: ScenarioModelConfig) -> Recipe:
+    def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
         if config.runtime is not None and isinstance(self.runtime, TrainingRuntime):
             raise RecipeConfigError("model overrides require an inference-only runtime")

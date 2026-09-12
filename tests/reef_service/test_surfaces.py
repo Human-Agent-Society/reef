@@ -4,8 +4,7 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
-from reef.scenario import AcceptAnyArtifact
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     RuntimeLoadMismatch,
     SkillLayer,
@@ -17,6 +16,7 @@ from reef.surface import (
     create_skill_surface,
     create_weight_surface,
 )
+from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
 
 
@@ -401,7 +401,7 @@ def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> N
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
-        scenario_store_factory=SQLiteScenarioStoreFactory(None),
+        scenario_storage=SQLiteScenarioStorage(None),
     )
     service = RequestService(dispatcher)
     backend = RecordingBackend()

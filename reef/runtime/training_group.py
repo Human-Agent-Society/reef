@@ -7,10 +7,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import Executor
-from reef.train.types import TrainingBatch
 
 
 class TrainingRuntimeError(ReefError):

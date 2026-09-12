@@ -1,7 +1,7 @@
 """Storage for the release chain: every publication as an immutable release.
 
 The package owns bytes and heads — persisted, staged, materialized on
-demand. *When* a head moves is the scenario commit protocol's decision, one
+demand. *When* a head moves is the scenario committer's decision, one
 level up. Boundaries this package holds:
 
 - Repository backends are scenario-agnostic. A backend stores one

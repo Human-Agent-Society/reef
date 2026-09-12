@@ -30,19 +30,15 @@ from dataclasses import dataclass
 from statistics import fmean
 from typing import Any, Protocol
 
+from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation
-from reef.train.evaluation.contracts import (
-    CandidateEvaluationPlugin,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
+from reef.train.cordis_backend.strategies import EpisodeScorer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceSample
 

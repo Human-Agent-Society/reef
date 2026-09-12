@@ -10,7 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness import compose
 from reef.harness.adapters import get_adapter
+from reef.harness.compose import FiberState
+from reef.harness.compose.loader import Loader
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native import DEFAULT_SYSTEM_PROMPT, LoadError, Session, _Loop
 from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW, Run, narrow_allow
@@ -19,9 +22,6 @@ from reef.harness.runners.native.plugins import NATIVE_PLUGINS, LoaderOrder
 from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend import compose
-from reef.train.cordis_backend.compose import FiberState
-from reef.train.cordis_backend.compose.loader import Loader
 
 
 def _entry(id_: str, kind: str, **config):

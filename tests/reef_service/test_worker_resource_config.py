@@ -2,6 +2,7 @@
 
 import pytest
 
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor import WorkerSpec
@@ -9,7 +10,6 @@ from reef.runtime.executor.config import ExecutorSettings, WorkerResources, exec
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.service.deploy.execution import service_executor_config
 from reef.train.cordis_backend.execution import evaluation_executor_config, evaluation_selection
-from reef.train.cordis_backend.recipe import CordisRecipe
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
 
 

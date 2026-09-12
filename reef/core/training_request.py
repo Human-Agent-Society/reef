@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.requirements import parse_requires
+
 
 @dataclass(frozen=True)
 class TrainingRequest:
@@ -15,7 +17,7 @@ class TrainingRequest:
     Session and release identify the request's source; they do not select an inference batch.
     ``requires`` is what the change needs from the person's machine, at most
     ``MAX_REQUIRES`` ``{name, kind, check}`` items of the shape
-    ``reef.train.cordis_backend.requests.parse_requires`` admits; default none.
+    ``reef.core.requirements.parse_requires`` admits; default none.
     """
 
     text: str
@@ -32,9 +34,6 @@ class TrainingRequest:
             raise ValueError("text must not exceed 4000 characters")
         if not isinstance(self.session, str) or not isinstance(self.release_id, str):
             raise ValueError("session and release_id must be strings")
-        # Lazy: reef.core loads before the training package can.
-        from reef.train.cordis_backend.requests import parse_requires
-
         object.__setattr__(self, "requires", tuple(parse_requires(self.requires)))
 
     @classmethod

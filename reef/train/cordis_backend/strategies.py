@@ -12,46 +12,14 @@ import inspect
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any, Protocol
 
-from reef.core.errors import ReefError
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.tree.mutations import Mutation
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TraceSample
-
-
-class MutationError(ReefError):
-    """A proposed mutation could not be applied."""
-
-
-@dataclass(frozen=True)
-class Mutation:
-    """One proposed change to the composition tree, by entry id.
-
-    ``create`` and ``update`` carry ``options`` (entry options without the
-    id, e.g. ``{"name": "rules", "config": {"text": ...}}``); an ``update``
-    merges them into the entry, with ``None`` values deleting keys, exactly
-    as the compose loader reconciles. Ids are root-level: the minimal layer
-    composes a flat tree, so nested (``:``-qualified) ids are rejected.
-    """
-
-    op: str
-    id: str
-    options: Mapping[str, Any] | None = None
-
-    def __post_init__(self) -> None:
-        _MUTATION_OPS = ("create", "update", "remove")
-        if self.op not in _MUTATION_OPS:
-            raise MutationError(f"mutation op must be one of {_MUTATION_OPS}, got {self.op!r}")
-        if not self.id or ":" in self.id:
-            raise MutationError(f"mutation id must be a non-empty root-level id, got {self.id!r}")
-        if self.op in ("create", "update") and not isinstance(self.options, Mapping):
-            raise MutationError(f"{self.op} mutation requires options")
-        if self.op == "remove" and self.options is not None:
-            raise MutationError("remove mutation takes no options")
 
 
 class Proposer(ABC):

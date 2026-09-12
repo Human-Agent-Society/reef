@@ -204,13 +204,13 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base") == initial.release_id
     assert run_git("--git-dir", str(remote), "rev-parse", "refs/reef/head") == initial.release_id
 
-    math = backend.fork(metadata={"scenario_snapshot": {"recipe": "openclawrl"}})
+    math = backend.fork(metadata={"scenario_commit_record": {"recipe": "openclawrl"}})
     code = code_backend.fork()
     manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{math.release_id}:reef-artifact.json"))
     assert math.release_id != code.release_id
     assert "scenario" not in manifest
     assert backend.fork() == math
-    assert backend.metadata() == {"scenario_snapshot": {"recipe": "openclawrl"}}
+    assert backend.metadata() == {"scenario_commit_record": {"recipe": "openclawrl"}}
     assert run_git("--git-dir", str(remote), "rev-parse", backend.ref_name) == math.release_id
 
     fresh_factory = GitLFSRepositoryBackend.factory(

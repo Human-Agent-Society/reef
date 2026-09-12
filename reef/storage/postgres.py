@@ -1,14 +1,16 @@
-"""PostgreSQL schema, pooled transactions, and lifecycle for SQL record storage."""
+"""PostgreSQL records, pooled transactions, and scenario storage lifecycle."""
 
 from __future__ import annotations
 
 import hashlib
 import re
+import shutil
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 from threading import RLock
 
 from sqlalchemy import (
@@ -34,7 +36,9 @@ from sqlalchemy.exc import ArgumentError
 from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
-from reef.records import RecordRetention
+from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
+from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
 
@@ -301,3 +305,66 @@ class PostgresRecordStore(SQLRecordStore):
                 self._live_records.clear()
                 if self._owns_database:
                     self._database.close()
+
+
+class PostgresScenarioStorage(ScenarioStorage):
+    """Combine pooled PostgreSQL records with generation-specific local commit logs."""
+
+    def __init__(self, database_url: str, directory: Path, *, schema: str = "reef_records") -> None:
+        self._directory = Path(directory)
+        self._directory.mkdir(parents=True, exist_ok=True)
+        self._database = PostgresRecordDatabase(database_url, schema=schema)
+        self._schema = schema
+        self._lock = RLock()
+        self._closed = False
+
+    @property
+    def durable(self) -> bool:
+        return True
+
+    def open(self, scenario: str) -> CommitLogScenarioStore:
+        with self._lock:
+            self._ensure_open()
+            records = PostgresRecordStore(self._database, name=scenario)
+            try:
+                commit_log = CommitLog(self._log_path(records.storage_id))
+                return CommitLogScenarioStore(scenario, records, commit_log)
+            except BaseException:
+                records.close()
+                raise
+
+    def archive(self, scenario: str) -> tuple[str, ...]:
+        with self._lock:
+            self._ensure_open()
+            storage_id = self._database.archive(scenario)
+            if storage_id is None:
+                return ()
+            archived = [f"postgres://{self._schema}/record-store/{storage_id}"]
+            # The next generation always gets another log name. If moving the
+            # old log fails, reopening cannot apply it to the new empty store.
+            path = self._log_path(storage_id)
+            if path.exists():
+                destination = self._directory / "archived" / f"postgres-{storage_id}"
+                destination.mkdir(parents=True, exist_ok=True)
+                target = destination / path.name
+                shutil.move(str(path), str(target))
+                archived.append(str(target))
+            return tuple(archived)
+
+    def prune(self, *, days: float, max_bytes: int) -> int:
+        with self._lock:
+            self._ensure_open()
+            return self._database.prune(RecordRetention(days, max_bytes))
+
+    def close(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._closed = True
+                self._database.close()
+
+    def _log_path(self, storage_id: str) -> Path:
+        return self._directory / f"postgres-{storage_id}.commits.jsonl"
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("scenario storage is closed")

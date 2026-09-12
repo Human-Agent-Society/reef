@@ -6,7 +6,7 @@ from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.service.app import RequestService
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 
 
@@ -28,7 +28,7 @@ def _service(tmp_path, *, recipe, skill_text: str | None) -> RequestService:
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         agent_record_dir=None,
-        scenario_store_factory=SQLiteScenarioStoreFactory(None),
+        scenario_storage=SQLiteScenarioStorage(None),
     )
     dispatcher.get_or_create_scenario("delivery")
     return RequestService(dispatcher)

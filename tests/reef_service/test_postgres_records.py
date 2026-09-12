@@ -11,13 +11,12 @@ from sqlalchemy import select
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.records import RecordConflict, RecordRetention
-from reef.scenario.state import CommitRecord, ScenarioSnapshot
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import ServiceSettings, service_settings_from_config
-from reef.storage.factory import PostgresScenarioStoreFactory
-from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, postgres_url
+from reef.storage.commits import CommitRecord
+from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
+from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.sqlite import SQLiteRecordStore
 
 
@@ -236,7 +235,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         recorded_at=123.0,
     )
     with (
-        closing(PostgresScenarioStoreFactory(url, tmp_path, schema=schema)) as factory,
+        closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory,
         closing(factory.open("math")) as store,
     ):
         store.records.append(record())
@@ -247,19 +246,11 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         monkeypatch.setattr(store.records, "compact", interrupted_compaction)
         with pytest.raises(RuntimeError, match="compaction interrupted"):
             store.commit_step(expected_step=0, commit=committed)
-    with closing(PostgresScenarioStoreFactory(url, tmp_path, schema=schema)) as factory:
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
         with closing(factory.open("math")) as store:
             assert store.history() == (committed,)
             assert store.records.count("math") == 1
-            snapshot = ScenarioSnapshot(
-                scenario="math",
-                base_artifact=ArtifactRef("base", "base", None),
-                scenario_step=0,
-                algorithm_state=None,
-                record_progress=None,
-                operation="training",
-            )
-            assert store.recover(snapshot=snapshot, checkpoint_head=committed.artifact_ref) == committed
+            assert store.recover(checkpoint=None) == committed
             assert store.records.count("math") == 0
             assert store.records.append_result(record()).inserted is False
         archived = factory.archive("math")
@@ -272,7 +263,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
 
 def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, monkeypatch):
     url, schema = postgres_config
-    with closing(PostgresScenarioStoreFactory(url, tmp_path, schema=schema)) as factory:
+    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
         with closing(factory.open("math")) as store:
             path = store.commit_log.path
             path.touch()
@@ -280,7 +271,7 @@ def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, m
         def failed_move(*args):
             raise OSError("move failed")
 
-        monkeypatch.setattr("reef.storage.factory.shutil.move", failed_move)
+        monkeypatch.setattr("reef.storage.postgres.shutil.move", failed_move)
         with pytest.raises(OSError, match="move failed"):
             factory.archive("math")
         with closing(factory.open("math")) as store:

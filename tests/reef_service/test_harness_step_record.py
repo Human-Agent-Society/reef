@@ -19,7 +19,8 @@ from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, TrajectoryKeepError, run_episode
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
-from reef.train.cordis_backend import CordisBackend, CordisRecipe, Mutation
+from reef.recipe.cordis import CordisRecipe
+from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, EpisodeEvaluationWorker
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 

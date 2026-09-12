@@ -1,7 +1,7 @@
 """Guard tests for the failure manifest (issue #475): the state schema is
 pinned field by field, fingerprints are stable across processes and temp
 directories, the diff classes follow the streak rules, every pre-manifest
-proposer shape keeps working, and the manifest rides the commit protocol
+proposer shape keeps working, and the manifest rides the committer
 from one step's settlement to the next step's propose."""
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import pytest
 
 from reef.artifact import LiveWeightArtifactRef
 from reef.harness.adapters import get_adapter
-from reef.scenario.state import CommitRecord
 from reef.storage.commit_log import CommitLog
+from reef.storage.commits import CommitRecord
 from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
 from reef.train.cordis_backend.manifest import MANIFEST_KIND, FailureObservation, advance, fingerprint, normalize_cause
 from reef.train.cordis_backend.strategies import Proposer, resolve_episode_scorer, resolve_proposer
@@ -195,7 +195,7 @@ def test_var_keyword_proposer_receives_the_manifest(tmp_path: Path) -> None:
     assert received == [FailureManifest.from_state(manifest_state())]
 
 
-# -- the manifest through steps, the commit protocol, and recovery ---------
+# -- the manifest through steps, the committer, and recovery ---------
 
 
 def failing_step(binary: str, received: list[FailureManifest | None], state: dict):

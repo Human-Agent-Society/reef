@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import closing
 from dataclasses import dataclass
 
 import pytest
@@ -18,10 +19,10 @@ from reef.artifact import (
 from reef.core import ReefError, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.inference import HttpInferenceBackend, InferenceBackend, default_artifact_request_headers
-from reef.scenario.checkpoint_strategy import EveryNVersions
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_weight_surface
 from reef.train import TrainStepResult
 from reef.train.types import PolicyBatch
@@ -41,7 +42,7 @@ def dispatcher_with_checkpoint_strategy(strategy, *, backend_factory, local_arti
         recipe,
         backend_factory,
         local_artifact_dir=local_artifact_dir,
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 
@@ -59,13 +60,13 @@ def weight_dispatcher(tmp_path, initial):
         WeightRecipe(checkpoint_strategy=EveryNVersions(3)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 
 @pytest.mark.unit
 def test_service_rejects_missing_scenario_and_inference_accept() -> None:
-    service = RequestService(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()))
+    service = RequestService(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()))
 
     with pytest.raises(ReefError, match="x-reef-scenario"):
         service.accept({}, {"score": 1.0}, request_type=RequestType.REPORT)
@@ -79,12 +80,14 @@ def test_service_rejects_missing_scenario_and_inference_accept() -> None:
 
 @pytest.mark.unit
 def test_service_has_no_control_route() -> None:
-    assert all(route.resource.canonical != "/reef/control" for route in create_app().router.routes())
+    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
+        assert all(route.resource.canonical != "/reef/control" for route in create_app(dispatcher).router.routes())
 
 
 @pytest.mark.unit
 def test_provider_native_generation_stays_behind_inference_backend() -> None:
-    routes = {route.resource.canonical for route in create_app().router.routes()}
+    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
+        routes = {route.resource.canonical for route in create_app(dispatcher).router.routes()}
 
     assert "/v1/chat/completions" in routes
     assert "/generate" not in routes
@@ -102,7 +105,7 @@ def test_live_artifact_headers_use_version_without_a_checkpoint_path() -> None:
 
 @pytest.mark.unit
 def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> None:
-    dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
     service = RequestService(dispatcher)
 
     math = service.accept(
@@ -141,7 +144,7 @@ def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
     (initial / "model.txt").write_text("base")
     backend = InMemoryRepositoryBackend.factory(initial)
     selected = backend("math").resolve_release().release_id
-    dispatcher = build_default_dispatcher(backend_factory=backend, scenario_store_factory=SQLiteScenarioStoreFactory())
+    dispatcher = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
     service = RequestService(dispatcher)
     headers = {
         "x-reef-scenario": "math",
@@ -175,7 +178,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
     dispatcher = Dispatcher(
         RecordingRecipe(name="tttd"),
         InMemoryRepositoryBackend.factory(initial),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     dispatcher.get_or_create_scenario("discovery")
@@ -188,7 +191,7 @@ def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     backend = InMemoryRepositoryBackend.factory(initial)
-    dispatcher = build_default_dispatcher(backend_factory=backend, scenario_store_factory=SQLiteScenarioStoreFactory())
+    dispatcher = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
 
     RequestService(dispatcher).accept(
         {"x-reef-scenario": "math"},
@@ -200,14 +203,14 @@ def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_new_dispatcher_recovers_scenario_snapshot_from_repository(tmp_path) -> None:
+def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     backend = InMemoryRepositoryBackend.factory(initial)
 
-    first = build_default_dispatcher(backend_factory=backend, scenario_store_factory=SQLiteScenarioStoreFactory())
+    first = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
     created = first.get_or_create_scenario("math")
-    second = build_default_dispatcher(backend_factory=backend, scenario_store_factory=SQLiteScenarioStoreFactory())
+    second = build_default_dispatcher(backend_factory=backend, scenario_storage=SQLiteScenarioStorage())
 
     recovered = second.get_or_create_scenario("math")
 
@@ -232,7 +235,7 @@ def test_failed_artifact_fork_does_not_leave_runtime(tmp_path) -> None:
 
     dispatcher = build_default_dispatcher(
         backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     with pytest.raises(ArtifactError, match="cannot fork math"):
@@ -255,7 +258,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 
         dispatcher = build_default_dispatcher(
             backend_factory=FailingBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_store_factory=SQLiteScenarioStoreFactory(),
+            scenario_storage=SQLiteScenarioStorage(),
         )
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
@@ -277,9 +280,7 @@ def test_http_artifact_failure_returns_service_unavailable(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_recipe_pipeline_has_no_update_algorithm() -> None:
-    runtime = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory()).get_or_create_scenario(
-        "math"
-    )
+    runtime = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
 
     assert runtime.trainer.processor.output_schema is PolicyBatch
     assert runtime.trainer.training_backend is None
@@ -288,7 +289,7 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
 @pytest.mark.unit
 def test_inference_payload_is_recorded_without_reef_body_fields() -> None:
     async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
         service = RequestService(dispatcher)
         payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
@@ -327,7 +328,7 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
             assert path == "/v1/chat/completions"
             return {"choices": [{"message": {"content": payload["messages"][0]["content"]}}]}
 
-        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=ContractInferenceBackend(backend))))
         await client.start_server()
         try:
@@ -432,7 +433,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         await upstream_server.start_server()
 
         dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_store_factory=SQLiteScenarioStoreFactory()
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
         backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
@@ -512,7 +513,7 @@ def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path)
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
         dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_store_factory=SQLiteScenarioStoreFactory()
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
         backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
@@ -564,7 +565,7 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
         upstream_server = TestServer(upstream_app)
         await upstream_server.start_server()
         dispatcher = build_default_dispatcher(
-            local_artifact_dir=tmp_path / "local", scenario_store_factory=SQLiteScenarioStoreFactory()
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
         )
         backend = HttpInferenceBackend(str(upstream_server.make_url("")).rstrip("/"))
         client = TestClient(TestServer(create_app(dispatcher, inference_backend=backend)))
@@ -604,7 +605,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
         (initial / "model.txt").write_text("base")
         repository_backend = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
         dispatcher = build_default_dispatcher(
-            backend_factory=repository_backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+            backend_factory=repository_backend, scenario_storage=SQLiteScenarioStorage()
         )
         old_ref = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
@@ -656,7 +657,7 @@ def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_
         backend_factory=backend,
         checkpoint_strategy=EveryNVersions(3),
         local_artifact_dir=tmp_path / "local",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     original_checkpoint = dispatcher.get_or_create_scenario("chat").repository.current_artifact
 
@@ -684,7 +685,7 @@ def test_every_version_serves_locally_and_only_selected_versions_checkpoint(tmp_
     assert backend("chat").expected_parents == [original_checkpoint]
     assert backend("chat").current() == runtime.repository.current_artifact
     recovered = build_default_dispatcher(
-        backend_factory=backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+        backend_factory=backend, scenario_storage=SQLiteScenarioStorage()
     ).get_or_create_scenario("chat")
     assert recovered.scenario_step == 3
 
@@ -837,7 +838,7 @@ def test_interrupted_inference_stops_at_the_configured_retry_deadline() -> None:
             del artifact, path, payload
             return {"choices": [{"finish_reason": "abort"}]}
 
-        dispatcher = build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())
+        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
         client = TestClient(
             TestServer(
                 create_app(
@@ -915,7 +916,7 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
         backend_factory=backend,
         checkpoint_strategy=EveryNVersions(3),
         local_artifact_dir=tmp_path / "first-local",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
     checkpoint = first_dispatcher.get_or_create_scenario("chat").repository.checkpoint_artifact
     candidate = tmp_path / "candidate"
@@ -928,7 +929,7 @@ def test_new_dispatcher_falls_back_to_latest_checkpoint(tmp_path) -> None:
         backend_factory=backend,
         checkpoint_strategy=EveryNVersions(3),
         local_artifact_dir=tmp_path / "second-local",
-        scenario_store_factory=SQLiteScenarioStoreFactory(),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     assert second_dispatcher.get_or_create_scenario("chat").repository.current_artifact == checkpoint
@@ -1048,7 +1049,7 @@ def test_healthz_answers_without_token_while_other_routes_require_it(tmp_path) -
         initial.mkdir()
         dispatcher = build_default_dispatcher(
             backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_store_factory=SQLiteScenarioStoreFactory(),
+            scenario_storage=SQLiteScenarioStorage(),
         )
         client = TestClient(TestServer(create_app(dispatcher, tokens="secret")))
         await client.start_server()
@@ -1087,7 +1088,7 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
         initial.mkdir()
         dispatcher = build_default_dispatcher(
             backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-            scenario_store_factory=SQLiteScenarioStoreFactory(),
+            scenario_storage=SQLiteScenarioStorage(),
         )
         client = TestClient(TestServer(create_app(dispatcher, tokens=["current", "next"])))
         await client.start_server()
@@ -1172,3 +1173,28 @@ def test_tags_ride_the_streaming_record_too() -> None:
     parsed = parse_request_headers({"x-reef-scenario": "math", "x-reef-tag-session": "hw-3"}, RequestType.INFERENCE)
     streamed = _with_tags({"messages": [], "stream": True}, parsed)
     assert streamed["metadata"]["tags"] == {"session": "hw-3"}
+
+
+@pytest.mark.parametrize("close_dispatcher", [False, True])
+def test_http_app_closes_dispatcher_only_when_requested(monkeypatch, close_dispatcher) -> None:
+    import asyncio
+
+    from aiohttp import web
+
+    with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
+        close = dispatcher.close
+        calls = []
+
+        def close_dispatcher_once():
+            calls.append("close")
+            close()
+
+        monkeypatch.setattr(dispatcher, "close", close_dispatcher_once)
+
+        async def run():
+            runner = web.AppRunner(create_app(dispatcher, close_dispatcher=close_dispatcher))
+            await runner.setup()
+            await runner.cleanup()
+
+        asyncio.run(run())
+        assert calls == (["close"] if close_dispatcher else [])

@@ -74,13 +74,13 @@ from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.render import render_composition
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
 from reef.service.deploy.config import load_config
 from reef.service.wire import SCENARIO_HEADER
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.records import RecordStore
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class EventLog:
@@ -154,7 +154,7 @@ class RunService:
             InMemoryRepositoryBackend.factory(bootstrap_pool, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             agent_record_dir=run_dir / "reef-data",
-            scenario_store_factory=SQLiteScenarioStoreFactory(run_dir / "reef-data"),
+            scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
         self._app = create_app(
             self.dispatcher,

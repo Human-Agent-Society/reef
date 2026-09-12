@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.config import DeployConfigError, load_config, validate_services
 from reef.service.deploy.orchestrator import (
     PROJECT_ROOT,
@@ -22,7 +23,6 @@ from reef.service.deploy.orchestrator import (
 from reef.service.deploy.settings import build_parser, service_settings_from_config
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend.recipe import CordisRecipe
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The profile's proposer lives in the tutorial: the wheel alone (the package job) cannot start it.

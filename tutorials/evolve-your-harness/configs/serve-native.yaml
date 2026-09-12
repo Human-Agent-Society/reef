@@ -2,7 +2,7 @@
 # The loop's tools and loop hooks are nodes, so the proposer may change
 # what the agent can do, not only what it is told.
 
-implementation: reef.train.cordis_backend.recipe:CordisRecipe
+implementation: reef.recipe.cordis:CordisRecipe
 
 execution:
   evolution:

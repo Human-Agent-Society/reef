@@ -21,22 +21,17 @@ from collections.abc import Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
+from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend.strategies import Mutation, Proposer
-from reef.train.evaluation.contracts import (
-    CandidateEvaluationPlugin,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
+from reef.train.cordis_backend.strategies import Proposer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TraceSample
 
 from .population import Population, PopulationStore, normalize_entries
-
 
 SEARCH_MODES = ("full_history", "incumbent_only")
 

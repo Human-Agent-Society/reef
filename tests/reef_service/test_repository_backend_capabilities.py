@@ -13,7 +13,7 @@ from reef.artifact import (
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
-from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class BasicBackend(RepositoryBackend):
@@ -62,7 +62,7 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
     backend = backend_type(InMemoryRepositoryBackend("math", tmp_path))
     if registered:
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
         )
         try:
             dispatcher.get_or_create_scenario("math")
@@ -76,7 +76,7 @@ def test_commit_log_rejects_basic_backend_before_reading_or_changing_registratio
     dispatcher = build_default_dispatcher(
         backend_factory=lambda name: backend,
         agent_record_dir=tmp_path / "records",
-        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
     )
     try:
         with monkeypatch.context() as patch:
@@ -92,7 +92,7 @@ def test_basic_backend_remains_usable_without_commit_log(tmp_path):
     backend = BasicBackend(InMemoryRepositoryBackend("math", tmp_path))
     for _ in range(2):
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_store_factory=SQLiteScenarioStoreFactory()
+            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
@@ -113,7 +113,7 @@ def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(t
         dispatcher = build_default_dispatcher(
             backend_factory=lambda name: backend,
             agent_record_dir=tmp_path / "records",
-            scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")

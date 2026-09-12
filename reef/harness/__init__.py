@@ -2,9 +2,12 @@
 
 The map, one subpackage per job:
 
+``compose/``
+    the composition engine shared by resident serving and the evolution backend.
 ``tree/``
     what a composition is: the node kinds and their admission (``nodes``), and
-    how a tree renders to one harness's files (``render``).
+    how a tree renders to one harness's files (``render``), and mutation admission
+    shared by serving and training (``mutations``).
 ``adapters/``
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
     ``descriptor``) plus quirks. pi, opencode, claude, codex, dsh, hermes, and
@@ -21,10 +24,13 @@ The map, one subpackage per job:
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
 
+This package depends on core values and runtime contracts, never on training,
+recipes, scenario coordination, or the HTTP service.
+
 The evolution loop itself, propose, gate and publish, is
 ``reef.train.cordis_backend``; versioning (staging, publishing, the commit
 log, recovery and rollback) is reef's artifact stack (``reef.artifact``,
-``reef.scenario.commit_protocol``), not here.
+``reef.scenario.committer``), not here.
 
 Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to
 a client program; this package evolves the *harness composition itself* by

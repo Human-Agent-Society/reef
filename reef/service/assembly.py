@@ -21,15 +21,16 @@ from reef.observability import build_experiment_tracker
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
-from reef.records import RecordRetention
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.registry import RuntimeRegistry
-from reef.scenario.store import ScenarioStoreFactory
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.settings import ServiceSettings, service_owned_keys
-from reef.storage.factory import PostgresScenarioStoreFactory, SQLiteScenarioStoreFactory
+from reef.storage.postgres import PostgresScenarioStorage
+from reef.storage.records import RecordRetention
+from reef.storage.scenario import ScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -206,16 +207,16 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
-    scenario_store_factory: ScenarioStoreFactory | None = None
+    scenario_storage: ScenarioStorage | None = None
     try:
         if settings.record_backend == "postgres":
-            scenario_store_factory = PostgresScenarioStoreFactory(
+            scenario_storage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 Path(settings.agent_record_dir),
                 schema=settings.record_database_schema,
             )
         else:
-            scenario_store_factory = SQLiteScenarioStoreFactory(Path(settings.agent_record_dir))
+            scenario_storage = SQLiteScenarioStorage(Path(settings.agent_record_dir))
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
         backend_factory = GitLFSRepositoryBackend.factory(
             _repository_location(settings.artifact_repository),
@@ -235,14 +236,14 @@ def build_dispatcher(
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
             agent_record_dir=Path(settings.agent_record_dir),
-            scenario_store_factory=scenario_store_factory,
+            scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
         )
     except BaseException:
-        if scenario_store_factory is not None:
+        if scenario_storage is not None:
             with suppress(Exception):
-                scenario_store_factory.close()
+                scenario_storage.close()
         if recipe.runtime is not None:
             with suppress(Exception):
                 recipe.runtime.shutdown()

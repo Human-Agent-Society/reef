@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.evaluation import SelectionDecision
 from reef.runtime.base import PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.inference import InferenceBackend
-from reef.train.evaluation.contracts import SelectionDecision
 from reef.train.types import TrainingBatch
 
 
