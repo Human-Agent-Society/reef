@@ -1372,7 +1372,7 @@ def test_bridge_marker_rejects_unsafe_checkpoint_path(tmp_path, kind) -> None:
 
 @pytest.mark.unit
 def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: Path, monkeypatch) -> None:
-    from reef.service.slime_driver import load_args_file
+    from reef.train.slime_backend.driver import load_args_file
 
     monkeypatch.setenv("BRIDGE_MODEL", "/models/demo model")
     args_file = tmp_path / "args.txt"
@@ -1393,7 +1393,8 @@ def test_load_args_file_expands_variables_and_uses_shell_like_quotes(tmp_path: P
 
 @pytest.mark.unit
 def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path: Path) -> None:
-    from reef.service.slime_driver import READY_MARKER, _driver_options, _retention_options, _write_ready_file
+    from reef.service.training_driver import READY_MARKER, _driver_options, _write_ready_file
+    from reef.train.slime_backend.driver import _retention_options
 
     ready_file = tmp_path / "state" / "bridge.ready"
     parsed_ready_file, remaining = _driver_options([f"--ready-file={ready_file}", "--loss-type", "sft_loss"])
@@ -1419,7 +1420,7 @@ def test_driver_ready_file_is_atomic_and_driver_option_is_not_forwarded(tmp_path
 
 @pytest.mark.unit
 def test_slime_rejects_its_legacy_raw_wandb_flags() -> None:
-    from reef.service.slime_driver import _validate_tracking_args
+    from reef.train.slime_backend.driver import _validate_tracking_args
 
     _validate_tracking_args(SimpleNamespace(use_wandb=False, wandb_key=None))
     with pytest.raises(RuntimeError, match=r"observability\.wandb"):
@@ -1446,14 +1447,12 @@ def test_driver_accepts_matching_reef_and_slime_objectives(loss_family, loss_typ
 
 @pytest.mark.unit
 def test_driver_derives_the_loss_family_from_the_configured_recipe() -> None:
-    from reef.service.slime_driver import _resolve_training_recipe
-    from reef.train.slime_backend.loss_families import resolve_loss_family
+    from reef.service.training_driver import _resolve_training_recipe
 
     recipe = "recipes.sao.recipe:SAORecipe"
     assert _resolve_training_recipe({"reef": {"recipe": recipe}}) == (
         "sao",
         recipe,
-        resolve_loss_family("sao"),
     )
     with pytest.raises(RuntimeError, match=r"must define reef\.recipe"):
         _resolve_training_recipe({})
@@ -1465,7 +1464,7 @@ def test_driver_derives_the_loss_family_from_the_configured_recipe() -> None:
 def test_driver_stamps_a_dotted_family_reference_for_the_workers() -> None:
     from types import SimpleNamespace
 
-    from reef.service.slime_driver import _stamp_loss_family_reference
+    from reef.train.slime_backend.driver import _stamp_loss_family_reference
 
     dotted = SimpleNamespace(loss_family="toy")
     _stamp_loss_family_reference(dotted, "toy_pkg.family:ToyAlgorithm")
@@ -1486,7 +1485,7 @@ def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> Non
     from types import ModuleType
 
     from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
-    from reef.service.slime_driver import _resolve_training_recipe
+    from reef.service.training_driver import _resolve_training_recipe
 
     class UnknownLossRecipe(WeightTrainingRecipe):
         @classmethod
@@ -1496,8 +1495,13 @@ def test_driver_rejects_a_recipe_with_an_unknown_loss_family(monkeypatch) -> Non
     module = ModuleType("unknown_loss_recipe")
     module.UnknownLossRecipe = UnknownLossRecipe
     monkeypatch.setitem(sys.modules, module.__name__, module)
+    from reef.train.slime_backend.driver import create_model_plan
+
+    config = {"reef": {"recipe": "unknown_loss_recipe:UnknownLossRecipe"}}
+    loss_family, _ = _resolve_training_recipe(config)
+    monkeypatch.setenv("RAY_ADDRESS", "local")
     with pytest.raises(RuntimeError, match="declares unsupported loss family 'grpo'"):
-        _resolve_training_recipe({"reef": {"recipe": "unknown_loss_recipe:UnknownLossRecipe"}})
+        create_model_plan(config, loss_family=loss_family)
 
 
 @pytest.mark.unit
@@ -1606,7 +1610,7 @@ def test_driver_rejects_mismatched_reef_and_slime_objectives(
 def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
     tmp_path: Path, ref_load: str | None, expected: str
 ) -> None:
-    from reef.service.slime_driver import _apply_bridge_resume_fallback
+    from reef.train.slime_backend.driver import _apply_bridge_resume_fallback
 
     args = SimpleNamespace(
         megatron_to_hf_mode="bridge",
@@ -1624,7 +1628,7 @@ def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
 
 @pytest.mark.unit
 def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
-    from reef.service.slime_driver import _apply_bridge_resume_fallback
+    from reef.train.slime_backend.driver import _apply_bridge_resume_fallback
 
     resume = tmp_path / "resume"
     resume.mkdir()

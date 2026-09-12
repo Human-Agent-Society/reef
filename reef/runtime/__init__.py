@@ -10,6 +10,9 @@ evaluates it before choosing activation or rejection.
 ``model_config.ModelConfig`` is the concrete, in-memory model selection shared
 by a scenario and its recipe. It has no file paths or persistence behavior.
 
+``deployment`` defines the minimal resource, inference-connection and training
+component contracts used by Reef's model driver.
+
 Training batches and candidate evaluation contracts come from ``reef.core``.
 This package never imports ``reef.train``.
 

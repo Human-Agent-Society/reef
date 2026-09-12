@@ -14,8 +14,8 @@ says how the runtime cuts one batch into optimizer steps. ``evaluation/`` is
 the recipe's candidate gate; ``Trainer`` runs it between prepare and settle.
 
 The package does not import recipes or service assembly. ``CordisRecipe``
-lives in ``reef.recipe.cordis``; the Slime process entrypoint lives in
-``reef.service.slime_driver``.
+lives in ``reef.recipe.cordis``. Slime component preparation lives in
+``reef.train.slime_backend.driver``; Reef's service layer owns their lifecycle.
 
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,

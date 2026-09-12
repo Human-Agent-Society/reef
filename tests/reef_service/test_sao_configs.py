@@ -6,7 +6,7 @@ could not boot, and nothing in CI noticed because no test ever
 re-parsed a cookbook YAML's flags. These tests close that hole: for each
 ``training-*.yaml`` they materialize the slime-driver command exactly as
 ``reef serve`` would, strip the driver/retention/loss-family options exactly as
-``reef.service.slime_driver`` does, and then feed the remaining flags to the actual
+``reef.train.slime_backend.driver`` does, and then feed the remaining flags to the actual
 Slime argparse surface plus the recipe's ``validate_backend_args`` and the
 bridge preflight.
 
@@ -54,7 +54,7 @@ pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOTS = (REPO_ROOT / "recipes", REPO_ROOT / "tutorials")
-SLIME_DRIVER_MODULE = "reef.service.slime_driver"
+SLIME_DRIVER_MODULE = "reef.service.training_driver"
 
 
 def _iter_config_files() -> list[Path]:
@@ -270,12 +270,15 @@ def _parse_config(config_path: Path):
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
-    from reef.service.slime_driver import _driver_options, _resolve_training_recipe, _retention_options
+    from reef.service.training_driver import _driver_options, _resolve_training_recipe
+    from reef.train.slime_backend.driver import _retention_options
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
     tokens, recipe = _driver_tokens(config)
-    _loss_family, resolved_recipe, spec = _resolve_training_recipe(config)
+    _loss_family, resolved_recipe = _resolve_training_recipe(config)
+    spec = resolve_loss_family(_loss_family)
     assert resolved_recipe == recipe
 
     _, tokens = _driver_options(tokens)

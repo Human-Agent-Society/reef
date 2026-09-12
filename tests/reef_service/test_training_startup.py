@@ -60,7 +60,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         assert reef["training_backend"] == "slime"
         assert config["execution"] == {"training": "ray", "rollout": "ray"}
         driver, http = validate_services(config, "test")
-        assert driver["command"] == [sys.executable, "-m", "reef.service.slime_driver"]
+        assert driver["command"] == [sys.executable, "-m", "reef.service.training_driver"]
         assert driver["ready_timeout"] == 45
         assert interpolate_config(config, driver["env"]["REEF_RAY_NAMESPACE"]) == "custom"
         assert interpolate_config(config, driver["env"]["REEF_RAY_ACTOR_NAME"]) == "bridge-custom"
@@ -271,7 +271,7 @@ import json, os, time
 from pathlib import Path
 keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME', 'SLIME_ARGS_FILE']
 Path('driver-env.json').write_text(json.dumps({key: os.environ[key] for key in keys}))
-Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-slime-bridge-ready')
+Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-training-ready')
 time.sleep(120)
 """
     http_script = """
@@ -279,7 +279,7 @@ import json, os
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import yaml
-assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-slime-bridge-ready'
+assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-training-ready'
 config = yaml.safe_load(Path(os.environ['REEF_CONFIG']).read_text())
 Path('http-config.json').write_text(json.dumps(config))
 class Handler(BaseHTTPRequestHandler):
@@ -383,17 +383,15 @@ def test_legacy_native_driver_arguments_remain_available():
 
 
 def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp_path, monkeypatch):
-    from reef.service import slime_driver
+    from reef.train.slime_backend import driver as slime_driver
 
     config, _ = resolve_deployment_config(training_config(), None, tmp_path / "c")
     monkeypatch.setenv("RAY_ADDRESS", "local")
     monkeypatch.setenv("REEF_CONFIG", str(tmp_path / "config"))
-    monkeypatch.setattr(slime_driver, "load_config", lambda path: config)
 
     def unexpected(*args, **kwargs):
         pytest.fail("direct managed flags must fail before connecting or parsing Slime")
 
     monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
-    monkeypatch.setattr(slime_driver.ray, "init", unexpected)
     with pytest.raises(RuntimeError, match="pass options through reef serve"):
-        slime_driver._serve(["--rollout-num-gpus=999"], tmp_path / "ready")
+        slime_driver.create_model_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")

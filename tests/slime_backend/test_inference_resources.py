@@ -1,4 +1,4 @@
-"""CPU ownership contracts for independently controlled Slime inference."""
+"""Slime components borrow connections and share one Reef-owned allocation."""
 
 import importlib
 import sys
@@ -6,6 +6,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.runtime.deployment import ModelDeploymentPlan
+from reef.service.training_driver import ModelDeployment
 from reef.train.slime_backend import resources
 
 
@@ -14,39 +16,52 @@ def resource_runtime(monkeypatch):
     events = []
     allocation = SimpleNamespace(id="shared")
     placements = {"actor": (allocation, [], []), "rollout": (allocation, [], [])}
+    state = SimpleNamespace(events=events, placements=placements, failure=None, config=None, initialized=False)
+
+    def event(name):
+        events.append(name)
+        if name == state.failure:
+            raise RuntimeError(f"failed {name}")
+
+    def connect(**kwargs):
+        state.initialized = True
+        state.ray_options = kwargs
+        event("connect")
+
+    def disconnect():
+        state.initialized = False
+        event("disconnect")
 
     def allocate(args):
-        events.append("allocate")
+        state.args = args
+        event("allocate")
         return dict(placements)
 
     for name, values in (
         ("slime.ray.placement_group", {"create_placement_groups": allocate}),
         ("slime.ray.utils", {"add_default_ray_env_vars": lambda values: values}),
-        (
-            "reef.train.slime_backend.reef_adapters.worker_hooks",
-            {"reef_rollout_env_vars": lambda: {"INFERENCE_TEST": "1"}},
-        ),
+        ("reef.train.slime_backend.reef_adapters.worker_hooks", {"reef_rollout_env_vars": lambda: {"TEST": "1"}}),
     ):
         module = ModuleType(name)
         module.__dict__.update(values)
         monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(resources.ray, "is_initialized", lambda: state.initialized)
+    monkeypatch.setattr(resources.ray, "init", connect)
+    monkeypatch.setattr(resources.ray, "shutdown", disconnect)
     placement_module = importlib.import_module("ray.util.placement_group")
-    monkeypatch.setattr(placement_module, "remove_placement_group", lambda pg: events.append(("release", pg.id)))
-    state = SimpleNamespace(events=events, placements=placements, failure=None, config=None)
+    monkeypatch.setattr(placement_module, "remove_placement_group", lambda pg: event("release-" + pg.id))
 
     class Executor:
         def __init__(self, config):
             state.config = config
             self.workers = ("inference-controller",)
-            events.append("create-inference")
+            event("create-inference")
 
         def rpc(self, rank, method, **kwargs):
-            events.append(method)
-            if method == state.failure:
-                raise RuntimeError(f"failed {method}")
+            event(method)
 
         def shutdown(self):
-            events.append("kill-controller")
+            event("kill-controller")
 
         @classmethod
         def from_workers(cls, workers):
@@ -56,51 +71,150 @@ def resource_runtime(monkeypatch):
     return state
 
 
-def test_deployment_owns_inference_and_releases_shared_reservations_once(resource_runtime):
-    owner = resources.SlimeInferenceResources()
-    owner.start(SimpleNamespace())
+def plan_for(state):
+    args = SimpleNamespace(rollout_num_gpus=4, rollout_num_gpus_per_engine=2)
+    allocation = resources.SlimeDeploymentResources(
+        args,
+        ray_address="external",
+        namespace="test",
+        runtime_env={"env_vars": {"PYTHONPATH": "/repo"}},
+    )
+
+    class Training:
+        inference_protocol = resources.INFERENCE_PROTOCOL
+
+        def start(self, supplied, inference):
+            assert supplied is allocation
+            assert inference.control.owned is False
+            state.events.append("training-start")
+
+        def check_health(self):
+            pass
+
+        def close(self):
+            state.events.append("training-close")
+
+    return ModelDeploymentPlan(allocation, resources.SlimeInferenceService(args), Training())
+
+
+def test_deployment_allocates_once_and_closes_training_inference_then_reservations(resource_runtime):
+    plan = plan_for(resource_runtime)
+    owner = ModelDeployment(plan)
+    assert resource_runtime.events == []
+    owner.start()
     config = resource_runtime.config
-    assert config.options["num_gpus"] == 0
-    assert config.options["num_cpus"] == 1
-    assert config.options["runtime_env"]["env_vars"] == {"INFERENCE_TEST": "1"}
+    assert config.options["num_gpus"] == 0 and config.options["num_cpus"] == 1
     assert config.workers[0].args[1] is resource_runtime.placements["rollout"]
-    assert owner.serving.workers == ("inference-controller",)
-    assert owner.serving.owned is False
+    assert resource_runtime.args.rollout_num_gpus == 4
+    assert resource_runtime.args.rollout_num_gpus_per_engine == 2
+    assert resource_runtime.ray_options == {
+        "address": "external",
+        "namespace": "test",
+        "runtime_env": {"env_vars": {"PYTHONPATH": "/repo"}},
+    }
     owner.close()
     owner.close()
     assert resource_runtime.events == [
+        "connect",
         "allocate",
         "create-inference",
         "check_health",
+        "training-start",
+        "check_health",
+        "training-close",
         "shutdown",
         "kill-controller",
-        ("release", "shared"),
+        "release-shared",
+        "disconnect",
     ]
-    with pytest.raises(RuntimeError, match="not running"):
-        _ = owner.serving
-    with pytest.raises(RuntimeError, match="once"):
-        owner.start(SimpleNamespace())
 
 
-@pytest.mark.parametrize("failure", ["check_health", "shutdown"])
-def test_inference_failure_still_releases_controller_and_allocation(resource_runtime, failure):
+@pytest.mark.parametrize("failure", ["allocate", "create-inference", "check_health", "shutdown", "release-shared"])
+def test_partial_failure_always_disconnects_the_owned_ray_job(resource_runtime, failure):
     resource_runtime.failure = failure
-    owner = resources.SlimeInferenceResources()
-    if failure == "check_health":
-        with pytest.raises(RuntimeError, match="check_health"):
-            owner.start(SimpleNamespace())
-    else:
-        owner.start(SimpleNamespace())
-        with pytest.raises(RuntimeError, match="shutdown"):
-            owner.close()
+    owner = ModelDeployment(plan_for(resource_runtime))
+    with pytest.raises(RuntimeError, match=failure):
+        owner.start()
+        owner.close()
     owner.close()
-    assert resource_runtime.events[-2:] == ["kill-controller", ("release", "shared")]
-    assert resource_runtime.events.count(("release", "shared")) == 1
+    assert resource_runtime.events[-1] == "disconnect"
+    if failure != "allocate":
+        assert resource_runtime.events.count("release-shared") == 1
 
 
-@pytest.mark.parametrize("field,value", [("colocate", True), ("rollout_external", True), ("megatron_lora_rank", 8)])
-def test_first_stage_rejects_unsupported_modes_before_allocation(resource_runtime, field, value):
-    owner = resources.SlimeInferenceResources()
-    with pytest.raises(ValueError, match="non-colocated full-weight"):
-        owner.start(SimpleNamespace(**{field: value}))
+def test_existing_client_session_is_not_disconnected(resource_runtime):
+    resource_runtime.initialized = True
+    owner = ModelDeployment(plan_for(resource_runtime))
+    with pytest.raises(RuntimeError, match="own Ray client session"):
+        owner.start()
     assert resource_runtime.events == []
+    assert resource_runtime.initialized is True
+
+
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("failure", [None, "health", "shutdown"])
+def test_training_adapter_attaches_without_allocating_or_closing_inference(
+    resource_runtime, monkeypatch, separate, failure
+):
+    from reef.train.slime_backend import training
+
+    allocation = plan_for(resource_runtime).resources
+    allocation.allocate_models = separate
+    allocation.start()
+    borrowed = SimpleNamespace(owned=False)
+    connection = resources.InferenceConnection(resources.INFERENCE_PROTOCOL, borrowed) if separate else None
+
+    def shutdown():
+        resource_runtime.events.append("training-close")
+        if failure == "shutdown":
+            raise RuntimeError("shutdown failed")
+
+    bridge = SimpleNamespace(
+        health=SimpleNamespace(remote=lambda: {"ok": failure != "health"}),
+        shutdown=SimpleNamespace(remote=shutdown),
+    )
+
+    def start(args, **kwargs):
+        assert kwargs["serving"] is (borrowed if separate else None)
+        assert kwargs["placement_groups"] is (allocation.placement_groups if separate else None)
+        return bridge
+
+    monkeypatch.setattr(training, "start_bridge", start)
+
+    def get(result, **kwargs):
+        if isinstance(result, dict):
+            assert "timeout" not in kwargs  # Startup health waits for checkpoint recovery.
+        return result
+
+    monkeypatch.setattr(training.ray, "get", get)
+    monkeypatch.setattr(training.ray, "kill", lambda *args, **kwargs: resource_runtime.events.append("kill-training"))
+    service = training.SlimeTrainingService(
+        allocation.args,
+        preparation=SimpleNamespace(),
+        loss_family_config=None,
+        actor_name="test",
+        namespace="test",
+        separate_inference=separate,
+    )
+    if separate:
+        with pytest.raises(ValueError, match="existing inference connection"):
+            service.start(allocation, None)
+    service.start(allocation, connection)
+    if failure == "health":
+        with pytest.raises(RuntimeError, match="health check"):
+            service.check_health()
+    else:
+        service.check_health()
+    if failure == "shutdown":
+        with pytest.raises(RuntimeError, match="shutdown failed"):
+            service.close()
+    else:
+        service.close()
+    service.close()
+    assert resource_runtime.events == [
+        "connect",
+        *(["allocate"] if separate else []),
+        "training-close",
+        "kill-training",
+    ]
+    allocation.close()

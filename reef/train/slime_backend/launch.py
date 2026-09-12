@@ -1,4 +1,4 @@
-"""Slime-owned process topology and runtime connection, without GPU imports."""
+"""Slime component definitions and runtime connection, without GPU imports."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
+from reef.runtime.deployment import ModelDeploymentPlan
 from reef.runtime.executor.arguments import native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.inference import InferenceBackendFactory
@@ -20,7 +21,7 @@ _NATIVE_INFERENCE = "reef.train.slime_backend.reef_adapters.sglang.chat.SGLangCh
 _READY_PROBE = (
     "import os, pathlib, sys; "
     "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "
-    "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-slime-bridge-ready' else 1)"
+    "sys.exit(0 if p.is_file() and p.read_text().strip() == 'reef-training-ready' else 1)"
 )
 
 
@@ -162,7 +163,7 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
 
 
 class SlimeDeployment(TrainingDeployment):
-    """Launch the Slime controller and connect HTTP to its shared Ray bridge."""
+    """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
 
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         model = config_value(config, "reef", "model_path")
@@ -201,7 +202,7 @@ class SlimeDeployment(TrainingDeployment):
         driver = {
             "name": "slime-driver",
             "executor": "uni",
-            "command": [python, "-m", "reef.service.slime_driver"],
+            "command": [python, "-m", "reef.service.training_driver"],
             "ready": [python, "-c", _READY_PROBE],
             "ready_timeout": settings["training_ready_timeout"],
             "env": {
@@ -213,6 +214,11 @@ class SlimeDeployment(TrainingDeployment):
             },
         }
         return (driver,)
+
+    def create_model_plan(self, config: Mapping[str, Any], *, loss_family: str) -> ModelDeploymentPlan:
+        from reef.train.slime_backend.driver import create_model_plan
+
+        return create_model_plan(config, loss_family=loss_family)
 
     def runtime_config(
         self, settings: Mapping[str, Any], *, max_staleness: int, connector: Any = None

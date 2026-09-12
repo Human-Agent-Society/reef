@@ -94,8 +94,8 @@ native training flags belong in ``training.options`` and engine flags in ``infer
 
 With the default Slime backend, Reef starts a local driver, waits for its healthy
 bridge, then starts HTTP and obtains the inference connection from that bridge.
-For managed, non-colocated full-weight training, the Reef driver owns a separate
-inference controller and coordinated model reservations. The training batch
+For managed, non-colocated full-weight training, the backend-neutral Reef model driver owns separate
+resource, inference and training components. The training batch
 manager borrows that controller; it does not launch or shut down inference.
 Slime's launch/placement helpers still implement the engine integration. LoRA,
 colocated and external-engine paths retain their existing combined lifecycle.
@@ -109,8 +109,8 @@ The same path supports CLI-only training with
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
 ``training.backend`` defaults to ``slime`` for compatibility. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
-``package.module:Deployment`` class. The selected definition owns the process
-plan and HTTP runtime connection; other backends do not inherit Slime's Ray,
+``package.module:Deployment`` class. The selected definition describes the process
+plan and HTTP runtime connection; Reef owns the managed component lifecycle; other backends do not inherit Slime's Ray,
 SGLang or native-argument requirements.
 
 An in-process integration can use ``InProcessTrainingDeployment``: it starts
@@ -252,7 +252,7 @@ For Slime, a versioned training stack can contain:
 
 Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
-options reach ``reef.service.slime_driver`` through the same effective config
+options reach ``reef.service.training_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
 argument handling and Slime's native parser. Automatic training launches use
 only this effective config and ignore an ambient ``SLIME_ARGS_FILE``. Explicit

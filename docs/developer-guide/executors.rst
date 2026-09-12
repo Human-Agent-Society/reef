@@ -394,34 +394,55 @@ without Ray services or declared Ray training/rollout roles do not start Ray.
 Slime inference ownership
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For managed, non-colocated full-weight training, ``reef.service.slime_driver``
-validates the bridge configuration before creating ``SlimeInferenceResources``.
-That deployment owner uses Slime's existing placement helper once for the
-coordinated model allocation and launches ``SlimeInferenceWorker`` as a separate
-Ray control actor. This actor owns the serving executor, engines and routers.
-It reserves one CPU and zero model GPUs; the model placement groups account for
-engine GPUs separately.
+``reef.service.training_driver`` owns model deployment lifecycle through
+``ModelDeployment``. The selected training definition returns a
+``ModelDeploymentPlan`` containing unstarted resources, inference and training
+components. The owner checks their declared connection protocols before
+allocation, then starts resources, inference and training in order. It checks
+inference readiness before attachment and again after training initialization;
+the readiness file is published only when both components are ready.
 
-The driver passes a borrowed executor connection and placement groups to
-``start_bridge``. ``ReefRolloutManagerImpl`` retains tensorization, DP partitions
-and micro-batch scheduling and forwards inference controls through the borrowed
-connection. Training workers obtain engine handles through that connection;
-weight transfer remains directly between workers and engines. Training-manager
-shutdown does not destroy inference. On deployment shutdown or startup failure,
-the driver releases training first, then inference, then the model reservations,
-and finally disconnects Ray. Shared reservations are released once.
+The Slime integration supplies ``SlimeDeploymentResources``,
+``SlimeInferenceService`` and ``SlimeTrainingService``. Argument parsing and
+preflight live in ``reef.train.slime_backend.driver``. The service layer resolves
+the recipe and passes its declared loss family into that integration, keeping
+recipe discovery out of the training package.
 
-This first stage keeps the control vocabulary inside the Slime integration.
-Existing full-weight publication, commit acknowledgement and generation-resume
-rules remain in the bridge; the controller does not independently reopen
-serving after a weight update. LoRA, colocated deployments, external engines and
-direct ``start_bridge`` callers without a supplied connection retain their
-existing lifecycle until those modes are migrated and validated. Managed
-configurations use ``inference.num-gpus``, ``inference.tensor-parallel-size``
-and ``inference.options`` in all modes. The integration converts these to
-Slime launch arguments once at the driver boundary; training options contain
-only training settings. A backend-neutral inference control interface and
-independent component restarts remain in `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+For non-colocated full-weight training, resources connect one Ray client job
+and use Slime's existing placement helper once for coordinated model allocation.
+Inference borrows those reservations and owns ``SlimeInferenceWorker`` as a
+separate Ray control actor. It reserves one CPU and zero model GPUs; model
+placement groups account for engine GPUs separately. Training receives the
+existing inference connection and reservations and calls ``start_bridge`` with
+both. Its batch manager retains tensorization, DP partitions and micro-batch
+scheduling; it never creates or closes the supplied inference component.
+
+The owner closes training, inference and resources in reverse dependency order,
+including components whose startup failed partway through. Cleanup failures do
+not skip later components, and the original startup error remains authoritative.
+Shared reservations are released once. Disconnecting the owned Ray client job
+leaves an external cluster running; an already initialized client session is
+rejected without disconnecting it.
+
+The minimal shared ``InferenceConnection`` contains a borrowed executor and a
+versioned control-protocol identifier. Slime's engine handles and placement
+representations remain private to its adapters. Weight transfer remains directly
+between training workers and engines. This protocol identifies the supported
+attachment vocabulary; it is not a general engine capability negotiation API.
+
+LoRA, colocated and external-engine modes select an explicit combined plan
+before startup. They keep their existing lifecycle; a failure in the separate
+path never falls back to combined ownership. Direct ``start_bridge`` callers
+remain supported, and ``reef.service.slime_driver`` remains a compatibility CLI
+for explicit process stacks. It delegates lifecycle orchestration to the same
+Reef owner.
+
+Managed configurations use ``inference.num-gpus``,
+``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
+Publication, commit acknowledgement and generation resumption remain in the
+existing bridge state machine. Moving that coordination, independent component
+restarts and validating additional real backend combinations remain in
+`RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 
 The service stack keeps the runtime alive through service shutdown, publishes
 the actual address as ``reef.ray_address`` in runtime snapshots, and supplies

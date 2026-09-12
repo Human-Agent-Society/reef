@@ -111,3 +111,75 @@ def test_remote_training_borrows_inference_and_transfers_directly_to_engine(monk
             finally:
                 owner.shutdown()
         ray.shutdown()
+
+
+def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monkeypatch):
+    from reef.runtime.deployment import ModelDeploymentPlan
+    from reef.service.training_driver import ModelDeployment
+    from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, SlimeDeploymentResources, SlimeInferenceService
+
+    ray = pytest.importorskip("ray")
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    original_init = ray.init
+
+    def init(**kwargs):
+        return original_init(**kwargs, num_cpus=4, include_dashboard=False)
+
+    monkeypatch.setattr(ray, "init", init)
+    root = Path(__file__).resolve().parents[2]
+    args = SimpleNamespace(reef_rollout_executor_backend=CpuServingExecutor)
+
+    class CpuReservations(SlimeDeploymentResources):
+        def start(self):
+            super().start()
+            self.placement_groups["rollout"] = None
+
+    class CpuTraining:
+        inference_protocol = INFERENCE_PROTOCOL
+        actor = None
+        engine = None
+        inference_survived = False
+
+        def start(self, resources, inference):
+            self.actor = RayExecutor(
+                ExecutorConfig(
+                    backend=RayExecutor,
+                    options={"num_cpus": 1, "num_gpus": 0},
+                    workers=(WorkerSpec(TrainingControl, args=(inference.control,)),),
+                )
+            )
+            engines, *_ = self.actor.rpc(0, "get_updatable_engines_and_lock", timeout=30)
+            self.engine = engines[0]
+            ray.get(self.engine.update_weight.remote(7), timeout=30)
+
+        def check_health(self):
+            self.actor.rpc(0, "check_health", timeout=30)
+
+        def close(self):
+            if self.actor is not None:
+                self.actor.rpc(0, "shutdown", timeout=30)
+                self.actor.shutdown()
+                if self.engine is not None:
+                    self.inference_survived = ray.get(self.engine.current_weight.remote(), timeout=30) == 7
+
+    training = CpuTraining()
+    owner = ModelDeployment(
+        ModelDeploymentPlan(
+            CpuReservations(
+                args,
+                ray_address="local",
+                namespace="reef-model-owner-test",
+                allocate_models=False,
+                runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join((str(root), str(root / "tests")))}},
+            ),
+            SlimeInferenceService(args),
+            training,
+        )
+    )
+    try:
+        owner.start()
+        assert ray.get(training.engine.current_weight.remote(), timeout=30) == 7
+    finally:
+        owner.close()
+    assert training.inference_survived is True
+    assert not ray.is_initialized()

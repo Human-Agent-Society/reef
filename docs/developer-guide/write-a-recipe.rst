@@ -210,6 +210,31 @@ overrides.
 Training backend deployment
 ----------------------------
 
+
+Managed model components can use Reef's shared process entrypoint,
+``python -m reef.service.training_driver``. Implement
+``TrainingDeployment.create_model_plan(config, *, loss_family)`` to return a
+``reef.runtime.deployment.ModelDeploymentPlan`` with configured, unstarted
+resource, inference and training components. Reef resolves the recipe; each
+backend decides how to interpret its declared loss family. Constructing the
+plan must validate the combination without allocating model resources.
+
+``DeploymentResources`` owns coordinated reservations and runtime connections.
+``InferenceService`` starts engines in supplied resources and returns an
+``InferenceConnection`` with a borrowed executor and a versioned control
+protocol. ``TrainingService`` declares the required protocol and attaches to
+that connection and those resources. Framework-specific arguments, engine
+handles and placement types stay inside the adapters. An HTTP provider URL
+alone does not establish weight-update compatibility.
+
+Reef starts these components in dependency order, probes readiness and closes
+them in reverse order. Every component's ``close`` must be idempotent and handle
+partial startup. A plan with no separate inference component explicitly selects
+a combined compatibility lifecycle; startup failure never selects it implicitly.
+Other deployment definitions, including in-process integrations, may keep their
+existing entrypoint and need not implement ``create_model_plan``. These startup
+contracts do not replace training, weight-update or version-commit contracts.
+
 ``training.backend`` selects one definition for both process preparation and
 HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
 ``reef.train.deployment`` and live under the owning integration:
