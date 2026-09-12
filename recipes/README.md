@@ -67,7 +67,7 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-[CORAL TTT](coral/README.md) runs a
+[CORAL TTT](beta/coral/README.md) runs a
 [CORAL](https://github.com/Human-Agent-Society/CORAL) discovery task — parallel
 coding agents in git worktrees, graded attempts on one problem — with every
 agent call served and attributed through Reef. CORAL's gateway traffic carries

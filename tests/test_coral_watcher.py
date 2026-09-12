@@ -13,8 +13,8 @@ import urllib.error
 
 import pytest
 
-from recipes.coral.journal import CallJournal, CallRecord, commit_matches
-from recipes.coral.watcher import AttemptWatcher, read_finalized_attempts
+from recipes.beta.coral.journal import CallJournal, CallRecord, commit_matches
+from recipes.beta.coral.watcher import AttemptWatcher, read_finalized_attempts
 
 PARENT_A = "a" * 40
 PARENT_B = "b" * 40
@@ -89,7 +89,7 @@ class FakeReef:
 @pytest.fixture()
 def fake_reef(monkeypatch):
     fake = FakeReef()
-    monkeypatch.setattr("recipes.coral.watcher.report_attempt", fake)
+    monkeypatch.setattr("recipes.beta.coral.watcher.report_attempt", fake)
     return fake
 
 

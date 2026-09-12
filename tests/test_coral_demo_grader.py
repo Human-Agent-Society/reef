@@ -18,6 +18,7 @@ import pytest
 GRADER_PATH = (
     Path(__file__).resolve().parent.parent
     / "recipes"
+    / "beta"
     / "coral"
     / "examples"
     / "coral_demo"

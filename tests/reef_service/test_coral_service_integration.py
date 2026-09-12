@@ -20,9 +20,9 @@ reef_service = pytest.importorskip("reef.service.app", reason="requires a reef c
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from recipes.coral.journal import CallJournal
-from recipes.coral.middleware import ReefGatewayMiddleware
-from recipes.coral.reporter import AttemptReport
+from recipes.beta.coral.journal import CallJournal
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.reporter import AttemptReport
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.inference import InferenceBackend
 from reef.storage.sqlite import SQLiteScenarioStorage

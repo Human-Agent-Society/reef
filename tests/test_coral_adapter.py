@@ -14,9 +14,9 @@ import threading
 
 import pytest
 
-from recipes.coral.journal import CallJournal, CallRecord, deterministic_report_id
-from recipes.coral.middleware import ReefGatewayMiddleware
-from recipes.coral.reporter import AttemptReport
+from recipes.beta.coral.journal import CallJournal, CallRecord, deterministic_report_id
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.reporter import AttemptReport
 
 
 def _scope(path="/v1/chat/completions", headers=None):

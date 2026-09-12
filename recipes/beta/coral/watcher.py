@@ -9,7 +9,7 @@ runtime's output.
 
 For each newly finalized attempt the watcher resolves the attempt's
 inference references from the call journal and posts one
-:class:`~recipes.coral.reporter.AttemptReport`. What gets reported:
+:class:`~recipes.beta.coral.reporter.AttemptReport`. What gets reported:
 
 - ``real`` attempts, whatever their score — the processor decides what
   trains; the report is the record of what happened.
@@ -45,8 +45,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from recipes.coral.journal import CallJournal, commit_matches
-from recipes.coral.reporter import AttemptReport, report_attempt
+from recipes.beta.coral.journal import CallJournal, commit_matches
+from recipes.beta.coral.reporter import AttemptReport, report_attempt
 
 logger = logging.getLogger(__name__)
 

@@ -15,8 +15,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from recipes.coral.journal import CallJournal, commit_matches
-from recipes.coral.reporter import AttemptReport
+from recipes.beta.coral.journal import CallJournal, commit_matches
+from recipes.beta.coral.reporter import AttemptReport
 
 
 def build_result_bundle(

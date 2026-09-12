@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 
-from recipes.coral.bundle import build_result_bundle
-from recipes.coral.journal import CallJournal, CallRecord
-from recipes.coral.middleware import ReefGatewayMiddleware
-from recipes.coral.reporter import AttemptReport
+from recipes.beta.coral.bundle import build_result_bundle
+from recipes.beta.coral.journal import CallJournal, CallRecord
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.reporter import AttemptReport
 
 
 def _record(agent, commit, record_id, *, release=None, prompt=0, completion=0, run="run-1"):

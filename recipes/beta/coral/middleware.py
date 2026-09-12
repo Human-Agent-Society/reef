@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from recipes.coral.journal import CallJournal, CallRecord
+from recipes.beta.coral.journal import CallJournal, CallRecord
 
 logger = logging.getLogger(__name__)
 

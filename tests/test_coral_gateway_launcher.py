@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from recipes.coral.gateway_launcher import attach_reef_adapter, attach_reef_adapter_to_agent_manager, insert_reef_layer
-from recipes.coral.middleware import ReefGatewayMiddleware
+from recipes.beta.coral.gateway_launcher import (
+    attach_reef_adapter,
+    attach_reef_adapter_to_agent_manager,
+    insert_reef_layer,
+)
+from recipes.beta.coral.middleware import ReefGatewayMiddleware
 
 
 class FakeCoralMiddleware:
@@ -52,7 +56,7 @@ def test_attach_splices_under_coral_and_keeps_register_agent_working(tmp_path):
 
 
 def test_insert_is_idempotent(tmp_path):
-    from recipes.coral.journal import CallJournal
+    from recipes.beta.coral.journal import CallJournal
 
     journal = CallJournal(tmp_path / "j.jsonl")
     middleware = FakeCoralMiddleware(app=object())
@@ -63,7 +67,7 @@ def test_insert_is_idempotent(tmp_path):
 
 
 def test_insert_requires_a_started_middleware(tmp_path):
-    from recipes.coral.journal import CallJournal
+    from recipes.beta.coral.journal import CallJournal
 
     journal = CallJournal(tmp_path / "j.jsonl")
     with pytest.raises(TypeError, match="started CoralGatewayMiddleware"):

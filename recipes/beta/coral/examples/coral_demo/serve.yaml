@@ -16,7 +16,7 @@ inference:
   timeout-s: 7200
   backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
 recipe:
-  implementation: recipes.coral.recipe:CoralRecipe
+  implementation: recipes.beta.coral.recipe:CoralRecipe
   config:
     group-size: 2          # two scored siblings release a training group
     checkpoint-every-n-versions: 1
