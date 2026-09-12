@@ -550,7 +550,7 @@ def resolve_deployment_config(
                 ):
                     raise DeployConfigError(f"unknown configuration flag --{key}")
         config = _apply_overrides(config, overrides or {}, arguments=arguments)
-        if versioned:
+        if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
         normalized_config = normalize_component_config(normalize_service_config(config), arguments)

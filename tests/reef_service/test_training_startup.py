@@ -135,6 +135,24 @@ def test_matching_home_relative_model_and_checkpoint_are_accepted(tmp_path):
     assert config["reef"]["training_backend_options"]["hf-checkpoint"] == "${reef.model_path}"
 
 
+def test_cli_only_training_resolves_public_config_references(tmp_path):
+    config, _ = resolve_deployment_config(
+        command_line_config({}),
+        {
+            "recipe.implementation": RECIPE,
+            "inference.model-path": "/models/demo",
+            "training.config.checkpoint_dir": "work/checkpoints",
+            "training.options.hf-checkpoint": "${inference.model-path}",
+            "training.options.save": "${training.config.checkpoint_dir}/megatron",
+        },
+        tmp_path / "cli",
+        standard=True,
+    )
+    options = config["reef"]["training_backend_options"]
+    assert interpolate_config(config, options["hf-checkpoint"]) == "/models/demo"
+    assert interpolate_config(config, options["save"]) == "work/checkpoints/megatron"
+
+
 def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     downloads, configs, paths = [], [], []
