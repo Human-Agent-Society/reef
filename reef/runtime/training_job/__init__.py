@@ -1,5 +1,6 @@
-"""Durable training-job markers and commit-gated weight publication.
+"""Durable training-step coordination and commit-gated weight publication.
 
-Backends retain checkpoint production and tensor transport. This package owns
+Backends retain admission, data preparation, optimizer execution, checkpoint I/O
+and tensor transport. Reef owns job identity/replay, RUNNING/CHECKPOINT ordering,
 publication ordering and recovery without importing a concrete model framework.
 """

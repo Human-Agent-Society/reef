@@ -13,8 +13,11 @@ the named bridge actor (``TrainBridgeActor``) through its existing job API.
    marker rather than training twice. ``update_serving_weights`` publishes that
    checkpoint but keeps generation paused until Reef acknowledges its commit.
 
-The job marker lets a restart on either side resume the transaction exactly
-where it stopped.
+The bridge delegates job replay, train/checkpoint ordering and commit-gated
+publication to ``reef.runtime.training_job``. Slime supplies preparation, model
+operations and checkpoint/weight I/O. A RUNNING marker after restart remains
+ambiguous and requires operator recovery; Reef never guesses whether an
+optimizer step completed.
 
 Keep the Ray bridge and the inference backends lazy so token-capture adapters
 remain importable without loading the complete Slime GPU stack.

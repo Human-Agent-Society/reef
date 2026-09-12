@@ -243,6 +243,14 @@ all engines and must leave requests paused. Serialize coordinator calls with
 training and shutdown; acknowledge only after Reef has durably committed its
 head. Reuse the runtime's durable marker format, while keeping checkpoint
 production and any backend-specific tensor/adapter restoration in the backend.
+Use ``TrainingExecution`` with ``TrainingJobBackend`` for checkpoint-first
+execution. Its preparation context must retain reservations until Reef records
+the checkpoint and must never suppress execution failures. Return a
+``PreparedTrainingJob`` with a ``TrainingCheckpoint``, ``train`` and
+``save_checkpoint``. Training returns ``TrainingMetrics``; saving must persist
+all required optimizer/model state and recovery metadata synchronously. Reef
+owns job-marker writes. Share the publication coordinator's ``state`` with
+execution and serialize both with the same operation lock.
 See `commit-gated weight publication <executors.rst#commit-gated-weight-publication>`__
 for retry and startup-recovery requirements.
 

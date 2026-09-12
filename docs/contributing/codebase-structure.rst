@@ -151,8 +151,9 @@ encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with surface contracts, while checkpoint cadence is recipe policy.
 ``recipe/cordis.py`` assembles the harness training backend, and
 ``service/training_driver.py`` owns model-component startup and shutdown.
-``runtime/training_job/`` owns durable job markers and commit-gated weight
-publication; concrete training integrations retain checkpoint and tensor I/O.
+``runtime/training_job/`` owns job identity/replay, train/checkpoint ordering,
+durable markers and commit-gated publication; concrete training integrations
+retain admission, model operations, checkpoint and tensor I/O.
 ``train/slime_backend/driver.py`` supplies Slime component definitions;
 ``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.
 

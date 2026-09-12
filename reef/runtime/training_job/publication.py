@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
 from reef.runtime.training_job.marker import read_marker, transition_marker, write_marker
+from reef.runtime.training_job.state import TrainingJobState
 
 
 class WeightPublisher(Protocol):
@@ -56,7 +57,15 @@ class TrainingPublication:
     def __init__(self, path: Path | None, publisher: WeightPublisher) -> None:
         self._path = path
         self._publisher = publisher
-        self.phase = "serving"
+        self.state = TrainingJobState()
+
+    @property
+    def phase(self) -> str:
+        return self.state.phase
+
+    @phase.setter
+    def phase(self, phase: str) -> None:
+        self.state.phase = phase
 
     def _require_path(self) -> Path:
         if self._path is None:

@@ -410,5 +410,6 @@ def test_training_publication_import_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher"
+        "from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher; "
+        "from reef.runtime.training_job.execution import TrainingExecution, TrainingJobBackend"
     )

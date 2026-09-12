@@ -440,9 +440,40 @@ Reef owner.
 Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
 Checkpoint production and backend-specific startup recovery remain in the
-Slime bridge. Independent component restarts, training-step orchestration and
-validation of additional real backend combinations remain in
+Slime adapters. Independent component restarts, migration of concrete inference
+control and validation of additional real backend combinations remain in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+
+Training-step coordination
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``reef.runtime.training_job.execution.TrainingExecution`` owns job identity,
+retry classification and the order of training and checkpoint recording. The
+Slime bridge invokes it under the same operation lock used by publication and
+shutdown. Execution and ``TrainingPublication`` share ``TrainingJobState`` for
+health reporting; recovery decisions always use the durable marker.
+
+``TrainingJobBackend.prepare`` performs admission, scoring and data packing
+before yielding a ``PreparedTrainingJob``. Its context holds the checkpoint
+reservation through the final marker write. It may return a stale or
+storage-blocked result without starting a job. Slime retains scenario/staleness
+admission, teacher scoring, tensorization and DP packing in this adapter.
+
+Reef records ``RUNNING`` before calling ``train``, then invokes
+``save_checkpoint`` and verifies the checkpoint directory. Training metrics and
+method telemetry are recorded together with ``CHECKPOINT`` in one durable write,
+so a crash cannot leave a replayable checkpoint without its training metrics.
+Slime's prepared job performs colocated offload and scenario activation, runs
+the optimizer, saves the actor/critic pair and updates its retention/scenario
+metadata. Neither prepared operation publishes inference weights.
+
+Preparation failure is retryable without a new job identity. Once ``RUNNING``
+is recorded, a training/save failure is ambiguous and requires operator
+recovery; automatic retry must not repeat a possible optimizer step. A
+checkpointed or completed job replays without preparing or training again.
+Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
+Job hashing, scenario/global checkpoint indexes and persisted marker fields
+remain compatible with existing deployments.
 
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
