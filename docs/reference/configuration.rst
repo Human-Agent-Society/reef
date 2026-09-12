@@ -34,6 +34,39 @@ a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
 log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
 
+Public service settings use the same argument parser for YAML and CLI values.
+Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
+CLI values override YAML values; omitted values use the setting's default.
+Run ``reef serve --help`` to see these options. Hyphenated names such as
+``--upstream-model`` and existing underscore names such as ``--upstream_model``
+are aliases, as are their dotted ``--reef.upstream_model`` forms. The last
+explicit CLI spelling of a setting wins. ``--recipe`` still selects a launcher
+profile; ``--reef.recipe`` overrides the deployment's recipe setting.
+
+String settings retain their text: ``--upstream-model 00123`` remains ``00123``.
+Numeric and boolean settings are parsed according to their declared type;
+invalid values fail before model downloads or process startup. Booleans accept
+an explicit value or a bare flag; a negative flag can disable a YAML setting:
+
+.. code:: bash
+
+   reef serve -c stack.yaml --port 9000 --no-allow-implicit-scenario-creation
+
+List and object options take one quoted JSON/YAML value. Empty lists and
+objects are preserved, and an explicit container replaces the YAML value:
+
+.. code:: bash
+
+   reef serve -c stack.yaml --tokens '[]' \
+     --inference-backend-config '{"tool_call_parser": "qwen25"}'
+
+The parsed public values are also supplied to service commands and the HTTP
+child's config. Existing empty/null service values retain their defaulting
+behavior. ``reef.token`` and ``reef.tokens`` remain distinct inputs whose
+credentials are combined. Recipe-owned fields and arbitrary custom-stack
+overrides keep their existing parsers and YAML coercion; this change does not
+replace the ``services`` layout or introduce a new configuration format.
+
 If a service exits before readiness or exceeds its ``ready_timeout``, Reef
 stops the stack and reports the service, the failure reason, and the local
 log directory. An exited service's message includes its exit code. CLI

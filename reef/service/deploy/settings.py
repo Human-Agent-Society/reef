@@ -11,14 +11,23 @@ orchestrator that starts the surrounding stack lives in
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 from reef.service.cors import console_origins
+from reef.service.deploy.arguments import (
+    ConfigArgument,
+    ConfigArgumentParser,
+    config_arguments,
+    config_metadata,
+    config_option,
+)
 from reef.service.deploy.config import config_value, interpolate_config, load_config
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
@@ -35,22 +44,26 @@ The Reef HTTP child is an internal service process configured from the same
 YAML file. Public startup is always config-driven.
 
 Config overrides:
-  Any ``--key value`` pair not recognized as a flag is applied as a config
-  override. Bare keys target the ``reef`` section; use dotted notation for
-  other sections. Values are YAML-coerced (ints, bools, etc.).
+  Public settings below share type conversion with YAML. Explicit CLI
+  values override YAML; omitted settings use the dataclass defaults.
+  Both --upstream-model and legacy --upstream_model spellings work.
+  Lists and objects take one quoted JSON/YAML value, including [] or {}.
+  Recipe and custom-stack overrides retain their existing YAML coercion:
+  bare keys target ``reef``; dotted keys target other sections.
 
   Examples:
-    reef serve --model_path Qwen2.5-1.5B-Instruct
+    reef serve -c stack.yaml --model-path Qwen/Qwen2.5-1.5B-Instruct
     reef serve -c path/to/local-sglang.yaml --port 9000
     reef serve --training.checkpoint_dir /tmp/ckpt
 """
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, service_arguments: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="reef serve",
         description=_DESCRIPTION,
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        allow_abbrev=False,
     )
     parser.add_argument(
         "-c",
@@ -58,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Config file path, relative to the working directory (default: $REEF_CONFIG or ./reef.yaml).",
     )
+    if service_arguments:
+        for argument in service_config_arguments():
+            argument.add_to(parser)
     return parser
 
 
@@ -71,50 +87,64 @@ class ServiceSettings:
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
     """
 
-    recipe: str
-    host: str = "0.0.0.0"
-    port: int = 8900
-    tokens: tuple[str, ...] = ()
-    console_origins: tuple[str, ...] = ()
-    ray_address: str | None = None
-    ray_namespace: str = "reef"
-    ray_actor_name: str = "reef-train-bridge"
-    inference_url: str | None = None
-    model_path: str | None = None
+    recipe: str = config_option(help="Recipe implementation or named deployment preset (the launcher owns --recipe).")
+    host: str = config_option("0.0.0.0", help="HTTP bind address.")
+    port: int = config_option(8900, help="HTTP bind port.")
+    tokens: tuple[str, ...] = config_option((), help="Accepted bearer tokens as a JSON/YAML list.")
+    console_origins: tuple[str, ...] = config_option((), help="Allowed console origins as a JSON/YAML list.")
+    ray_address: str | None = config_option(None, help="Ray cluster address.")
+    ray_namespace: str = config_option("reef", help="Ray namespace for the training bridge.")
+    ray_actor_name: str = config_option("reef-train-bridge", help="Training bridge actor name.")
+    inference_url: str | None = config_option(None, help="Local inference endpoint.")
+    model_path: str | None = config_option(None, help="Local model directory or Hugging Face repository ID.")
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
     #: evaluation episodes from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
-    upstream_url: str | None = None
-    upstream_api_key: str | None = None
-    upstream_model: str | None = None
+    upstream_url: str | None = config_option(None, help="Upstream provider base URL.")
+    upstream_api_key: str | None = config_option(None, help="Upstream provider credential.")
+    upstream_model: str | None = config_option(None, help="Model name requested from the upstream provider.")
     #: The provider's API dialect: ``openai`` (default), ``responses``, or ``anthropic``.
-    upstream_api: str = "openai"
-    inference_timeout_s: float = 300.0
-    train_timeout_s: float | None = None
-    inference_backend_factory: str | None = None
-    inference_backend_config: Mapping[str, Any] = field(default_factory=dict)
-    inference_retry_initial_s: float = 0.05
-    inference_retry_max_s: float = 1.0
-    inference_retry_timeout_s: float = 300.0
-    artifact_repository: str = ".reef/artifacts.git"
-    artifact_work_dir: str = ".reef/artifact-work"
-    artifact_cache_dir: str = ".reef/artifact-cache"
-    agent_record_dir: str = ".reef/agent-record"
-    record_backend: str = "sqlite"
-    record_database_url: str | None = field(default=None, repr=False)
-    record_database_schema: str = "reef_records"
-    agent_record_retention_days: float = 7.0
-    agent_record_retention_max_bytes: int = 20 * 1024**3
-    allow_implicit_scenario_creation: bool = True
+    upstream_api: str = config_option("openai", help="Provider API dialect.")
+    inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
+    train_timeout_s: float | None = config_option(None, help="Training request timeout in seconds.")
+    inference_backend_factory: str | None = config_option(None, help="Dotted inference backend factory.")
+    inference_backend_config: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Inference backend options as a JSON/YAML object.")
+    )
+    inference_retry_initial_s: float = config_option(0.05, help="Initial inference retry delay in seconds.")
+    inference_retry_max_s: float = config_option(1.0, help="Maximum inference retry delay in seconds.")
+    inference_retry_timeout_s: float = config_option(
+        300.0, help="Retry deadline in seconds; defaults to the inference timeout."
+    )
+    artifact_repository: str = config_option(".reef/artifacts.git", help="Artifact repository location.")
+    artifact_work_dir: str = config_option(".reef/artifact-work", help="Artifact working directory.")
+    artifact_cache_dir: str = config_option(".reef/artifact-cache", help="Artifact cache directory.")
+    agent_record_dir: str = config_option(".reef/agent-record", help="Agent record directory.")
+    record_backend: str = config_option("sqlite", help="Record storage backend.")
+    record_database_url: str | None = field(
+        default=None, repr=False, metadata=config_metadata("PostgreSQL connection URL.")
+    )
+    record_database_schema: str = config_option("reef_records", help="PostgreSQL schema.")
+    agent_record_retention_days: float = config_option(7.0, help="Record retention in days.")
+    agent_record_retention_max_bytes: int = config_option(20 * 1024**3, help="Maximum retained record bytes.")
+    allow_implicit_scenario_creation: bool = config_option(True, help="Allow requests to create scenarios implicitly.")
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
-    wandb_config: Mapping[str, Any] = field(default_factory=dict)
-    training_settings: Mapping[str, Any] = field(default_factory=dict)
+    wandb_config: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("W&B settings as a JSON/YAML object.", path=("observability", "wandb")),
+    )
+    training_settings: Mapping[str, Any] = field(
+        default_factory=dict, metadata=config_metadata("Training settings as a JSON/YAML object.", path=("training",))
+    )
     #: Optional pre-publication checkpoint evaluator and selection plugin.
-    evaluation_settings: Mapping[str, Any] | None = None
+    evaluation_settings: Mapping[str, Any] | None = field(
+        default=None,
+        metadata=config_metadata("Candidate evaluation settings as a JSON/YAML object.", path=("evaluation",)),
+    )
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
@@ -148,20 +178,6 @@ def _config_service_mapping(config: Mapping[str, Any], *path: str) -> Mapping[st
     return {} if value is None else value
 
 
-def _config_optional_mapping(config: Mapping[str, Any], *path: str) -> Mapping[str, Any] | None:
-    """Return an optional object while rejecting a present non-object value."""
-    value: Any = config
-    for key in path:
-        if not isinstance(value, Mapping) or key not in value:
-            return None
-        value = value[key]
-    if value is None:
-        return None
-    if not isinstance(value, Mapping):
-        raise ValueError(f"{'.'.join(path)} must be an object")
-    return value
-
-
 def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
     """The flat ``reef`` section with per-value interpolation applied."""
     section = config.get("reef")
@@ -184,6 +200,84 @@ def service_owned_keys() -> frozenset[str]:
         for settings_field in dataclasses.fields(ServiceSettings)
         if settings_field.name not in non_reef_fields
     ) | frozenset(SERVICE_CONFIG_ALIASES)
+
+
+@lru_cache(maxsize=1)
+def service_config_arguments() -> tuple[ConfigArgument, ...]:
+    """Public settings derive their types and defaults from ServiceSettings."""
+    return (
+        *config_arguments(ServiceSettings),
+        ConfigArgument("token", ("reef", "token"), "str", True, None, "One accepted bearer token."),
+    )
+
+
+def service_override(key: str, value: str) -> tuple[ConfigArgument, str] | None:
+    """Identify a declared option, retaining legacy names and dotted paths."""
+    flag = f"--{key}"
+    for argument in service_config_arguments():
+        if flag in argument.flags:
+            return argument, value
+        if flag in argument.negative_flags:
+            return argument, "false"
+    return None
+
+
+def _argument_value(config: Mapping[str, Any], argument: ConfigArgument) -> Any:
+    node: Any = config
+    for key in argument.path:
+        if not isinstance(node, Mapping):
+            raise ValueError(f"{'.'.join(argument.path[:-1])} must be an object")
+        node = node.get(key)
+        if node is None:
+            return None
+    if isinstance(node, str):
+        return os.path.expanduser(interpolate_config(config, node.strip())) if node.strip() else None
+    if argument.kind == "strings" and isinstance(node, (list, tuple)):
+        return [interpolate_config(config, item) if isinstance(item, str) else item for item in node]
+    return node
+
+
+def parse_service_arguments(
+    config: Mapping[str, Any], *, cli_paths: frozenset[tuple[str, ...]] = frozenset()
+) -> dict[str, Any]:
+    """Parse YAML arguments followed by explicit CLI values with one parser.
+
+    The caller has already replaced overridden environment references and
+    expanded the effective config. CLI paths identify the values to append
+    last; containers are encoded as objects, never flattened into shell text.
+    """
+    parser = ConfigArgumentParser(prog="reef serve", add_help=False, allow_abbrev=False)
+    yaml_args: list[str] = []
+    cli_args: list[str] = []
+    for argument in service_config_arguments():
+        argument.add_to(parser)
+        value = _argument_value(config, argument)
+        if value is not None:
+            target = cli_args if argument.path in cli_paths else yaml_args
+            target.append(f"{argument.flags[0]}={argument.encode(value)}")
+    values = vars(parser.parse_args([*yaml_args, *cli_args]))
+    return {argument.name: values[argument.destination] for argument in service_config_arguments()}
+
+
+def normalize_service_config(
+    config: Mapping[str, Any], *, cli_paths: frozenset[tuple[str, ...]] = frozenset()
+) -> dict[str, Any]:
+    """Validate explicit public settings and pass the same values to children.
+
+    Do not add defaults to the deployment mapping: recipes must still know
+    which of their fields the operator supplied, and custom stacks may have
+    no Reef HTTP child at all.
+    """
+    values = parse_service_arguments(config, cli_paths=cli_paths)
+    normalized = copy.deepcopy(dict(config))
+    for argument in service_config_arguments():
+        if _argument_value(config, argument) is None:
+            continue
+        node = normalized
+        for key in argument.path[:-1]:
+            node = node[key]
+        node[argument.path[-1]] = values[argument.name]
+    return normalized
 
 
 def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
@@ -210,103 +304,17 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens))
 
 
-def _console_origins(config: Mapping[str, Any]) -> tuple[str, ...]:
-    listed = _config_service_mapping(config, "reef").get("console_origins", ())
-    if isinstance(listed, str) or not isinstance(listed, Sequence):
-        raise ValueError("reef.console_origins must be a list of origins")
-    if not all(isinstance(value, str) for value in listed):
-        raise ValueError("reef.console_origins must contain only origins")
-    return console_origins(tuple(interpolate_config(config, value) for value in listed))
-
-
 def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     """Translate the config's ``reef`` section into HTTP service settings."""
-    selected_recipe = _config_service_value(config, "reef", "recipe")
-    if not isinstance(selected_recipe, str) or not selected_recipe:
+    values = parse_service_arguments(config)
+    if not isinstance(values["recipe"], str) or not values["recipe"]:
         raise ValueError("config must declare a non-empty reef.recipe")
-    inference_timeout_s = float(_config_service_value(config, "reef", "inference_timeout_s", default="300"))
-    train_timeout_raw = _config_service_value(config, "reef", "train_timeout_s")
-    train_timeout_s = float(train_timeout_raw) if train_timeout_raw is not None else None
-    return ServiceSettings(
-        host=_config_service_value(config, "reef", "host", default="0.0.0.0"),
-        port=int(_config_service_value(config, "reef", "port", default="8900")),
-        tokens=_service_tokens(config),
-        console_origins=_console_origins(config),
-        recipe=selected_recipe,
-        ray_address=_config_service_value(config, "reef", "ray_address"),
-        ray_namespace=_config_service_value(config, "reef", "ray_namespace", default="reef"),
-        ray_actor_name=_config_service_value(
-            config,
-            "reef",
-            "ray_actor_name",
-            default="reef-train-bridge",
-        ),
-        inference_url=_config_service_value(config, "reef", "inference_url"),
-        model_path=_config_service_value(config, "reef", "model_path"),
-        upstream_url=_config_service_value(config, "reef", "upstream_url"),
-        upstream_api_key=_config_service_value(config, "reef", "upstream_api_key"),
-        upstream_model=_config_service_value(config, "reef", "upstream_model"),
-        upstream_api=_config_service_value(config, "reef", "upstream_api", default="openai"),
-        inference_timeout_s=inference_timeout_s,
-        train_timeout_s=train_timeout_s,
-        inference_backend_factory=_config_service_value(
-            config,
-            "reef",
-            "inference_backend_factory",
-        ),
-        inference_backend_config=_config_service_mapping(
-            config,
-            "reef",
-            "inference_backend_config",
-        ),
-        inference_retry_initial_s=float(
-            _config_service_value(config, "reef", "inference_retry_initial_s", default="0.05")
-        ),
-        inference_retry_max_s=float(_config_service_value(config, "reef", "inference_retry_max_s", default="1")),
-        inference_retry_timeout_s=float(
-            _config_service_value(config, "reef", "inference_retry_timeout_s", default=inference_timeout_s)
-        ),
-        artifact_repository=_config_service_value(
-            config,
-            "reef",
-            "artifact_repository",
-            default=".reef/artifacts.git",
-        ),
-        artifact_work_dir=_config_service_value(
-            config,
-            "reef",
-            "artifact_work_dir",
-            default=".reef/artifact-work",
-        ),
-        artifact_cache_dir=_config_service_value(
-            config,
-            "reef",
-            "artifact_cache_dir",
-            default=".reef/artifact-cache",
-        ),
-        agent_record_dir=_config_service_value(
-            config,
-            "reef",
-            "agent_record_dir",
-            default=".reef/agent-record",
-        ),
-        agent_record_retention_days=float(
-            _config_service_value(config, "reef", "agent_record_retention_days", default=7.0)
-        ),
-        record_backend=_config_service_value(config, "reef", "record_backend", default="sqlite"),
-        record_database_url=_config_service_value(config, "reef", "record_database_url"),
-        record_database_schema=_config_service_value(config, "reef", "record_database_schema", default="reef_records"),
-        agent_record_retention_max_bytes=int(
-            _config_service_value(config, "reef", "agent_record_retention_max_bytes", default=20 * 1024**3)
-        ),
-        allow_implicit_scenario_creation=bool(
-            _config_service_value(config, "reef", "allow_implicit_scenario_creation", default=True)
-        ),
-        wandb_config=_config_service_mapping(config, "observability", "wandb"),
-        training_settings=_config_service_mapping(config, "training"),
-        evaluation_settings=_config_optional_mapping(config, "evaluation"),
-        recipe_settings=_reef_section(config),
-    )
+    values["tokens"] = _service_tokens({"reef": {"token": values.pop("token"), "tokens": values["tokens"]}})
+    values["console_origins"] = console_origins(values["console_origins"])
+    # The legacy retry deadline follows the request timeout unless supplied.
+    if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
+        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
+    return ServiceSettings(**values, recipe_settings=_reef_section(config))
 
 
 def run_service(config_path: str | Path | None = None) -> int:
