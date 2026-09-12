@@ -1,4 +1,4 @@
-"""Guarantees of the tutorials/harness-requests demos, hermetic: the deployment builds in manual mode with the harness
+"""Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the harness
 requests defaults and the gate's selection set to always, the driver parses, the demo requests and the measurement's
 fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the README keeps
 the shape the rows land in."""
@@ -18,12 +18,13 @@ from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe import reefine
+from reef.recipe.reefine import ReefineRecipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TUTORIAL = REPO_ROOT / "tutorials" / "harness-requests"
+TUTORIAL = REPO_ROOT / "tutorials" / "reefine"
 METHOD_ROOT = REPO_ROOT / "tutorials" / "evolve-your-harness"
 RUNS_HEADER = (
     "| Demo | Model | Run | Date | Code | Proposal | Verdict | W / L / T | Pending | Promoted | Requires "
@@ -48,7 +49,7 @@ DROPPED_WORDS = (
 
 @pytest.fixture
 def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    """tutorials/harness-requests/run.py as a module, loaded from its path: it is a script, not a package."""
+    """tutorials/reefine/run.py as a module, loaded from its path: it is a script, not a package."""
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
     spec = importlib.util.spec_from_file_location("harness_requests_run", TUTORIAL / "run.py")
     if spec is None or spec.loader is None:
@@ -58,14 +59,8 @@ def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-def _clear_method_package() -> None:
-    # Every tutorial's method package is named ``harness``: a sibling's cached import must not win.
-    for name in [name for name in sys.modules if name == "harness" or name.startswith("harness.")]:
-        sys.modules.pop(name)
-
-
 def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_selection_always(monkeypatch) -> None:
-    """The demos' deployment is the other tutorial's with its state moved, training_mode manual (one step per
+    """The demos use the built-in recipe with tutorial-local state, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the gate's selection set to always, so a
     workflow change that ties every task still publishes and a code_extension still waits."""
     from reef.recipe.registry import build_named_recipe
@@ -85,30 +80,29 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     assert config["data"]["training_mode"] == "manual"
     assert section["tasks"] == load_config(METHOD_ROOT / "configs" / "deployment.yaml")["evolution"]["tasks"]
     assert [service["name"] for service in config["services"]] == ["reef"]
-    method_root = METHOD_ROOT
     module_name = section["propose"].partition(":")[0]
+    assert module_name == "reef.recipe.reefine.evolution"
     spec = importlib.util.find_spec(module_name)
     assert spec is not None
-    assert Path(spec.origin).resolve() == (method_root / "harness" / "evolution.py").resolve()
+    # The selected module belongs to the active Reef installation, including a wheel outside the checkout.
+    assert Path(spec.origin).resolve() == Path(reefine.__file__).with_name("evolution.py").resolve()
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
-        assert config["reef"][key].startswith("tutorials/harness-requests/work/")
-    assert config["run_dir"].startswith("tutorials/harness-requests/work/")
-    assert section["step_record_dir"].startswith("tutorials/harness-requests/work/")
+        assert config["reef"][key].startswith("tutorials/reefine/work/")
+    assert config["run_dir"].startswith("tutorials/reefine/work/")
+    assert section["step_record_dir"].startswith("tutorials/reefine/work/")
     # The proposal inbox defaults to .reef/proposals under the service's directory, outside the run's state.
-    assert section["proposals_dir"].startswith("tutorials/harness-requests/work/")
+    assert section["proposals_dir"].startswith("tutorials/reefine/work/")
     assert config["reef"]["port"] == 8901 and config["reef"]["token"] == "reef-local"
 
-    _clear_method_package()
-    monkeypatch.syspath_prepend(str(method_root))
     service = service_config_from_mapping(config)
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(TUTORIAL / "configs")},
         default_runtime=_upstream_runtime(service),
     )
-    assert isinstance(built, CordisRecipe) and built.adapter == "pi"
+    assert isinstance(built, ReefineRecipe) and built.adapter == "pi"
     assert built.review_kinds == ("code_extension",)
-    # Manual mode needs a proposer that names requests, which the other tutorial's does; the build refuses otherwise.
+    # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
     assert built.candidate_plugin is BackendAlwaysSelectPlugin
     assert built.model_binding().model == "provider/model-a"
@@ -118,7 +112,6 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
         "reef-requests",
         "reef-pi-extension-api",
     ]
-    _clear_method_package()
 
 
 def test_run_py_help_names_the_modes() -> None:
@@ -332,7 +325,7 @@ def test_the_readme_keeps_the_runs_table_shape_and_the_docs_words() -> None:
 
 def test_the_tutorial_is_listed_beside_the_other() -> None:
     listing = (REPO_ROOT / "tutorials" / "README.md").read_text(encoding="utf-8")
-    assert "harness-requests/README.md" in listing
+    assert "reefine/README.md" in listing
     for name in (
         "run.sh",
         "run.py",
@@ -348,9 +341,7 @@ def test_the_tutorial_is_listed_beside_the_other() -> None:
 def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     """run.sh exports REEF_PROPOSER_TIMEOUT_S because the method package's defaults (60 s for a failure step,
     120 s for a request) are short of what a local 26B model needs; unset, the defaults stand."""
-    _clear_method_package()
-    monkeypatch.syspath_prepend(str(METHOD_ROOT))
-    from harness import evolution
+    from reef.recipe.reefine import evolution
 
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     assert evolution._timeout_s(120.0) == 120.0
@@ -367,4 +358,3 @@ def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
     assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
     assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh
-    _clear_method_package()

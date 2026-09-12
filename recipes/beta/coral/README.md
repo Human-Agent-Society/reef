@@ -1,5 +1,13 @@
 # CORAL test-time training through Reef and Slime
 
+**Status: beta.** CORAL TTT and its `coral_demo` example remain under
+`recipes/beta/coral/` until complete, reproducible learning results are
+published. The integration and smoke tests below validate the wiring; they
+do not establish learning performance. See
+[issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this
+classification and [issue #3](https://github.com/Human-Agent-Society/reef/issues/3)
+for the experiment.
+
 Runs a real CORAL task with fully attributable inference: CORAL's own runtime
 (agent worktrees, gateway, grader daemon) drives coding-agent CLIs whose every
 call flows through Reef, evaluator scores return as training data, weights

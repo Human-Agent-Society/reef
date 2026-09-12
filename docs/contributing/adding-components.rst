@@ -7,8 +7,9 @@ owner, then use the matching playbook below.
 Core and external extensions
 ----------------------------
 
-Recipes and learning methods are external packages selected by dotted
-reference; Reef does not bundle or register them. Changes to shared runtime or
+Reefine is the built-in harness refinement recipe in ``reef/recipe/reefine/``.
+Other recipes and learning methods are external packages selected by dotted
+reference; Reef does not import those packages at boot. Changes to shared runtime or
 training machinery start with an `RFC issue
 <https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
 A new top-level package, persisted format, wire contract, or incompatible

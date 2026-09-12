@@ -55,8 +55,10 @@ def _method(monkeypatch: pytest.MonkeyPatch, module: str) -> ModuleType:
     return importlib.import_module(f"harness.{module}")
 
 
-@pytest.fixture
-def evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+@pytest.fixture(params=["tutorial", "builtin"])
+def evolution(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> ModuleType:
+    if request.param == "builtin":
+        return importlib.import_module("reef.recipe.reefine.evolution")
     return _method(monkeypatch, "evolution")
 
 

@@ -8,7 +8,8 @@ Choose a destination
 --------------------
 
 ``reef/`` holds every shared mechanism, including the harness evolution engine
-at ``reef/train/cordis_backend/``. Paper-backed methods live in separate
+at ``reef/train/cordis_backend/``. The built-in Reefine recipe lives under
+``reef/recipe/reefine/``. Paper-backed methods live in separate
 packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``skillclaw``)
 with that method's recipe, processor, step preparer, and, for weight methods,
 the ``slime/`` subpackage only the training plane imports. Nothing under
@@ -76,8 +77,8 @@ import a concrete integration.
 | ``reef/scenario/``   | scenario binding, commit ordering,                       | training algorithms, repository            |
 |                      | recovery, and lifecycle                                  | implementations                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/recipe/``     | the contract a method implements, dotted                 | any particular method                      |
-|                      | class resolution, and runtime instance binding           |                                            |
+| ``reef/recipe/``     | the contract a method implements, dotted                 | external cookbook methods                  |
+|                      | resolution, runtime binding, and built-in Reefine        |                                            |
 +----------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/train/``      | the trainer loop, processor engines, batch               | HTTP endpoints, deployment                 |
 |                      | types, backend integrations                              | configuration parsing                      |

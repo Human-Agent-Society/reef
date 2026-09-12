@@ -224,16 +224,19 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
 [教程](tutorials/evolve-your-harness/README.md)。
 
-要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [harness requests 教程](tutorials/harness-requests/README.md)。
+要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [Reefine 教程](tutorials/reefine/README.md)。
+
+Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --model ollama/gemma4:26b` 即可启动。
 
 
 ## Recipes 与示例
 
-请根据工作负载可提供的反馈和需要更新的 artifact 选择 recipe。这些实现位于本仓库的
+请根据工作负载可提供的反馈和需要更新的 artifact 选择 recipe。Reefine 为内置实现；其他实现位于本仓库的
 `recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
 
 | 工作负载 | Recipe 指南 | 更新的 artifact | 示例与结果 |
 |---|---|---|---|
+| 用自然语言提出编程 Agent 的改进需求 | [Reefine](docs/user-guide/recipes/reefine.rst) | Harness；无需训练 GPU | [教程](tutorials/reefine/README.md) |
 | 由测试或校验器打分的任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | 模型权重 | [示例](recipes/sao/examples/sao/README.md) · [结果](recipes/sao/examples/sao/README.md#results) |
 | 具备可用的下一状态信号、但无显式上报的 Agent 流量 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | 模型权重 | [示例](recipes/openclawrl/examples/openclawrl/README.md) |
 | 对同一问题的多次带分尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 模型权重 | [示例](recipes/tttd/examples/tttd/README.md) · [结果](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |

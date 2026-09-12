@@ -1,26 +1,21 @@
-# Run from the repository root:
-# reef serve -c tutorials/harness-requests/configs/deployment.yaml
-# The pi deployment the harness requests demos run on: the deployment of
-# tutorials/evolve-your-harness with its state under tutorials/harness-requests/work/,
-# training_mode manual and the gate's selection set to always. ./run.sh starts it,
-# installs the served tree and runs run.py <demo>.
+# Built-in Reefine: reef serve --recipe reefine --model ollama/gemma4:26b
 schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901
   token: reef-local
-  run-dir: tutorials/harness-requests/work/deployment/stack
+  run-dir: .reef/reefine/stack
 
 recipe:
-  implementation: reef.recipe.cordis:CordisRecipe
+  implementation: reef.recipe.reefine:ReefineRecipe
   # The recipe uses the upstream runtime's model for evaluation as well as serving.
 
   config:
     evolution:
       adapter: pi
-      # The other tutorial's method package: its propose answers a request with any kind pi renders.
-      propose: tutorials.evolve-your-harness.harness.evolution:propose
-      evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
+      # The built-in proposer answers a request with any kind pi renders.
+      propose: reef.recipe.reefine.evolution:propose
+      evaluate: reef.recipe.reefine.evolution:evaluate
       # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
@@ -31,9 +26,9 @@ recipe:
       # comparison would reject; the demo publishes on any verdict and records it (RFC #308's tasks are the fix).
       selection: always
       # Every step's proposer calls, parsed proposal and gate episodes, so a row can be read back.
-      step_record_dir: tutorials/harness-requests/work/deployment/steps
+      step_record_dir: .reef/reefine/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
-      proposals_dir: tutorials/harness-requests/work/deployment/proposals
+      proposals_dir: .reef/reefine/proposals
       # No binary: at startup reef installs the descriptor's pinned pi under
       # ~/.local/share/reef-harness/pi, shared with the client install script.
       # Set evolution.binary to a path to use an install of your own instead.
@@ -88,7 +83,7 @@ inference:
   upstream-model: ${REEF_UPSTREAM_MODEL:?}
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}
 storage:
-  agent-record-dir: tutorials/harness-requests/work/deployment/agent-record
-  artifact-repository: tutorials/harness-requests/work/deployment/artifacts.git
-  artifact-work-dir: tutorials/harness-requests/work/deployment/artifact-work
-  artifact-cache-dir: tutorials/harness-requests/work/deployment/artifact-cache
+  agent-record-dir: .reef/reefine/agent-record
+  artifact-repository: .reef/reefine/artifacts.git
+  artifact-work-dir: .reef/reefine/artifact-work
+  artifact-cache-dir: .reef/reefine/artifact-cache
