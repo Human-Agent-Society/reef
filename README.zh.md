@@ -229,21 +229,21 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 ## Recipes 与示例
 
-请根据工作负载可提供的反馈和需要更新的 artifact 选择 recipe。这些实现位于本仓库的
-`recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
+根据工作负载的**任务类型**，以及希望**进化的对象**（模型权重或 Agent 的 harness）来选择
+recipe。进化模型权重的 recipe 需要 GPU 训练栈；harness recipe 只需要一个模型端点。下表中每个
+recipe 链接到其指南，每个已测 benchmark 链接到其结果页；[Recipe 目录](https://reefinfra.ai/docs/user-guide/recipes/)
+还列出了每个 recipe 的代码和示例。这些实现位于本仓库的 `recipes/` cookbook 中，通过带点号的
+类路径指定，不随 Reef wheel 发布。
 
-| 工作负载 | Recipe 指南 | 更新的 artifact | 示例与结果 |
-|---|---|---|---|
-| 由测试或校验器打分的任务流 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | 模型权重 | [示例](recipes/sao/examples/sao/README.md) · [结果](recipes/sao/examples/sao/README.md#results) |
-| 具备可用的下一状态信号、但无显式上报的 Agent 流量 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | 模型权重 | [示例](recipes/openclawrl/examples/openclawrl/README.md) |
-| 对同一问题的多次带分尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 模型权重 | [示例](recipes/tttd/examples/tttd/README.md) · [结果](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |
-| 带分数的代码搜索：引导模型可训练，执行器冻结 | [Guidance-TTT / TTTD](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | 引导模型权重 | [示例](recipes/tttd/examples/guidance_ttt/README.md) · [结果](recipes/tttd/examples/guidance_ttt/results/README.md) |
-| 使用 Agent 反馈进化其技能池 | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | Harness 技能；无需训练 GPU | [示例](recipes/skillclaw/README.md) |
-| 使用分数和交互记录改进提示词与指令 | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Harness；模型权重不变 | [示例与结果](recipes/gepa/examples/aime/README.md) |
+| 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
+|---|---|---|---|---|
+| 科学发现 | 一个难题反复尝试，有可度量的目标 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md)、[CORAL TTT](recipes/beta/coral/README.md)（beta） | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充（n = 26、32）](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。拟采用：CORAL 任务 |
+| 任务流上的持续学习 | 独立任务组成的任务流，每个由校验器打分 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[Terminal-Bench 30 任务子集](recipes/meta_harness/RESULTS.md)。拟采用：SWE-bench stream、Terminal-Bench stream、Continual Learning Bench、CEO-Bench |
+| 从使用中学习 | 真实交互，无显式分数或反馈延迟到达 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | 已测：[OpenClaw-RL 模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)。拟采用：暂无；这是最缺 benchmark 的一类 |
 
-如果想快速了解反馈、候选修改和发布流程，可以从[编程 harness
-教程](tutorials/evolve-your-harness/README.md)开始。每个结果页面都会说明任务、评估设置、
-测量结果和局限性。
+[`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
+反馈、候选修改和发布流程，可以从[编程 harness 教程](tutorials/evolve-your-harness/README.md)开始。
+每个结果页面都会说明任务、评估设置、测量结果和局限性。
 
 
 ## 架构
@@ -264,7 +264,7 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 - [编写 recipe](https://reefinfra.ai/docs/developer-guide/write-a-recipe/)：配置 Reef 如何处理数据、产出更新
 - [进化你的 harness](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)：不训练权重，改进 harness
 - [进化你的模型](https://reefinfra.ai/docs/user-guide/evolve-your-model/)：配置并运维训练部署
-- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：本仓库 cookbook 实现的进一步说明
+- [Recipes](https://reefinfra.ai/docs/user-guide/recipes/)：按任务类型整理的 cookbook recipe 目录，以及各自测过的 benchmark
 - [核心循环](https://reefinfra.ai/docs/getting-started/core-loop/)：Reef 的核心循环
 - [术语表](https://reefinfra.ai/docs/reference/glossary/)：文档所用术语的解释
 
