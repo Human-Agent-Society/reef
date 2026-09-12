@@ -1540,7 +1540,7 @@ def test_main_passes_release_to_setup_only_when_named(tmp_path) -> None:
 
 
 class _DoctorReef:
-    """A reef whose status route checks the bearer and whose catalog names one served head."""
+    """A reef that serves only the harness routes, checks the bearer on them, and names one served head."""
 
     def __init__(self, token: str, head: str) -> None:
         import http.server
@@ -1548,9 +1548,9 @@ class _DoctorReef:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
-                if self.path == "/reef/status":
-                    ok = self.headers.get("Authorization") == f"Bearer {token}"
-                    code, payload = (200, {"scenarios": {}}) if ok else (401, {"error": "invalid service token"})
+                # Only the harness routes, the ones the API platform exposes too; no service wide status.
+                if self.headers.get("Authorization") != f"Bearer {token}":
+                    code, payload = 401, {"error": "invalid service token"}
                 elif self.path == "/reef/harness/releases":
                     code, payload = 200, {"releases": [{"release_id": head, "pending": False}]}
                 else:

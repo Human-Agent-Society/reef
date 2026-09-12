@@ -935,6 +935,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     warning, a route error); this is the one place that runs them all and
     says which failed."""
     rows: list[tuple[bool, str, str]] = []
+    catalog: list[Mapping[str, Any]] | None = None
     try:
         import reef
 
@@ -951,15 +952,19 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     else:
         upstream = _strip_v1(upstream)
         token = _reef_token(adapter, compose_dir)
-        req = urllib.request.Request(f"{upstream}/reef/status", headers=_reef_headers(scenario, token))
+        # The release catalog, not /reef/status: every client of a harness can read it, direct or through the
+        # API platform, which does not expose the service wide status.
+        req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
         try:
-            with urllib.request.urlopen(req, timeout=10):
-                rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
+            with urllib.request.urlopen(req, timeout=10) as response:
+                listed = json.loads(response.read()).get("releases")
+            catalog = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
+            rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
         except urllib.error.HTTPError as exc:
             rows.append(
                 (False, "service", f"{upstream} answered {exc.code}: {exc.read().decode(errors='replace')[:120]}")
             )
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
@@ -984,23 +989,18 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
                 f"no {HARNESS_RELEASE_FILE} beside the tree; this tree did not come through the install",
             )
         )
-    elif upstream is not None and rows[1][0]:
-        try:
-            catalog = _catalog(upstream, scenario, adapter, _reef_token(adapter, compose_dir))
-        except SystemExit as exc:
-            rows.append((False, "release", f"installed {installed[:8]}; catalog unreadable: {exc.code}"))
+    elif catalog is not None:
+        head = next((row.get("release_id") for row in reversed(catalog) if not row.get("pending")), None)
+        if head == installed:
+            rows.append((True, "release", f"{installed[:8]} installed, the served head"))
         else:
-            head = next((row.get("release_id") for row in reversed(catalog) if not row.get("pending")), None)
-            if head == installed:
-                rows.append((True, "release", f"{installed[:8]} installed, the served head"))
-            else:
-                rows.append(
-                    (
-                        True,
-                        "release",
-                        f"{installed[:8]} installed; served head {str(head)[:8]}, the next session offers it",
-                    )
+            rows.append(
+                (
+                    True,
+                    "release",
+                    f"{installed[:8]} installed; served head {str(head)[:8]}, the next session offers it",
                 )
+            )
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
     for ok, label, value in rows:
