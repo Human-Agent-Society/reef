@@ -1,4 +1,4 @@
-# Examples
+# Recipes and examples
 
 Setup, once per example directory (installs the example's harness and its
 declared dependencies, including `reef-client` and, where used,
@@ -10,6 +10,112 @@ pip install -e .
 
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 (`run.py`).
+
+The catalog below groups recipes by the **task type** they serve and by
+**what they evolve**, model weights or the agent harness. Weight recipes need
+the GPU training stack, while harness recipes need only a model endpoint.
+Reefine ships with `reef-infra` and every other recipe here is a cookbook
+package. [Basic](#basic) is the record-only starting stack and stays outside
+the catalog, and [beta recipes](#beta-recipes) join it once they publish
+learning results. The root [README](../README.md#recipes-and-examples) and the
+[recipes guide](../docs/user-guide/recipes.rst) show the same catalog.
+
+## Scientific discovery
+
+One hard problem with a measurable objective, where the recipe makes repeated
+attempts and trains on those attempts at test time.
+
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [TTT-Discover on circle packing and Erdős minimum overlap](tttd/examples/tttd/README.md) |
+| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [Guidance-TTT on TriMul](tttd/examples/guidance_ttt/README.md) |
+
+[TTT-Discover](tttd/examples/tttd/README.md) separates a normal, service-agnostic rollout
+harness from its Reef adapter. It demonstrates grouped discovery rollouts,
+continuous evaluation, exact inference-to-report references, and
+paper-faithful PUCT state reuse. Its README keeps the formal circle-packing
+runs and an Erdős run, with the stored W&B history.
+
+[Guidance-TTT](tttd/examples/guidance_ttt/README.md) trains a summary-only Qwen guidance
+policy while a frozen external execution model writes verifier-scored
+programs. It demonstrates how to attach an execution model without adding it
+to Reef's training or inference-token capture path.
+
+## Continual learning on a task stream
+
+A stream of independent tasks that a verifier scores one by one, so the recipe
+learns from each score before the next task arrives.
+
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md) |
+| GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
+| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [Meta-Harness on Terminal-Bench](meta_harness/README.md) |
+
+[SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
+SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
+run in order by `run.py`, each driving six scored rollouts through Reef with a
+verifiable binary reward, and every scored rollout is one training step.
+
+[GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
+method package on the same mechanism: `propose` is one GEPA iteration - Pareto
+sample a parent from the method's own archive, reflect on one component with a
+stronger model over the served composition's failing traffic, and accept the
+child only if it beats its parent on the minibatch - and `selection` publishes
+only on a strict mean improvement over the full validation set. Nothing in it
+imports the upstream package. Its AIME example is the validation: the driver
+embeds the Reef service, runs the quickstart's 45 training problems through it
+three at a time, and seals the two 150-problem test passes against the retained
+official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
+run reflected from the same parents on the same problems and reached 46.67%, and
+its seed-1 run gained the official 12 points.
+
+[Meta-Harness](meta_harness/README.md) searches complete harness compositions
+using all retained candidates and scores. It selects strict mean-score
+improvements and commits the population with Reef's serving state. See the
+[Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
+
+## Learning from usage
+
+Real interaction where no one reports a score or the feedback arrives late, so
+the recipe reads the signal out of the traffic it already serves.
+
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
+| SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
+
+[OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
+personal-agent experiment as a reef-eval task stream: a simulated student brings
+72 GSM8K homework problems to a Hermes agent whose model calls go through
+reef, and the metric is the number of sessions before the agent's answers
+match the student's taste. The method (session correlation, PRM judging, the
+hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
+contains only the harness side.
+
+[SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
+reproduction as a method package on the same mechanism: `propose` is the
+sealed night (one decision per skill group plus the no-skill bucket) mapped
+to one composite mutation sequence, `selection: always` publishes every
+non skip night as the paper's ungated regime does, and the method ships its
+own delivery - a recipe surface that injects the served pool's catalog into
+every proxied request. The campaign driver embeds the Reef service, runs
+the frozen 60-task WildClawBench day in docker, pulls the published pool
+from `GET /reef/harness`, and seals rounds for the preregistered gain
+criterion carried verbatim from the sealed campaign. Its `harbor/` is one
+WildClawBench task vendored in the standard Harbor format (self-contained
+image, the benchmark's own programmatic grader), and `run.py solve` is the
+one-episode reef-eval smoke over it.
+
+[Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
+turns a plain-language request into a harness update. The served model
+proposes the change and the gate scores it, and code extensions wait for a
+promote before they run. `reef serve --recipe reefine` starts its profile
+without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
+records a bug-fix flow, a research loop, and which requests won the gate.
+
+## Basic
 
 [Basic](basic/) is everything on the core, record-only `recipe` — the
 deployment that learns nothing, and the smallest complete loop around it.
@@ -50,22 +156,14 @@ the verifier reward back at trial end (`harness/`), the loop written out
 `Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
 `external-provider.yaml` with local overrides and runs it.
 
-[SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
-SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
-run in order by `run.py`, each driving six scored rollouts through Reef with a
-verifiable binary reward, and every scored rollout is one training step. Its
-README keeps a comparison against GRPO(+DIS) at Qwen3-30B-A3B scale.
+## Beta recipes
 
-[TTT-Discover](tttd/examples/tttd/README.md) separates a normal, service-agnostic rollout
-harness from its Reef adapter. It demonstrates grouped discovery rollouts,
-continuous evaluation, exact inference-to-report references, and
-paper-faithful PUCT state reuse. Its README keeps the formal circle-packing
-runs and an Erdős run, with the stored W&B history.
-
-[Guidance-TTT](tttd/examples/guidance_ttt/README.md) trains a summary-only Qwen guidance
-policy while a frozen external execution model writes verifier-scored
-programs. It demonstrates how to attach an execution model without adding it
-to Reef's training or inference-token capture path.
+[CORAL TTT](beta/coral/README.md) and its
+[`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
+under `recipes/beta/coral/` until complete, reproducible learning results are
+published. Integration and smoke tests validate the wiring but do not
+establish learning performance. See the recipe's
+[validation instructions](beta/coral/README.md#verifying-without-gpus).
 
 [CORAL TTT](beta/coral/README.md) runs a
 [CORAL](https://github.com/Human-Agent-Society/CORAL) discovery task — parallel
@@ -77,62 +175,3 @@ sibling attempts of one parent commit train as one grouped relative-reward
 step (reusing the TTT-Discover preparer and loss family). Its example is a
 real CORAL task driven by CORAL's own runtime, plus a no-GPU smoke lane that
 runs the whole loop against the production Reef service with a canned model.
-
-[Harness-Evolve quickstart](../tutorials/evolve-your-harness/README.md) runs the smallest skill
-evolution on the harness evolution mechanism: the served model proposes one
-skill mutation over its own failing traffic, gated real episodes on three
-exact-answer coding tasks decide it, and the winning composition publishes
-for client pull via `GET /reef/harness`. Setup here is just
-`pip install reef-client`: the loop drives `reef_client` directly,
-no Harbor task or reef-eval.
-
-[GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
-method package on the same mechanism: `propose` is one GEPA iteration - Pareto
-sample a parent from the method's own archive, reflect on one component with a
-stronger model over the served composition's failing traffic, and accept the
-child only if it beats its parent on the minibatch - and `selection` publishes
-only on a strict mean improvement over the full validation set. Nothing in it
-imports the upstream package. Its AIME example is the validation: the driver
-embeds the Reef service, runs the quickstart's 45 training problems through it
-three at a time, and seals the two 150-problem test passes against the retained
-official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
-run reflected from the same parents on the same problems and reached 46.67%, and
-its seed-1 run gained the official 12 points.
-
-[Meta-Harness](meta_harness/README.md) searches complete harness compositions
-using all retained candidates and scores. It selects strict mean-score
-improvements and commits the population with Reef's serving state. See the
-[Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
-
-[SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
-reproduction as a method package on the same mechanism: `propose` is the
-sealed night (one decision per skill group plus the no-skill bucket) mapped
-to one composite mutation sequence, `selection: always` publishes every
-non skip night as the paper's ungated regime does, and the method ships its
-own delivery - a recipe surface that injects the served pool's catalog into
-every proxied request. The campaign driver embeds the Reef service, runs
-the frozen 60-task WildClawBench day in docker, pulls the published pool
-from `GET /reef/harness`, and seals rounds for the preregistered gain
-criterion carried verbatim from the sealed campaign. Its `harbor/` is one
-WildClawBench task vendored in the standard Harbor format (self-contained
-image, the benchmark's own programmatic grader), and `run.py solve` is the
-one-episode reef-eval smoke over it.
-
-[OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
-personal-agent experiment as a reef-eval task stream: a simulated student brings
-72 GSM8K homework problems to a Hermes agent whose model calls go through
-reef, and the metric is the number of sessions before the agent's answers
-match the student's taste. The method (session correlation, PRM judging, the
-hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
-contains only the harness side: the task stream, the Hermes agent wrapper,
-the student service, and the analysis scripts. Its README keeps the learning
-curve and training curves of a complete run.
-
-## Beta recipes
-
-[CORAL TTT](beta/coral/README.md) and its
-[`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
-under `recipes/beta/coral/` until complete, reproducible learning results are
-published. Integration and smoke tests validate the wiring; they do not
-establish learning performance. See the recipe's
-[validation instructions](beta/coral/README.md#verifying-without-gpus).
