@@ -109,7 +109,26 @@ The extension points those packages expose are in `Python API
 - Is it a value or error needed by unrelated layers without behavior attached?
   Put it in ``reef/core/``.
 - Does it own scenario state, commit ordering, recovery, or rollback? Put it in
-  ``reef/scenario/``.
+  ``reef/scenario/``. ``state.py`` defines the persisted ``CommitRecord``,
+  ``ScenarioSnapshot``, and ``RecordProgress`` values without storage behavior.
+  ``store.py`` defines the ``ScenarioStore`` and ``ScenarioStoreFactory`` abstract
+  bases; ``snapshot.py`` adapts snapshot values to artifact metadata.
+  ``ScenarioFactory`` receives a store factory from deployment assembly and
+  supplies an opened store to ``Scenario``. The scenario package never imports
+  ``reef/storage``. ``Dispatcher`` also requires an injected store factory and
+  never imports or chooses a concrete record backend.
+- Does it define shared record operations or retention limits? Put the contract
+  or value in ``reef/records.py``. It defines the ``RecordStore`` abstract base
+  without importing scenario coordination, training, or concrete adapters.
+  ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state;
+  ``ScenarioStoreFactory`` owns archival and retention.
+- Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
+  shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
+  schema, connections, transactions, and file maintenance. ``postgres.py`` supplies
+  PostgreSQL tables, pooled transactions, and retention. ``commit_log.py`` owns
+  the JSONL ``CommitLog`` and ``CommitLogScenarioStore``, which accepts any
+  ``RecordStore``. ``factory.py`` assembles SQLite or PostgreSQL records with
+  the commit log store. Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes? Put it in
   ``reef/artifact/``. If it decides how consumers activate those bytes, put
   that behavior in ``reef/surface/`` instead.

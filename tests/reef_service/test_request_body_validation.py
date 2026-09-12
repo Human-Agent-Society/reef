@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.service.wire import ReportPayload
+from reef.storage.factory import SQLiteScenarioStoreFactory
 
 HEADERS = {"x-reef-scenario": "body-validation"}
 NON_OBJECTS = ([], "text", 1, True, None)
@@ -19,7 +20,9 @@ NON_OBJECTS = ([], "text", 1, True, None)
 @pytest.mark.unit
 def test_object_routes_reject_non_object_bodies_with_400() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         try:
             json_headers = {**HEADERS, "Content-Type": "application/json"}
@@ -55,7 +58,9 @@ def test_report_payload_keeps_finite_scores() -> None:
 @pytest.mark.unit
 def test_report_route_answers_400_for_a_non_finite_score() -> None:
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         try:
             # 1e999 decodes to infinity, so the value reaches the wire contract itself.
@@ -77,7 +82,9 @@ def test_release_id_routes_reject_empty_and_whitespace_bodies_with_400() -> None
     """#228 — an empty release_id is a malformed request, not a missing release."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         try:
             for path in ("/reef/scenarios", "/reef/scenarios/x/rollback", "/reef/scenarios/x/promote"):
@@ -101,7 +108,9 @@ def test_create_scenario_strips_surrounding_whitespace_from_release_id() -> None
     """#228 — a supplied release_id is stripped before use, matching rollback/promote."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         try:
             # A whitespace-padded release id is stripped, so the lookup names "no-such-release",
@@ -125,7 +134,9 @@ def test_promote_route_rejects_non_object_body_with_400() -> None:
     """#228 — promote now shares the read_object path with the other JSON routes."""
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(build_default_dispatcher())))
+        client = TestClient(
+            TestServer(create_app(build_default_dispatcher(scenario_store_factory=SQLiteScenarioStoreFactory())))
+        )
         await client.start_server()
         try:
             for body in NON_OBJECTS:

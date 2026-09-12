@@ -33,6 +33,7 @@ from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
 from reef.service.deploy.settings import ServiceSettings
+from reef.storage.factory import SQLiteScenarioStoreFactory
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle, policy_batch
@@ -307,6 +308,7 @@ def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_pat
         Recipe(runtime=runtime),
         InMemoryRepositoryBackend.factory(initial),
         agent_record_dir=tmp_path / "records",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
     )
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
@@ -334,7 +336,11 @@ def test_dispatchers_close_their_runtimes_without_stopping_external_workers(tmp_
     for _ in range(2):
         executor = UniProcExecutor.from_workers((worker,), owned=False)
         runtime = ExecutorTrainingRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
-        dispatcher = Dispatcher(Recipe(runtime=runtime), InMemoryRepositoryBackend.factory(tmp_path))
+        dispatcher = Dispatcher(
+            Recipe(runtime=runtime),
+            InMemoryRepositoryBackend.factory(tmp_path),
+            scenario_store_factory=SQLiteScenarioStoreFactory(),
+        )
         try:
             executor.check_health()
         finally:
@@ -359,6 +365,7 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
         Recipe(runtime=runtime),
         InMemoryRepositoryBackend.factory(initial),
         agent_record_dir=tmp_path / "records",
+        scenario_store_factory=SQLiteScenarioStoreFactory(tmp_path / "records"),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     original_close = scenario.close

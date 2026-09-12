@@ -7,7 +7,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.sao import SAORecipe
 from reef.recipe import RecipeConfigError
-from reef.records import RecordStore
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 
 PLUGIN = "reef_service._candidate_evaluation_plugin"
@@ -53,7 +53,7 @@ def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
         runtime=runtime,
     )
 
-    trainer = recipe.build("math", RecordStore())
+    trainer = recipe.build("math", SQLiteRecordStore())
 
     assert trainer.candidate_evaluator is not None
     assert trainer.candidate_evaluator.scenario == "math"

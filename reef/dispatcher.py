@@ -8,7 +8,6 @@ handling lives in ``reef.service``; the dispatcher is transport-free.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import shutil
 import tempfile
@@ -39,6 +38,7 @@ from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
+from reef.scenario.store import ScenarioStoreFactory
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -148,6 +148,7 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        scenario_store_factory: ScenarioStoreFactory,
     ) -> None:
         self._recipe = recipe
         self._record_retention_lock = Lock()
@@ -157,6 +158,7 @@ class Dispatcher:
             backend_factory,
             local_artifact_dir=local_artifact_dir,
             agent_record_dir=agent_record_dir,
+            scenario_store_factory=scenario_store_factory,
             allow_implicit_creation=allow_implicit_creation,
             experiment_tracker=self._experiment_tracker,
         )
@@ -221,8 +223,7 @@ class Dispatcher:
     def prune_record_archives(self, retention: RecordRetention) -> int:
         """Apply deployment-wide retention without racing scenario file moves."""
         with self._record_retention_lock:
-            directory = self._registry.agent_record_dir
-            return 0 if directory is None else retention.prune(directory)
+            return self._registry.prune_records(retention)
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
         """Remove a scenario from this deployment and move its own state aside.
@@ -255,15 +256,7 @@ class Dispatcher:
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        moved: list[str] = []
-        record_dir = self._registry.agent_record_dir
-        if record_dir is not None:
-            destination = record_dir / "archived" / f"{hashlib.sha256(scenario.encode('utf-8')).hexdigest()}-{stamp}"
-            for path in self._registry.state_paths(scenario):
-                if path.exists():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(path), str(destination / path.name))
-                    moved.append(str(destination / path.name))
+        moved = list(self._registry.archive_store(scenario))
         for directory in self._recipe.scenario_state_dirs(scenario):
             if directory.exists():
                 destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
@@ -450,7 +443,7 @@ class Dispatcher:
         except Exception:
             logger.exception("training backend failed to describe experiment configuration")
             backend_config = None
-        run_segment, run_step = (0, 0) if current.commit_log is None else current.commit_log.training_run_position()
+        run_segment, run_step = current.store.training_run_position() if current.store.durable else (0, 0)
         return TrainingExperimentContext(
             scenario=current.name,
             recipe=self._recipe.name,
@@ -548,7 +541,7 @@ class Dispatcher:
             self._record_training_error(scenario, self._error_text(exc))
 
     def _reload_durable_local_scenario(self, scenario: str, current: Scenario) -> None:
-        if current.commit_log is None:
+        if not current.store.durable:
             return
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
@@ -929,6 +922,10 @@ class Dispatcher:
                 scenario.close()
             except BaseException as exc:  # noqa: PERF203 - every scenario must be torn down before the runtime.
                 errors.append(exc)
+        try:
+            self._registry.close_store_factory()
+        except BaseException as exc:
+            errors.append(exc)
         if self._recipe.runtime is not None:
             try:
                 self._recipe.runtime.shutdown()
@@ -948,6 +945,7 @@ def build_default_dispatcher(
     checkpoint_strategy: CheckpointStrategy | None = None,
     local_artifact_dir: Path | None = None,
     agent_record_dir: Path | None = None,
+    scenario_store_factory: ScenarioStoreFactory,
 ) -> Dispatcher:
     """Build a Dispatcher serving the core record-only ``recipe``.
 
@@ -955,7 +953,8 @@ def build_default_dispatcher(
     dispatcher. The recipe is the same base ``Recipe`` a deployment gets
     from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
-    provided.
+    provided. Record and commit storage must be supplied explicitly through
+    ``scenario_store_factory``; this helper does not select a record backend.
     """
     if backend_factory is None:
         root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
@@ -970,4 +969,5 @@ def build_default_dispatcher(
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         agent_record_dir=agent_record_dir,
+        scenario_store_factory=scenario_store_factory,
     )

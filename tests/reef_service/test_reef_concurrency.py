@@ -24,6 +24,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.storage.factory import SQLiteScenarioStoreFactory
 from reef.train.evaluation import SelectionDecision
 from reef.train.types import TrainStepResult
 
@@ -152,6 +153,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
         TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     pairs_per_thread = 4
     thread_count = 4
@@ -192,6 +194,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
         TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     original_prepare_commit = scenario.trainer.prepare_commit
@@ -222,6 +225,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         checkpoint_strategy=EveryNVersions(1),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     dispatcher.get_or_create_scenario("chat")
     commits_per_thread = 3
@@ -265,6 +269,7 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         checkpoint_strategy=EveryNVersions(1000),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     scenario = dispatcher.get_or_create_scenario("chat")
     repository = scenario.repository

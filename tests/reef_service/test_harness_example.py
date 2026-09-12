@@ -18,9 +18,9 @@ import yaml
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
-from reef.records import RecordStore
 from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.trainer import Trainer
 from reef.train.types import TraceSample
@@ -486,7 +486,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
 
 
 # -- the native variant: skills, tools, and hooks --------------------------
@@ -685,7 +685,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
         "answer-style",
     ]
     assert "upstream" not in yaml.safe_dump(list(built.seed))
-    assert isinstance(built.build("demo", RecordStore()), Trainer)  # loads the seed; no episodes
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
 
 
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
@@ -731,7 +731,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert built.build_surface("demo").harness.served_model == model_id
     # The person asks while it keeps learning from failures, so the tutorial proposer must take requests.
     assert built.training_mode == "hybrid"
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
     assert trainer.training_mode == "hybrid"
     trainer.close()

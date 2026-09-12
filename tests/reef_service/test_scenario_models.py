@@ -17,6 +17,7 @@ from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.executor.config import ExecutorSettings
 from reef.scenario.model_config import ScenarioModelConfig
+from reef.storage.factory import SQLiteScenarioStoreFactory
 from reef.train.cordis_backend import CordisRecipe, Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.types import TraceBatch, TraceSample
@@ -130,7 +131,11 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
     recipe = replace(make_recipe(platform, tmp_path), worker_executor=ExecutorSettings(backend=executor))
     initial = tmp_path / "initial"
     initial.mkdir()
-    dispatcher = Dispatcher(recipe, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"))
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
+    )
     try:
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
         artifact = Artifact(scenario.repository.require_current_artifact(), scenario.repository)
@@ -254,7 +259,11 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
         output = initial / path
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(content)
-    dispatcher = Dispatcher(recipe, InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"))
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
+    )
 
     async def run():
         client = TestClient(TestServer(create_app(dispatcher, tokens="deployment-secret")))
@@ -332,10 +341,14 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     records = tmp_path / "records"
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = make_recipe(platform, tmp_path)
-    first = Dispatcher(recipe, factory, agent_record_dir=records)
+    first = Dispatcher(
+        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
+    )
     first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
     first.close()
-    recovered = Dispatcher(recipe, factory, agent_record_dir=records)
+    recovered = Dispatcher(
+        recipe, factory, agent_record_dir=records, scenario_store_factory=SQLiteScenarioStoreFactory(records)
+    )
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert scenario.runtime.api_key == "scoped-alpha-1"

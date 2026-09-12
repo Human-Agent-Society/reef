@@ -28,8 +28,8 @@ from reef_service.test_reef_trainer_contracts import ExampleBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.harness.client.wrapper import harness
-from reef.records import RecordStore
 from reef.service.app import create_app
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import CordisRecipe, Mutation
 from reef.train.cordis_backend.backend import _merged_requires
@@ -453,7 +453,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
     payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
     for written, expected in ((merged, merged), (None, REQUIRES)):
-        records = RecordStore()
+        records = SQLiteRecordStore()
         trainer = Trainer.build(
             "agents",
             records,

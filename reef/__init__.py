@@ -20,6 +20,8 @@ except PackageNotFoundError:
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
 from reef.records import RecordStore
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.postgres import PostgresRecordStore
 from reef.train.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
@@ -70,6 +72,7 @@ __all__ = [
     "EveryNVersions",
     "InferenceRuntime",
     "ModelCandidate",
+    "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
     "RecordStore",
@@ -80,6 +83,7 @@ __all__ = [
     "ReportValidationError",
     "RequestHeaders",
     "RequestType",
+    "SQLiteRecordStore",
     "Scenario",
     "SelectionDecision",
     "Trainer",

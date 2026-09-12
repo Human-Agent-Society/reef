@@ -14,10 +14,11 @@ from reef.runtime.base import InferenceRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.checkpoint_strategy import CheckpointStrategy
-from reef.scenario.commit_log import CommitLog, CommitRecord
 from reef.scenario.commit_protocol import ScenarioCommitProtocol
 from reef.scenario.model_config import ScenarioModelConfig
 from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY, snapshot_metadata_for
+from reef.scenario.state import CommitRecord
+from reef.scenario.store import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
 from reef.train.trainer import Trainer
@@ -34,19 +35,19 @@ class Scenario:
         binding: ScenarioBinding,
         repository: Repository,
         checkpoint_strategy: CheckpointStrategy,
-        records: RecordStore,
+        store: ScenarioStore,
         trainer: Trainer,
         model_config: ScenarioModelConfig | None = None,
         scenario_step: int = 0,
         process_id: str | None = None,
-        commit_log: CommitLog | None = None,
         recovered_head_record: CommitRecord | None = None,
     ) -> None:
         self._name = name
         self._binding = binding
         self.model_config = model_config or ScenarioModelConfig()
         self._surface = binding.surface
-        self._records = records
+        self._store = store
+        self._closed = False
         self._trainer = trainer
         self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._commit_protocol = ScenarioCommitProtocol(
@@ -56,7 +57,7 @@ class Scenario:
             checkpoint_strategy=checkpoint_strategy,
             trainer=trainer,
             scenario_step=scenario_step,
-            commit_log=commit_log,
+            store=store,
             recovered_head_record=recovered_head_record,
         )
 
@@ -91,7 +92,12 @@ class Scenario:
 
     @property
     def records(self) -> RecordStore:
-        return self._records
+        return self._store.records
+
+    @property
+    def store(self) -> ScenarioStore:
+        """The scenario's record and commit storage session."""
+        return self._store
 
     @property
     def trainer(self) -> Trainer:
@@ -148,11 +154,6 @@ class Scenario:
             self._trainer.restore_record_progress(after_sequence=after_sequence, offset=offset)
 
     @property
-    def commit_log(self) -> CommitLog | None:
-        """The durable commit log, for read-only inspection."""
-        return self._commit_protocol.commit_log
-
-    @property
     def commit_status(self) -> Mapping[str, Any]:
         """The non-blocking committed step, training outcome, and artifact-head sync status."""
         return self._commit_protocol.commit_status
@@ -161,8 +162,7 @@ class Scenario:
     def committed_training_job_id(self) -> str | None:
         """Training-job identity proven by the current durable commit."""
         with self._commit_protocol.lock:
-            commit_log = self._commit_protocol.commit_log
-            records = () if commit_log is None else commit_log.records()
+            records = self._store.history() if self._store.durable else ()
             if not records or records[-1].step != self.scenario_step:
                 return None
             return records[-1].training_job_id
@@ -171,8 +171,7 @@ class Scenario:
     def committed_training_without_job_id(self) -> bool:
         """Whether the current head is a pre-identity training commit."""
         with self._commit_protocol.lock:
-            commit_log = self._commit_protocol.commit_log
-            records = () if commit_log is None else commit_log.records()
+            records = self._store.history() if self._store.durable else ()
             if not records or records[-1].step != self.scenario_step:
                 return False
             record = records[-1]
@@ -210,7 +209,7 @@ class Scenario:
         return self._commit_protocol.commit(result)
 
     def close(self) -> None:
-        """Tear down what this scenario instance owns: trainer, then records.
+        """Tear down what this scenario instance owns: trainer, then its storage session.
 
         The dispatcher calls this on shutdown and when a durable reload
         replaces the instance — the one guarantee processors with background
@@ -218,10 +217,14 @@ class Scenario:
         than once; the trainer closes first so no processor thread can touch
         the record store after it closes.
         """
-        try:
-            self._trainer.close()
-        finally:
-            self._records.close()
+        with self._commit_protocol.lock:
+            if self._closed:
+                return
+            self._closed = True
+            try:
+                self._trainer.close()
+            finally:
+                self._store.close()
 
     def to_snapshot_metadata(self) -> dict[str, object]:
         return snapshot_metadata_for(

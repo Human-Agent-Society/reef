@@ -20,10 +20,11 @@ from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.records import RecordStore
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
 from reef.runtime.candidates import StaleCandidate
 from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
@@ -430,6 +431,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         SAORecipe(runtime),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     try:
         dispatcher.accept_record(_sao_inference("i1"))
@@ -475,6 +477,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     try:
         dispatcher.accept_record(_sao_inference("i1"))
@@ -511,6 +514,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
         SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     try:
         pre_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
@@ -550,6 +554,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
+            scenario_store_factory=SQLiteScenarioStoreFactory(agent_dir),
         )
 
     first = _make_dispatcher()
@@ -569,8 +574,8 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
         assert recovered.scenario_step == 1  # step rebuilt from durable state
         assert recovered.trainer.state == {"steps": 1}  # algorithm_state from the commit log
-        assert recovered.commit_log is not None
-        record = recovered.commit_log.records()[-1]
+        assert recovered.store.durable
+        record = recovered.store.history()[-1]
         assert record.step == 1  # the journal drove recovery
         # SAO's async telemetry is carried opaquely on the durable record, so a
         # step's schedule cadence survives the restart that produced it.
@@ -599,7 +604,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     second_inference = _sao_inference("i2")
     second_report = _sao_report("r2", "i2", 0.5)
 
-    with RecordStore(database) as first_store:
+    with SQLiteRecordStore(database) as first_store:
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
         first = Trainer.build(
@@ -616,7 +621,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         first.commit(prepared)
         first.apply_compaction(prepared.compacted_ids)
 
-    with RecordStore(database) as second_store:
+    with SQLiteRecordStore(database) as second_store:
         second = Trainer.build(
             "math",
             second_store,

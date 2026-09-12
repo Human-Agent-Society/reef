@@ -9,9 +9,9 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.records import RecordStore
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ProcessorContext
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
@@ -125,7 +125,7 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         episode_workers=workers,
         worker_executor=ExecutorSettings(executor_backend),
     )
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = Trainer(
         scenario="test",
         records=records,

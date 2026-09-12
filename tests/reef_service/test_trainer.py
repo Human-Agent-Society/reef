@@ -11,8 +11,9 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.records import RecordStore
 from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.storage.factory import SQLiteScenarioStoreFactory
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.evaluation import (
@@ -450,7 +451,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
 
 @pytest.mark.unit
 def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     trainer = Trainer.build(
@@ -506,7 +507,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
             calls.append("decide")
             return SelectionDecision("select", "test", "1", "selected by test", evaluation)
 
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     backend = Backend()
@@ -557,7 +558,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
             calls.append(("decide", evaluation.evaluator))
             return SelectionDecision("select", "external", "1", "selected by module", evaluation)
 
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     candidate_evaluator = ExternalEvaluator()
@@ -606,7 +607,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
         def decide(self, candidate, evaluation):
             raise RuntimeError("policy failed")
 
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     backend = Backend()
@@ -655,7 +656,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
             replacement = EvaluationResult("external", "1", {"score": 0.0})
             return SelectionDecision("reject", "broken", "1", "replaced result", replacement)
 
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(inference("i1"))
     records.append(report("r1", "i1", 1.0))
     trainer = Trainer.build(
@@ -673,7 +674,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
 
 @pytest.mark.unit
 def test_trainer_restores_algorithm_state_from_metadata() -> None:
-    records = RecordStore()
+    records = SQLiteRecordStore()
     for item in (
         inference("i1"),
         report("r1", "i1", 1.0),
@@ -731,7 +732,7 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
     second_inference = positioned_inference(3)
     second_report = positioned_report(4, second_inference.agent_record_id, 0.5)
 
-    with RecordStore(database) as first_store:
+    with SQLiteRecordStore(database) as first_store:
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
         first = Trainer.build(
@@ -757,7 +758,7 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
             second_report.agent_record_id,
         ]
 
-    with RecordStore(database) as second_store:
+    with SQLiteRecordStore(database) as second_store:
         second = Trainer.build(
             "math",
             second_store,
@@ -847,6 +848,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         GroupedPgRecipe(training_runtime, name="grouped_pg"),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_store_factory=SQLiteScenarioStoreFactory(),
     )
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
         dispatcher.accept_record(inference(rid))
