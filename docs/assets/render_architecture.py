@@ -1,322 +1,304 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["pillow==11.3.0"]
-# ///
-"""Rebuild the README architecture GIFs: uv run docs/assets/render_architecture.py.
+"""Rebuild the README architecture diagrams: python3 docs/assets/render_architecture.py
 
-Uses Arial on macOS or DejaVu Sans on Linux. Override with --font and --bold-font.
-The diagram stays readable in every frame; motion only highlights the data flow.
+Writes architecture-light.svg and architecture-dark.svg. Each file is
+self-contained: IBM Plex Sans and IBM Plex Mono are embedded, box highlights
+are CSS animations, and the moving dots are SMIL, so the drawing animates inside
+an <img> tag on GitHub and stays a readable static diagram wherever animation
+is off. The fonts are fetched from Google Fonts once and cached under
+~/.cache/reef-fonts (override with --font-cache).
 """
 
 from __future__ import annotations
 
 import argparse
-import itertools
-import math
+import base64
+import re
+import urllib.request
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-
 ROOT = Path(__file__).resolve().parent
-WIDTH, HEIGHT, SCALE = 1200, 780, 2
-FRAME_MS, FRAMES = 80, 200
+W, H = 1200, 550
+CYCLE = 12  # seconds for one lap of serve, observe, grow, commit
+
 THEMES = {
     "light": {
-        "bg": "#F7FAFB",
-        "panel": "#FFFFFF",
-        "ink": "#17343D",
-        "muted": "#617B84",
-        "border": "#DCE7EA",
-        "wire": "#BDCED4",
-        "teal": "#087F8C",
-        "violet": "#7460BE",
-        "soft": "#EAF4F5",
-        "shadow": "#EAF0F2",
+        "card": "#ffffff",
+        "ink": "#14110e",
+        "line": "#3c3630",
+        "muted": "#7d766e",
+        "faint": "#b8b0a6",
+        "accent": "#a03729",
     },
     "dark": {
-        "bg": "#0D171E",
-        "panel": "#14232C",
-        "ink": "#E5F0F3",
-        "muted": "#91ABB5",
-        "border": "#293F49",
-        "wire": "#3D5661",
-        "teal": "#57D4CE",
-        "violet": "#B5A2F3",
-        "soft": "#192F37",
-        "shadow": "#0B141A",
+        "card": "#1c1a16",
+        "ink": "#f7f4f0",
+        "line": "#cfc8bf",
+        "muted": "#a49c93",
+        "faint": "#5d554c",
+        "accent": "#d99183",
     },
 }
-PHASES = [
-    ("Serve", "Freeze the release. Return a response and receipt."),
-    ("Observe", "Match feedback to receipts. Prepare eligible records."),
-    ("Grow", "Run the recipe. Evaluate and select a candidate."),
-    ("Commit", "Publish selected updates. Keep serving if rejected."),
+
+FONTS = [("IBM Plex Sans", 500), ("IBM Plex Sans", 600), ("IBM Plex Mono", 400)]
+FONTS_CSS = (
+    "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@500;600&family=IBM+Plex+Mono:wght@400&display=swap"
+)
+USER_AGENT = "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+
+# The two rows of the diagram: what serves a request, and what learns from it.
+# Each box is a title and two lines of description.
+SERVING = [
+    ("Harness", "agent, prompts and tools", "receipt-linked feedback"),
+    ("Scenario", "freezes the release", "stores the interaction"),
+    ("Inference", "provider-native requests", "OpenAI, Anthropic compatible"),
 ]
+LEARNING = [
+    ("Records", "matches feedback to", "recorded interactions"),
+    ("Trainer", "runs the recipe", "weights or harness"),
+    ("Evaluation", "evaluates the candidate", "selects or rejects it"),
+    ("Release", "accepted artifact with", "its parent history"),
+]
+STEPS = [
+    ("Serve", "request served and recorded"),
+    ("Observe", "feedback matched to records"),
+    ("Grow", "recipe trains on records"),
+    ("Commit", "evaluated, then published"),
+]
+# Which step lights each box up.
+PHASE_OF = {"Harness": 1, "Scenario": 1, "Inference": 1, "Records": 2, "Trainer": 3, "Evaluation": 4, "Release": 4}
+
+# Type scale.
+TITLE, BODY, LABEL, NOTE, CAPS = 24, 17, 16, 15, 14
+STEP_NAME, STEP_DESC, BADGE_R = 22, 17, 16
+
+Y1, Y2, BH = 54, 286, 122
+ROW1 = [(40, 344), (428, 344), (816, 344)]
+ROW2 = [(40, 253), (329, 253), (618, 253), (907, 253)]
+STRIP_Y = 500
 
 
-def rgb(color):
-    return tuple(bytes.fromhex(color.lstrip("#")))
-
-
-def blend(a, b, amount):
-    return tuple(round(x + (y - x) * amount) for x, y in zip(rgb(a), rgb(b), strict=False))
-
-
-def font_path(bold=False):
-    names = (
-        ["/System/Library/Fonts/Supplemental/Arial Bold.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"]
-        if bold
-        else ["/System/Library/Fonts/Supplemental/Arial.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
-    )
-    for name in names:
-        if Path(name).exists():
-            return name
-    raise FileNotFoundError("Pass --font and --bold-font with local TrueType fonts.")
-
-
-class Diagram:
-    def __init__(self, theme, regular, bold):
-        self.c = THEMES[theme]
-        self.fonts = {
-            (size, weight): ImageFont.truetype(bold if weight else regular, size * SCALE)
-            for size in (14, 15, 16, 17, 18, 20, 23, 26, 32)
-            for weight in (False, True)
-        }
-        self.image = Image.new("RGB", (WIDTH * SCALE, HEIGHT * SCALE), self.c["bg"])
-        self.draw = ImageDraw.Draw(self.image)
-        self.paths = {}
-        self.base()
-        self.static = self.image.copy()
-
-    def box(self, bounds, fill, outline=None, radius=16, width=1):
-        self.draw.rounded_rectangle(
-            tuple(v * SCALE for v in bounds), radius=radius * SCALE, fill=fill, outline=outline, width=width * SCALE
-        )
-
-    def text(self, x, y, value, size=18, color="ink", bold=False, anchor="la"):
-        self.draw.text(
-            (x * SCALE, y * SCALE), value, font=self.fonts[size, bold], fill=self.c.get(color, color), anchor=anchor
-        )
-
-    def line(self, points, color, width=2):
-        self.draw.line([(x * SCALE, y * SCALE) for x, y in points], fill=color, width=width * SCALE, joint="curve")
-
-    def dot(self, x, y, radius, color):
-        self.draw.ellipse(
-            ((x - radius) * SCALE, (y - radius) * SCALE, (x + radius) * SCALE, (y + radius) * SCALE), fill=color
-        )
-
-    def route(self, name, points, accent="teal"):
-        # Round orthogonal bends so animated packets travel smoothly through them.
-        smooth = [points[0]]
-        for a, b, c in zip(points, points[1:], points[2:], strict=False):
-            ab, bc = math.dist(a, b), math.dist(b, c)
-            r = min(14, ab / 2, bc / 2)
-            p = tuple(b[i] + (a[i] - b[i]) * r / ab for i in (0, 1))
-            q = tuple(b[i] + (c[i] - b[i]) * r / bc for i in (0, 1))
-            smooth.append(p)
-            for step in range(1, 13):
-                t = step / 12
-                smooth.append(tuple((1 - t) ** 2 * p[i] + 2 * (1 - t) * t * b[i] + t * t * q[i] for i in (0, 1)))
-        smooth.append(points[-1])
-        self.paths[name] = (smooth, accent)
-        self.line(smooth, self.c["wire"])
-        a, b = smooth[-2:]
-        angle = math.atan2(b[1] - a[1], b[0] - a[0])
-        self.line(
-            [
-                (b[0] - 8 * math.cos(angle - 0.5), b[1] - 8 * math.sin(angle - 0.5)),
-                b,
-                (b[0] - 8 * math.cos(angle + 0.5), b[1] - 8 * math.sin(angle + 0.5)),
-            ],
-            self.c["wire"],
-        )
-
-    def icon(self, x, y, kind, accent):
-        color = self.c[accent]
-        self.box((x, y, x + 36, y + 36), blend(self.c["panel"], color, 0.10), radius=10)
-        if kind == "harness":
-            self.line([(x + 10, y + 12), (x + 16, y + 18), (x + 10, y + 24)], color)
-            self.line([(x + 20, y + 24), (x + 27, y + 24)], color)
-        elif kind == "scenario":
-            for dx, dy in ((10, 10), (24, 10), (10, 24), (24, 24)):
-                self.box((x + dx - 3, y + dy - 3, x + dx + 3, y + dy + 3), None, color, 2)
-        elif kind == "inference":
-            self.line(
-                [
-                    (x + 20, y + 7),
-                    (x + 11, y + 20),
-                    (x + 18, y + 20),
-                    (x + 16, y + 29),
-                    (x + 26, y + 15),
-                    (x + 19, y + 15),
-                ],
-                color,
+def font_files(cache: Path) -> list[tuple[str, int, bytes]]:
+    """Latin woff2 for each face, downloaded once through the Google Fonts CSS API."""
+    cache.mkdir(parents=True, exist_ok=True)
+    out = []
+    css = None
+    for family, weight in FONTS:
+        target = cache / f"{family.replace(' ', '')}-{weight}.woff2"
+        if not target.exists():
+            if css is None:
+                req = urllib.request.Request(FONTS_CSS, headers={"User-Agent": USER_AGENT})
+                css = urllib.request.urlopen(req, timeout=30).read().decode()
+            block = next(
+                b
+                for b in re.findall(r"@font-face\s*{(.*?)}", css, re.S)
+                if f"'{family}'" in b and f"font-weight: {weight}" in b and "U+0000-00FF" in b
             )
-        elif kind == "records":
-            for dy in (10, 17, 24):
-                self.line([(x + 11, y + dy), (x + 26, y + dy)], color)
-                self.dot(x + 7, y + dy, 1, color)
-        elif kind == "trainer":
-            for dx, dy in ((10, 23), (18, 15), (26, 8)):
-                self.line([(x + dx, y + 28), (x + dx, y + dy)], color, 3)
-        elif kind == "evaluation":
-            self.line([(x + 9, y + 18), (x + 15, y + 24), (x + 27, y + 11)], color, 3)
+            url = re.search(r"url\((https://[^)]+)\)", block).group(1)
+            target.write_bytes(urllib.request.urlopen(url, timeout=30).read())
+        out.append((family, weight, target.read_bytes()))
+    return out
 
-    def card(self, x, y, title, subtitle, detail, kind, accent="teal"):
-        self.box((x, y + 4, x + 300, y + 130), self.c["shadow"])
-        self.box((x, y, x + 300, y + 126), self.c["panel"], self.c["border"])
-        self.icon(x + 20, y + 20, kind, accent)
-        self.text(x + 68, y + 25, title, 23, bold=True)
-        self.text(x + 20, y + 69, subtitle, 18, color="muted")
-        self.text(x + 20, y + 96, detail, 16, color=accent)
 
-    def base(self):
-        c = self.c
-        self.box((1, 1, 1199, 779), c["bg"], c["border"], 24)
-        self.text(40, 30, "REEF  /  ARCHITECTURE", 15, "teal", True)
-        self.text(40, 61, "Live requests. Continuous learning.", 32, bold=True)
-        self.dot(998, 48, 4, c["teal"])
-        self.text(1012, 37, "Always serving", 16, "muted")
-        self.text(1158, 72, "Weights + harness", 16, "muted", anchor="ra")
-        self.line([(40, 116), (1160, 116)], c["border"], 1)
+def text(x, y, s, size, weight=500, fill="", anchor="start", cls="", mono=False, extra=""):
+    fam = "IBM Plex Mono" if mono else "IBM Plex Sans"
+    c = f' class="{cls}"' if cls else ""
+    f = f' fill="{fill}"' if fill else ""
+    return (
+        f'<text{c} x="{x}" y="{y}" font-family="\'{fam}\', ui-sans-serif, sans-serif" '
+        f'font-size="{size}" font-weight="{weight}"{f} text-anchor="{anchor}"{extra}>{s}</text>'
+    )
 
-        self.route("request", [(400, 211), (450, 211)])
-        self.route("response", [(450, 255), (400, 255)])
-        self.route("infer", [(750, 211), (800, 211)])
-        self.route("answer", [(800, 255), (750, 255)])
-        self.route("record", [(600, 300), (600, 344), (250, 344), (250, 407)])
-        self.route("batch", [(400, 470), (450, 470)])
-        self.route("candidate", [(750, 470), (800, 470)], "violet")
-        self.route("publish", [(950, 533), (950, 622), (750, 622)], "violet")
-        self.route("release", [(450, 622), (62, 622), (62, 143), (600, 143), (600, 174)])
-        self.text(425, 181, "request", 14, "muted", anchor="ma")
-        self.text(425, 270, "receipt", 14, "muted", anchor="ma")
-        self.text(775, 181, "proxy", 14, "muted", anchor="ma")
-        self.text(775, 270, "reply", 14, "muted", anchor="ma")
-        self.text(406, 318, "records + feedback", 17, "muted", anchor="ma")
-        self.text(425, 441, "batch", 14, "muted", anchor="ma")
-        self.text(775, 441, "artifact", 14, "muted", anchor="ma")
-        self.text(981, 571, "selected", 17, "violet")
-        self.text(255, 595, "serve current release", 17, "teal", anchor="ma")
 
-        self.card(100, 174, "Harness", "Agent, prompts and tools", "Requests + receipt-linked feedback", "harness")
-        self.card(
-            450, 174, "Scenario", "Freeze release · verify response", "Return receipt · store interaction", "scenario"
+def cap(x, y, s, fill, size=CAPS):
+    return text(x, y, s.upper(), size, 500, fill, extra=f' letter-spacing="{size * 0.1}"')
+
+
+def label(x, y, s, fill, anchor="middle", size=LABEL):
+    return text(x, y, s, size, 400, fill, anchor, mono=True)
+
+
+def arrow(x, y, direction, color, size=7):
+    r = {"right": 0, "down": 90, "left": 180, "up": 270}[direction]
+    return (
+        f'<path d="M{-size} {-size * 0.55} L0 0 L{-size} {size * 0.55}" fill="none" stroke="{color}" '
+        f'stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" '
+        f'transform="translate({x} {y}) rotate({r})"/>'
+    )
+
+
+def box(p, x, y, w, name, line1, line2):
+    phase = PHASE_OF[name]
+    return "".join(
+        [
+            (
+                f'<rect class="hi{phase}" x="{x}" y="{y}" width="{w}" height="{BH}" rx="10" fill="{p["card"]}" '
+                f'stroke="{p["line"]}" stroke-width="1.3"/>'
+            ),
+            text(x + 18, y + 42, name, TITLE, 600, p["ink"]),
+            text(x + 18, y + 72, line1, BODY, 500, p["muted"]),
+            text(x + 18, y + 98, line2, BODY, 500, p["muted"]),
+        ]
+    )
+
+
+def dot(p, path_id, t0, t1):
+    """A dot that runs along a connector between two moments of the cycle (fractions of CYCLE)."""
+    e = 0.004
+    return (
+        f'<circle r="4.5" fill="{p["accent"]}" opacity="0">'
+        f'<animateMotion dur="{CYCLE}s" repeatCount="indefinite" calcMode="linear" '
+        f'keyPoints="0;0;1;1" keyTimes="0;{t0};{t1};1"><mpath xlink:href="#{path_id}"/></animateMotion>'
+        f'<animate attributeName="opacity" dur="{CYCLE}s" repeatCount="indefinite" '
+        f'values="0;0;1;1;0;0" keyTimes="0;{t0};{t0 + e};{t1 - e};{t1};1"/></circle>'
+    )
+
+
+def keyframes(name: str, a: int, b: int, on: str, off: str) -> str:
+    """One CSS animation that holds `on` between a% and b% of the cycle and `off` elsewhere."""
+    stops = []
+    if a > 0:
+        stops.append(f"0%,{a - 1}%{{{off}}}")
+    stops.append(f"{a}%,{b - 2}%{{{on}}}")
+    stops.append(f"{b}%,100%{{{off}}}" if b < 100 else f"100%{{{off}}}")
+    return f"@keyframes {name}{{{''.join(stops)}}}"
+
+
+def styles(p, fonts):
+    faces = "".join(
+        f"@font-face{{font-family:'{fam}';font-weight:{w};font-style:normal;"
+        f"src:url(data:font/woff2;base64,{base64.b64encode(data).decode()}) format('woff2')}}\n"
+        for fam, w, data in fonts
+    )
+    # Each step owns a quarter of the cycle; the highlighted stroke fades over the last 2%.
+    frames = []
+    for n in range(1, 5):
+        a, b = (n - 1) * 25, n * 25
+        on, off = f"stroke:{p['accent']};stroke-width:1.8", f"stroke:{p['line']};stroke-width:1.3"
+        fill_on, fill_off = f"fill:{p['accent']}", f"fill:{p['card']}"
+        num_on, num_off = f"fill:{p['card']}", f"fill:{p['accent']}"
+        name_on, name_off = f"fill:{p['ink']}", f"fill:{p['muted']}"
+        frames += [
+            keyframes(f"hi{n}", a, b, on, off),
+            keyframes(f"bf{n}", a, b, fill_on, fill_off),
+            keyframes(f"bn{n}", a, b, num_on, num_off),
+            keyframes(f"nm{n}", a, b, name_on, name_off),
+        ]
+        frames += [
+            f".hi{n}{{animation:hi{n} {CYCLE}s linear infinite}}",
+            f".bf{n}{{animation:bf{n} {CYCLE}s linear infinite}}",
+            f".bn{n}{{animation:bn{n} {CYCLE}s linear infinite}}",
+            f".nm{n}{{animation:nm{n} {CYCLE}s linear infinite}}",
+        ]
+    return "<style>\n" + faces + "\n".join(frames) + "\n</style>"
+
+
+def render(theme: str, fonts) -> str:
+    p = THEMES[theme]
+    # No background rectangle: the drawing sits on the README's own light or dark ground.
+    o = [
+        (
+            f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+            f'width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
+            f'aria-label="Reef architecture: a harness sends requests through a scenario to inference; '
+            f"records match feedback to the interactions, the trainer runs the recipe, evaluation accepts "
+            f'or rejects the candidate, and the accepted release serves the next request.">'
+        ),
+        styles(p, fonts),
+    ]
+
+    # serving row; the request labels sit above the row and the return labels below it
+    o.append(cap(40, 34, "serving", p["faint"]))
+    for (x, w), (name, line1, line2) in zip(ROW1, SERVING, strict=True):
+        o.append(box(p, x, Y1, w, name, line1, line2))
+    for k in range(2):
+        gx0, gx1 = ROW1[k][0] + ROW1[k][1], ROW1[k + 1][0]
+        top, bot = Y1 + 42, Y1 + 80
+        o.append(
+            f'<path id="fwd{k}" d="M{gx0 + 2} {top} H{gx1 - 4}" stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
         )
-        self.card(
-            800, 174, "Inference", "Provider-native model requests", "OpenAI / Anthropic compatible", "inference"
+        o.append(arrow(gx1 - 3, top, "right", p["line"]))
+        o.append(
+            f'<path id="back{k}" d="M{gx1 - 2} {bot} H{gx0 + 4}" stroke="{p["muted"]}" stroke-width="1.3" fill="none"/>'
         )
-        self.text(100, 375, "LEARNING LOOP", 14, "muted", True)
-        self.text(1100, 375, "Scoped to each scenario", 15, "muted", anchor="ra")
-        self.card(100, 407, "Records", "Match feedback to interactions", "Filter eligible records", "records")
-        self.card(
-            450,
-            407,
-            "Trainer",
-            "Prepare a batch · run training",
-            "Recipe updates weights or harness",
-            "trainer",
-            "violet",
+        o.append(arrow(gx0 + 3, bot, "left", p["muted"]))
+        cx = (gx0 + gx1) / 2
+        o.append(label(cx, Y1 - 14, ("request", "proxy")[k], p["muted"]))
+        o.append(label(cx, Y1 + BH + 24, ("receipt", "reply")[k], p["muted"]))
+
+    # learning row; the hand-off labels sit below the row
+    o.append(cap(40, Y2 - 18, "learning", p["faint"]))
+    for (x, w), (name, line1, line2) in zip(ROW2, LEARNING, strict=True):
+        o.append(box(p, x, Y2, w, name, line1, line2))
+    labels = ["batch", "candidate", "accepted"]
+    for k in range(3):
+        gx0, gx1 = ROW2[k][0] + ROW2[k][1], ROW2[k + 1][0]
+        y = Y2 + 46
+        o.append(
+            f'<path id="learn{k}" d="M{gx0 + 2} {y} H{gx1 - 4}" stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
         )
-        self.card(
-            800,
-            407,
-            "Artifact evaluation",
-            "Evaluate · select or reject",
-            "Rejected? Keep the current release.",
-            "evaluation",
-            "violet",
+        o.append(arrow(gx1 - 3, y, "right", p["line"]))
+        o.append(label((gx0 + gx1) / 2, Y2 + BH + 24, labels[k], p["muted"]))
+    ex, ew = ROW2[2]
+    o.append(label(ex + ew / 2, Y2 + BH + 48, "rejected: keep the current release", p["faint"], size=NOTE))
+    lx, lw = ROW2[3]
+    o.append(label(lx + lw / 2, Y2 + BH + 48, "harness pulls the release", p["faint"], size=NOTE))
+
+    # scenario -> records, and release -> scenario
+    sx, sw = ROW1[1]
+    rx, rw = ROW2[0]
+    down_x, up_x = sx + 60, sx + sw - 60
+    o.append(
+        f'<path id="observe" d="M{down_x} {Y1 + BH + 2} V244 H{rx + rw / 2} V{Y2 - 4}" '
+        f'stroke="{p["line"]}" stroke-width="1.3" fill="none"/>'
+    )
+    o.append(arrow(rx + rw / 2, Y2 - 3, "down", p["line"]))
+    o.append(label((down_x + rx + rw / 2) / 2, 237, "records · feedback", p["muted"]))
+    o.append(
+        f'<path id="commit" d="M{lx + lw / 2} {Y2 - 2} V216 H{up_x} V{Y1 + BH + 4}" '
+        f'stroke="{p["accent"]}" stroke-width="1.4" fill="none"/>'
+    )
+    o.append(arrow(up_x, Y1 + BH + 3, "up", p["accent"]))
+    o.append(label(lx + lw / 2 - 90, 209, "served next", p["accent"]))
+
+    # the step strip
+    for k, (name, desc) in enumerate(STEPS):
+        n = k + 1
+        x = 40 + BADGE_R + k * 285
+        o.append(
+            f'<circle class="bf{n}" cx="{x}" cy="{STRIP_Y}" r="{BADGE_R}" fill="{p["card"]}" '
+            f'stroke="{p["accent"]}" stroke-width="1.5"/>'
         )
+        o.append(text(x, STRIP_Y + 6, str(n), 16, 600, p["accent"], "middle", cls=f"bn{n}"))
+        o.append(text(x + BADGE_R + 14, STRIP_Y + 7, name, STEP_NAME, 600, p["muted"], cls=f"nm{n}"))
+        o.append(text(x + BADGE_R + 14, STRIP_Y + 34, desc, STEP_DESC, 500, p["muted"]))
 
-        self.box((450, 582, 750, 662), c["panel"], c["border"], 16)
-        self.text(472, 595, "Versioned release", 20, bold=True)
-        self.text(472, 626, "Accepted artifact + parent history", 16, "muted")
-        for x in (681, 701, 721):
-            self.dot(x, 609, 3, c["teal"])
-        self.line([(684, 609), (718, 609)], c["teal"], 1)
-        self.text(100, 672, "Harness recipes pull the served tree before running.", 15, "muted")
-
-    def packet(self, name, progress):
-        points, accent = self.paths[name]
-        lengths = [math.dist(a, b) for a, b in itertools.pairwise(points)]
-        total = sum(lengths)
-
-        def point_at(t):
-            distance = min(1, max(0, t)) * total
-            for a, b, length in zip(points, points[1:], lengths, strict=False):
-                if distance <= length:
-                    ratio = distance / length if length else 0
-                    return tuple(a[i] + (b[i] - a[i]) * ratio for i in (0, 1))
-                distance -= length
-            return points[-1]
-
-        color = self.c[accent]
-        for i in range(10, 0, -1):
-            t = progress - i * 5 / total
-            if t >= 0:
-                x, y = point_at(t)
-                self.dot(x, y, 2, blend(self.c["bg"], color, (11 - i) / 14))
-        x, y = point_at(progress)
-        self.dot(x, y, 9, blend(self.c["bg"], color, 0.12))
-        self.dot(x, y, 5, color)
-        self.dot(x - 1, y - 1, 1.5, self.c["panel"])
-
-    def frame(self, index):
-        self.image = self.static.copy()
-        self.draw = ImageDraw.Draw(self.image)
-        t = index * FRAME_MS / 1000
-        phase = min(3, int(t / 4))
-        # Inference traffic continues independently while learning progresses.
-        traffic = (t % 3.2) / 3.2
-        for name, start in (("request", 0), ("infer", 0.25), ("answer", 0.5), ("response", 0.75)):
-            if start <= traffic < start + 0.25:
-                self.packet(name, (traffic - start) * 4)
-        for name, start, end in (
-            ("record", 4, 6.4),
-            ("batch", 6.4, 8),
-            ("candidate", 9.2, 11.8),
-            ("publish", 12, 13.6),
-            ("release", 13.6, 16),
-        ):
-            if start <= t < end:
-                self.packet(name, (t - start) / (end - start))
-
-        # A restrained border pulse highlights the active learning stage.
-        active = [(450, 174, 750, 300), (100, 407, 400, 533), (450, 407, 750, 533), (450, 582, 750, 662)][phase]
-        accent = "violet" if phase == 2 else "teal"
-        strength = 0.40 + 0.20 * math.sin(t * math.pi)
-        self.box(active, None, blend(self.c["border"], self.c[accent], strength), 16, 2)
-        self.box((40, 699, 1160, 758), self.c["soft"], radius=14)
-        for i, (label, _) in enumerate(PHASES):
-            x = 57 + i * 127
-            if i == phase:
-                self.box((x, 710, x + 116, 745), self.c["panel"], radius=9)
-            self.text(x + 10, 718, f"0{i + 1}  {label}", 16, "teal" if i == phase else "muted", i == phase)
-        self.text(595, 720, PHASES[phase][1], 17, "ink")
-        return self.image.resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
+    # the moving dots, one lap per cycle
+    for path_id, t0, t1 in [
+        ("fwd0", 0.01, 0.05),
+        ("fwd1", 0.06, 0.10),
+        ("back1", 0.11, 0.15),
+        ("back0", 0.16, 0.21),
+        ("observe", 0.27, 0.46),
+        ("learn0", 0.52, 0.58),
+        ("learn1", 0.62, 0.70),
+        ("learn2", 0.77, 0.83),
+        ("commit", 0.85, 0.97),
+    ]:
+        o.append(dot(p, path_id, t0, t1))
+    o.append("</svg>")
+    return "\n".join(o)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--font")
-    parser.add_argument("--bold-font")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--font-cache", type=Path, default=Path.home() / ".cache" / "reef-fonts")
     args = parser.parse_args()
+    fonts = font_files(args.font_cache)
     for theme in THEMES:
-        diagram = Diagram(theme, args.font or font_path(), args.bold_font or font_path(True))
-        # One shared palette avoids frame-to-frame color shimmer.
-        samples = [diagram.frame(i).resize((600, 390)) for i in (12, 65, 120, 165, 190)]
-        atlas = Image.new("RGB", (600, 390 * len(samples)))
-        for i, sample in enumerate(samples):
-            atlas.paste(sample, (0, i * 390))
-        palette = atlas.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
-        frames = [diagram.frame(i).quantize(palette=palette, dither=Image.Dither.NONE) for i in range(FRAMES)]
-        output = ROOT / f"architecture-{theme}.gif"
-        frames[0].save(
-            output, save_all=True, append_images=frames[1:], duration=FRAME_MS, loop=0, optimize=True, disposal=1
-        )
-        print(f"{output.name}: {output.stat().st_size / 1024:.0f} KiB, {FRAMES} frames, 16 seconds")
+        target = ROOT / f"architecture-{theme}.svg"
+        target.write_text(render(theme, fonts))
+        print(f"wrote {target.relative_to(ROOT.parent.parent)} ({target.stat().st_size // 1024} KB)")
 
 
 if __name__ == "__main__":

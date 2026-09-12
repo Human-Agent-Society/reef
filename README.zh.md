@@ -251,8 +251,8 @@ reef-pi report --score 0 --feedback "missed the empty-token case"
 
 <div align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.gif">
-  <img src="docs/assets/architecture-light.gif" alt="Reef 架构：Harness 请求经 Scenario 转发到推理服务；通过 receipt 关联的反馈进入记录与 recipe 训练，候选产物经评估和选择后发布新版本。候选被拒绝时，继续使用当前版本。" width="1200">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture-light.svg" alt="Reef 架构：Harness 请求经 Scenario 转发到推理服务；通过 receipt 关联的反馈进入记录与 recipe 训练，候选产物经评估和选择后发布新版本。候选被拒绝时，继续使用当前版本。" width="1200">
 </picture>
 </div>
 
