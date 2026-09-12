@@ -261,6 +261,17 @@ For a small walkthrough of feedback, candidate edits, and publication, start wit
 [the coding harness tutorial](tutorials/evolve-your-harness/README.md). Each result
 page documents its task, evaluation setup, measurements, and limitations.
 
+### Beta recipes
+
+CORAL TTT and `coral_demo` remain beta until complete, reproducible learning
+results are published. Their integration and smoke tests do not establish
+learning performance.
+
+| Recipe or example | Status | Code and documentation |
+|---|---|---|
+| CORAL TTT | Beta — complete learning results pending | [Recipe](recipes/beta/coral/README.md) |
+| `coral_demo` | Beta — complete learning results pending | [Demo](recipes/beta/coral/examples/coral_demo/) · [Setup and validation](recipes/beta/coral/README.md) |
+
 
 ## Architecture
 

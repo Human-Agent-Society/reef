@@ -127,3 +127,12 @@ hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
 contains only the harness side: the task stream, the Hermes agent wrapper,
 the student service, and the analysis scripts. Its README keeps the learning
 curve and training curves of a complete run.
+
+## Beta recipes
+
+[CORAL TTT](beta/coral/README.md) and its
+[`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
+under `recipes/beta/coral/` until complete, reproducible learning results are
+published. Integration and smoke tests validate the wiring; they do not
+establish learning performance. See the recipe's
+[validation instructions](beta/coral/README.md#verifying-without-gpus).

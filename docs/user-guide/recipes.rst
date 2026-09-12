@@ -82,3 +82,12 @@ Built-in harness refinement
 `Reefine <recipes/reefine.rst>`__ turns user instructions into harness updates
 and ships with ``reef-infra``. Start it with ``reef serve --recipe reefine``
 and a configured model endpoint.
+
+Beta recipes
+------------
+
+`CORAL TTT <../../recipes/beta/coral/README.md>`__ and its
+`coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
+**beta** until complete, reproducible learning results are published. Both
+live under ``recipes/beta/coral/``. Integration and smoke tests validate the
+wiring; they do not establish learning performance.
