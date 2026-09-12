@@ -53,9 +53,8 @@ Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
 - Measured: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO), and the
-  Terminal-Bench 30-task hard subset (Meta-Harness). The harness evolve
-  tutorial and Reefine grade three fixed coding tasks rather than a standard
-  benchmark.
+  Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades three
+  fixed coding tasks rather than a standard benchmark.
 - Proposed: `CEO-Bench <https://arxiv.org/abs/2606.18543>`__ as a long-horizon
   showcase; expensive per run, with license and cost still unverified.
 
@@ -82,16 +81,11 @@ feedback on each task as the stream goes by.
      - ``recipes/meta_harness/``
      - `Meta-Harness <../../recipes/meta_harness/README.md>`__
      - `results <../../recipes/meta_harness/RESULTS.md>`__
-   * - Harness evolve
-     - harness skills
-     - ``reef/``, with the `harness-evolve.yaml <../../reef/service/profiles/harness-evolve.yaml>`__ profile
-     - `Evolve your harness <evolve-your-harness.rst>`__
-     - `example <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
    * - Reefine
      - harness: skills, rules, agent commands, and pi extensions
-     - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ profile
-     - `Reefine <recipes/reefine.rst>`__
-     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__
+     - ``reef/recipe/reefine/``, with the `reefine.yaml <../../reef/service/profiles/reefine.yaml>`__ and `harness-evolve.yaml <../../reef/service/profiles/harness-evolve.yaml>`__ profiles
+     - `Reefine <recipes/reefine.rst>`__ · `Evolve your harness <evolve-your-harness.rst>`__
+     - `example <../../tutorials/reefine/README.md>`__ · `results <../../tutorials/reefine/README.md#runs>`__; `example <../../tutorials/evolve-your-harness/README.md>`__ · `results <../../tutorials/evolve-your-harness/README.md#results>`__
 
 Learning from usage
 -------------------

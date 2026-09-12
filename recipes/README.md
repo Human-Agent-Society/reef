@@ -55,9 +55,8 @@ Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
 - Measured: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO), and the
-  Terminal-Bench 30-task hard subset (Meta-Harness). The harness evolve
-  tutorial and Reefine grade three fixed coding tasks rather than a standard
-  benchmark.
+  Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades three
+  fixed coding tasks rather than a standard benchmark.
 - Proposed: [CEO-Bench](https://arxiv.org/abs/2606.18543) as a long-horizon
   showcase; expensive per run, with license and cost still unverified.
 
@@ -66,8 +65,7 @@ feedback on each task as the stream goes by.
 | SAO | model weights | [`sao/`](sao/) | [guide](../docs/user-guide/recipes/sao.rst) | [`sao/examples/sao/`](sao/examples/sao/README.md) · [results](sao/examples/sao/README.md#results) |
 | GEPA | harness tree: rules, skills, and agent commands | [`gepa/`](gepa/) | [guide](../docs/user-guide/recipes/gepa.rst) | [`gepa/examples/aime/`](gepa/examples/aime/README.md) · [results](gepa/examples/aime/README.md#the-validation-contract) |
 | Meta-Harness | harness: complete compositions | [`meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [results](meta_harness/RESULTS.md) |
-| Harness evolve | harness skills | [`reef/`](../reef/) with the [`harness-evolve.yaml`](../reef/service/profiles/harness-evolve.yaml) profile | [guide](../docs/user-guide/evolve-your-harness.rst) | [`tutorials/evolve-your-harness/`](../tutorials/evolve-your-harness/README.md) · [results](../tutorials/evolve-your-harness/README.md#results) |
-| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) with the [`reefine.yaml`](../reef/service/profiles/reefine.yaml) profile | [guide](../docs/user-guide/recipes/reefine.rst) | [`tutorials/reefine/`](../tutorials/reefine/README.md) · [results](../tutorials/reefine/README.md#runs) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) with the [`reefine.yaml`](../reef/service/profiles/reefine.yaml) and [`harness-evolve.yaml`](../reef/service/profiles/harness-evolve.yaml) profiles | [guide](../docs/user-guide/recipes/reefine.rst) · [Evolve your harness](../docs/user-guide/evolve-your-harness.rst) | [`tutorials/reefine/`](../tutorials/reefine/README.md) · [results](../tutorials/reefine/README.md#runs); [`tutorials/evolve-your-harness/`](../tutorials/evolve-your-harness/README.md) · [results](../tutorials/evolve-your-harness/README.md#results) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
@@ -93,14 +91,6 @@ using all retained candidates and scores. It selects strict mean-score
 improvements and commits the population with Reef's serving state. See the
 [Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
 
-[Harness evolve quickstart](../tutorials/evolve-your-harness/README.md) runs the smallest skill
-evolution on the harness evolution mechanism: the served model proposes one
-skill mutation over its own failing traffic, gated real episodes on three
-exact-answer coding tasks decide it, and the winning composition publishes
-for client pull via `GET /reef/harness`. Setup here is just
-`pip install reef-client`: the loop drives `reef_client` directly,
-no Harbor task or reef-eval.
-
 [Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
 turns a person's plain-language request into a harness update: the served
 model proposes the change, the gate scores it, and code extensions wait for a
@@ -108,6 +98,14 @@ promote before they run. `reef serve --recipe reefine` starts its profile
 without a checkout; the [Reefine tutorial](../tutorials/reefine/README.md)
 records a bug-fix flow, a research loop, and a measurement of which requests
 won the gate.
+
+The [evolve-your-harness quickstart](../tutorials/evolve-your-harness/README.md) runs the same
+proposer and evaluator through the failure-driven `harness-evolve` profile:
+the served model proposes one skill mutation over its own failing traffic,
+gated real episodes on three exact-answer coding tasks decide it, and the
+winning composition publishes for client pull via `GET /reef/harness`. Setup
+here is just `pip install reef-client`: the loop drives `reef_client`
+directly, no Harbor task or reef-eval.
 
 ## Learning from usage
 

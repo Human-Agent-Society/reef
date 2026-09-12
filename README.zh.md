@@ -240,7 +240,7 @@ recipe 链接到其指南，每个已测 benchmark 链接到其结果页；[Reci
 | 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
 |---|---|---|---|---|
 | 科学发现 | 一个难题反复尝试，有可度量的目标 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充（n = 26、32）](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
-| 任务流上的持续学习 | 独立任务组成的任务流，每个由校验器打分 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Harness evolve](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[Terminal-Bench 30 任务子集](recipes/meta_harness/RESULTS.md)。拟采用：CEO-Bench |
+| 任务流上的持续学习 | 独立任务组成的任务流，每个由校验器打分 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md)、[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[AIME 2025](recipes/gepa/examples/aime/README.md)、[IMOAnswerBench](recipes/sao/examples/sao/README.md#results)、[Terminal-Bench 30 任务子集](recipes/meta_harness/RESULTS.md)。拟采用：CEO-Bench |
 | 从使用中学习 | 真实交互，无显式分数或反馈延迟到达 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/) | 已测：[OpenClaw-RL 模拟学生](recipes/openclawrl/examples/openclawrl/README.md#results)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
