@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import os
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, parse_config_values
@@ -13,6 +14,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings
 from reef.runtime.registry import runtime_factory_for
 from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.layout import deployment_config_arguments
 from reef.service.deploy.settings import service_config_arguments, service_owned_keys
 
 _EXECUTION_ROLES = ("services", "training", "rollout", "evolution")
@@ -20,7 +22,7 @@ _EXECUTION_ROLES = ("services", "training", "rollout", "evolution")
 
 def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, tuple[str, ...]]:
     reference = config_value(config, "reef", "recipe", expand=False)
-    if isinstance(reference, str) and ":" in reference:
+    if isinstance(reference, str) and (":" in reference or reference == "recipe"):
         recipe_type = recipe_class_for(reference)
         prefix = (
             ("reef",)
@@ -38,11 +40,52 @@ def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, 
 
 def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgument, ...]:
     """Inspect only the selected class; never construct a recipe or runtime."""
-    arguments: list[ConfigArgument] = []
+    arguments: list[ConfigArgument] = list(deployment_config_arguments())
     recipe_type, prefix = _recipe_definition(config)
     if recipe_type is not None:
-        arguments.extend(config_arguments(recipe_type, prefix=prefix))
+        arguments.extend(
+            replace(argument, public_path=("recipe", "config", argument.name))
+            for argument in config_arguments(recipe_type, prefix=prefix)
+        )
+        if issubclass(recipe_type, WeightTrainingRecipe):
+            # The legacy service contract projects this control into artifact
+            # settings rather than the recipe's data fields; keep its default there.
+            arguments.append(
+                ConfigArgument(
+                    "checkpoint_every_n_versions",
+                    (*prefix, "checkpoint_every_n_versions"),
+                    "int",
+                    True,
+                    None,
+                    "Artifact checkpoint interval in published versions.",
+                    public_path=("recipe", "config", "checkpoint_every_n_versions"),
+                )
+            )
+        section_prefix = prefix[:-1] if prefix[-1:] == ("data",) else prefix
+        arguments.extend(
+            ConfigArgument(
+                section,
+                (*section_prefix, section),
+                "object",
+                False,
+                {},
+                f"Recipe-owned {section} configuration.",
+                public_path=("recipe", "config", section),
+            )
+            for section in recipe_type.config_sections
+        )
     runtime_prefix = ("runtime",) if prefix == ("data",) else ("reef", "runtime")
+    arguments.append(
+        ConfigArgument(
+            "runtime_type",
+            (*runtime_prefix, "type"),
+            "str",
+            True,
+            None,
+            "Selected recipe runtime factory.",
+            public_path=("recipe", "runtime", "type"),
+        )
+    )
     runtime = config.get("runtime", {}) if prefix == ("data",) else config.get("reef", {}).get("runtime", {})
     if isinstance(runtime, Mapping) and isinstance(runtime.get("type"), str):
         factory = runtime_factory_for(runtime["type"])
@@ -50,7 +93,10 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             raise ValueError(f"unknown runtime type {runtime['type']!r}")
         settings_type = factory.config_type()
         if settings_type is not None:
-            arguments.extend(config_arguments(settings_type, prefix=runtime_prefix))
+            arguments.extend(
+                replace(argument, public_path=("recipe", "runtime", argument.name))
+                for argument in config_arguments(settings_type, prefix=runtime_prefix)
+            )
     for role in _EXECUTION_ROLES:
         prefix = ("execution", role)
         arguments.extend(config_arguments(ExecutorSettings, prefix=prefix))

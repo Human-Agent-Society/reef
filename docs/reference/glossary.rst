@@ -59,7 +59,7 @@ producing updates.
 Recipe reference
 ----------------
 
-What ``reef.recipe`` selects. ``recipe`` is the core record-only implementation;
+What ``recipe.implementation`` selects. ``recipe`` is the core record-only implementation;
 a dotted ``package.module:ClassName`` selects an installed method class; any
 other bare name resolves only to a YAML preset under
 ``REEF_RECIPE_CONFIG_DIR``. Reef has no global recipe-implementation registry.
@@ -253,5 +253,5 @@ Preset
 ------
 
 A recipe configuration file, ``<name>.yaml`` under ``REEF_RECIPE_CONFIG_DIR``,
-named by ``reef.recipe``. It carries the recipe's own sections; it is not a
+named by ``recipe.implementation``. It carries the recipe's own sections; it is not a
 deployment config and ``reef serve -c`` cannot read it.

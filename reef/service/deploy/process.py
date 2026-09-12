@@ -276,8 +276,8 @@ class ProcessWorker:
         if not ready:
             return True
         with subprocess.Popen(
-            interpolate_config(self.config, ready),
-            shell=True,
+            interpolate_config(self.config, ready) if isinstance(ready, str) else _command_argv(self.config, ready),
+            shell=isinstance(ready, str),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             env=self._service_env(service),

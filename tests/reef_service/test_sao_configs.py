@@ -41,13 +41,13 @@ from __future__ import annotations
 import argparse
 import importlib.machinery
 import os
-import shlex
 import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from reef_service.config_helpers import load_deployment
 
 pytest.importorskip("torch")
 
@@ -79,7 +79,7 @@ def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
     for path in _iter_config_files():
         text = path.read_text()
-        if "\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text):
+        if "\nservice:" in text or ("\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text)):
             deployments.append(path)
     return sorted(deployments)
 
@@ -223,18 +223,22 @@ def _build_slime_parser() -> argparse.ArgumentParser:
 
 def _driver_tokens(config: dict) -> tuple[list[str], str]:
     """Materialize the driver command and deployment recipe reference."""
-    from reef.service.deploy.config import interpolate_config
 
     services = {service["name"]: service for service in config["services"]}
-    command = interpolate_config(config, services["slime-driver"]["command"])
-    tokens = shlex.split(command)
+    from reef.service.deploy.options import native_arguments
+    from reef.service.deploy.process import _command_argv
+
+    tokens = _command_argv(config, services["slime-driver"]["command"])
     module = SLIME_DRIVER_MODULE
     assert module in tokens, f"slime-driver service must invoke {module}"
     driver_env = services["slime-driver"].get("env") or {}
     assert "REEF_TRAINING_RECIPE" not in driver_env
     assert "REEF_TRAINING_LOSS" not in driver_env
     recipe = config["reef"]["recipe"]
-    return tokens[tokens.index(module) + 1 :], recipe
+    return [
+        *native_arguments(config["reef"].get("training_backend_options", {})),
+        *tokens[tokens.index(module) + 1 :],
+    ], recipe
 
 
 def _strip_sglang_flags(tokens: list[str]) -> list[str]:
@@ -258,11 +262,10 @@ def _parse_config(config_path: Path):
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
-    from reef.service.deploy.config import load_config
     from reef.service.slime_driver import _driver_options, _resolve_training_recipe, _retention_options
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(config_path)
+        config = load_deployment(config_path)
     tokens, recipe = _driver_tokens(config)
     _loss_family, resolved_recipe, spec = _resolve_training_recipe(config)
     assert resolved_recipe == recipe
@@ -366,11 +369,11 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _configured_inference_backend_factory, _recipe_owned_settings
-    from reef.service.deploy.config import load_config, validate_services
+    from reef.service.deploy.config import validate_services
     from reef.service.deploy.settings import service_settings_from_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(config_path)
+        config = load_deployment(config_path)
 
     settings = service_settings_from_config(config)
     if settings.inference_backend_factory is not None:
@@ -411,11 +414,10 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.config import load_config
     from reef.service.deploy.settings import service_settings_from_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
+        config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
 
     settings = service_settings_from_config(config)
     state_dir = Path(_CONFIG_ENV["TTTD_STATE_DIR"])

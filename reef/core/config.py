@@ -21,10 +21,21 @@ import yaml
 
 
 def config_metadata(
-    help: str = "", *, path: tuple[str, ...] = (), env: str | None = None, allow_nonfinite: bool = False
+    help: str = "",
+    *,
+    path: tuple[str, ...] = (),
+    public_path: tuple[str, ...] = (),
+    env: str | None = None,
+    allow_nonfinite: bool = False,
 ) -> dict[str, Any]:
     """Describe a public setting; an omitted path means ``reef.<field>``."""
-    return {"config_help": help, "config_path": path, "config_env": env, "config_allow_nonfinite": allow_nonfinite}
+    return {
+        "config_help": help,
+        "config_path": path,
+        "config_public_path": public_path,
+        "config_env": env,
+        "config_allow_nonfinite": allow_nonfinite,
+    }
 
 
 def config_option(
@@ -32,6 +43,7 @@ def config_option(
     *,
     default_factory: Any = dataclasses.MISSING,
     help: str = "",
+    public_path: tuple[str, ...] = (),
     env: str | None = None,
     allow_nonfinite: bool = False,
 ) -> Any:
@@ -39,7 +51,7 @@ def config_option(
     return dataclasses.field(
         default=default,
         default_factory=default_factory,
-        metadata=config_metadata(help, env=env, allow_nonfinite=allow_nonfinite),
+        metadata=config_metadata(help, public_path=public_path, env=env, allow_nonfinite=allow_nonfinite),
     )
 
 
@@ -63,6 +75,7 @@ class ConfigArgument:
     env: str | None = None
     allow_nonfinite: bool = False
     required: bool = False
+    public_path: tuple[str, ...] = ()
 
     @property
     def destination(self) -> str:
@@ -78,6 +91,9 @@ class ConfigArgument:
         # The launcher owns --recipe; the setting remains --reef.recipe.
         if len(self.path) == 2 and self.path[0] == "reef" and self.name != "recipe":
             names = [self.name.replace("_", "-"), self.name, *names]
+        if self.public_path:
+            public = ".".join(self.public_path)
+            names = [public.replace("_", "-"), public, *names]
         return tuple(dict.fromkeys(f"--{name}" for name in names))
 
     @property
@@ -207,6 +223,7 @@ def config_arguments(settings_type: type, *, prefix: tuple[str, ...] = ("reef",)
                 field.metadata.get("config_env"),
                 field.metadata.get("config_allow_nonfinite", False),
                 field.default is dataclasses.MISSING and field.default_factory is dataclasses.MISSING,
+                field.metadata.get("config_public_path", ()),
             )
         )
     return tuple(arguments)

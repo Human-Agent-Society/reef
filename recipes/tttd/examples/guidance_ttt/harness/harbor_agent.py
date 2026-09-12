@@ -53,13 +53,13 @@ STATE_DIR = EXAMPLE_DIR / "work" / "polyomino_packing"  # checkpoints, artifacts
 RUN_DIR = STATE_DIR / "guidance-run"
 
 _STACK = yaml.safe_load((EXAMPLE_DIR / "serve.yaml").read_text())
-GROUPS_PER_STEP = _STACK["reef"]["groups_per_step"]
-ROLLOUTS_PER_GROUP = _STACK["reef"]["rollouts_per_group"]
-STEPS = _STACK["training"]["steps"]
-MAX_TOKENS = _STACK["training"]["max_tokens"]
-SEQ_LENGTH = _STACK["training"]["seq_length"]
-LORA_RANK = _STACK["training"]["lora_rank"]
-TENSOR_PARALLEL_SIZE = _STACK["training"]["tensor_parallel_size"]
+GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
+ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
+STEPS = _STACK["training"]["config"]["steps"]
+MAX_TOKENS = _STACK["training"]["config"]["max_tokens"]
+SEQ_LENGTH = _STACK["training"]["config"]["seq_length"]
+LORA_RANK = _STACK["training"]["config"]["lora_rank"]
+TENSOR_PARALLEL_SIZE = _STACK["training"]["config"]["tensor_parallel_size"]
 MAX_WORKERS = 8  # host-side concurrency; the stack has no matching knob
 
 TRAIN_TIMEOUT_S = 14_400.0

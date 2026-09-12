@@ -31,3 +31,36 @@ def test_serve_initializes_ray_with_the_job_runtime_env():
     # cannot import the cookbook loss family.
     source = inspect.getsource(_serve)
     assert "runtime_env=_job_runtime_env()" in source
+
+
+def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path, monkeypatch):
+    import pytest
+
+    from reef.service import slime_driver
+
+    class StopBeforeRuntime(Exception):
+        pass
+
+    class Algorithm:
+        def parse_driver_options(self, arguments):
+            return None, arguments
+
+    captured = []
+
+    def parse(arguments):
+        captured.extend(arguments)
+        raise StopBeforeRuntime
+
+    monkeypatch.setenv("RAY_ADDRESS", "auto")
+    monkeypatch.setenv("REEF_CONFIG", "unused.yaml")
+    monkeypatch.delenv("SLIME_ARGS_FILE", raising=False)
+    monkeypatch.setattr(
+        slime_driver,
+        "load_config",
+        lambda path: {"reef": {"training_backend_options": {"lr": 1e-6, "use-critic": True}}},
+    )
+    monkeypatch.setattr(slime_driver, "_resolve_training_recipe", lambda config: ("loss", "recipe", Algorithm()))
+    monkeypatch.setattr(slime_driver, "_parse_slime_args", parse)
+    with pytest.raises(StopBeforeRuntime):
+        slime_driver._serve(["--lr=2e-6"], tmp_path / "ready")
+    assert captured == ["--lr=1e-06", "--use-critic", "--lr=2e-6"]

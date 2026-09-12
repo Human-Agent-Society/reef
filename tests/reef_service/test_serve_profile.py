@@ -73,25 +73,25 @@ def test_the_serve_parser_takes_recipe_and_model_and_the_service_parser_still_do
 
 
 @pytest.mark.unit
-def test_the_config_is_resolved_explicit_first_then_the_environment_then_reef_yaml(tmp_path, monkeypatch) -> None:
-    """``-c`` or ``--recipe`` is the person's choice and wins; ``REEF_CONFIG`` and ``reef.yaml`` are the defaults behind them."""
+def test_only_an_explicit_config_or_profile_selects_a_file(tmp_path, monkeypatch) -> None:
+    """An environment variable or nearby YAML must not silently select a deployment."""
     profile = str(PROFILES_DIR / "harness-evolve.yaml")
-    assert _resolve_config("mine.yaml", None, {"REEF_CONFIG": "env.yaml"}) == "mine.yaml"
-    assert _resolve_config(None, "harness-evolve", {"REEF_CONFIG": "env.yaml"}) == profile
-    assert _resolve_config(None, None, {"REEF_CONFIG": "env.yaml"}) == "env.yaml"
+    monkeypatch.setenv("REEF_CONFIG", "env.yaml")
+    assert _resolve_config("mine.yaml", None) == "mine.yaml"
+    assert _resolve_config(None, "harness-evolve") == profile
+    assert _resolve_config(None, None) is None
     with pytest.raises(DeployConfigError, match="not both"):
-        _resolve_config("mine.yaml", "harness-evolve", {})
+        _resolve_config("mine.yaml", "harness-evolve")
     with pytest.raises(DeployConfigError, match="recipes with a profile: harness-evolve"):
-        _resolve_config(None, "weights", {})
+        _resolve_config(None, "weights")
     monkeypatch.chdir(tmp_path)
     installed = tmp_path / "installed"
     installed.mkdir()
     (installed / "reef.yaml").write_text("reef: {}\n")
     monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", installed)
-    with pytest.raises(DeployConfigError, match="--recipe <name>; recipes with a profile: harness-evolve"):
-        _resolve_config(None, None, {})
+    assert _resolve_config(None, None) is None
     (tmp_path / "reef.yaml").write_text("reef: {}\n")
-    assert _resolve_config(None, None, {}) == "reef.yaml"
+    assert _resolve_config(None, None) is None
 
 
 @pytest.mark.unit
@@ -116,7 +116,7 @@ def test_the_model_flag_fills_the_provider_preset_and_leaves_other_spellings_alo
 
 @pytest.mark.unit
 def test_a_profile_needs_a_model_and_the_checkout_before_it_loads(tmp_path, monkeypatch) -> None:
-    with pytest.raises(DeployConfigError, match="pass --model <provider>/<model>"):
+    with pytest.raises(DeployConfigError, match=r"pass --inference\.upstream-model MODEL"):
         _prepare_profile("harness-evolve", None, {})
     monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
     with pytest.raises(DeployConfigError, match="runs from a reef checkout"):
@@ -153,13 +153,15 @@ def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_
     }.items():
         monkeypatch.setenv(key, value)
     path = profile_path("harness-evolve")
-    config = load_config(path)
+    from reef.service.deploy.orchestrator import resolve_deployment_config
+
+    config = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
     validate_services(config, path)
     reef_service = next(service for service in config["services"] if service["name"] == "reef")
     assert reef_service["env"]["REEF_RECIPE_CONFIG_DIR"] == str(PROFILES_DIR)
     method_root = Path(reef_service["env"]["PYTHONPATH"].split(os.pathsep)[0])
     assert (method_root / "harness" / "evolution.py").is_file()
-    assert config["reef"]["recipe"] == "harness-evolve" and config["reef"]["port"] == 8900
+    assert config["reef"]["recipe"] == "reef.recipe.cordis:CordisRecipe" and config["reef"]["port"] == 8900
     assert "token" not in config["reef"]  # loopback only; a copy of the file adds one
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith(".reef/harness-evolve/")
@@ -197,4 +199,12 @@ def test_serve_without_a_config_names_the_recipes_with_a_profile(tmp_path) -> No
         timeout=60,
     )
     assert result.returncode == 2
-    assert "pass --model <provider>/<model>" in result.stderr
+    assert "pass --inference.upstream-model MODEL" in result.stderr
+
+
+@pytest.mark.unit
+def test_explicit_empty_profile_model_does_not_fall_back_to_the_environment():
+    with pytest.raises(DeployConfigError, match=r"pass --inference\.upstream-model MODEL"):
+        _prepare_profile(
+            "harness-evolve", None, {"REEF_UPSTREAM_MODEL": "env-model"}, {"inference.upstream-model": ""}
+        )

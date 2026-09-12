@@ -26,7 +26,14 @@ from reef.service.deploy.config import config_value, interpolate_config, interpo
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
-_DESCRIPTION = """reef serve — start a stack from a config.
+_DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
+
+With no selected config, --inference.upstream-url and --inference.upstream-model start Reef's
+record-only recipe on 127.0.0.1:8900. YAML and a services list are optional.
+Alternatively, --inference.model-path starts managed SGLang inference and Reef;
+--inference.tensor-parallel-size selects the visible GPU count (default: 1).
+Config files are selected explicitly with -c; REEF_CONFIG and ./reef.yaml
+are not discovered by the launcher.
 
 ``reef serve -c <stack>.yaml`` reads the config's ``services``
 list and starts every declared process (SGLang, Slime driver, Reef, and so on)
@@ -34,22 +41,23 @@ in dependency order. Each service's ``ready`` probe must pass before the next
 starts. After all services are up, Reef blocks until SIGTERM/SIGINT; a
 watchdog thread detects unexpected exits and tears the stack down.
 
-The Reef HTTP child is an internal service process configured from the same
-YAML file. Public startup is always config-driven.
+The Reef HTTP child receives the effective configuration from the launcher.
 
 Config overrides:
   Public settings below share type conversion with YAML. Explicit CLI
   values override YAML; omitted settings use the dataclass defaults.
-  Both --upstream-model and legacy --upstream_model spellings work.
+  Use the full public namespace; legacy aliases remain accepted.
   Lists and objects take one quoted JSON/YAML value, including [] or {}.
   Selected recipe/runtime fields share these rules; use -c <file> --help
-  to inspect their definitions. Undeclared custom-stack keys retain YAML
-  coercion; bare keys target ``reef``, dotted keys target other sections.
+  to inspect their definitions. Versioned files reject unknown public
+  fields; legacy custom-stack keys retain their compatibility parsing.
 
   Examples:
-    reef serve -c stack.yaml --model-path Qwen/Qwen2.5-1.5B-Instruct
-    reef serve -c path/to/local-sglang.yaml --port 9000
-    reef serve --training.checkpoint_dir /tmp/ckpt
+    reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+    reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
+    reef serve -c stack.yaml --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+    reef serve -c path/to/local-sglang.yaml --service.port 9000
+    reef serve -c stack.yaml --training.config.checkpoint_dir /tmp/ckpt
 """
 
 
@@ -64,7 +72,7 @@ def build_parser(*, service_arguments: bool = False) -> argparse.ArgumentParser:
         "-c",
         "--config",
         default=None,
-        help="Config file path, relative to the working directory (default: $REEF_CONFIG or ./reef.yaml).",
+        help="Optional config file path, relative to the working directory; no file is loaded unless selected.",
     )
     if service_arguments:
         for argument in service_config_arguments():
@@ -82,50 +90,124 @@ class ServiceSettings:
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
     """
 
-    recipe: str = config_option(help="Recipe implementation or named deployment preset (the launcher owns --recipe).")
-    host: str = config_option("0.0.0.0", help="HTTP bind address.")
-    port: int = config_option(8900, help="HTTP bind port.")
-    tokens: tuple[str, ...] = config_option((), help="Accepted bearer tokens as a JSON/YAML list.")
-    console_origins: tuple[str, ...] = config_option((), help="Allowed console origins as a JSON/YAML list.")
-    ray_address: str | None = config_option(None, help="Ray cluster address.")
-    ray_namespace: str = config_option("reef", help="Ray namespace for the training bridge.")
-    ray_actor_name: str = config_option("reef-train-bridge", help="Training bridge actor name.")
-    inference_url: str | None = config_option(None, help="Local inference endpoint.")
-    model_path: str | None = config_option(None, help="Local model directory or Hugging Face repository ID.")
+    recipe: str = config_option(
+        public_path=("recipe", "implementation"),
+        help="Recipe implementation or named deployment preset (the launcher owns --recipe).",
+    )
+    host: str = config_option("0.0.0.0", public_path=("service", "host"), help="HTTP bind address.")
+    port: int = config_option(8900, public_path=("service", "port"), help="HTTP bind port.")
+    tokens: tuple[str, ...] = config_option(
+        (), public_path=("service", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
+    )
+    console_origins: tuple[str, ...] = config_option(
+        (), public_path=("service", "console_origins"), help="Allowed console origins as a JSON/YAML list."
+    )
+    ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
+    ray_namespace: str = config_option(
+        "reef", public_path=("training", "ray_namespace"), help="Ray namespace for the training bridge."
+    )
+    ray_actor_name: str = config_option(
+        "reef-train-bridge", public_path=("training", "ray_actor_name"), help="Training bridge actor name."
+    )
+    inference_url: str | None = config_option(None, public_path=("inference", "url"), help="Local inference endpoint.")
+    model_path: str | None = config_option(
+        None, public_path=("inference", "model_path"), help="Local model directory or Hugging Face repository ID."
+    )
+    inference_backend: str | None = config_option(
+        None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
+    )
+    tensor_parallel_size: int | None = config_option(
+        None, public_path=("inference", "tensor_parallel_size"), help="Managed local inference GPU count (default: 1)."
+    )
+    inference_options: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
+    )
+    training_backend_options: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Native Slime driver options.", public_path=("training", "options")),
+    )
     #: The OpenAI-compatible provider no-update recipes proxy to (no ``/v1``
     #: suffix), its credential, and the model name to request from it. The
     #: only place the upstream is named: the HTTP service forwards to it, and
     #: the training side derives the model binding it hands to methods and
     #: evaluation episodes from it. ``upstream_model`` is a provider model
     #: name, unlike ``model_path``, which is local weights for training.
-    upstream_url: str | None = config_option(None, help="Upstream provider base URL.")
-    upstream_api_key: str | None = config_option(None, help="Upstream provider credential.")
-    upstream_model: str | None = config_option(None, help="Model name requested from the upstream provider.")
+    upstream_url: str | None = config_option(
+        None, public_path=("inference", "upstream_url"), help="Upstream provider base URL."
+    )
+    upstream_api_key: str | None = config_option(
+        None, public_path=("inference", "upstream_api_key"), help="Upstream provider credential."
+    )
+    upstream_model: str | None = config_option(
+        None, public_path=("inference", "upstream_model"), help="Model name requested from the upstream provider."
+    )
     #: The provider's API dialect: ``openai`` (default), ``responses``, or ``anthropic``.
-    upstream_api: str = config_option("openai", help="Provider API dialect.")
-    inference_timeout_s: float = config_option(300.0, help="Inference request timeout in seconds.")
-    train_timeout_s: float | None = config_option(None, help="Training request timeout in seconds.")
-    inference_backend_factory: str | None = config_option(None, help="Dotted inference backend factory.")
+    upstream_api: str = config_option(
+        "openai", public_path=("inference", "upstream_api"), help="Provider API dialect."
+    )
+    inference_timeout_s: float = config_option(
+        300.0, public_path=("inference", "timeout_s"), help="Inference request timeout in seconds."
+    )
+    train_timeout_s: float | None = config_option(
+        None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
+    )
+    inference_backend_factory: str | None = config_option(
+        None, public_path=("inference", "backend_factory"), help="Dotted inference backend factory."
+    )
     inference_backend_config: Mapping[str, Any] = field(
-        default_factory=dict, metadata=config_metadata("Inference backend options as a JSON/YAML object.")
+        default_factory=dict,
+        metadata=config_metadata(
+            "Inference backend options as a JSON/YAML object.", public_path=("inference", "backend_config")
+        ),
     )
-    inference_retry_initial_s: float = config_option(0.05, help="Initial inference retry delay in seconds.")
-    inference_retry_max_s: float = config_option(1.0, help="Maximum inference retry delay in seconds.")
+    inference_retry_initial_s: float = config_option(
+        0.05, public_path=("inference", "retry_initial_s"), help="Initial inference retry delay in seconds."
+    )
+    inference_retry_max_s: float = config_option(
+        1.0, public_path=("inference", "retry_max_s"), help="Maximum inference retry delay in seconds."
+    )
     inference_retry_timeout_s: float = config_option(
-        300.0, help="Retry deadline in seconds; defaults to the inference timeout."
+        300.0,
+        public_path=("inference", "retry_timeout_s"),
+        help="Retry deadline in seconds; defaults to the inference timeout.",
     )
-    artifact_repository: str = config_option(".reef/artifacts.git", help="Artifact repository location.")
-    artifact_work_dir: str = config_option(".reef/artifact-work", help="Artifact working directory.")
-    artifact_cache_dir: str = config_option(".reef/artifact-cache", help="Artifact cache directory.")
-    agent_record_dir: str = config_option(".reef/agent-record", help="Agent record directory.")
-    record_backend: str = config_option("sqlite", help="Record storage backend.")
+    artifact_repository: str = config_option(
+        ".reef/artifacts.git", public_path=("storage", "artifact_repository"), help="Artifact repository location."
+    )
+    artifact_work_dir: str = config_option(
+        ".reef/artifact-work", public_path=("storage", "artifact_work_dir"), help="Artifact working directory."
+    )
+    artifact_cache_dir: str = config_option(
+        ".reef/artifact-cache", public_path=("storage", "artifact_cache_dir"), help="Artifact cache directory."
+    )
+    agent_record_dir: str = config_option(
+        ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
+    )
+    record_backend: str = config_option(
+        "sqlite", public_path=("storage", "record_backend"), help="Record storage backend."
+    )
     record_database_url: str | None = field(
-        default=None, repr=False, metadata=config_metadata("PostgreSQL connection URL.")
+        default=None,
+        repr=False,
+        metadata=config_metadata("PostgreSQL connection URL.", public_path=("storage", "record_database_url")),
     )
-    record_database_schema: str = config_option("reef_records", help="PostgreSQL schema.")
-    agent_record_retention_days: float = config_option(7.0, help="Record retention in days.")
-    agent_record_retention_max_bytes: int = config_option(20 * 1024**3, help="Maximum retained record bytes.")
-    allow_implicit_scenario_creation: bool = config_option(True, help="Allow requests to create scenarios implicitly.")
+    record_database_schema: str = config_option(
+        "reef_records", public_path=("storage", "record_database_schema"), help="PostgreSQL schema."
+    )
+    agent_record_retention_days: float = config_option(
+        7.0, public_path=("storage", "agent_record_retention_days"), help="Record retention in days."
+    )
+    agent_record_retention_max_bytes: int = config_option(
+        20 * 1024**3,
+        public_path=("storage", "agent_record_retention_max_bytes"),
+        help="Maximum retained record bytes.",
+    )
+    allow_implicit_scenario_creation: bool = config_option(
+        True,
+        public_path=("service", "allow_implicit_scenario_creation"),
+        help="Allow requests to create scenarios implicitly.",
+    )
     #: Deployment-level experiment provider settings, sourced from
     #: ``observability.wandb``.
     wandb_config: Mapping[str, Any] = field(
@@ -133,7 +215,10 @@ class ServiceSettings:
         metadata=config_metadata("W&B settings as a JSON/YAML object.", path=("observability", "wandb")),
     )
     training_settings: Mapping[str, Any] = field(
-        default_factory=dict, metadata=config_metadata("Training settings as a JSON/YAML object.", path=("training",))
+        default_factory=dict,
+        metadata=config_metadata(
+            "Training settings as a JSON/YAML object.", path=("training",), public_path=("training", "config")
+        ),
     )
     #: Optional pre-publication checkpoint evaluator and selection plugin.
     evaluation_settings: Mapping[str, Any] | None = field(
@@ -204,7 +289,15 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
     """Public settings derive their types and defaults from ServiceSettings."""
     return (
         *config_arguments(ServiceSettings),
-        ConfigArgument("token", ("reef", "token"), "str", True, None, "One accepted bearer token."),
+        ConfigArgument(
+            "token",
+            ("reef", "token"),
+            "str",
+            True,
+            None,
+            "One accepted bearer token.",
+            public_path=("service", "token"),
+        ),
     )
 
 
@@ -241,6 +334,10 @@ def parse_service_arguments(
     expanded the effective config. ``cli_paths`` remains accepted for callers
     of the earlier adapter; precedence is already present in the mapping.
     """
+    if "schema-version" in config:
+        from reef.service.deploy.layout import translate_layout
+
+        config = translate_layout(config)
     arguments = service_config_arguments()
     supplied = {}
     for argument in arguments:
@@ -263,6 +360,10 @@ def normalize_service_config(
     which of their fields the operator supplied, and custom stacks may have
     no Reef HTTP child at all.
     """
+    if "schema-version" in config:
+        from reef.service.deploy.layout import translate_layout
+
+        config = translate_layout(config)
     values = parse_service_arguments(config, cli_paths=cli_paths)
     normalized = copy.deepcopy(dict(config))
     for argument in service_config_arguments():
@@ -301,6 +402,12 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
 
 def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     """Translate the config's ``reef`` section into HTTP service settings."""
+    if "schema-version" in config:
+        from reef.service.deploy.components import component_config_arguments
+        from reef.service.deploy.layout import normalize_component_layout, translate_layout
+
+        config = translate_layout(config)
+        config = normalize_component_layout(config, component_config_arguments(config))
     values = parse_service_arguments(config)
     if not isinstance(values["recipe"], str) or not values["recipe"]:
         raise ValueError("config must declare a non-empty reef.recipe")
@@ -309,8 +416,8 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
     # The legacy retry deadline follows the request timeout unless supplied.
     if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
-    # Built-in profiles use one file as both a stack and a named preset.
-    preset = dict(config) if "implementation" in config and ":" not in values["recipe"] else None
+    # Preserve shared execution settings for presets and directly selected recipes.
+    preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
     return ServiceSettings(**values, recipe_settings=_reef_section(config), preset_config=preset)
 
 

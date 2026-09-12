@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from reef_service.config_helpers import deployment_layout
 
 from reef.runtime.executor.ray import RayExecutor
 from reef.service.deploy.config import validate_services
@@ -22,7 +23,7 @@ def test_local_training_controllers_leave_all_model_gpus_available(tmp_path, mon
     from ray.cluster_utils import Cluster
 
     root = Path(__file__).resolve().parents[2]
-    config = yaml.safe_load((root / "recipes" / recipe / "serve.yaml").read_text())
+    config = deployment_layout(yaml.safe_load((root / "recipes" / recipe / "serve.yaml").read_text()))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     real_init = ray.init
@@ -87,7 +88,9 @@ def test_inference_services_leave_five_disjoint_gpus_for_slime(tmp_path, monkeyp
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
     root = Path(__file__).resolve().parents[2]
-    config = yaml.safe_load((root / "recipes/openclawrl/examples/openclawrl/serve.yaml").read_text())
+    config = deployment_layout(
+        yaml.safe_load((root / "recipes/openclawrl/examples/openclawrl/serve.yaml").read_text())
+    )
     gpu_pool = [str(gpu) for gpu in range(1, 8)]
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", ",".join(gpu_pool))
     monkeypatch.delenv("RAY_ADDRESS", raising=False)

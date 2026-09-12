@@ -3,32 +3,128 @@
 # algorithm constants; harness/harbor_agent.py holds the same values so a
 # qualification and a full run cannot silently disagree.
 
-run_dir: work/polyomino_packing/stack
-ready_timeout: 3600
+schema-version: 2
+service:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: work/polyomino_packing/stack
+  ready-timeout: 3600
+
+inference:
+  model-path: work/model
+  timeout-s: 7200
+  backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+recipe:
+  implementation: recipes.tttd.recipe:TTTDRecipe
+  config:
+    groups-per-step: 2
+    rollouts-per-group: 4
+    checkpoint-every-n-versions: 2
+training:
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  timeout-s: 7200
+  config:
+    num_gpus: 2
+    # The grid and model limits. harness/harbor_agent.py reads these same keys,
+    # so the harness and the stack cannot disagree about the step it is running.
+    steps: 1
+    max_tokens: 8192
+    seq_length: 12288
+    lora_rank: 32
+    tensor_parallel_size: 2
+    checkpoint_dir: work/polyomino_packing/checkpoints
+
+  options:
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    ref-load: "${inference.model-path}"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    save-interval: "${recipe.config.checkpoint-every-n-versions}"
+    megatron-to-hf-mode: "bridge"
+    num-rollout: "${training.config.steps}"
+    rollout-batch-size: "${recipe.config.groups-per-step}"
+    n-samples-per-prompt: "${recipe.config.rollouts-per-group}"
+    global-batch-size: "8"
+    disable-rollout-global-dataset: true
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "${training.config.num_gpus}"
+    rollout-num-gpus: "${training.config.num_gpus}"
+    rollout-num-gpus-per-engine: "1"
+    num-gpus-per-node: "${training.config.num_gpus}"
+    colocate: true
+    tensor-model-parallel-size: "${training.config.tensor_parallel_size}"
+    pipeline-model-parallel-size: "1"
+    context-parallel-size: "1"
+    expert-model-parallel-size: "1"
+    expert-tensor-parallel-size: "1"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    rotary-base: "1000000"
+    swiglu: true
+    disable-bias-linear: true
+    normalization: "RMSNorm"
+    group-query-attention: true
+    qk-layernorm: true
+    seq-length: "${training.config.seq_length}"
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "12288"
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    megatron-lora-rank: "${training.config.lora_rank}"
+    megatron-lora-alpha: "32"
+    megatron-lora-dropout: "0"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+    check-lora-weight-equal: true
+    verify-lora-base-weights: true
+    optimizer: "adam"
+    lr: "4e-5"
+    lr-decay-style: "constant"
+    override-opt-param-scheduler: true
+    weight-decay: "0"
+    adam-beta1: "0.9"
+    adam-beta2: "0.95"
+    adam-eps: "1e-8"
+    clip-grad: "0"
+    loss-type: "custom_loss"
+    custom-loss-function-path: "recipes.tttd.slime.objective.tttd_loss"
+    use-rollout-logprobs: true
+    advantage-estimator: "grpo"
+    kl-coef: "0.1"
+    custom-advantage-function-path: "recipes.tttd.slime.objective.tttd_advantages"
+    entropy-coef: "0"
+    rollout-temperature: "1"
+    rollout-max-response-len: "8192"
+    rollout-max-context-len: "12288"
+    sglang-context-length: "12288"
+    sglang-router-port: "30000"
+    sglang-mem-fraction-static: "0.5"
+    sglang-disable-prefill-cuda-graph: true
+    sglang-cuda-graph-max-bs-decode: "8"
+    train-env-vars: "{\"PYTORCH_CUDA_ALLOC_CONF\":\"max_split_size_mb:512\"}"
+    log-probs-chunk-size: "1024"
+    attention-dropout: "0"
+    hidden-dropout: "0"
+    accumulate-allreduce-grads-in-fp32: true
+    attention-softmax-in-fp32: true
+    attention-backend: "flash"
+storage:
+  artifact-repository: work/polyomino_packing/artifacts.git
+  artifact-work-dir: work/polyomino_packing/artifact-work
+  artifact-cache-dir: work/polyomino_packing/artifact-cache
+  agent-record-dir: work/polyomino_packing/agent-record
 
 # Service processes launch locally; Slime owns distributed GPU model workers.
 execution:
   training: ray
   rollout: ray
-
-reef:
-  host: 127.0.0.1
-  model_path: work/model
-  port: 8900
-  recipe: recipes.tttd.recipe:TTTDRecipe
-  token: reef-local
-  groups_per_step: 2
-  rollouts_per_group: 4
-  checkpoint_every_n_versions: 2
-  ray_namespace: reef
-  ray_actor_name: reef-train-bridge
-  inference_timeout_s: 7200
-  train_timeout_s: 7200
-  inference_backend_factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
-  artifact_repository: work/polyomino_packing/artifacts.git
-  artifact_work_dir: work/polyomino_packing/artifact-work
-  artifact_cache_dir: work/polyomino_packing/artifact-cache
-  agent_record_dir: work/polyomino_packing/agent-record
 
 observability:
   wandb:
@@ -42,96 +138,12 @@ observability:
     directory: work/polyomino_packing/wandb
     upload_checkpoints: false
 
-training:
-  num_gpus: 2
-  # The grid and model limits. harness/harbor_agent.py reads these same keys,
-  # so the harness and the stack cannot disagree about the step it is running.
-  steps: 1
-  max_tokens: 8192
-  seq_length: 12288
-  lora_rank: 32
-  tensor_parallel_size: 2
-  checkpoint_dir: work/polyomino_packing/checkpoints
-
 services:
   - name: slime-driver
-    command: >-
-      "${REEF_PYTHON}" -m reef.service.slime_driver
-      --hf-checkpoint=${reef.model_path}
-      --load=${training.checkpoint_dir}/megatron
-      --ref-load=${reef.model_path}
-      --save=${training.checkpoint_dir}/megatron
-      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
-      --save-interval=${reef.checkpoint_every_n_versions}
-      --megatron-to-hf-mode=bridge
-      --num-rollout=${training.steps}
-      --rollout-batch-size=${reef.groups_per_step}
-      --n-samples-per-prompt=${reef.rollouts_per_group}
-      --global-batch-size=8
-      --disable-rollout-global-dataset
-      --actor-num-nodes=1
-      --actor-num-gpus-per-node=${training.num_gpus}
-      --rollout-num-gpus=${training.num_gpus}
-      --rollout-num-gpus-per-engine=1
-      --num-gpus-per-node=${training.num_gpus}
-      --colocate
-      --tensor-model-parallel-size=${training.tensor_parallel_size}
-      --pipeline-model-parallel-size=1
-      --context-parallel-size=1
-      --expert-model-parallel-size=1
-      --expert-tensor-parallel-size=1
-      --padded-vocab-size=151936
-      --position-embedding-type=rope
-      --rotary-base=1000000
-      --swiglu
-      --disable-bias-linear
-      --normalization=RMSNorm
-      --group-query-attention
-      --qk-layernorm
-      --seq-length=${training.seq_length}
-      --use-dynamic-batch-size
-      --max-tokens-per-gpu=12288
-      --recompute-granularity=full
-      --recompute-method=uniform
-      --recompute-num-layers=1
-      --megatron-lora-rank=${training.lora_rank}
-      --megatron-lora-alpha=32
-      --megatron-lora-dropout=0
-      --megatron-lora-target-modules
-      linear_qkv linear_proj linear_fc1 linear_fc2
-      --check-lora-weight-equal
-      --verify-lora-base-weights
-      --optimizer=adam
-      --lr=4e-5
-      --lr-decay-style=constant
-      --override-opt-param-scheduler
-      --weight-decay=0
-      --adam-beta1=0.9
-      --adam-beta2=0.95
-      --adam-eps=1e-8
-      --clip-grad=0
-      --loss-type=custom_loss
-      --custom-loss-function-path=recipes.tttd.slime.objective.tttd_loss
-      --use-rollout-logprobs
-      --advantage-estimator=grpo
-      --kl-coef=0.1
-      --custom-advantage-function-path=recipes.tttd.slime.objective.tttd_advantages
-      --entropy-coef=0
-      --rollout-temperature=1
-      --rollout-max-response-len=8192
-      --rollout-max-context-len=12288
-      --sglang-context-length=12288
-      --sglang-router-port=30000
-      --sglang-mem-fraction-static=0.5
-      --sglang-disable-prefill-cuda-graph
-      --sglang-cuda-graph-max-bs-decode=8
-      --train-env-vars='{"PYTORCH_CUDA_ALLOC_CONF":"max_split_size_mb:512"}'
-      --log-probs-chunk-size=1024
-      --attention-dropout=0
-      --hidden-dropout=0
-      --accumulate-allreduce-grads-in-fp32
-      --attention-softmax-in-fp32
-      --attention-backend=flash
+    command:
+      - ${REEF_PYTHON}
+      - -m
+      - reef.service.slime_driver
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     env:
       REEF_RAY_NAMESPACE: reef
@@ -141,6 +153,6 @@ services:
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready: curl -sf http://127.0.0.1:${service.port}/healthz
     ready_timeout: 120
     depends_on: [slime-driver]

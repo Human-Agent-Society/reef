@@ -9,24 +9,21 @@
 #   export REEF_TOKEN=$(openssl rand -hex 16)
 #   export REEF_UPSTREAM_API_KEY=sk-...
 
-reef:
+schema-version: 2
+service:
   host: 0.0.0.0
   port: 8900
-  recipe: recipe
-  # The service credential. Use `tokens: [...]` instead to accept several
-  # at once, e.g. while rotating.
+  # Use tokens: [...] to accept several credentials during rotation.
   token: ${REEF_TOKEN}
-  # The OpenAI-compatible provider (no /v1 suffix), its credential, and the
-  # model to request. Reef is the only party that ever sees these.
-  upstream_url: https://api.openai.com
-  upstream_api_key: ${REEF_UPSTREAM_API_KEY}
-  upstream_model: gpt-4o
-  inference_timeout_s: 300
-  artifact_work_dir: .reef/artifact-work
-  artifact_cache_dir: .reef/artifact-cache
-  agent_record_dir: .reef/agent-record
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+recipe:
+  implementation: recipe
+# The OpenAI-compatible provider (no /v1 suffix), its credential, and model.
+inference:
+  upstream-url: https://api.openai.com
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+  upstream-model: gpt-4o
+  timeout-s: 300
+storage:
+  artifact-work-dir: .reef/artifact-work
+  artifact-cache-dir: .reef/artifact-cache
+  agent-record-dir: .reef/agent-record

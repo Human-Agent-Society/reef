@@ -29,7 +29,8 @@ environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
 defaults to the interpreter running `reef serve`, so Python services that use
 it share Reef's environment without changing the meaning of literal `python`
 commands. Copy one and adapt it;
-`reef serve -c <stack> --<key> <value>` overrides any `reef.*` setting. The
+`reef serve -c <stack> --<section.field> <value>` overrides the matching YAML setting,
+for example `--inference.model-path /models/demo` or `--service.port 9000`. The
 `recipe` they bind is the base contract in
 [`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
 lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the

@@ -43,7 +43,7 @@ Pick by the signal your workload can produce.
 How a recipe is selected
 ------------------------
 
-A deployment serves exactly one recipe, named by ``reef.recipe`` in its config.
+A deployment serves exactly one recipe, named by ``recipe.implementation`` in its config.
 Every scenario it creates uses that recipe. Requests never name a recipe, and
 scenario snapshots do not store one. The scenario header is the only routing a
 caller provides. The artifact repository is therefore deployment-owned: do not
@@ -51,11 +51,13 @@ point deployments configured with different recipes at the same repository.
 
 .. code:: yaml
 
-   reef:
-     recipe: recipes.sao.recipe:SAORecipe
-     batch_size: 1
+   schema-version: 2
+   recipe:
+     implementation: recipes.sao.recipe:SAORecipe
+     config:
+       batch-size: 1
 
-``reef.recipe`` accepts the core value ``recipe``, a dotted class, or a preset.
+``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
 Reef does not register or import learning methods. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__

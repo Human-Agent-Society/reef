@@ -26,50 +26,20 @@
 # would only mislead anyone debugging from the config.
 #
 # Prerequisites:
-#   HF model directory at reef.model_path (bridge mode loads HF weights
+#   HF model directory at inference.model-path (bridge mode loads HF weights
 #   directly; no torch_dist conversion needed).
 
-execution:
-  training: ray
-  rollout: ray
-
-reef:
+schema-version: 2
+service:
   host: 0.0.0.0
-  model_path: /root/models/Qwen3-4B-Thinking-2507
   port: 28900
-  recipe: recipes.openclawrl.recipe:OpenClawRLRecipe
   token: ${REEF_TOKEN}                 # run.sh mints one per run
-  batch_size: 16                       # MUST equal training.global_batch_size
-  checkpoint_every_n_versions: 1
-  ray_namespace: reef
-  ray_actor_name: reef-train-bridge
-  # A step with long assembled episodes can exceed the 300 s default; a
-  # timed-out worker retry then collides with the still-running job's
-  # RUNNING marker (observed live as "operator recovery required").
-  inference_timeout_s: 7200
-  train_timeout_s: 7200
-  # slime's sglang router binds the node IP, not localhost.
-  # In-processor judging: one sglang server (prm-sglang below) answers judge
-  # generations and teacher prefills.
-  prm_url: ${endpoints.prm-sglang}
-  prm_tokenizer_path: ${prm.model_path}
-  # Thinking-model PRM under judge load: single votes need minutes. Upstream
-  # never times judge calls out (httpx timeout=None); 3600s is effectively
-  # that while still freeing a truly wedged socket. 300s was punishing long
-  # turns: votes timed out -> 0.0 -> no verdict, so degenerate long replies
-  # escaped the -1 upstream would deliver. (The directive teacher no longer
-  # calls this server at all — candidates go to the train actor's Megatron
-  # teacher pass, which computes exact log-probs on the trainer's own
-  # tempered scale.)
-  prm_timeout_s: 3600
-  prm_max_hint_candidates: 3
-  # The judged population, one JSON line per batch (upstream's
-  # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
-  # "the judges disagree" from "the judges never ran".
-  prm_record_file: /var/lib/reef/prm-records.jsonl
-  inference_backend_factory: >-
+inference:
+  model-path: /root/models/Qwen3-4B-Thinking-2507
+  timeout-s: 7200
+  backend-factory: >-
     reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
-  inference_backend_config:
+  backend-config:
     tool_call_parser: qwen25
     # Old-policy top-K capture (S^q / ell_old) for the top-K objective.
     capture_topk: 4
@@ -82,22 +52,133 @@ reef:
       top_p: 0.95
       top_k: 20
       max_new_tokens: 8192
-  artifact_repository: /var/lib/reef/artifacts.git
-  artifact_work_dir: /var/lib/reef/artifact-work
-  artifact_cache_dir: /var/lib/reef/artifact-cache
-  agent_record_dir: /var/lib/reef/agent-record
+recipe:
+  implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
+  config:
+    batch-size: 16                     # MUST equal training.config.global_batch_size
+    checkpoint-every-n-versions: 1
+    prm-url: ${endpoints.prm-sglang}
+    prm-tokenizer-path: ${training.config.prm.model_path}
+    # Thinking-model PRM under judge load: single votes need minutes. Upstream
+    # never times judge calls out (httpx timeout=None); 3600s is effectively
+    # that while still freeing a truly wedged socket. 300s was punishing long
+    # turns: votes timed out -> 0.0 -> no verdict, so degenerate long replies
+    # escaped the -1 upstream would deliver. (The directive teacher no longer
+    # calls this server at all — candidates go to the train actor's Megatron
+    # teacher pass, which computes exact log-probs on the trainer's own
+    # tempered scale.)
+    prm-timeout-s: 3600
+    prm-max-hint-candidates: 3
+    # The judged population, one JSON line per batch (upstream's
+    # OPENCLAW_PRM_RECORD_FILE). A batch reward mean cannot distinguish
+    # "the judges disagree" from "the judges never ran".
+    prm-record-file: /var/lib/reef/prm-records.jsonl
+training:
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  # A step with long assembled episodes can exceed the 300 s default; a
+  # timed-out worker retry then collides with the still-running job's
+  # RUNNING marker (observed live as "operator recovery required").
+  timeout-s: 7200
+  config:
+    sglang_port: "23000"
+    checkpoint_dir: /var/lib/reef/checkpoints
+    checkpoint_retention:
+      max_storage_fraction: 0.80
+      min_free_space_fraction: 0.10
+      policy: latest
+    global_batch_size: 16
+    # The private SGLang service answers judge generations and teacher prefills.
+    prm:
+      model_path: /root/models/Qwen3-4B-Thinking-2507
+      port: "23001"
+      tp: 1
 
-prm:
-  model_path: /root/models/Qwen3-4B-Thinking-2507
-  port: "23001"
-  tp: 1
+    user_llm:
+      # The paper simulates users with Qwen3-32B "to ensure faithful
+      # role-following" (§4.1); one B200 hosts it comfortably.
+      model_path: /root/models/Qwen3-32B
+      port: "30001"
+      served_name: qwen3-32b-user-llm
 
-user_llm:
-  # The paper simulates users with Qwen3-32B "to ensure faithful
-  # role-following" (§4.1); one B200 hosts it comfortably.
-  model_path: /root/models/Qwen3-32B
-  port: "30001"
-  served_name: qwen3-32b-user-llm
+  # Model sizes are derived from HF metadata; tokenizer padding and model-family
+  # flags are explicit here. The loss family supplies its hook paths.
+  options:
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    megatron-to-hf-mode: "bridge"
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    sglang-router-port: "${training.config.sglang_port}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    rollout-num-gpus: "1"
+    rollout-num-gpus-per-engine: "1"
+    num-gpus-per-node: "7"
+    tensor-model-parallel-size: "4"
+    pipeline-model-parallel-size: "1"
+    seq-length: "65536"
+    rollout-max-response-len: "8192"
+    rollout-max-context-len: "65536"
+    sglang-context-length: "65536"
+    sglang-reasoning-parser: "qwen3-thinking"
+    rotary-base: "5000000"
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    log-probs-chunk-size: "1024"
+    ckpt-fully-parallel-save: true
+    sequence-parallel: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "65536"
+    attention-dropout: "0.0"
+    hidden-dropout: "0.0"
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: "flash"
+    optimizer: "adam"
+    lr: "1e-5"
+    lr-decay-style: "constant"
+    weight-decay: "0.1"
+    adam-beta1: "0.9"
+    adam-beta2: "0.98"
+    loss-type: "custom_loss"
+    eps-clip: "0.2"
+    eps-clip-high: "0.28"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "1"
+    num-steps-per-rollout: "1"
+    openclawrl-w-rl: "1.0"
+    openclawrl-w-opd: "1.0"
+    openclawrl-adv-diff-clip: "1.0"
+    openclawrl-hint-selection: "sequence_optimal"
+    openclawrl-subset-mode: "student"
+    rollout-temperature: "0.6"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    normalization: "RMSNorm"
+    group-query-attention: true
+    qk-layernorm: true
+    sglang-tool-call-parser: "qwen25"
+storage:
+  artifact-repository: /var/lib/reef/artifacts.git
+  artifact-work-dir: /var/lib/reef/artifact-work
+  artifact-cache-dir: /var/lib/reef/artifact-cache
+  agent-record-dir: /var/lib/reef/agent-record
+
+execution:
+  training: ray
+  rollout: ray
 
 observability:
   wandb:
@@ -111,99 +192,32 @@ observability:
     directory: /var/lib/reef/wandb
     upload_checkpoints: false
 
-training:
-  sglang_port: "23000"
-  checkpoint_dir: /var/lib/reef/checkpoints
-  checkpoint_retention:
-    max_storage_fraction: 0.80
-    min_free_space_fraction: 0.10
-    policy: latest
-  global_batch_size: 16
-  # openclawrl runs the verbatim upstream top-K select objective; architecture
-  # Reef derives architecture flags from the HF config.
-  # --padded-vocab-size + the rope/swiglu/norm/GQA flags below: the
-  # Reef autofills architecture sizes from the HF config but not these;
-  # its tokenizer-derived vocab pad mismatches Qwen3's 151936.
-  # The objective itself comes from the loss family: the worker's @objective
-  # registry sets every hook path at init, so none appears here.
-  # --openclawrl-*: the objective's knobs. Upstream ships them through
-  # ray's runtime-env; on argv a Megatron actor can never silently run a
-  # different value than the one configured.
-  # Nothing in this block may carry a comment: `>-` folds every line into the
-  # flag string, so a comment becomes argv tokens that only survive because
-  # Megatron parses with ignore_unknown_args.
-  slime_flags: >-
-    --actor-num-nodes=1 --actor-num-gpus-per-node=4 --rollout-num-gpus=1
-    --rollout-num-gpus-per-engine=1 --num-gpus-per-node=7
-    --tensor-model-parallel-size=4 --pipeline-model-parallel-size=1
-    --seq-length=65536 --rollout-max-response-len=8192
-    --rollout-max-context-len=65536 --sglang-context-length=65536
-    --sglang-reasoning-parser=qwen3-thinking --rotary-base=5000000
-    --recompute-granularity=full --recompute-method=uniform
-    --recompute-num-layers=1 --log-probs-chunk-size=1024
-    --ckpt-fully-parallel-save --sequence-parallel
-    --use-dynamic-batch-size --max-tokens-per-gpu=65536
-    --attention-dropout=0.0 --hidden-dropout=0.0
-    --attention-softmax-in-fp32 --accumulate-allreduce-grads-in-fp32
-    --attention-backend=flash
-    --optimizer=adam --lr=1e-5 --lr-decay-style=constant
-    --weight-decay=0.1 --adam-beta1=0.9 --adam-beta2=0.98
-    --loss-type=custom_loss
-    --eps-clip=0.2 --eps-clip-high=0.28 --entropy-coef=0.0
-    --n-samples-per-prompt=1 --num-steps-per-rollout=1
-    --openclawrl-w-rl=1.0 --openclawrl-w-opd=1.0
-    --openclawrl-adv-diff-clip=1.0
-    --openclawrl-hint-selection=sequence_optimal
-    --openclawrl-subset-mode=student
-    --rollout-temperature=0.6
-    --padded-vocab-size=151936
-    --position-embedding-type=rope
-    --swiglu --disable-bias-linear --normalization=RMSNorm
-    --group-query-attention --qk-layernorm
-    --sglang-tool-call-parser=qwen25
-
 services:
   - name: prm-sglang
-    endpoint: http://{host}:${prm.port}
+    endpoint: http://{host}:${training.config.prm.port}
     command: >-
-      "${REEF_PYTHON}" -m sglang.launch_server
-      --model-path=${prm.model_path} --tp ${prm.tp}
-      --host 0.0.0.0 --port=${prm.port}
-    ready: curl -sf http://127.0.0.1:${prm.port}/health
+      "${REEF_PYTHON}" -m sglang.launch_server --model-path=${training.config.prm.model_path} --tp ${training.config.prm.tp}
+      --host 0.0.0.0 --port=${training.config.prm.port}
+    ready: curl -sf http://127.0.0.1:${training.config.prm.port}/health
     ready_timeout: 600
     resources:
       num_gpus: 1
 
   - name: user-llm-sglang
-    endpoint: http://{host}:${user_llm.port}
+    endpoint: http://{host}:${training.config.user_llm.port}
     command: >-
-      "${REEF_PYTHON}" -m sglang.launch_server
-      --model-path=${user_llm.model_path} --tp 1
-      --served-model-name=${user_llm.served_name}
-      --host 0.0.0.0 --port=${user_llm.port}
-    ready: curl -sf http://127.0.0.1:${user_llm.port}/health
+      "${REEF_PYTHON}" -m sglang.launch_server --model-path=${training.config.user_llm.model_path} --tp 1 --served-model-name=${training.config.user_llm.served_name}
+      --host 0.0.0.0 --port=${training.config.user_llm.port}
+    ready: curl -sf http://127.0.0.1:${training.config.user_llm.port}/health
     ready_timeout: 600
     resources:
       num_gpus: 1
 
   - name: slime-driver
-    command: >-
-      "${REEF_PYTHON}" -m reef.service.slime_driver
-      --reef-checkpoint-max-storage-fraction=${training.checkpoint_retention.max_storage_fraction}
-      --reef-checkpoint-min-free-space-fraction=${training.checkpoint_retention.min_free_space_fraction}
-      --reef-checkpoint-policy=${training.checkpoint_retention.policy}
-      --megatron-to-hf-mode bridge
-      --hf-checkpoint=${reef.model_path}
-      --load=${training.checkpoint_dir}/megatron
-      --save=${training.checkpoint_dir}/megatron
-      --save-interval=100
-      --save-hf=${training.checkpoint_dir}/hf/{rollout_id}
-      --sglang-router-port=${training.sglang_port}
-      --num-rollout=100000000
-      --rollout-batch-size=${training.global_batch_size}
-      --global-batch-size=${training.global_batch_size}
-      --micro-batch-size=1
-      ${training.slime_flags}
+    command:
+      - ${REEF_PYTHON}
+      - -m
+      - reef.service.slime_driver
     ready: test -f "$REEF_BRIDGE_READY_FILE"
     ready_timeout: 900
     env:
@@ -217,5 +231,5 @@ services:
 
   - name: reef
     command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+    ready: curl -sf http://127.0.0.1:${service.port}/healthz
     depends_on: [slime-driver, prm-sglang]

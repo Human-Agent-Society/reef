@@ -18,7 +18,7 @@ unexpectedly.
 
 .. config::
 
-   -c, --config | the config file. Defaults to ``reef.yaml``, or ``$REEF_CONFIG``.
+   -c, --config | optional config file. No file is loaded unless explicitly selected.
    --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``harness-evolve``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --help | the command list
@@ -33,17 +33,20 @@ without a file of your own:
 
 .. code:: bash
 
-   reef serve --recipe harness-evolve --model ollama/gemma4:26b
+   reef serve --recipe harness-evolve \
+     --inference.upstream-url http://127.0.0.1:11434 \
+     --inference.upstream-model gemma4:26b
 
-The config is chosen in this order: ``-c`` or ``--recipe`` (one of the two),
-else ``$REEF_CONFIG``, else ``reef.yaml`` in the checkout; with none of them,
-``reef serve`` names the recipes that carry a profile and stops. This is a
-default of the recipe, not of reef: nothing starts without a recipe or a
-config named. ``ollama/`` fills ``http://127.0.0.1:11434`` and a placeholder
-key; ``openai/`` fills ``https://api.openai.com`` and reads the key from
-``REEF_UPSTREAM_API_KEY``; a spelling with another prefix (``Qwen/Qwen3-8B``)
-or none is the model ID as is, with the endpoint from ``REEF_UPSTREAM_URL``.
-An explicit ``--upstream_url`` or ``--upstream_api_key`` override wins over
+Select a file with ``-c`` or a built-in profile with ``--recipe``. With neither,
+Reef uses CLI inference settings and does not discover ``$REEF_CONFIG`` or
+``reef.yaml``. The profile selector is a launcher option; configuration values
+use their full public namespaces as shown above.
+
+The optional ``--model`` shorthand remains supported: ``ollama/`` fills
+``http://127.0.0.1:11434`` and a placeholder key; ``openai/`` fills
+``https://api.openai.com`` and reads ``REEF_UPSTREAM_API_KEY``. Other prefixes
+and bare values are model IDs and need an upstream URL.
+An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
 the prefix. The ``harness-evolve`` profile points at the tutorial's proposer
 and evaluator, so it runs from a reef checkout; it listens on
 ``127.0.0.1:8900`` with no token and keeps its state under
@@ -53,25 +56,25 @@ and evaluator, so it runs from a reef checkout; it listens on
 Overriding config values
 ------------------------
 
-Any ``--key value`` pair the parser does not recognize is applied as a config
-override, so a stack can be retargeted without editing its file. Values are
-YAML-coerced, so ints and bools arrive as ints and bools.
+Canonical CLI paths match ``schema-version: 2`` YAML. Declared fields use the
+same type parser for both inputs; explicit CLI values override YAML. Opaque
+component objects support leaf overrides, validated by their owning component.
 
 .. code:: bash
 
    reef serve -c path/to/training.yaml \
-     --model_path ~/models/Qwen2.5-1.5B-Instruct \
-     --training.checkpoint_dir /tmp/ckpt
+     --inference.model-path ~/models/Qwen2.5-1.5B-Instruct \
+     --training.config.checkpoint_dir /tmp/ckpt
 
-A bare key targets the ``reef`` section. A dotted key targets any other section.
-Use it to move a stack's state without editing its config:
+Use public namespaces to move a stack's state without editing its config.
+Legacy bare and ``reef.*`` aliases remain accepted for compatibility:
 
 .. code:: bash
 
    reef serve -c recipes/basic/external-provider.yaml \
-     --agent_record_dir .reef/agent-record \
-     --artifact_work_dir .reef/artifact-work \
-     --artifact_cache_dir .reef/artifact-cache
+     --storage.agent-record-dir .reef/agent-record \
+     --storage.artifact-work-dir .reef/artifact-work \
+     --storage.artifact-cache-dir .reef/artifact-cache
 
 Where it writes
 ---------------

@@ -372,6 +372,7 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
 
 .. code:: yaml
 
+   schema-version: 2
    execution:
      training: ray
      rollout: ray
@@ -382,9 +383,10 @@ For example, to move a standalone PRM service onto a Ray GPU worker:
        options:
          num_cpus: 1
 
-   reef:
-     # Other existing recipe/model settings stay here.
-     prm_url: ${endpoints.prm-sglang}
+   recipe:
+     implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
+     config:
+       prm-url: ${endpoints.prm-sglang}
 
    services:
      - name: prm-sglang

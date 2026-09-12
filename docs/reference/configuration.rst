@@ -1,14 +1,171 @@
 Configure Reef serving and training
 ===================================
 
-A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
-every process in its ``services`` list in dependency order, and hands the
-``reef`` section to the HTTP service.
+Local inference needs no YAML file:
 
-Relative config paths, including ``REEF_CONFIG``, resolve from the directory
-where you run the command. With no ``-c`` or ``--recipe``, Reef reads
-``REEF_CONFIG`` if set, otherwise ``./reef.yaml`` in that directory. It does
-not search the Reef installation for your config. From outside a checkout,
+.. code:: bash
+
+   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+
+This starts SGLang on an automatically selected loopback port, waits for its
+health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
+``--inference.tensor-parallel-size 2`` for two visible GPUs; the default is one.
+``--inference.backend sglang`` makes the default backend explicit. The
+service interpreter (``REEF_PYTHON``, otherwise the launcher's interpreter)
+must have SGLang and GPU-enabled PyTorch installed. SGLang validates its GPU environment,
+model compatibility and available device memory during startup. Its output
+is available in ``.reef/run/sglang.log``. The managed path currently supports a single GPU node and SGLang.
+Use the `SGLang installation guide <https://docs.sglang.io/docs/get_started/install>`__
+to prepare the inference environment; the base Reef installation stays CPU-only.
+
+Local model paths and Hugging Face IDs use the existing model resolver.
+Reef resolves a downloaded snapshot once and preserves the original model
+identifier as SGLang's served model name. Startup has a one-hour readiness
+deadline for SGLang and 30 seconds for Reef. On failure or interruption,
+Reef cleans up both processes. Logs live under ``.reef/run/``.
+Local ``--inference.model-path`` cannot be combined with upstream URL/model selection;
+``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below. Training
+still requires an explicit stack file.
+
+An external-provider deployment also needs no YAML file:
+
+.. code:: bash
+
+   reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
+
+Reef starts its core record-only recipe, listens on ``127.0.0.1:8900``, and
+stores state under ``.reef/`` in the launch directory. It records inference
+and feedback without training weights. Use ``--service.host`` or ``--service.port`` to change
+the bind address. Logs live under ``.reef/run/``. Reef checks its own HTTP
+readiness, runs in the foreground, and cleans up its process on Ctrl-C;
+it does not launch or stop the upstream provider. Readiness does not verify
+provider credentials or model availability.
+
+``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and
+``REEF_TOKEN`` supply optional environment fallbacks for this mode. Explicit
+CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
+model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
+with any other prefix still needs an upstream URL.
+
+Versioned configuration layout
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The canonical CLI paths match the sections of a ``schema-version: 2`` file.
+For example, the local inference command above can also use:
+
+.. code:: yaml
+
+   schema-version: 2
+   service:
+     host: 127.0.0.1
+     port: 8900
+   inference:
+     backend: sglang
+     model-path: Qwen/Qwen2.5-1.5B-Instruct
+     tensor-parallel-size: 1
+     options:
+       mem-fraction-static: 0.8
+   recipe:
+     implementation: recipe
+
+Run it with ``reef serve -c reef.yaml --inference.options.mem-fraction-static 0.7``.
+An explicit CLI value overrides the corresponding YAML value. Omitted public
+fields use their declared defaults. Hyphens and underscores are accepted in
+declared YAML fields; supplying both spellings of one field is an error.
+Unknown sections and undeclared public fields are rejected.
+
+The public layout groups fields by their owner:
+
+* ``service``: HTTP host, port, authentication, run directory and readiness deadline.
+* ``inference``: model path, backend, TP size, provider connection and native options.
+* ``recipe.implementation``: the selected recipe class or preset.
+* ``recipe.config``: fields declared by that recipe.
+* ``recipe.runtime``: the runtime type and its declared settings.
+* ``training``: Ray bridge connection, request timeout and native Slime ``options``.
+* ``storage``: artifact repository, work/cache directories and record retention.
+* ``execution`` / ``executors``: role placement and named executor profiles.
+* ``evaluation`` / ``observability``: their existing component-owned settings.
+
+Without ``services``, version 2 assembles the core record-only recipe with a
+managed SGLang process or an external provider. Training and custom runtime
+settings require an explicit ``services`` list. Version 2 keeps that advanced
+process escape hatch for custom stacks. ``training.config`` holds stack-template variables such as checkpoint directories
+and example workload sizes; native backend flags belong in ``training.options``.
+
+Managed engine launches use one generic builder. A backend definition supplies
+its command template, public parameter bindings, reserved aliases and HTTP
+health path. Adding an engine with this launch contract does not require a
+backend-specific deploy module or a second process lifecycle implementation.
+Currently only the SGLang definition is supplied.
+
+The launcher translates public paths to the existing internal service and
+recipe contracts before starting children. Config references such as
+``${service.port}`` and ``${inference.model-path}`` use the same field mapping.
+Existing unversioned files retain their ``reef``, ``training`` and ``services``
+layout and defaults, including the HTTP service's ``0.0.0.0`` bind address.
+Version 2 defaults to loopback. Do not mix ``reef`` with version 2 sections.
+
+Native backend options
+~~~~~~~~~~~~~~~~~~~~~~
+
+Public fields and backend-specific flags share the same CLI-over-YAML merge.
+For managed SGLang, use:
+
+.. code:: bash
+
+   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
+     --inference.options.mem-fraction-static 0.8 \
+     --inference.options.trust-remote-code true
+
+These become native ``--mem-fraction-static=0.8`` and ``--trust-remote-code``
+arguments to ``python -m sglang.launch_server``. SGLang owns their types,
+defaults and validation. Reef does not duplicate the engine argument schema.
+A native ``true`` emits a switch; ``false`` or ``null`` omits it. To disable
+an engine feature enabled by default, use that engine's native disabling
+flag. Lists supply multiple argument values; objects are passed as JSON.
+Use native flag names without their leading ``--`` inside ``options``.
+
+A field override preserves its YAML siblings; an explicit whole object,
+such as ``--inference.options '{}'``, replaces the entire object. Model,
+served-model name, TP size, bind address, authentication and unsupported
+multi-node launch controls cannot be overridden through native options in
+managed serving. Use public fields or an explicit custom service definition.
+
+For Slime, a versioned training stack can contain:
+
+.. code:: yaml
+
+   training:
+     options:
+       lr: 0.000001
+       use-critic: true
+
+Override an individual native flag with
+``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
+options reach ``reef.service.slime_driver`` through the same effective config
+as the HTTP child. The driver passes them through its existing recipe-specific
+argument handling and Slime's native parser. Existing ``SLIME_ARGS_FILE`` and
+explicit driver command flags still work and take precedence over the options
+object; avoid specifying the same flag in both places. This does not yet
+assemble a training deployment without a ``services`` list.
+
+``inference.backend-config`` has a different owner: it configures Reef's
+selected ``inference.backend-factory`` adapter, for example its tool parser.
+It does not configure the managed SGLang process. Executor ``options`` and
+recipe-owned option objects likewise stay with their selected components.
+
+Explicit file selection and legacy compatibility
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Relative config paths resolve from the directory where you run the command.
+With no ``-c`` or explicit ``--recipe`` profile, Reef uses CLI inference inputs;
+it does not discover ``REEF_CONFIG`` or ``./reef.yaml``. File deployments must
+use ``reef serve -c reef.yaml`` or ``reef serve -c "$REEF_CONFIG"`` instead
+of relying on the previous implicit discovery. ``REEF_CONFIG`` remains the
+internal way the launcher passes effective settings to its HTTP child.
+A selected missing or invalid file is an error, even when provider flags are
+present. Reef reports the selected config source and does not search the Reef
+installation for your config. From outside a checkout,
 pass an absolute path to a cookbook config. Relative state paths still use
 the launch directory, and an explicit ``services[].cwd`` controls that
 service's working directory.
@@ -29,36 +186,43 @@ service's working directory.
        ready: curl -sf http://127.0.0.1:${reef.port}/healthz
 
 Values interpolate from the environment with ``${VAR}`` and from the config
-itself with ``${dotted.path}``. Any value can be overridden on the command line:
-a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
-``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
-log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
+itself with ``${dotted.path}``. Use full public paths for command-line overrides,
+including legacy files: ``--inference.model-path /models/demo`` or
+``--training.config.checkpoint_dir /tmp/ckpt``. Legacy files default to
+``/tmp/reef-stack/`` logs; version 2 uses ``.reef/run/``. Set ``service.run-dir``
+in version 2 (legacy ``run_dir``) to move them.
+
+Configuration-free startup accepts public serving flags and native inference
+options. Unknown public flags and settings for training or custom runtimes require an
+explicit stack file; they do not silently change the generated deployment.
+The effective settings are handed to the child using a private temporary
+config, removed when the launcher exits. No user YAML file is created.
 
 Public service settings use the same argument parser for YAML and CLI values.
 Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
-Run ``reef serve --help`` to see these options. Hyphenated names such as
-``--upstream-model`` and existing underscore names such as ``--upstream_model``
-are aliases, as are their dotted ``--reef.upstream_model`` forms. The last
+Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
+as the canonical spelling. Compatibility aliases include ``--upstream-model``,
+``--upstream_model`` and ``--reef.upstream_model``. The last
 explicit CLI spelling of a setting wins. ``--recipe`` still selects a launcher
-profile; ``--reef.recipe`` overrides the deployment's recipe setting.
+profile; ``--recipe.implementation`` overrides the deployment's recipe setting.
 
-String settings retain their text: ``--upstream-model 00123`` remains ``00123``.
+String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;
 invalid values fail before model downloads or process startup. Booleans accept
 an explicit value or a bare flag; a negative flag can disable a YAML setting:
 
 .. code:: bash
 
-   reef serve -c stack.yaml --port 9000 --no-allow-implicit-scenario-creation
+   reef serve -c stack.yaml --service.port 9000 --no-service.allow-implicit-scenario-creation
 
 List and object options take one quoted JSON/YAML value. Empty lists and
 objects are preserved, and an explicit container replaces the YAML value:
 
 .. code:: bash
 
-   reef serve -c stack.yaml --tokens '[]' \
-     --inference-backend-config '{"tool_call_parser": "qwen25"}'
+   reef serve -c stack.yaml --service.tokens '[]' \
+     --inference.backend-config '{"tool_call_parser": "qwen25"}'
 
 The parsed public values are also supplied to service commands and the HTTP
 child's config. Existing empty/null service values retain their defaulting
@@ -70,11 +234,20 @@ retain generic YAML coercion; the ``services`` layout is unchanged.
 Component configuration
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-After selecting ``reef.recipe``, Reef loads that class's declarations without
+Shipped examples and profiles use version 2, including standalone recipe files
+loaded by embedding scripts. ``recipe_config_from_mapping`` / ``load_recipe_config``
+translate their public envelope into the existing recipe construction contract.
+Recipes may declare opaque sections in ``config_sections``; for example, Cordis
+owns ``recipe.config.evolution``. Those sections use object/leaf CLI overrides,
+then their recipe validates the payload. Executor placement remains shared with
+the deployment and reaches dotted recipes as well as named presets.
+
+After selecting ``recipe.implementation`` (legacy ``reef.recipe``), Reef loads that class's declarations without
 constructing the recipe. A dotted weight-training recipe exposes its fields
-as ``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
-recipes use their structured ``data`` section, such as
-``--reef.data.batch-size``. ``reef serve -c stack.yaml --help`` includes the
+as ``--recipe.config.batch-size``, with legacy aliases
+``--batch-size`` / ``--batch_size`` / ``--reef.batch_size``. Other dotted
+recipes use the same ``--recipe.config.*`` namespace; their internal ``data``
+section and ``--reef.data.*`` spellings remain compatibility details. ``reef serve -c stack.yaml --help`` includes the
 selected component's flags; basic ``reef serve --help`` does not load a recipe.
 The selected package must be importable in the launcher and child environments.
 When a profile file also declares its recipe ``implementation``, its fields
@@ -109,9 +282,9 @@ role; it does not modify the shared profile. Backend ``options`` objects
 remain owned by the selected backend. Slime's native model/optimizer flags
 continue through Slime's own parser; Reef does not duplicate that schema.
 
-A non-weight dotted recipe can supply ``reef.runtime`` to select a registered
+A non-weight dotted recipe can supply ``recipe.runtime`` to select a registered
 or dotted runtime factory. Its declared fields use names such as
-``--reef.runtime.timeout-s``. Inference proxy, Ray training, and executor
+``--recipe.runtime.timeout-s``. Inference proxy, Ray training, and executor
 training adapters declare their connection settings. Custom ``RuntimeFactory``
 implementations can opt in with ``config_type()``; legacy callable factories
 keep receiving their existing mapping. Unknown fields in a declared component
@@ -137,7 +310,7 @@ Use ``${VAR:?}`` for a required environment variable, for example
 ``upstream_model: ${REEF_UPSTREAM_MODEL:?}``. If it is unset, empty, or only
 whitespace, Reef reports the missing variable names and their config fields
 before downloading models or starting processes. Command-line overrides are
-applied before this check, so ``--upstream_model <model-id>`` can supply the
+applied before this check, so ``--inference.upstream-model <model-id>`` can supply the
 value instead. Plain ``${VAR}`` keeps resolving to an empty string when unset;
 use it for optional values such as an API key for a provider without authentication.
 
@@ -180,8 +353,12 @@ actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
 LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
 a PRM engine and a student model.
 
-The ``reef`` section
---------------------
+Legacy ``reef`` section
+----------------------
+
+The fields below describe the unversioned compatibility contract. New files
+use ``recipe.implementation``, ``service``, ``inference`` and ``storage`` as
+shown above; the repository examples all use version 2.
 
 .. config::
 
@@ -256,6 +433,11 @@ ignored.
 
 Recipe configuration
 --------------------
+
+Version 2 puts declared recipe fields under ``recipe.config`` and the runtime
+under ``recipe.runtime``. Harness settings live in ``recipe.config.evolution``.
+The ``data``, ``evolution`` and ``runtime`` paths below also name the existing
+Python recipe contract and remain accepted by legacy presets.
 
 ``data.training_mode`` is shared by all recipes and defaults to ``auto``.
 In ``auto``, the recipe's processor decides when its data can form a batch,
@@ -480,7 +662,7 @@ string commands retain their current ``shlex`` parsing.
 
    services[].name | the service's id, used by ``depends_on``; unique within one stack
    services[].command | the command line string or argv list to run
-   services[].ready | a shell command that succeeds once the service is up
+   services[].ready | a shell command or argument list that succeeds once the service is up; lists run without a shell
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
    services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
@@ -494,15 +676,15 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
-   training.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
-   training.checkpoint_dir | where Megatron and HF checkpoints are written
-   training.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
-   training.checkpoint_retention | storage-fraction bounds and the retention policy
-   training.slime_flags | GPU layout, optimizer, sequence length, and loss settings, as one literal string
+   training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
+   training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
+   training.config.checkpoint_dir | where Megatron and HF checkpoints are written
+   training.config.megatron_checkpoint_path | optional pre-converted torch_dist checkpoint, to skip HF conversion on every start
+   training.config.checkpoint_retention | storage-fraction bounds and the retention policy
+   training.options | native backend flags as a mapping: GPU layout, optimizer, sequence length, and loss settings
 
 Slime fills architecture flags such as layer counts and hidden sizes from
-``reef.model_path``. Do not put them in the config.
+``inference.model-path``. Do not put them in the config.
 
 The ``evaluation`` section
 --------------------------
@@ -559,7 +741,7 @@ store on the cluster.
 
    There is no API-key field here. Reef rejects Slime's ``--wandb-key`` flag and
    never writes a credential into metrics or run config. Do not put one in the
-   YAML, in ``slime_flags``, in a tag, or in a run name.
+   YAML, in ``training.options``, in a tag, or in a run name.
 
 ``online`` sends data to the project. ``offline`` makes no network calls and
 writes syncable data below ``directory`` for a later ``wandb sync``.

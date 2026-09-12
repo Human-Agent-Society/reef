@@ -73,6 +73,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.tree.render import render_composition
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
@@ -102,8 +103,7 @@ def load_recipe() -> Any:
     served deployment. The method (harness/) never sees the endpoint.
     """
     config = load_config(HERE / "skillclaw.yaml")
-    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
-    sections.update({key: config[key] for key in ("execution", "executors") if key in config})
+    sections = recipe_config_from_mapping(config)
     runtime = InferenceProxyRuntime(
         model_path=AGENT_MODEL,
         base_url=UPSTREAM_BASE,

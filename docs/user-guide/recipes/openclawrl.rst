@@ -79,7 +79,7 @@ candidates the engine recorded at generation time. The teacher is the frozen
 base model conditioned on one of the accepted hindsight hints, and the
 objective selects which hint by how well the teacher's top-K overlaps the
 policy's. The weights of the two terms are ``--openclawrl-w-rl`` and
-``--openclawrl-w-opd`` in ``training.slime_flags``, both 1.0 by default.
+``--openclawrl-w-opd`` in ``training.options``, both 1.0 by default.
 
 Configuration
 -------------

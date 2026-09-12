@@ -1,4 +1,8 @@
-"""``reef serve`` — start a stack from a config.
+"""``reef serve`` — start managed inference, connect a provider, or run a configured stack.
+
+Without a selected file, inference settings assemble the standard record-only
+service, optionally with a managed SGLang process. Configuration parsing and process lifecycle use the same deployment
+path as explicitly configured stacks.
 
 ``reef serve -c <stack>.yaml`` reads the config's ``services``
 list and starts every declared process (SGLang, Slime driver, Reef, and so

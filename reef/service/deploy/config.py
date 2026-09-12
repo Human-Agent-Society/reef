@@ -167,6 +167,15 @@ def recipe_source_root(config: Mapping[str, Any], config_path: str | Path) -> Pa
     return None
 
 
+def _command_list(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(argument, str) for argument in value)
+        and bool(value[0].strip())
+    )
+
+
 def validate_services(config: Mapping[str, Any], config_path: str | Path) -> list[dict[str, Any]]:
     """Services with valid commands and unique names, checked before any process starts."""
     services = config.get("services")
@@ -185,12 +194,7 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
             raise DeployConfigError(f"invalid service name {name!r}; use letters, digits, '_' or '-'")
         command = service.get("command")
         valid_string = isinstance(command, str) and bool(command.strip())
-        valid_list = (
-            isinstance(command, list)
-            and bool(command)
-            and all(isinstance(argument, str) for argument in command)
-            and bool(command[0].strip())
-        )
+        valid_list = _command_list(command)
         if not valid_string and not valid_list:
             raise DeployConfigError(
                 f"config {config_path}: services[{index}] must have a non-empty 'command' string or list of strings"
@@ -212,7 +216,11 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
             raise DeployConfigError(f"service {service['name']!r}: depends_on must be a list of names")
         if any(dep not in names for dep in dependencies):
             raise DeployConfigError(f"service {service['name']!r}: unknown dependency")
-        for field in ("ready", "cwd", "endpoint", "advertise_host"):
+        if "ready" in service and not isinstance(service["ready"], str) and not _command_list(service["ready"]):
+            raise DeployConfigError(
+                f"service {service['name']!r}: ready must be a string or non-empty list of strings"
+            )
+        for field in ("cwd", "endpoint", "advertise_host"):
             if field in service and not isinstance(service[field], str):
                 raise DeployConfigError(f"service {service['name']!r}: {field} must be a string")
         if not isinstance(service.get("env", {}), Mapping):

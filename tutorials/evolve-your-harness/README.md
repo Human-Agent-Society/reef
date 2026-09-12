@@ -123,7 +123,7 @@ deployment and its named recipe preset; no recipe generation or extra Python
 launcher is needed. A YAML anchor shares the model name between the recipe
 and the upstream runtime, so inference, proposal, and evaluation use the same model.
 Defaults: port `8901`, Reef access token `reef-local`, state under
-`work/deployment/`. Use `--reef.port` and `--reef.token` to override the port
+`work/deployment/`. Use `--service.port` and `--service.token` to override the port
 and access token. The `run.sh` demo keeps its separate configuration and state.
 
 `data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step that reads it runs it first, with no mode switch. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never batches on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.

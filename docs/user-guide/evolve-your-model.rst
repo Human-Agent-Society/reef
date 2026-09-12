@@ -28,7 +28,7 @@ Weight training needs the supported GPU environment: Ray, a Slime driver, and
 CUDA-specific builds of torch, SGLang, and Megatron. ``pip install -e .`` from
 the quickstart brings none of them; build the image as described in
 `Installation <../getting-started/installation.rst#gpu-image-for-weight-training>`__, then get
-inside it, mounting the model directory ``reef.model_path`` points at and the
+inside it, mounting the model directory ``inference.model-path`` points at and the
 directory Reef keeps its state in:
 
 .. code:: bash
@@ -48,7 +48,7 @@ The cookbook ``recipes/sao/examples/sao/serve.yaml`` requests one actor GPU
 and one rollout GPU through Slime flags. Reef manages the shared Ray runtime,
 and Slime schedules its model workers there. Its ``run.sh`` defaults the local
 Ray pool to two visible devices; an external cluster controls its own pool.
-The model at ``reef.model_path`` must be present or downloadable.
+The model at ``inference.model-path`` must be present or downloadable.
 
 Start from a config
 -------------------
@@ -73,18 +73,18 @@ What to review
 
 .. config::
 
-   reef.model_path | a local HF model directory or a repo id, downloaded on start
-   reef.recipe | the recipe this deployment serves. Recipe fields such as ``batch_size`` sit beside it
-   reef.token | the bearer token the service accepts
-   training.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   training.global_batch_size | samples in one optimizer step
-   training.checkpoint_dir | where checkpoints land, with the ``reef.artifact_*`` paths
-   training.slime_flags | GPU layout, optimizer, sequence length, loss settings
+   inference.model-path | a local HF model directory or a repo id, downloaded on start
+   recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
+   service.token | the bearer token the service accepts
+   training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
+   training.config.global_batch_size | samples in one optimizer step
+   training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
+   training.options | GPU layout, optimizer, sequence length, loss settings
 
 Three things to get right:
 
 1. **Batch sizes must agree.** A recipe's ``batch_size`` must equal
-   ``training.global_batch_size``. A mismatch leaves a partial optimizer batch
+   ``training.config.global_batch_size``. A mismatch leaves a partial optimizer batch
    or makes the driver reject the update.
 2. **The recipe and the loss flags must describe the same objective.** The driver
    checks this at startup. Each recipe page names its loss family, and
@@ -95,7 +95,7 @@ Three things to get right:
    inference. The bundled SGLang training backend records them in
    ``response.training``.
 
-Keep the ``slime_flags`` from the closest working config and change only what
+Keep the ``training.options`` mapping from the closest working config and change only what
 your model or recipe needs.
 
 Run the example
@@ -106,7 +106,7 @@ Run the example
    export REEF_TOKEN=reef-local     # the token recipes/sao/examples/sao/serve.yaml declares
 
    reef serve -c recipes/sao/examples/sao/serve.yaml \
-     --reef.model_path ~/models/Qwen2.5-1.5B-Instruct
+     --inference.model-path ~/models/Qwen2.5-1.5B-Instruct
 
 Any config value can be overridden on the command line. Startup takes several
 minutes; wait for all three services to report ready.

@@ -118,37 +118,36 @@ The recipe config names the callables, the tasks, and the first-boot tree:
 
 .. code:: yaml
 
-   implementation: reef.recipe.cordis:CordisRecipe
-
-   model:
-     path: qwen3-8b
-
-   evolution:
-     adapter: pi
-     binary: pi
-     propose: methods.mine:propose
-     evaluate: methods.mine:evaluate
-     tasks:
-       - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
-     seed:
-       - id: answer-style
-         name: skill
-         config: {name: answer-style, text: "# answer-style\n\nStarter skill."}
-     models:                        # optional extras; each key read via api_key_env
-       teacher:
-         url: https://api.openai.com
-         model: gpt-4o
-         api_key_env: OPENAI_API_KEY
-
-   data:
-     batch_size: 1
-     max_score: 0.0
+   schema-version: 2
+   recipe:
+     implementation: reef.recipe.cordis:CordisRecipe
+     config:
+       batch-size: 1
+       max-score: 0.0
+       evolution:
+         adapter: pi
+         binary: pi
+         propose: methods.mine:propose
+         evaluate: methods.mine:evaluate
+         tasks:
+           - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
+         seed:
+           - id: answer-style
+             name: skill
+             config: {name: answer-style, text: "# answer-style\n\nStarter skill."}
+         models:                        # optional extras; each key read via api_key_env
+           teacher:
+             url: https://api.openai.com
+             model: gpt-4o
+             api_key_env: OPENAI_API_KEY
+   inference:
+     upstream-model: qwen3-8b
 
 Preset YAML is read as-is: ``${VAR}`` is **not** interpolated in a preset, only
 in a deployment config. Write literal values.
 
-That file is a preset, not a deployment config. It has no ``services`` and no
-``reef`` section, so ``reef serve -c`` cannot read it. Save it as
+That standalone preset describes the method and model; it does not assemble
+the serving processes. Save it as
 ``recipes/<name>.yaml`` and ``export REEF_RECIPE_CONFIG_DIR=$PWD/recipes``;
 there is no default directory. The deployment config is the file ``reef serve
 -c`` reads, and ``tutorials/evolve-your-harness/configs/serve.yaml`` is
@@ -156,25 +155,28 @@ the one to copy:
 
 .. code:: yaml
 
-   reef:
-     recipe: <name>                      # resolves to recipes/<name>.yaml
+   schema-version: 2
+   recipe:
+     implementation: <name>  # resolves to recipes/<name>.yaml
+   service:
      token: reef-local
-     port: 8900                          # the ready probe's ${reef.port} resolves against this
-     upstream_url: ${REEF_UPSTREAM_URL}  # interpolated here, unlike the preset
-     upstream_api_key: ${REEF_UPSTREAM_API_KEY}
-     upstream_model: ${REEF_MODEL}
-
+     port: 8900
+   inference:
+     upstream-url: ${REEF_UPSTREAM_URL}
+     upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+     upstream-model: ${REEF_MODEL}
    services:
      - name: reef
        command: ["${REEF_PYTHON}", "-m", "reef.service"]
-       ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+       ready: curl -sf http://127.0.0.1:${service.port}/healthz
 
 See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
-``tutorials/evolve-your-harness/run.sh`` does exactly this.
+The tutorial selects the dotted class directly and keeps its recipe settings
+in the same versioned deployment file.
 
 Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
 package is importable, and give ``-c`` an absolute path: Reef resolves a
-relative ``-c`` against its own repo root, not your working directory. Recovered
+relative ``-c`` against your working directory. Recovered
 tree state always wins over ``seed``. The full field list is in `Harness
 evolution keys <../reference/configuration.rst#harness-evolution-keys>`__.
 

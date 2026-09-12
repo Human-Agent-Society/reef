@@ -385,3 +385,23 @@ def test_profile_can_omit_its_runtime_with_an_empty_object(extension):
         }
     )
     assert combined["runtime"] == {}
+
+
+def test_versioned_recipe_layout_uses_selected_schema(extension):
+    from reef.service.deploy.layout import normalize_component_layout, translate_layout, translate_references
+
+    config = translate_layout(
+        {
+            "schema-version": 2,
+            "recipe": {"implementation": "reef_config_extension:Training", "config": {"label": "001", "count": 2}},
+            "inference": {"model-path": "org/model"},
+            "services": [{"name": "reef", "command": ["echo", "${recipe.config.count}"]}],
+        }
+    )
+    arguments = component_config_arguments(config)
+    config = normalize_component_layout(config, arguments)
+    config = _apply_overrides(config, {"recipe.config.count": "5"}, arguments=arguments)
+    config = normalize_component_config(normalize_service_config(config), arguments)
+    assert config["reef"]["count"] == 5 and config["reef"]["label"] == "001"
+    assert "data" not in config["reef"]
+    assert translate_references(config, arguments)["services"][0]["command"][1] == "${reef.count}"

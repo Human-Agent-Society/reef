@@ -39,7 +39,7 @@ class _Models:
 def _seed(serve: Path) -> tuple[tuple[str, dict], ...]:
     config = yaml.safe_load(serve.read_text())
     nodes = []
-    for entry in config["evolution"]["seed"]:
+    for entry in config["recipe"]["config"]["evolution"]["seed"]:
         if isinstance(entry, str):
             nodes.extend((node["name"], node["config"]) for node in SEED_NODES)
         else:
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config = yaml.safe_load(args.serve.read_text())
-    task = next(t for t in config["evolution"]["tasks"] if t.startswith(args.task))
+    task = next(t for t in config["recipe"]["config"]["evolution"]["tasks"] if t.startswith(args.task))
     nodes = _seed(args.serve)
     models = _Models(ModelBinding(base_url=args.base_url, model=args.model, api_key="none"))
     sample = TraceSample("probe", {"messages": [{"role": "user", "content": task}]}, 0.0)

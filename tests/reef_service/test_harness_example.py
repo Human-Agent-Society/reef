@@ -14,12 +14,13 @@ from types import ModuleType
 
 import pytest
 import yaml
+from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.config import load_config
 from reef.service.deploy.settings import service_settings_from_config
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import Mutation
@@ -411,7 +412,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2, "resources": {"cpus_per_worker": 2}}}
     config["execution"] = {"services": "local", "evolution": "cpu-pool"}
     if selector == "worker":
-        config["evolution"]["worker_executor"] = "cpu-pool"
+        config["recipe"]["config"]["evolution"]["worker_executor"] = "cpu-pool"
         config["execution"]["evolution"] = "uni"  # The explicit worker profile must win.
     serve = tmp_path / "serve.yaml"
     serve.write_text(yaml.safe_dump(config))
@@ -420,13 +421,13 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert settings["execution"] == config["execution"]
     assert settings["executors"] == config["executors"]
     assert "reef" not in settings and "services" not in settings
-    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["evolution"]["tasks"]
+    assert json.loads((tmp_path / "work/tasks.json").read_text()) == config["recipe"]["config"]["evolution"]["tasks"]
     # Boot the real recipe; a retained selector without its profile would fail here.
     from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 
     recipe = CordisRecipe.from_environment(
         {},
-        config=settings,
+        config=recipe_config_from_mapping(settings),
         runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
     )
     assert recipe.worker_executor.backend == "mp"
@@ -435,7 +436,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert recipe.worker_executor.resources.cpus_per_worker == 2
 
 
-def test_materializer_accepts_legacy_config_without_execution_sections(monkeypatch, tmp_path):
+def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp_path):
     materializer = _method(monkeypatch, "materialize_recipe")
     config = yaml.safe_load((EXAMPLE_DIR / "configs/serve.yaml").read_text())
     config.pop("execution")
@@ -443,7 +444,7 @@ def test_materializer_accepts_legacy_config_without_execution_sections(monkeypat
     serve.write_text(yaml.safe_dump(config))
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
-    assert set(result) == {"implementation", "model", "evolution", "data"}
+    assert set(result) == {"schema-version", "recipe", "inference"}
 
 
 def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_path, monkeypatch) -> None:

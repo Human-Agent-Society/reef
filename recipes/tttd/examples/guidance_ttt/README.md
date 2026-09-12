@@ -209,7 +209,7 @@ The example runs the small `2 × 4`, 12,288-token qualification on two GPUs.
 Reef starts and stops the shared Ray runtime automatically; no `ray start`
 or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
 `CUDA_VISIBLE_DEVICES=0,1`, leaving GPU 2 for the frozen executor. Override the
-mask at launch to select different GPUs; `training.num_gpus` still sets
+mask at launch to select different GPUs; `training.config.num_gpus` still sets
 Slime's model topology. The local driver does not reserve model GPUs itself.
 For an existing cluster, set `RAY_ADDRESS`; its nodes control GPU visibility
 and Reef leaves it running on exit. The harness reads the Ray connection from
