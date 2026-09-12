@@ -248,16 +248,6 @@ Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --mo
 教程](tutorials/evolve-your-harness/README.md)开始。每个结果页面都会说明任务、评估设置、
 测量结果和局限性。
 
-### Beta recipes
-
-CORAL TTT 和 `coral_demo` 在发布完整、可复现的学习结果之前保持 beta 状态。
-现有集成测试和冒烟测试不能证明学习效果。
-
-| Recipe 或示例 | 状态 | 代码与文档 |
-|---|---|---|
-| CORAL TTT | Beta — 待补充完整学习结果 | [Recipe](recipes/beta/coral/README.md) |
-| `coral_demo` | Beta — 待补充完整学习结果 | [示例](recipes/beta/coral/examples/coral_demo/) · [配置与验证](recipes/beta/coral/README.md) |
-
 
 ## 架构
 
