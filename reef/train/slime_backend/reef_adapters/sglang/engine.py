@@ -222,6 +222,16 @@ class ReefSGLangEngine(SGLangEngine):
             },
         )
 
+    def release_memory_occupation(self, tags: list[str] | None = None):
+        """Release GPU memory, restricted to ``tags`` when given.
+
+        Slime's engine always releases everything. SGLang's route takes the
+        same tags its resume side does, so a caller that knows some region is
+        unchanged can leave it resident.
+        """
+        self.flush_cache()
+        return self._make_request("release_memory_occupation", {"tags": list(tags)} if tags else None)
+
     def unload_lora_adapter(self, lora_name: str):
         return self._make_request("unload_lora_adapter", {"lora_name": lora_name})
 

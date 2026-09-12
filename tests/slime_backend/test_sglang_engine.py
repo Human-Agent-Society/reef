@@ -787,3 +787,25 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     assert scheduler.calls[-1] == (False, True)
     assert scheduler.is_fully_idle(for_health_check=True) is False
     assert scheduler.calls[-1] == (True, False)
+
+
+@pytest.mark.unit
+def test_release_memory_occupation_passes_tags_and_defaults_to_everything(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_sglang_engine_module(monkeypatch)
+    calls: list[tuple[str, object]] = []
+    engine = object.__new__(module.ReefSGLangEngine)
+    engine.node_rank = 0
+    engine._make_request = lambda route, payload=None, **_kw: calls.append((route, payload))
+    engine.flush_cache = lambda: calls.append(("flush_cache", None))
+
+    engine.release_memory_occupation()
+    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+
+    assert calls == [
+        ("flush_cache", None),
+        ("release_memory_occupation", None),
+        ("flush_cache", None),
+        ("release_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
+    ]

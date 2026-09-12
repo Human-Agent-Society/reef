@@ -121,6 +121,8 @@ def _actor(
     *,
     start_rollout_id: int = 0,
     adapter_capacity: int | None = None,
+    colocate: bool = False,
+    keep_lora_base_resident: bool = False,
 ):
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
     group = _SlottedGroup(template, version)
@@ -132,6 +134,8 @@ def _actor(
         start_rollout_id=start_rollout_id,
         lora=True,
         adapter_capacity=adapter_capacity,
+        colocate=colocate,
+        keep_lora_base_resident=keep_lora_base_resident,
         critic_group=_RecordingGroup(template, critic=True),
         loss_family="sao",
     )
@@ -405,3 +409,39 @@ def test_an_unload_the_engine_refuses_leaks_visibly(tmp_path, _local_ray_get) ->
     residency = actor.health()["adapter_residency"]
     assert residency["leaked"] == 1 and residency["counters"]["unload_failures"] == 1
     assert residency["recent_actions"][-1]["action"] == "leaked"
+
+
+@pytest.mark.unit
+def test_keeping_the_base_resident_releases_only_kv_and_graphs(tmp_path, _local_ray_get) -> None:
+    # Issue #203: the base is frozen for the whole run, so releasing it copies
+    # identical bytes to the host and back on every training step.
+    actor, _, manager, _ = _actor(tmp_path, _EngineVersion(0), colocate=True, keep_lora_base_resident=True)
+    manager.memory_calls.clear()
+    manager.release_tags.clear()
+
+    _run(actor, _job("a", 0, "inc:0"))
+
+    assert manager.release_tags == [("kv_cache", "cuda_graph")]
+    # SGLang resumes a region by removing its tag from the set release added it
+    # to, so resuming weights that were never released raises. The restore has
+    # to drop the same half the release did.
+    assert manager.memory_calls == ["offload", "onload_kv"]
+
+
+@pytest.mark.unit
+def test_the_default_still_releases_everything_and_restores_both_halves(tmp_path, _local_ray_get) -> None:
+    actor, _, manager, _ = _actor(tmp_path, _EngineVersion(0), colocate=True)
+    manager.memory_calls.clear()
+    manager.release_tags.clear()
+
+    _run(actor, _job("a", 0, "inc:0"))
+
+    assert manager.release_tags == [None]
+    assert manager.memory_calls == ["offload", "onload_weights", "onload_kv"]
+
+
+@pytest.mark.unit
+def test_the_base_stays_released_without_lora_or_colocation(tmp_path, _local_ray_get) -> None:
+    """Full-weight training rewrites the served weights; releasing them is the point."""
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), keep_lora_base_resident=True)
+    assert actor._release_tags is None
