@@ -81,16 +81,41 @@ The public layout groups fields by their owner:
 * ``recipe.implementation``: the selected recipe class or preset.
 * ``recipe.config``: fields declared by that recipe.
 * ``recipe.runtime``: the runtime type and its declared settings.
-* ``training``: Ray bridge connection, request timeout and native Slime ``options``.
+* ``training``: backend selection, bridge startup/request timeouts, Ray connection and native Slime ``options``.
 * ``storage``: artifact repository, work/cache directories and record retention.
 * ``execution`` / ``executors``: role placement and named executor profiles.
 * ``evaluation`` / ``observability``: their existing component-owned settings.
 
-Without ``services``, version 2 assembles the core record-only recipe with a
-managed SGLang process or an external provider. Training and custom runtime
-settings require an explicit ``services`` list. Version 2 keeps that advanced
-process escape hatch for custom stacks. ``training.config`` holds stack-template variables such as checkpoint directories
+Without ``services``, version 2 assembles either the core record-only recipe
+with managed SGLang or an external provider, or a dotted weight-training recipe
+with the Slime driver. The SAO example uses this automatic training path.
+An explicit ``services`` list remains available for custom stacks.
+``training.config`` holds template variables such as checkpoint directories
 and example workload sizes; native backend flags belong in ``training.options``.
+
+For weight training, Reef starts a local Slime driver, waits for its healthy
+bridge, then starts HTTP and obtains the inference connection from that bridge.
+Slime owns the SGLang model workers; Reef does not start a second inference
+server. Both processes share the Ray address, namespace, actor name and resolved
+model path. With no Ray address, Reef owns the shared runtime and stops it on
+exit; an existing cluster is left running. Model topology, optimizer settings
+and checkpoint paths still need the complete options for the selected recipe.
+
+The same path supports CLI-only training with
+``--recipe.implementation package.module:WeightRecipe``,
+``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
+``training.backend`` currently supports ``slime`` and defaults to it.
+``training.ready-timeout`` controls bridge startup (default 3600 seconds);
+``service.ready-timeout`` controls HTTP startup (default 30 seconds).
+Training-owned inference uses ``training.options.sglang-*`` for native engine
+settings; upstream provider settings and standalone ``inference.options`` cannot
+be combined with it. Reef binds ``training.options.hf-checkpoint`` to
+``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
+by Reef and cannot be supplied through native options.
+
+PRM and user-simulation dependencies belong to OpenClawRL, or to the method
+that uses them. They are not native Reef components. Those custom stacks keep
+explicit process definitions until the method owns their startup and cleanup.
 
 Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
@@ -144,10 +169,10 @@ Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
 options reach ``reef.service.slime_driver`` through the same effective config
 as the HTTP child. The driver passes them through its existing recipe-specific
-argument handling and Slime's native parser. Existing ``SLIME_ARGS_FILE`` and
-explicit driver command flags still work and take precedence over the options
-object; avoid specifying the same flag in both places. This does not yet
-assemble a training deployment without a ``services`` list.
+argument handling and Slime's native parser. Automatic training launches use
+only this effective config and ignore an ambient ``SLIME_ARGS_FILE``. Explicit
+``services`` stacks retain ``SLIME_ARGS_FILE`` and driver command flags, which
+take precedence over the options object; avoid specifying a flag in both places.
 
 ``inference.backend-config`` has a different owner: it configures Reef's
 selected ``inference.backend-factory`` adapter, for example its tool parser.
@@ -192,9 +217,10 @@ including legacy files: ``--inference.model-path /models/demo`` or
 ``/tmp/reef-stack/`` logs; version 2 uses ``.reef/run/``. Set ``service.run-dir``
 in version 2 (legacy ``run_dir``) to move them.
 
-Configuration-free startup accepts public serving flags and native inference
-options. Unknown public flags and settings for training or custom runtimes require an
-explicit stack file; they do not silently change the generated deployment.
+Configuration-free startup accepts public settings and the selected weight
+recipe's declared fields, plus native inference or training options for the
+selected launch mode. Unknown public flags are rejected. Custom runtimes and
+method-specific service topologies still require an explicit stack file.
 The effective settings are handed to the child using a private temporary
 config, removed when the launcher exits. No user YAML file is created.
 
@@ -654,6 +680,9 @@ episode's session log, so treat its directory like the commit log.
 The ``services`` list
 ---------------------
 
+Omit this list for standard serving or Slime weight training. When supplied,
+the list replaces automatic assembly; Reef does not append generated processes.
+
 Each entry is one process. ``command`` can be a command-line string or an argv
 list. Prefer the list form when exact argument boundaries matter; existing
 string commands retain their current ``shlex`` parsing.
@@ -676,6 +705,8 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
+   training.backend | slime | backend for automatic weight-training assembly; currently only ``slime``
+   training.ready-timeout | 3600 | seconds to wait for the generated driver's bridge to become ready
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.
    training.config.checkpoint_dir | where Megatron and HF checkpoints are written

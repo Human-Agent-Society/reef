@@ -13,7 +13,7 @@ from reef.service.deploy.config import DeployConfigError
 from reef.service.deploy.inference import http_readiness_command, prepare_inference
 from reef.service.deploy.layout import deployment_config_arguments
 from reef.service.deploy.options import native_override
-from reef.service.deploy.settings import service_override, service_settings_from_config
+from reef.service.deploy.settings import ServiceSettings, service_override, service_settings_from_config
 from reef.service.profiles import profile_names
 
 # Only these environment fallbacks belong to configuration-free startup.
@@ -32,6 +32,8 @@ _CONFIGURED_FIELDS = {
     "ray_namespace",
     "ray_actor_name",
     "train_timeout_s",
+    "training_backend",
+    "training_ready_timeout",
     "training_settings",
     "training_backend_options",
     "evaluation_settings",
@@ -57,11 +59,16 @@ def provider_config(overrides: Mapping[str, str], environ: Mapping[str, str]) ->
         if argument.name == "model_path" and not value.strip():
             raise DeployConfigError("--inference.model-path must be non-empty")
         if argument.name in _CONFIGURED_FIELDS:
-            raise DeployConfigError(f"--{key} requires a configured stack (-c); provider startup uses an upstream")
+            raise DeployConfigError(f"--{key} requires a weight-training recipe or an explicit services stack")
         if argument.name == "recipe" and value != "recipe":
             raise DeployConfigError(
-                "provider startup uses the core recipe; select other recipes with a config/profile"
+                "provider startup uses the core recipe; select a weight-training recipe or an explicit custom stack"
             )
+    return command_line_config(environ)
+
+
+def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
+    """Seed optional environment fallbacks before selecting component schemas."""
     reef: dict[str, Any] = {"recipe": "recipe", "host": "127.0.0.1"}
     for field, variable in _ENVIRONMENT_FIELDS.items():
         if environ.get(variable, "").strip():
@@ -73,7 +80,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
     if unsupported or "training" in config or "evaluation" in config:
-        raise DeployConfigError("training and custom runtime settings require an explicit services stack")
+        raise DeployConfigError("select a weight-training recipe for training, or declare an explicit services stack")
     settings = service_settings_from_config(config)
     local_service = None
     if settings.model_path:
@@ -117,6 +124,14 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         raise DeployConfigError("--inference.upstream-api must be openai, responses, or anthropic")
     if settings.inference_timeout_s <= 0:
         raise DeployConfigError("--inference.timeout-s must be positive")
+    config["services"] = [http_service(config, settings)]
+    if local_service is not None:
+        config["services"][0]["depends_on"] = [local_service["name"]]
+        config["services"].insert(0, local_service)
+
+
+def http_service(config: Mapping[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+    """Build the standard local HTTP child and its readiness probe."""
     host = settings.host
     if host == "0.0.0.0":
         host = "127.0.0.1"
@@ -126,16 +141,11 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         host = f"[{host}]"
     endpoint = f"http://{host}:{settings.port}"
     python = os.environ.get("REEF_PYTHON", sys.executable)
-    config["services"] = [
-        {
-            "name": "reef",
-            "executor": "uni",
-            "command": [python, "-m", "reef.service"],
-            "endpoint": endpoint,
-            "ready": http_readiness_command(python, f"{endpoint}/healthz"),
-            "ready_timeout": config.get("ready_timeout", 30),
-        }
-    ]
-    if local_service is not None:
-        config["services"][0]["depends_on"] = [local_service["name"]]
-        config["services"].insert(0, local_service)
+    return {
+        "name": "reef",
+        "executor": "uni",
+        "command": [python, "-m", "reef.service"],
+        "endpoint": endpoint,
+        "ready": http_readiness_command(python, f"{endpoint}/healthz"),
+        "ready_timeout": config.get("ready_timeout", 30),
+    }

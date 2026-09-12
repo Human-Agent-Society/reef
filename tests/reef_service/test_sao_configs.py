@@ -47,6 +47,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 from reef_service.config_helpers import load_deployment
 
 pytest.importorskip("torch")
@@ -69,7 +70,14 @@ def _iter_config_files() -> list[Path]:
 
 
 def _discover_training_configs() -> list[Path]:
-    return sorted(path for path in _iter_config_files() if SLIME_DRIVER_MODULE in path.read_text())
+    configs = []
+    for path in _iter_config_files():
+        text = path.read_text()
+        config = yaml.safe_load(text)
+        training = config.get("training", {}) if isinstance(config, dict) else {}
+        if SLIME_DRIVER_MODULE in text or (isinstance(training, dict) and training.get("backend") == "slime"):
+            configs.append(path)
+    return sorted(configs)
 
 
 TRAINING_CONFIGS = _discover_training_configs()

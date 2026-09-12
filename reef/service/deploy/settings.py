@@ -123,6 +123,12 @@ class ServiceSettings:
         default_factory=dict,
         metadata=config_metadata("Native inference engine options.", public_path=("inference", "options")),
     )
+    training_backend: str | None = config_option(
+        None, public_path=("training", "backend"), help="Managed weight-training backend (default: slime)."
+    )
+    training_ready_timeout: int = config_option(
+        3600, public_path=("training", "ready_timeout"), help="Training bridge startup deadline in seconds."
+    )
     training_backend_options: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata("Native Slime driver options.", public_path=("training", "options")),

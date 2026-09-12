@@ -1,10 +1,11 @@
 """``reef serve`` — start managed inference, connect a provider, or run a configured stack.
 
-Without a selected file, inference settings assemble the standard record-only
-service, optionally with a managed SGLang process. Configuration parsing and process lifecycle use the same deployment
-path as explicitly configured stacks.
+Without a services list, inference settings assemble the record-only service,
+optionally with managed SGLang, and weight recipes assemble the Slime driver
+and HTTP service. Configuration parsing and process lifecycle use the same
+deployment path as explicitly configured stacks.
 
-``reef serve -c <stack>.yaml`` reads the config's ``services``
+When supplied, ``reef serve -c <stack>.yaml`` reads the config's ``services``
 list and starts every declared process (SGLang, Slime driver, Reef, and so
 on) in dependency order; see :mod:`reef.service.deploy.orchestrator`. The
 Reef HTTP child is an internal service process: this package translates the

@@ -188,7 +188,10 @@ def test_invalid_readiness_commands_are_rejected(ready):
         (["--model", "ollama/demo", "--host", ""], "must be non-empty"),
         (["--model", "ollama/demo", "--no-config"], "unknown option"),
         (["--model", "ollama/demo", "--model-path", "org/model"], "cannot be combined"),
-        (["--model", "ollama/demo", "--reef.recipe", "missing.module:Recipe"], "core recipe"),
+        (
+            ["--model", "ollama/demo", "--recipe.implementation", "missing.module:Recipe"],
+            "cannot import recipe reference",
+        ),
         (["--model", "ollama/demo", "--upstream-modle", "typo"], "unknown option"),
         (["--model", "ollama/demo", "--services", "[]"], "unknown option"),
         (["--model", "ollama/demo", "--inference-timeout-s", "0"], "must be positive"),

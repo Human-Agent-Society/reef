@@ -27,7 +27,9 @@ from typing import Any
 import yaml
 
 from reef.core.config import ConfigArgument
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSelection, role_executor_settings, select_executor
 from reef.runtime.executor.ray import RayExecutor
@@ -53,13 +55,14 @@ from reef.service.deploy.layout import (
     translate_references,
 )
 from reef.service.deploy.options import native_override, normalize_native_options, object_override_path
-from reef.service.deploy.provider import assemble_provider_services, provider_config
+from reef.service.deploy.provider import assemble_provider_services, command_line_config, provider_config
 from reef.service.deploy.settings import (
     build_parser,
     normalize_service_config,
     service_config_arguments,
     service_override,
 )
+from reef.service.deploy.training import assemble_training_services
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
@@ -533,8 +536,11 @@ def resolve_deployment_config(
         _log(f"recipe package resolves from {source_root}")
     try:
         arguments = component_config_arguments(selected)
+        recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
+        training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
         if versioned:
             config = normalize_component_layout(config, arguments)
+        if versioned or (standard and training):
             for key, value in (overrides or {}).items():
                 if (
                     service_override(key, value) is None
@@ -549,12 +555,13 @@ def resolve_deployment_config(
         config = interpolate_environment(config, resolved_config_path)
         normalized_config = normalize_component_config(normalize_service_config(config), arguments)
         if standard:
-            provider_config(overrides or {}, os.environ)
-            if normalized_config.get("reef", {}).get("recipe") != "recipe":
-                raise DeployConfigError(
-                    "automatic serving uses recipe.implementation: recipe; other recipes need services"
-                )
-            assemble_provider_services(normalized_config)
+            if training:
+                assemble_training_services(normalized_config)
+            else:
+                provider_config(overrides or {}, os.environ)
+                if normalized_config.get("reef", {}).get("recipe") != "recipe":
+                    raise DeployConfigError("automatic serving requires a record-only or weight-training recipe")
+                assemble_provider_services(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root
@@ -563,9 +570,7 @@ def resolve_deployment_config(
 def _run_orchestrator(config_path: str | None, overrides: dict[str, str] | None = None) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
     config = (
-        load_config(resolved_config_path, interpolate_env=False)
-        if config_path
-        else provider_config(overrides or {}, os.environ)
+        load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
     )
     versioned = config.get("schema-version") == 2
     _log(f"config: {resolved_config_path}" if config_path else "config: command line")
