@@ -109,17 +109,12 @@ python3 -c "import reef; print(reef.__version__)"
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
 
-连接已有推理服务，无需 YAML 或 GPU：
+作为最小示例，将 Reef 启动为纯推理服务
+（[RFC #414](https://github.com/Human-Agent-Society/reef/issues/414) 中规划的功能）：
 
 ```bash
-reef serve --upstream-url http://localhost:8000 --upstream-model my-model
+uv run reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
-
-这会在 `127.0.0.1:8900` 启动仅记录交互的 recipe，状态保存在 `.reef/`。
-通过 `REEF_UPSTREAM_API_KEY` 设置上游凭证，通过 `REEF_TOKEN` 要求 Reef bearer token。
-文件部署显式传入 `-c`；启动器不再自动发现 `REEF_CONFIG` 或 `./reef.yaml`。
-推理和反馈的完整示例见
-[CPU 快速开始](https://reefinfra.ai/docs/getting-started/quickstart/)。
 
 ### 模型权重训练部署
 

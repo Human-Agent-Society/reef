@@ -111,17 +111,12 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-To connect an existing inference provider without YAML or a GPU:
+As a minimal example, start Reef as a pure inference server
+(planned in [RFC #414](https://github.com/Human-Agent-Society/reef/issues/414)):
 
 ```bash
-reef serve --upstream-url http://localhost:8000 --upstream-model my-model
+uv run reef serve --model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
-
-This starts the record-only recipe on `127.0.0.1:8900`, with state in `.reef/`.
-Set `REEF_UPSTREAM_API_KEY` for provider authentication and `REEF_TOKEN` to
-require a Reef bearer token. File deployments use explicit `-c`; the launcher
-does not discover `REEF_CONFIG` or `./reef.yaml`. See the
-[CPU quickstart](https://reefinfra.ai/docs/getting-started/quickstart/) for inference and feedback.
 
 ### Weight-training deployment
 
