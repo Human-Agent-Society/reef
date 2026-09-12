@@ -1,14 +1,41 @@
 Configure Reef serving and training
 ===================================
 
-A deployment config is one YAML file. ``reef serve -c <file>`` reads it, starts
-every process in its ``services`` list in dependency order, and hands the
-``reef`` section to the HTTP service.
+An external-provider deployment needs no YAML file:
 
-Relative config paths, including ``REEF_CONFIG``, resolve from the directory
-where you run the command. With no ``-c`` or ``--recipe``, Reef reads
-``REEF_CONFIG`` if set, otherwise ``./reef.yaml`` in that directory. It does
-not search the Reef installation for your config. From outside a checkout,
+.. code:: bash
+
+   reef serve --upstream-url http://localhost:8000 --upstream-model my-model
+
+Reef starts its core record-only recipe, listens on ``127.0.0.1:8900``, and
+stores state under ``.reef/`` in the launch directory. It records inference
+and feedback without training weights. Use ``--host`` or ``--port`` to change
+the bind address. Logs live under ``.reef/run/``. Reef checks its own HTTP
+readiness, runs in the foreground, and cleans up its process on Ctrl-C;
+it does not launch or stop the upstream provider. Readiness does not verify
+provider credentials or model availability.
+
+``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and
+``REEF_TOKEN`` supply optional environment fallbacks for this mode. Explicit
+CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
+model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
+with any other prefix still needs an upstream URL. ``--model-path`` remains
+a local-weight setting and requires a configured stack.
+
+For a custom deployment, ``reef serve -c <file>`` reads a YAML file, starts
+every process in its ``services`` list in dependency order, and hands its
+``reef`` section to the HTTP service. Existing file defaults remain unchanged,
+including the service's ``0.0.0.0`` bind address.
+
+Relative config paths resolve from the directory where you run the command.
+With no ``-c`` or explicit ``--recipe`` profile, Reef uses provider inputs;
+it does not discover ``REEF_CONFIG`` or ``./reef.yaml``. File deployments must
+use ``reef serve -c reef.yaml`` or ``reef serve -c "$REEF_CONFIG"`` instead
+of relying on the previous implicit discovery. ``REEF_CONFIG`` remains the
+internal way the launcher passes effective settings to its HTTP child.
+A selected missing or invalid file is an error, even when provider flags are
+present. Reef reports the selected config source and does not search the Reef
+installation for your config. From outside a checkout,
 pass an absolute path to a cookbook config. Relative state paths still use
 the launch directory, and an explicit ``services[].cwd`` controls that
 service's working directory.
@@ -32,7 +59,13 @@ Values interpolate from the environment with ``${VAR}`` and from the config
 itself with ``${dotted.path}``. Any value can be overridden on the command line:
 a bare ``--model_path /models/demo`` targets the ``reef`` section, and a dotted
 ``--training.checkpoint_dir /tmp/ckpt`` targets any other. Each process writes a
-log under ``/tmp/reef-stack/``; set ``run_dir`` to move it.
+log under ``/tmp/reef-stack/`` for a configured stack; set ``run_dir`` to move it.
+
+Configuration-free startup accepts declared provider/service flags. Unknown
+flags and settings for training, local models, or custom runtimes require an
+explicit stack file; they do not silently change the generated deployment.
+The effective settings are handed to the child using a private temporary
+config, removed when the launcher exits. No user YAML file is created.
 
 Public service settings use the same argument parser for YAML and CLI values.
 Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
@@ -480,7 +513,7 @@ string commands retain their current ``shlex`` parsing.
 
    services[].name | the service's id, used by ``depends_on``; unique within one stack
    services[].command | the command line string or argv list to run
-   services[].ready | a shell command that succeeds once the service is up
+   services[].ready | a shell command or argument list that succeeds once the service is up; lists run without a shell
    services[].ready_timeout | seconds to wait for ``ready`` before giving up; the top-level ``ready_timeout`` sets the default
    services[].depends_on | services that must be ready first
    services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead

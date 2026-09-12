@@ -73,25 +73,25 @@ def test_the_serve_parser_takes_recipe_and_model_and_the_service_parser_still_do
 
 
 @pytest.mark.unit
-def test_the_config_is_resolved_explicit_first_then_the_environment_then_reef_yaml(tmp_path, monkeypatch) -> None:
-    """``-c`` or ``--recipe`` is the person's choice and wins; ``REEF_CONFIG`` and ``reef.yaml`` are the defaults behind them."""
+def test_only_an_explicit_config_or_profile_selects_a_file(tmp_path, monkeypatch) -> None:
+    """An environment variable or nearby YAML must not silently select a deployment."""
     profile = str(PROFILES_DIR / "harness-evolve.yaml")
-    assert _resolve_config("mine.yaml", None, {"REEF_CONFIG": "env.yaml"}) == "mine.yaml"
-    assert _resolve_config(None, "harness-evolve", {"REEF_CONFIG": "env.yaml"}) == profile
-    assert _resolve_config(None, None, {"REEF_CONFIG": "env.yaml"}) == "env.yaml"
+    monkeypatch.setenv("REEF_CONFIG", "env.yaml")
+    assert _resolve_config("mine.yaml", None) == "mine.yaml"
+    assert _resolve_config(None, "harness-evolve") == profile
+    assert _resolve_config(None, None) is None
     with pytest.raises(DeployConfigError, match="not both"):
-        _resolve_config("mine.yaml", "harness-evolve", {})
+        _resolve_config("mine.yaml", "harness-evolve")
     with pytest.raises(DeployConfigError, match="recipes with a profile: harness-evolve"):
-        _resolve_config(None, "weights", {})
+        _resolve_config(None, "weights")
     monkeypatch.chdir(tmp_path)
     installed = tmp_path / "installed"
     installed.mkdir()
     (installed / "reef.yaml").write_text("reef: {}\n")
     monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", installed)
-    with pytest.raises(DeployConfigError, match="--recipe <name>; recipes with a profile: harness-evolve"):
-        _resolve_config(None, None, {})
+    assert _resolve_config(None, None) is None
     (tmp_path / "reef.yaml").write_text("reef: {}\n")
-    assert _resolve_config(None, None, {}) == "reef.yaml"
+    assert _resolve_config(None, None) is None
 
 
 @pytest.mark.unit

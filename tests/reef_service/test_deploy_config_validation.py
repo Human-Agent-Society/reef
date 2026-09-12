@@ -38,8 +38,7 @@ def test_relative_config_uses_working_directory_not_installation(tmp_path: Path,
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("source", ["argument", "environment", "default"])
-def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Path, monkeypatch, source) -> None:
+def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
     class StackStub:
@@ -63,11 +62,9 @@ def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Pa
     monkeypatch.delenv("REEF_CONFIG", raising=False)
     monkeypatch.setattr(orchestrator, "_Stack", StackStub)
     monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
-    path = tmp_path / ("reef.yaml" if source == "default" else "stack.yaml")
+    path = tmp_path / "stack.yaml"
     path.write_text("run_dir: work/stack\n" + VALID)
-    if source == "environment":
-        monkeypatch.setenv("REEF_CONFIG", path.name)
-    arguments = ["serve", "-c", path.name] if source == "argument" else ["serve"]
+    arguments = ["serve", "-c", path.name]
 
     with pytest.raises(SystemExit) as caught:
         cli_main(arguments)

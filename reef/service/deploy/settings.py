@@ -26,7 +26,12 @@ from reef.service.deploy.config import config_value, interpolate_config, interpo
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
-_DESCRIPTION = """reef serve — start a stack from a config.
+_DESCRIPTION = """reef serve — connect an external provider or start a configured stack.
+
+With no selected config, --upstream-url and --upstream-model start Reef's
+record-only recipe on 127.0.0.1:8900. YAML and a services list are optional.
+Config files are selected explicitly with -c; REEF_CONFIG and ./reef.yaml
+are not discovered by the launcher.
 
 ``reef serve -c <stack>.yaml`` reads the config's ``services``
 list and starts every declared process (SGLang, Slime driver, Reef, and so on)
@@ -34,8 +39,7 @@ in dependency order. Each service's ``ready`` probe must pass before the next
 starts. After all services are up, Reef blocks until SIGTERM/SIGINT; a
 watchdog thread detects unexpected exits and tears the stack down.
 
-The Reef HTTP child is an internal service process configured from the same
-YAML file. Public startup is always config-driven.
+The Reef HTTP child receives the effective configuration from the launcher.
 
 Config overrides:
   Public settings below share type conversion with YAML. Explicit CLI
@@ -47,9 +51,10 @@ Config overrides:
   coercion; bare keys target ``reef``, dotted keys target other sections.
 
   Examples:
+    reef serve --upstream-url http://localhost:8000 --upstream-model my-model
     reef serve -c stack.yaml --model-path Qwen/Qwen2.5-1.5B-Instruct
     reef serve -c path/to/local-sglang.yaml --port 9000
-    reef serve --training.checkpoint_dir /tmp/ckpt
+    reef serve -c stack.yaml --training.checkpoint_dir /tmp/ckpt
 """
 
 
@@ -64,7 +69,7 @@ def build_parser(*, service_arguments: bool = False) -> argparse.ArgumentParser:
         "-c",
         "--config",
         default=None,
-        help="Config file path, relative to the working directory (default: $REEF_CONFIG or ./reef.yaml).",
+        help="Optional config file path, relative to the working directory; no file is loaded unless selected.",
     )
     if service_arguments:
         for argument in service_config_arguments():
