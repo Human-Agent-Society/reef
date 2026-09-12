@@ -237,17 +237,19 @@ current harness on the tutorial's three coding tasks and publishes it only if
 it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
 tasks and evaluation.
 
-To ask for a harness change in plain words and see the whole path from the ask to the install, run the [harness requests tutorial](tutorials/harness-requests/README.md).
+To ask for a harness change in plain words and see the whole path from the ask to the install, run the [Reefine tutorial](tutorials/reefine/README.md).
 
+Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --model ollama/gemma4:26b`.
 
 ## Recipes and examples
 
 Choose a recipe based on your workload's feedback and the artifact you want to
-update. The implementations live in this repository's `recipes/` cookbook,
-are selected by dotted class reference, and do not ship in the Reef wheel.
+update. Reefine is built in; the other implementations live in this repository's
+`recipes/` cookbook, are selected by dotted class reference, and do not ship in the Reef wheel.
 
 | Workload | Recipe guide | Updated artifact | Examples and results |
 |---|---|---|---|
+| Plain-language requests to refine a coding agent | [Reefine](docs/user-guide/recipes/reefine.rst) | Harness; no training GPUs | [Tutorial](tutorials/reefine/README.md) |
 | A stream of tasks scored by tests or a verifier | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | Model weights | [Example](recipes/sao/examples/sao/README.md) · [Results](recipes/sao/examples/sao/README.md#results) |
 | Agent traffic with useful next-state signals and no explicit reports | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | Model weights | [Example](recipes/openclawrl/examples/openclawrl/README.md) |
 | Repeated, scored attempts at one problem | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/) | Model weights | [Example](recipes/tttd/examples/tttd/README.md) · [Results](recipes/tttd/examples/tttd/README.md#formal-8x64-results) |

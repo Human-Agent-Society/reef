@@ -58,7 +58,7 @@ point deployments configured with different recipes at the same repository.
        batch-size: 1
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
-Reef does not register or import learning methods. The ``recipes/`` tree in
+Reefine ships in Reef; other learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
@@ -75,3 +75,10 @@ Reef yet. For a harness recipe, follow `Evolve agent prompts, rules, and skills
 <evolve-your-harness.rst>`__. For a weight recipe, follow `Train model weights
 from agent feedback <evolve-your-model.rst>`__. Each recipe page above provides
 its own configuration and example.
+
+Built-in harness refinement
+---------------------------
+
+`Reefine <recipes/reefine.rst>`__ turns user instructions into harness updates
+and ships with ``reef-infra``. Start it with ``reef serve --recipe reefine``
+and a configured model endpoint.

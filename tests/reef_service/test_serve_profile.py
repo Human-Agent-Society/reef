@@ -43,8 +43,8 @@ def isolated_harness_package() -> Iterator[None]:
 
 
 @pytest.mark.unit
-def test_the_harness_evolve_recipe_carries_the_one_profile() -> None:
-    assert profile_names() == ("harness-evolve",)
+def test_builtin_recipe_profiles() -> None:
+    assert profile_names() == ("harness-evolve", "reefine")
     assert profile_path("harness-evolve") == PROFILES_DIR / "harness-evolve.yaml"
     with pytest.raises(UnknownProfileError, match="recipes with a profile: harness-evolve"):
         profile_path("weights")

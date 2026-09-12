@@ -1,15 +1,21 @@
-# Harness requests on reef-pi
+# Reefine: refine your harness on reef-pi
 
 A person asks their coding agent for a capability in plain words, from the shell (`reef-pi harness "..."`) or from inside a pi session (`/reef-harness ...`), and the ask posts a training instruction to reef (`POST /reef/train`) with the installed release and the session it came from. Nothing in the session writes the change: the agent side only asks.
 
 The service writes it. The deployment runs in `training_mode: manual`, so one evolve step runs for each accepted instruction: it hands the request to the recipe's proposer, the served model, which reads the current tree, the request and the pi extension API reference and answers with the change the request names: a skill, a rules entry, an agent command or a pi extension. Admission screens it, the gate runs it against the current tree on the recipe's tasks, and the catalog row carries the request (`metrics.training_request`), the mutations and the verdict, with one page per step that says why the version exists and what it changed.
 
-The person promotes what runs as code. A release that touches a `code_extension` waits as pending until a person reads its page and promotes it; a release whose `requires` items (a permission, a variable, a service) are not checked off with `reef-pi setup` is never installed. The demos here script that path end to end on this machine and record what the model did, working or not; this is RFC #310's stage 5, and `./run.sh measure` counts the requests that won the gate, the first of the two measurements its stage 6 names before the recipe promotion (the held out shapes are not here).
+The person promotes what runs as code. A release that touches a `code_extension` waits as pending until a person reads its page and promotes it; a release whose `requires` items (a permission, a variable, a service) are not checked off with `reef-pi setup` is never installed. The demos here script that path end to end on this machine and record what the model did, working or not; this is RFC #310's stage 5, and `./run.sh measure` counts the requests that won the gate, the first of the two measurements its stage 6 names before promotion into the package (the held out shapes are not here).
+
+## Built-in recipe
+
+Reefine ships in `reef-infra` as `reef.recipe.reefine:ReefineRecipe`, including its proposer and evaluator. Start it from an installed package with `reef serve --recipe reefine --model ollama/gemma4:26b`; the profile listens on `127.0.0.1:8901`, uses token `reef-local`, and stores state under `.reef/reefine/`. The demos below use their own state under `tutorials/reefine/work/`. The recipe defaults to manual training, requests and update notices enabled, extension review, and `selection: always`. The three arithmetic tasks record regression scores; they do not verify a requested workflow. Set `evolution.tasks`, `evolution.evaluate`, and `evolution.selection` for your own evaluation.
+
+The directory was previously named `tutorials/harness-requests`. Historical measurements below are unchanged; existing runs can be retained by moving their `work/` directory and retaining their original scenario name in `run.py`.
 
 ## Directory layout
 
 ```text
-harness-requests/
+reefine/
   README.md          this file: what the tutorial shows, how to run it, what it saw
   run.sh             starts reef serve on configs/deployment.yaml, waits for /healthz,
                      installs the served tree under work/harness, runs run.py <mode>,
@@ -17,16 +23,15 @@ harness-requests/
   run.py             the driver: ask -> step -> promote if pending -> setup if required
                      -> install -> show; and the measurement
   configs/
-    deployment.yaml  the pi deployment of tutorials/evolve-your-harness with requests,
+    deployment.yaml  the built-in Reefine deployment with requests,
                      version_check and review_kinds: [code_extension], training_mode
                      manual, selection: always, the same three tasks, and every path
-                     under tutorials/harness-requests/work/
+                     under tutorials/reefine/work/
   demos/
     bugfix.md        the bug fix flow request and the workspace fixture
     research.md      the research loop request
     workspace/       a tiny Python project with one failing test (sum_to stops one short)
-  pyproject.toml     makes the directory installable; the method package stays in
-                     tutorials/evolve-your-harness/harness
+  pyproject.toml     installs reef-infra and reef-client for the demos
   work/              the runs: reef.log, harness/ (the installed tree), captures/,
                      <mode>-<timestamp>.json and <mode>-<timestamp>/ (the page, the show
                      session's receipts and workspace); not committed
@@ -35,8 +40,8 @@ harness-requests/
 ## Quick start
 
 ```bash
-cd tutorials/harness-requests
-pip install -e .          # reef-client for run.py; reef itself runs from the checkout
+cd tutorials/reefine
+uv pip install -e .       # reef-infra and reef-client for the demos
 export REEF_UPSTREAM_URL=http://127.0.0.1:11434   # an OpenAI compatible endpoint, no /v1 suffix
 export REEF_UPSTREAM_MODEL=gemma4:26b             # a model that endpoint serves
 export REEF_UPSTREAM_API_KEY=dummy                # the endpoint's key; anything for a local ollama
@@ -107,7 +112,7 @@ Every row is one `./run.sh measure` run on the code of the pull request in its C
 ## Reproduce
 
 ```bash
-cd tutorials/harness-requests
+cd tutorials/reefine
 # the demos: ollama on 127.0.0.1:11434, the model in the row's Model column
 REEF_UPSTREAM_MODEL=gemma4:26b ./run.sh bugfix
 REEF_UPSTREAM_MODEL=gemma4:26b ./run.sh research

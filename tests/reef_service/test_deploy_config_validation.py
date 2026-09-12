@@ -155,7 +155,7 @@ def test_required_environment_values_resolve_and_optional_values_can_be_empty(tm
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "harness-requests"])
+@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "reefine"])
 def test_tutorial_missing_environment_fails_before_launch_without_traceback(tutorial, monkeypatch, capsys) -> None:
     for name in ("REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
         monkeypatch.delenv(name, raising=False)

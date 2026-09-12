@@ -527,7 +527,8 @@ tutorial's ``configs/deployment.yaml`` sets
 ``POST /reef/scenarios/{scenario}/promote`` before any session installs it;
 promote it as shown below. ``configs/serve.yaml`` and
 ``configs/serve-native.yaml`` stay in ``auto``, where an ask is refused, and
-set none of the three. ``tutorials/harness-requests/`` runs this path end to
+set none of the three. The built-in ``reef.recipe.reefine:ReefineRecipe`` is available through
+``reef serve --recipe reefine``. ``tutorials/reefine/`` runs this path end to
 end on one machine, from the ask to the install and a session on the new
 tree, with a bug fix flow demo, a research loop demo and a measurement of
 which requests won the gate (``./run.sh bugfix``, ``./run.sh research``,

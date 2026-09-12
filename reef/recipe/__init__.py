@@ -9,6 +9,7 @@ weights or the harness*. This package holds everything a method binds to:
   ``WeightTrainingSpec`` (step preparer, loss family, data processor).
 - ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
+- ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement.
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
   ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
@@ -22,7 +23,7 @@ prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``;
 and configuration live in ``reef.train.evaluation``. The recipe chooses and
 configures the policy.
 
-Learning methods live outside the core package. The repository's sibling
+Reefine is bundled; other learning methods live outside the core package. The repository's sibling
 ``recipes`` tree contains cookbook implementations, but Reef neither imports
 them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.

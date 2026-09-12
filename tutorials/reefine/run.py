@@ -1,4 +1,4 @@
-"""Harness requests v1 on reef-pi, end to end: ask, step, promote, setup, install, show.
+"""Reefine on reef-pi, end to end: ask, step, promote, setup, install, show.
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
@@ -45,7 +45,7 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
-SCENARIO = "harness-requests-demo"  # this workload's isolated lane; the install bakes it into reef-pi
+SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
 # A local model reads the API skill and writes the change, then six pi episodes score it.
@@ -608,7 +608,7 @@ def measure(n):
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="run.py",
-        description="Harness requests v1 on reef-pi: the two demos and the measurement; start it through ./run.sh",
+        description="Reefine on reef-pi: the two demos and the measurement; start it through ./run.sh",
     )
     modes = parser.add_subparsers(dest="mode", required=True)
     modes.add_parser("install", help="install the served head into work/harness (run.sh does this first)")
