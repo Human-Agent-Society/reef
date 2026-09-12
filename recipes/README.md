@@ -105,8 +105,7 @@ reef, and the metric is the number of sessions before the agent's answers
 match the student's taste. The method (session correlation, PRM judging, the
 hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
 contains only the harness side: the task stream, the Hermes agent wrapper,
-the student service, and the analysis scripts. Its README keeps the learning
-curve and training curves of a complete run.
+the student service, and the analysis scripts.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
