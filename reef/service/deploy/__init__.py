@@ -7,7 +7,7 @@ method-specific dependencies in Python. Unversioned files retain their explicit
 readiness and cleanup machinery. HTTP assembly lives in :mod:`reef.service.assembly`.
 
 Module responsibilities:
-    config: YAML loading, environment interpolation and recipe source paths.
+    config_utils: YAML loading, environment interpolation and recipe source paths.
     service_config: Typed shared settings consumed by HTTP app assembly.
     component_config: Selected component schemas, public layout and validation.
     cli: CLI help, dotted override syntax and precedence.
@@ -22,9 +22,9 @@ lives in ``reef.runtime.executor.arguments``. Import those owners directly.
 
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.service.deploy.cli import build_parser
-from reef.service.deploy.config import PROJECT_ROOT, DeployConfigError, load_config
+from reef.service.deploy.config_utils import PROJECT_ROOT, DeployConfigError, load_config
 from reef.service.deploy.orchestrator import DeployStartupError, main, run_service
-from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 
 
 def build_app(settings, **kwargs):
@@ -44,12 +44,12 @@ __all__ = [
     "DeployConfigError",
     "DeployStartupError",
     "GitLFSRepositoryBackend",
-    "ServiceSettings",
+    "ServiceConfig",
     "build_app",
     "build_dispatcher",
     "build_parser",
     "load_config",
     "main",
     "run_service",
-    "service_settings_from_config",
+    "service_config_from_mapping",
 ]

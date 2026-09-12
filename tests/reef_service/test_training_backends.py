@@ -18,10 +18,10 @@ from reef_service._training_deployment import LocalDeployment
 from reef.runtime.registry import RuntimeConfigError
 from reef.service.assembly import _connect_training_runtime, _training_recipe
 from reef.service.deploy import training
-from reef.service.deploy.config import DeployConfigError
+from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.train.runtime_backend import RuntimeTrainingBackend
 
 BACKEND = "reef_service._training_deployment:LocalDeployment"
@@ -52,7 +52,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert [process["name"] for process in config["services"]] == ["reef"]
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_backend_factory"} & config["reef"].keys()
-        settings = service_settings_from_config(config)
+        settings = service_config_from_mapping(config)
         runtime = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
@@ -113,7 +113,7 @@ def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
     monkeypatch.setattr(type(runtime_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="TrainingRuntime"):
         _connect_training_runtime(
-            ServiceSettings(recipe=RECIPE, training_backend=BACKEND), model_path="demo", max_staleness=0
+            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", max_staleness=0
         )
     assert closed == [True]
 
@@ -123,7 +123,7 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
     from reef.storage.sqlite import SQLiteRecordStore
 
     config, _ = resolve_deployment_config(deployment(), None, tmp_path / "serve.yaml")
-    recipe = _training_recipe(SAORecipe, service_settings_from_config(config), {}, None)
+    recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {}, None)
     records = SQLiteRecordStore()
     try:
         trainer = recipe.build("scenario", records)

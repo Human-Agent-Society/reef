@@ -13,8 +13,8 @@ from urllib.parse import urlsplit
 
 from reef.runtime.adapters.inference_proxy import PROVIDER_APIS
 from reef.runtime.executor.arguments import native_arguments
-from reef.service.deploy.config import DeployConfigError
-from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
+from reef.service.deploy.config_utils import DeployConfigError
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.service.profiles import profile_names
 
 
@@ -75,7 +75,7 @@ def http_readiness_command(python: str, endpoint: str) -> list[str]:
     ]
 
 
-def prepare_inference(config: dict[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
     """Resolve launch choices once, before model downloads or service creation."""
     backend = settings.inference_backend or "sglang"
     definition = INFERENCE_BACKENDS.get(backend)
@@ -164,7 +164,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         raise DeployConfigError(
             "select a weight-training recipe for training; custom process stacks require unversioned legacy YAML"
         )
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     if config.get("reef", {}).get("runtime"):
         if not settings.host.strip() or not 1 <= settings.port <= 65535:
             raise DeployConfigError("invalid reef.host or reef.port")
@@ -176,7 +176,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
             raise DeployConfigError("local inference requires a valid --reef.port and positive --inference.timeout-s")
         local_service = prepare_inference(config, settings)
-        settings = service_settings_from_config(config)
+        settings = service_config_from_mapping(config)
     elif (
         settings.inference_backend is not None
         or settings.tensor_parallel_size is not None
@@ -216,7 +216,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         config["services"].insert(0, local_service)
 
 
-def http_service(config: Mapping[str, Any], settings: ServiceSettings) -> dict[str, Any]:
+def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
     """Build the standard local HTTP child and its readiness probe."""
     host = settings.host
     if host == "0.0.0.0":

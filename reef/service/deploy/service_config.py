@@ -1,7 +1,7 @@
 """Typed HTTP, storage and shared runtime settings derived from component fields.
 
 CLI and YAML values use the shared parser in ``reef.core.config``. This module
-converts effective deployment configuration into ``ServiceSettings`` for app assembly.
+converts effective deployment configuration into ``ServiceConfig`` for app assembly.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.service.cors import console_origins
-from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
 
 @dataclass(frozen=True)
-class ServiceSettings:
+class ServiceConfig:
     """The HTTP service's settings, translated from a deployment config.
 
     Recipe-specific config fields (batch sizes, group counts, checkpoint cadence)
@@ -218,7 +218,7 @@ def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: ``reef.*`` keys the service consumes under a different field name. The
-#: service's vocabulary is ``ServiceSettings``' fields plus these, so the
+#: service's vocabulary is ``ServiceConfig``' fields plus these, so the
 #: recipe-owned remainder of the section never includes them.
 SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 
@@ -228,16 +228,16 @@ def service_owned_keys() -> frozenset[str]:
     non_reef_fields = {"evaluation_settings", "training_settings", "wandb_config"}
     return frozenset(
         settings_field.name
-        for settings_field in dataclasses.fields(ServiceSettings)
+        for settings_field in dataclasses.fields(ServiceConfig)
         if settings_field.name not in non_reef_fields
     ) | frozenset(SERVICE_CONFIG_ALIASES)
 
 
 @lru_cache(maxsize=1)
 def service_config_arguments() -> tuple[ConfigArgument, ...]:
-    """Public settings derive their types and defaults from ServiceSettings."""
+    """Public settings derive their types and defaults from ServiceConfig."""
     return (
-        *config_arguments(ServiceSettings),
+        *config_arguments(ServiceConfig),
         ConfigArgument(
             "token",
             ("reef", "token"),
@@ -349,7 +349,7 @@ def _service_tokens(config: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(tokens))
 
 
-def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
+def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     """Translate the config's ``reef`` section into HTTP service settings."""
     if "schema-version" in config:
         from reef.service.deploy.component_config import (
@@ -370,4 +370,4 @@ def service_settings_from_config(config: Mapping[str, Any]) -> ServiceSettings:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for presets and directly selected recipes.
     preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
-    return ServiceSettings(**values, recipe_settings=_reef_section(config), preset_config=preset)
+    return ServiceConfig(**values, recipe_settings=_reef_section(config), preset_config=preset)

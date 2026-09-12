@@ -101,7 +101,7 @@ def _config_id(path: Path) -> str:
 
 def _resolved_strings(config: dict, value):
     """Yield every string after applying the orchestrator's config pass."""
-    from reef.service.deploy.config import interpolate_config
+    from reef.service.deploy.config_utils import interpolate_config
 
     if isinstance(value, dict):
         for item in value.values():
@@ -378,13 +378,13 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.execution import validate_services
-    from reef.service.deploy.service_config import service_settings_from_config
+    from reef.service.deploy.service_config import service_config_from_mapping
     from reef.train.slime_backend.launch import _configured_inference_backend_factory
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
 
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     if settings.inference_backend_factory is not None:
         assert callable(_configured_inference_backend_factory(settings.inference_backend_factory))
     services = validate_services(config, config_path)
@@ -423,12 +423,12 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.service_config import service_settings_from_config
+    from reef.service.deploy.service_config import service_config_from_mapping
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
 
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     state_dir = Path(_CONFIG_ENV["TTTD_STATE_DIR"])
     assert Path(settings.artifact_repository) == state_dir / "artifacts.git"
     assert Path(settings.artifact_work_dir) == state_dir / "artifact-work"

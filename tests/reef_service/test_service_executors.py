@@ -13,7 +13,7 @@ import yaml
 from reef.runtime.executor import ExecutorConfig
 from reef.runtime.executor.config import executor_settings, role_executor_settings
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.service.deploy.config import DeployConfigError
+from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import service_executor_config, validate_services
 from reef.service.deploy.orchestrator import _Stack
 from reef.service.deploy.process import ProcessWorker, RayProcessWorker
@@ -67,7 +67,7 @@ def test_all_services_use_the_selected_executor_and_discover_endpoints(tmp_path)
         assert stack.config["endpoints"]["prm"] == f"http://127.0.0.1:{port}"
         child_config = yaml.safe_load((tmp_path / "reef" / "runtime.yaml").read_text())
         assert child_config["endpoints"]["prm"] == f"http://127.0.0.1:{port}"
-        from reef.service.deploy.config import interpolate_config
+        from reef.service.deploy.config_utils import interpolate_config
 
         assert interpolate_config(child_config, child_config["reef"]["prm_url"]) == f"http://127.0.0.1:{port}"
         assert stack._is_alive("prm") and stack._is_alive("reef")
@@ -165,7 +165,7 @@ def test_slime_driver_honors_yaml_roles_and_explicit_flag_precedence(cli):
 
 
 def test_nested_endpoint_interpolation_supports_service_names_with_hyphens():
-    from reef.service.deploy.config import interpolate_config
+    from reef.service.deploy.config_utils import interpolate_config
 
     config = {"reef": {"prm_url": "${endpoints.prm-sglang}"}, "endpoints": {"prm-sglang": "http://node:23001"}}
     assert interpolate_config(config, "--url=${reef.prm_url}") == "--url=http://node:23001"

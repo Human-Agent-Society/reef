@@ -21,7 +21,7 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.service_config import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.cordis_backend import Mutation
 from reef.train.trainer import Trainer
@@ -462,7 +462,7 @@ def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_p
 
     # The deployment names the upstream once, on the reef section; the
     # service builds the recipe's runtime from it.
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     assert (service.upstream_url, service.upstream_api_key, service.upstream_model) == (
         "http://127.0.0.1:8000",
         "dummy",
@@ -670,7 +670,7 @@ def test_native_example_yaml_boots_the_recipe_with_the_shipped_seed(native_evolu
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
 
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
@@ -720,7 +720,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith("tutorials/evolve-your-harness/")
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     monkeypatch.delenv("REEF_UPSTREAM_MODEL")  # Recipe construction uses the resolved runtime, not the environment.
     built = build_named_recipe(
         "deployment",
@@ -769,7 +769,7 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
-        default_runtime=_upstream_runtime(service_settings_from_config(config)),
+        default_runtime=_upstream_runtime(service_config_from_mapping(config)),
     )
     assert isinstance(built, CordisRecipe)
     assert built.review_kinds == ("code_extension",)
@@ -795,7 +795,7 @@ def test_native_example_recipe_renders_its_seed_as_the_base_files(native_evoluti
     materialized.write_text(yaml.safe_dump(recipe_sections))
     from reef.service.assembly import _upstream_runtime
 
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     built = CordisRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )

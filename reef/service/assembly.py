@@ -1,6 +1,6 @@
 """Assemble the Reef HTTP service from settings: dispatcher, registry, app.
 
-This is the service's composition logic — a :class:`ServiceSettings` in, a
+This is the service's composition logic — a :class:`ServiceConfig` in, a
 running aiohttp application out. It knows nothing about the deployment config
 format; ``reef.service.deploy`` translates YAML into these settings and
 orchestrates processes around the result.
@@ -26,7 +26,7 @@ from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.registry import RuntimeRegistry
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.service.app import InferenceRetryPolicy, create_app
-from reef.service.deploy.service_config import ServiceSettings, service_owned_keys
+from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -42,10 +42,10 @@ def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
     return None
 
 
-def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
+def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     """The flat ``reef.*`` keys that belong to the recipe, not the service.
 
-    The service's own vocabulary is :class:`ServiceSettings`' fields plus the
+    The service's own vocabulary is :class:`ServiceConfig`' fields plus the
     config spellings that map onto them (``reef.token`` feeds ``tokens``), so
     it never drifts from what the settings layer consumes. Everything else
     the operator wrote under ``reef:`` is recipe configuration and must be
@@ -68,7 +68,7 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 
 
 def _connect_training_runtime(
-    settings: ServiceSettings,
+    settings: ServiceConfig,
     *,
     model_path: str,
     max_staleness: int,
@@ -90,7 +90,7 @@ def _connect_training_runtime(
     return runtime
 
 
-def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
+def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
     """The proxy runtime ``reef.upstream_url`` names, or None to leave recipes
     to their own resolution (a recipe-config ``runtime`` section, else the
     ``REEF_UPSTREAM_URL`` environment)."""
@@ -107,7 +107,7 @@ def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
 
 def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
-    settings: ServiceSettings,
+    settings: ServiceConfig,
     env: Mapping[str, str],
     connector: Any,
 ) -> Recipe:
@@ -136,7 +136,7 @@ def _training_recipe(
         raise
 
 
-def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, str], connector: Any) -> Recipe:
+def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str], connector: Any) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
@@ -185,7 +185,7 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
 
 
 def build_dispatcher(
-    settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None
+    settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None
 ) -> Dispatcher:
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
@@ -237,7 +237,7 @@ def build_dispatcher(
         raise
 
 
-def build_app(settings: ServiceSettings, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
+def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None) -> Any:
     record_retention = RecordRetention(settings.agent_record_retention_days, settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
         initial_s=settings.inference_retry_initial_s,

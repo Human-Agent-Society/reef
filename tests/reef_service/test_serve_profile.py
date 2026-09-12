@@ -13,10 +13,10 @@ import pytest
 
 from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.cli import build_parser, build_serve_parser
-from reef.service.deploy.config import DeployConfigError, load_config
+from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.orchestrator import PROJECT_ROOT, _model_overrides, _prepare_profile, _resolve_config
-from reef.service.deploy.service_config import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_names, profile_path
 from reef.storage.sqlite import SQLiteRecordStore
 
@@ -165,7 +165,7 @@ def test_the_harness_evolve_profile_loads_and_boots_its_recipe(monkeypatch, tmp_
         assert config["reef"][key].startswith(".reef/harness-evolve/")
     assert config["run_dir"].startswith(".reef/harness-evolve/")
     monkeypatch.syspath_prepend(str(method_root))
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     monkeypatch.delenv("REEF_UPSTREAM_MODEL")
     built = build_named_recipe("harness-evolve", dict(os.environ), default_runtime=_upstream_runtime(service))
     assert isinstance(built, CordisRecipe) and built.adapter == "pi" and built.training_mode == "hybrid"

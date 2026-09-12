@@ -260,10 +260,10 @@ Deployment modules
 
 ``reef/service/deploy/`` separates configuration input from process startup:
 
-* ``config.py`` reads YAML, expands environment/config references and locates
+* ``config_utils.py`` reads YAML, expands environment/config references and locates
   recipe source packages. It does not download models or validate process graphs.
 * ``service_config.py`` declares shared HTTP, storage and runtime fields and
-  converts effective values into ``ServiceSettings`` for app assembly.
+  converts effective values into ``ServiceConfig`` for app assembly.
 * ``component_config.py`` loads selected recipe/runtime declarations, translates
   the versioned public layout and validates component values.
 * ``cli.py`` builds help and applies dotted command-line overrides before shared

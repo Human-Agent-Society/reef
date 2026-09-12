@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from reef.service.deploy.config import load_config
+from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 
 

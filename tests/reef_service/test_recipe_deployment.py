@@ -9,7 +9,7 @@ import pytest
 
 from recipes.openclawrl.deployment import prepare_dependencies
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import DeployConfigError, interpolate_config
+from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
@@ -118,7 +118,7 @@ def test_external_prm_has_no_managed_process_and_keeps_its_connection():
 
 def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     from reef.service.assembly import _serving_recipe
-    from reef.service.deploy.service_config import service_settings_from_config
+    from reef.service.deploy.service_config import service_config_from_mapping
 
     raw = {
         "schema-version": 2,
@@ -129,7 +129,7 @@ def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    recipe = _serving_recipe(raw["recipe"]["implementation"], service_settings_from_config(config), {}, None)
+    recipe = _serving_recipe(raw["recipe"]["implementation"], service_config_from_mapping(config), {}, None)
     assert recipe.runtime.base_url == "http://localhost:8000"
 
 

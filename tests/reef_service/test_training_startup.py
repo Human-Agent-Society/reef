@@ -12,7 +12,7 @@ import yaml
 
 from reef.cli import main
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import interpolate_config
+from reef.service.deploy.config_utils import interpolate_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
@@ -156,7 +156,7 @@ def test_cli_only_training_resolves_public_config_references(tmp_path):
 def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     downloads, configs, paths = [], [], []
-    from reef.service.deploy import config as config_module
+    from reef.service.deploy import config_utils as config_module
     from reef.service.deploy import inference
 
     def download(model):

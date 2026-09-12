@@ -12,13 +12,13 @@ import yaml
 from reef.cli import main as cli_main
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
-from reef.service.deploy.config import interpolate_environment, load_config
+from reef.service.deploy.config_utils import interpolate_environment, load_config
 from reef.service.deploy.service_config import (
-    ServiceSettings,
+    ServiceConfig,
     normalize_service_config,
     parse_service_arguments,
     service_config_arguments,
-    service_settings_from_config,
+    service_config_from_mapping,
 )
 
 
@@ -53,8 +53,8 @@ def test_parser_defaults_come_from_settings():
     for argument in service_config_arguments():
         if argument.name in {"token", "recipe"}:
             continue
-        field = next(field for field in fields(ServiceSettings) if field.name == argument.name)
-        assert defaults[argument.name] == getattr(ServiceSettings(recipe="recipe"), field.name)
+        field = next(field for field in fields(ServiceConfig) if field.name == argument.name)
+        assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)
 
 
 def test_recipe_setting_and_launcher_profile_are_independent_arguments():
@@ -67,16 +67,16 @@ def test_recipe_setting_and_launcher_profile_are_independent_arguments():
 @pytest.mark.parametrize("flag", ["--port", "--reef.port"])
 def test_cli_beats_yaml_and_omitted_cli_leaves_yaml_value(flag):
     config = {"reef": {"recipe": "recipe", "port": 9123}}
-    assert service_settings_from_config(config).port == 9123
+    assert service_config_from_mapping(config).port == 9123
     updated = _apply_overrides(config, _parse_overrides([flag, "8123"]))
-    assert service_settings_from_config(normalize_service_config(updated)).port == 8123
+    assert service_config_from_mapping(normalize_service_config(updated)).port == 8123
     assert config["reef"]["port"] == 9123
 
 
 def test_last_cli_alias_wins_even_when_a_previous_spelling_is_repeated():
     overrides = _parse_overrides(["--port", "7000", "--reef.port", "8000", "--port", "9000"])
     config = _apply_overrides({"reef": {"recipe": "recipe", "port": 6000}}, overrides)
-    assert service_settings_from_config(config).port == 9000
+    assert service_config_from_mapping(config).port == 9000
 
 
 @pytest.mark.parametrize(
@@ -106,7 +106,7 @@ def test_boolean_flags_can_enable_and_disable_yaml_settings(arguments, expected)
     config = _apply_overrides(
         {"reef": {"recipe": "recipe", "allow_implicit_scenario_creation": not expected}}, _parse_overrides(arguments)
     )
-    assert service_settings_from_config(config).allow_implicit_scenario_creation is expected
+    assert service_config_from_mapping(config).allow_implicit_scenario_creation is expected
 
 
 def test_empty_container_overrides_replace_yaml_values_and_survive_child_serialization():
@@ -116,7 +116,7 @@ def test_empty_container_overrides_replace_yaml_values_and_survive_child_seriali
     )
     normalized = normalize_service_config(config)
     child = yaml.safe_load(yaml.safe_dump(normalized))
-    settings = service_settings_from_config(child)
+    settings = service_config_from_mapping(child)
     assert settings.tokens == ()
     assert settings.inference_backend_config == {}
 
@@ -134,14 +134,14 @@ def test_override_replaces_required_environment_reference_before_validation(monk
         {"port": "9000"},
     )
     config = interpolate_environment(config, "stack.yaml")
-    settings = service_settings_from_config(normalize_service_config(config))
+    settings = service_config_from_mapping(normalize_service_config(config))
     assert settings.port == 9000
     assert settings.inference_url == "http://localhost:9000"
 
 
 def test_string_lists_resolve_config_references():
     config = {"reef": {"recipe": "recipe", "tokens": ["${auth.current}"]}, "auth": {"current": "credential"}}
-    assert service_settings_from_config(config).tokens == ("credential",)
+    assert service_config_from_mapping(config).tokens == ("credential",)
 
 
 def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
@@ -156,7 +156,7 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
         },
     )
     normalized = normalize_service_config(config)
-    settings = service_settings_from_config(normalized)
+    settings = service_config_from_mapping(normalized)
     assert settings.training_settings == {"global_batch_size": 2}
     assert settings.evaluation_settings == {"module": "example:Evaluator"}
     assert settings.wandb_config == {"enabled": False}
@@ -167,9 +167,9 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
 
 def test_retry_deadline_still_follows_inference_timeout():
     config = {"reef": {"recipe": "recipe", "inference_timeout_s": 42}}
-    assert service_settings_from_config(normalize_service_config(config)).inference_retry_timeout_s == 42
+    assert service_config_from_mapping(normalize_service_config(config)).inference_retry_timeout_s == 42
     config["reef"]["inference_retry_timeout_s"] = 12
-    assert service_settings_from_config(config).inference_retry_timeout_s == 12
+    assert service_config_from_mapping(config).inference_retry_timeout_s == 12
 
 
 @pytest.mark.parametrize(
@@ -186,7 +186,7 @@ def test_retry_deadline_still_follows_inference_timeout():
 )
 def test_invalid_public_values_report_the_field_without_echoing_values(name, value):
     with pytest.raises(ValueError, match=name) as caught:
-        service_settings_from_config({"reef": {"recipe": "recipe", name: value}})
+        service_config_from_mapping({"reef": {"recipe": "recipe", name: value}})
     assert "secret-invalid-integer" not in str(caught.value)
 
 
@@ -255,7 +255,7 @@ def test_launcher_passes_typed_cli_values_to_commands_and_child(tmp_path: Path, 
         )
     assert caught.value.code == 0
     for config in captured.values():
-        settings = service_settings_from_config(config)
+        settings = service_config_from_mapping(config)
         assert settings.port == 8123
         assert settings.upstream_model == "001"
         assert settings.tokens == ()

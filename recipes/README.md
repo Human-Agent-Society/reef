@@ -22,7 +22,7 @@ and what the quickstart serves:
   training.
 
 Each is complete and runnable: a flat `reef:` section (translated into the
-frozen `ServiceSettings` by
+frozen `ServiceConfig` by
 [`reef/service/deploy/service_config.py`](../reef/service/deploy/service_config.py)) plus
 a `services:` list the orchestrator starts in dependency order, with `${VAR}`
 environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`

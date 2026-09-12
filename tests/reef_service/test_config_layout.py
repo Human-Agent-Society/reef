@@ -17,8 +17,8 @@ from reef.service.deploy.component_config import (
     translate_layout,
     translate_references,
 )
-from reef.service.deploy.config import DeployConfigError, load_config
-from reef.service.deploy.service_config import normalize_service_config, service_settings_from_config
+from reef.service.deploy.config_utils import DeployConfigError, load_config
+from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 
 
 def test_public_layout_and_cli_preserve_values_and_opaque_options():
@@ -47,7 +47,7 @@ def test_public_layout_and_cli_preserve_values_and_opaque_options():
         ]
     )
     config = normalize_service_config(_apply_overrides(config, overrides))
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     assert settings.port == 9000 and settings.tokens == ("001",)
     assert settings.model_path == "org/model" and settings.agent_record_dir == ".reef/data"
     assert native_arguments(settings.inference_options) == ["--mem-fraction-static=0.6"]

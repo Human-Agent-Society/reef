@@ -12,8 +12,8 @@ from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
-from reef.service.deploy.config import load_config
-from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
+from reef.service.deploy.config_utils import load_config
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresRecordStore, PostgresScenarioStorage, postgres_url
 from reef.storage.records import RecordConflict, RecordRetention
@@ -292,7 +292,7 @@ def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, m
 )
 def test_deployment_rejects_invalid_record_backend(values):
     with pytest.raises(ValueError):
-        ServiceSettings(recipe="recipe", **values)
+        ServiceConfig(recipe="recipe", **values)
 
 
 def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
@@ -302,12 +302,12 @@ def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
         "reef:\n  recipe: recipe\n  record_backend: postgres\n"
         "  record_database_url: ${TEST_RECORD_URL}\n  record_database_schema: deployment_one\n"
     )
-    settings = service_settings_from_config(load_config(path))
+    settings = service_config_from_mapping(load_config(path))
     assert settings.record_database_url == "postgresql://user:secret@example.invalid/db"
     assert settings.record_database_schema == "deployment_one"
     assert "secret" not in repr(settings)
     assert _recipe_owned_settings(settings) == {}
-    assert ServiceSettings(recipe="recipe").record_backend == "sqlite"
+    assert ServiceConfig(recipe="recipe").record_backend == "sqlite"
     with pytest.raises(ValueError) as error:
         postgres_url("secret is not a url")
     assert "secret" not in str(error.value)
@@ -319,7 +319,7 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
     if backend == "postgres":
         url, schema = request.getfixturevalue("postgres_config")
         values = {"record_backend": backend, "record_database_url": url, "record_database_schema": schema}
-    settings = ServiceSettings(
+    settings = ServiceConfig(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),

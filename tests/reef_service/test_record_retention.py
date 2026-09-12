@@ -14,7 +14,7 @@ from sqlalchemy.exc import OperationalError
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service import assembly
-from reef.service.deploy.service_config import ServiceSettings, service_settings_from_config
+from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 
@@ -135,17 +135,17 @@ def test_retention_rejects_invalid_budgets(size):
 
 
 def test_service_config_defaults_to_seven_days_and_twenty_gib_and_accepts_overrides():
-    defaults = service_settings_from_config({"reef": {"recipe": "recipe"}})
+    defaults = service_config_from_mapping({"reef": {"recipe": "recipe"}})
     assert defaults.agent_record_retention_days == 7
     assert defaults.agent_record_retention_max_bytes == 20 * 1024**3
-    settings = service_settings_from_config(
+    settings = service_config_from_mapping(
         {"reef": {"recipe": "recipe", "agent_record_retention_days": 3, "agent_record_retention_max_bytes": 1024}}
     )
     assert settings.agent_record_retention_days == 3
     assert settings.agent_record_retention_max_bytes == 1024
     assert "agent_record_retention_days" not in assembly._recipe_owned_settings(settings)
     with pytest.raises(ValueError, match="retention_max_bytes"):
-        service_settings_from_config({"reef": {"recipe": "recipe", "agent_record_retention_max_bytes": 0}})
+        service_config_from_mapping({"reef": {"recipe": "recipe", "agent_record_retention_max_bytes": 0}})
 
 
 def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, monkeypatch, caplog):
@@ -171,7 +171,7 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
             records.compact("math", frozenset({"expired"}))
 
         async def run():
-            app = assembly.build_app(ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path)))
+            app = assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path)))
             runner = web.AppRunner(app)
             await runner.setup()
             try:

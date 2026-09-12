@@ -340,7 +340,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     """The driver's load_recipe contract, hermetic: interpolate skillclaw.yaml
     through reef's config loader and build the explicit implementation - selection
     always, batch_size 60, the seed composition plus the seed_skills pool."""
-    from reef.service.deploy.config import load_config
+    from reef.service.deploy.config_utils import load_config
     from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
     from reef.surface.skills import SkillInferenceHooks
@@ -666,7 +666,7 @@ def test_persist_and_committed_pool_round_trip(driver, tmp_path) -> None:
 
 
 def test_the_recipe_yaml_is_valid_yaml_after_interpolation(monkeypatch) -> None:
-    from reef.service.deploy.config import load_config
+    from reef.service.deploy.config_utils import load_config
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:9")
     monkeypatch.setenv("REEF_MODEL", "demo-model")

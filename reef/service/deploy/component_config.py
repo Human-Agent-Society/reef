@@ -19,7 +19,7 @@ from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings
 from reef.runtime.registry import runtime_factory_for
-from reef.service.deploy.config import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.service.deploy.service_config import service_config_arguments, service_owned_keys
 
 _MISSING = object()

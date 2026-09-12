@@ -32,7 +32,7 @@ from reef.runtime.adapters import ray_runtime
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.uniproc import UniProcExecutor
 from reef.service import assembly
-from reef.service.deploy.service_config import ServiceSettings
+from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 
@@ -390,7 +390,7 @@ def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
 
     async def run():
-        app = assembly.build_app(ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path)))
+        app = assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path)))
         runner = web.AppRunner(app)
         await runner.setup()
         await runner.cleanup()
@@ -409,6 +409,6 @@ def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
     with pytest.raises(ValueError, match="training must be an object"):
         assembly.build_dispatcher(
-            ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), training_settings="invalid")
+            ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), training_settings="invalid")
         )
     assert worker.shutdown_events == ["shutdown"]

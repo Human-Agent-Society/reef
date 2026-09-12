@@ -19,7 +19,7 @@ from reef_service.config_helpers import load_harness_deployment as load_config
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe.cordis import CordisRecipe
-from reef.service.deploy.service_config import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -100,7 +100,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
 
     _clear_method_package()
     monkeypatch.syspath_prepend(str(method_root))
-    service = service_settings_from_config(config)
+    service = service_config_from_mapping(config)
     built = build_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(TUTORIAL / "configs")},

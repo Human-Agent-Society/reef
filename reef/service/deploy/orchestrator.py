@@ -49,7 +49,7 @@ from reef.service.deploy.component_config import (
     translate_layout,
     translate_references,
 )
-from reef.service.deploy.config import (
+from reef.service.deploy.config_utils import (
     PROJECT_ROOT,
     DeployConfigError,
     config_value,
@@ -63,9 +63,9 @@ from reef.service.deploy.inference import assemble_provider_services, command_li
 from reef.service.deploy.service_config import (
     normalize_service_config,
     service_config_arguments,
+    service_config_from_mapping,
     service_override,
     service_owned_keys,
-    service_settings_from_config,
 )
 from reef.service.deploy.training import assemble_training_services
 from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
@@ -661,7 +661,7 @@ def run_service(config_path: str | Path | None = None) -> int:
     selected_config = config_path or os.environ.get("REEF_CONFIG")
     if selected_config is None:
         raise SystemExit("[reef] ERROR: internal service requires REEF_CONFIG")
-    settings = service_settings_from_config(load_config(selected_config))
+    settings = service_config_from_mapping(load_config(selected_config))
     from reef.service.assembly import build_app
 
     app = build_app(settings)

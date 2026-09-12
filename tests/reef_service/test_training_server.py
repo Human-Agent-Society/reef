@@ -13,7 +13,7 @@ from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
 from reef.service.assembly import _repository_location
-from reef.service.deploy.service_config import ServiceSettings
+from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -55,7 +55,7 @@ def _example_owned(relative_path: str):
     )
 
 
-def _settings(**overrides) -> ServiceSettings:
+def _settings(**overrides) -> ServiceConfig:
     recipe_settings = {
         "batch_size": 2,
         "checkpoint_every_n_versions": 3,
@@ -84,12 +84,12 @@ def _settings(**overrides) -> ServiceSettings:
         "recipe_settings": recipe_settings,
     }
     values.update(overrides)
-    return ServiceSettings(**values)
+    return ServiceConfig(**values)
 
 
 @pytest.mark.unit
 def test_service_config_exposes_shared_batch_controls() -> None:
-    args = deploy.service_settings_from_config({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
 
     assert args.recipe == OPENCLAWRL_RECIPE
     assert not hasattr(args, "default_recipe")
@@ -110,7 +110,7 @@ def test_service_config_exposes_shared_batch_controls() -> None:
 
 @pytest.mark.unit
 def test_service_config_preserves_inference_backend_config() -> None:
-    args = deploy.service_settings_from_config(
+    args = deploy.service_config_from_mapping(
         {
             "reef": {
                 "recipe": OPENCLAWRL_RECIPE,
@@ -130,7 +130,7 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
         "config": {"threshold": 0.8},
     }
 
-    args = deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
 
     assert args.evaluation_settings == evaluation
 
@@ -138,12 +138,12 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
 @pytest.mark.unit
 def test_service_config_rejects_non_object_evaluation_section() -> None:
     with pytest.raises(ValueError, match="evaluation must be an object"):
-        deploy.service_settings_from_config({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": "disabled"})
 
 
 @pytest.mark.unit
 def test_service_config_selects_inference_recipe_and_interpolates_settings() -> None:
-    args = deploy.service_settings_from_config(
+    args = deploy.service_config_from_mapping(
         {
             "reef": {
                 "recipe": "recipe",
@@ -163,7 +163,7 @@ def test_service_config_selects_inference_recipe_and_interpolates_settings() -> 
 @pytest.mark.unit
 def test_service_config_requires_recipe() -> None:
     with pytest.raises(ValueError, match=r"reef\.recipe"):
-        deploy.service_settings_from_config({"reef": {}})
+        deploy.service_config_from_mapping({"reef": {}})
 
 
 @pytest.mark.unit
@@ -188,7 +188,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
 
     config = load_deployment(config_path)
     service = next(item for item in config["services"] if item["name"] == "reef")
-    args = deploy.service_settings_from_config(config)
+    args = deploy.service_config_from_mapping(config)
 
     assert service["command"] == [sys.executable, "-m", "reef.service"]
     assert "REEF_TOKEN" not in service.get("env", {})
@@ -560,23 +560,23 @@ def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
             "tokens": ["bob", "", "alice", "  carol  "],
         }
     }
-    assert deploy.service_settings_from_config(config).tokens == ("alice", "bob", "carol")
+    assert deploy.service_config_from_mapping(config).tokens == ("alice", "bob", "carol")
 
 
 def test_service_tokens_rejects_non_list() -> None:
     config = {"reef": {"recipe": "openclawrl", "tokens": "alice,bob"}}
     with pytest.raises(ValueError, match=r"reef\.tokens must be a list"):
-        deploy.service_settings_from_config(config)
+        deploy.service_config_from_mapping(config)
 
 
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
-    """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
+    """``reef.token`` feeds ``ServiceConfig.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
     training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings
 
     config = {"reef": {"recipe": "openclawrl", "token": "secret", "tokens": ["next"], "batch_size": 2}}
-    owned = _recipe_owned_settings(deploy.service_settings_from_config(config))
+    owned = _recipe_owned_settings(deploy.service_config_from_mapping(config))
     assert set(owned) == {"batch_size"}
 
 

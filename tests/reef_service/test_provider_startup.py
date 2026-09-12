@@ -21,10 +21,10 @@ import pytest
 import reef
 from reef.cli import main
 from reef.service.deploy import orchestrator
-from reef.service.deploy.config import DeployConfigError, load_config
+from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.inference import assemble_provider_services
-from reef.service.deploy.service_config import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 
 
 @pytest.fixture
@@ -84,7 +84,7 @@ def test_provider_settings_use_shared_types_and_reach_the_child(tmp_path, monkey
         )
     assert result.value.code == 0
     config = captured_stack["config"]
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     assert settings.upstream_model == "00123"
     assert settings.upstream_api_key == "test-provider-secret"
     assert settings.tokens == ("test-reef-secret",)
@@ -107,7 +107,7 @@ def test_without_c_ignores_files_and_config_environment(tmp_path, monkeypatch, c
     with pytest.raises(SystemExit) as result:
         main(["serve", "--model", "ollama/my-model"])
     assert result.value.code == 0
-    settings = service_settings_from_config(captured_stack["config"])
+    settings = service_config_from_mapping(captured_stack["config"])
     assert settings.upstream_url == "http://127.0.0.1:11434"
     assert settings.upstream_model == "my-model"
 
@@ -131,7 +131,7 @@ def test_provider_startup_can_take_all_inputs_from_declared_environment(monkeypa
     with pytest.raises(SystemExit) as result:
         main(["serve"])
     assert result.value.code == 0
-    assert service_settings_from_config(captured_stack["config"]).upstream_model == "env-model"
+    assert service_config_from_mapping(captured_stack["config"]).upstream_model == "env-model"
 
 
 @pytest.mark.usefixtures("provider_environment")
@@ -139,7 +139,7 @@ def test_model_shorthand_accepts_explicit_provider_key(captured_stack):
     with pytest.raises(SystemExit) as result:
         main(["serve", "--model", "openai/demo", "--reef.upstream-api-key", "explicit-key"])
     assert result.value.code == 0
-    settings = service_settings_from_config(captured_stack["config"])
+    settings = service_config_from_mapping(captured_stack["config"])
     assert settings.upstream_url == "https://api.openai.com"
     assert settings.upstream_api_key == "explicit-key"
 

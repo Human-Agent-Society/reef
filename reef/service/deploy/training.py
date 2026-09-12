@@ -7,9 +7,9 @@ from dataclasses import asdict
 from importlib.metadata import entry_points
 from typing import Any
 
-from reef.service.deploy.config import DeployConfigError, config_value
+from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service
-from reef.service.deploy.service_config import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.deployment import TrainingDeployment
 
 
@@ -41,7 +41,7 @@ def training_deployment_for(name: str | None) -> TrainingDeployment:
 
 def assemble_training_services(config: dict[str, Any]) -> None:
     """Validate common inputs; integrations own process topology and connections."""
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     backend = training_deployment_for(settings.training_backend)
     model = config_value(config, "reef", "model_path")
     if not isinstance(model, str) or not model:
@@ -65,7 +65,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
     config["reef"]["training_backend"] = settings.training_backend or "slime"
     dependencies = backend.prepare(config, asdict(settings))
-    http = http_service(config, service_settings_from_config(config))
+    http = http_service(config, service_config_from_mapping(config))
     if dependencies:
         http["depends_on"] = [process["name"] for process in dependencies]
     config["services"] = [*dependencies, http]
