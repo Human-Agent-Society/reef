@@ -258,7 +258,13 @@ class _SlimeInferenceEngines:
 
     def pause(self) -> Any:
         mode = getattr(self._worker.args, "weight_update_pause_mode", "retract")
-        return ray.get([engine.pause_generation.remote(mode) for engine in self._worker.updatable_rollout_engines])
+        return ray.get(
+            [
+                engine.pause_generation.remote(mode)
+                for engine in self._worker.updatable_rollout_engines
+                if engine is not None
+            ]
+        )
 
     def resume(self) -> Any:
         return ray.get([engine.continue_generation.remote() for engine in self._worker.updatable_rollout_engines])

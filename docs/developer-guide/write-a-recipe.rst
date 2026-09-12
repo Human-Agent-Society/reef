@@ -251,6 +251,12 @@ the checkpoint and must never suppress execution failures. Return a
 all required optimizer/model state and recovery metadata synchronously. Reef
 owns job-marker writes. Share the publication coordinator's ``state`` with
 execution and serialize both with the same operation lock.
+The publisher's ``republish(runtime_load_id, marker)`` resends unchanged trainer
+weights with a complete transfer, preserving the requested identity without
+resuming generation. Use ``TrainingPublication.republish`` to coordinate this
+operation after an engine replacement; it validates marker eligibility and
+resumes only through the durable commit gate. Retain the last verified runtime
+load ID if a transfer fails or returns a different one.
 Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
 with concrete engine, monitoring and update-connection adapters. Serialize calls
 in the owning actor, and route legacy monitoring controls through the same pause

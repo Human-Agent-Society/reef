@@ -653,14 +653,7 @@ class TrainBridgeActorImpl:
         changed; the next optimizer-backed publication advances it normally.
         """
         with self._operation_lock:
-            expected = self._runtime_load_id
-            self._group.restore_runtime_load_id_for_republication(expected)
-            marker = read_marker(self._marker_path()) if self._save_hf_template is not None else None
-            published = self._update_serving(scenario=self._marker_scenario(marker))
-            if published != expected:
-                raise RuntimeError(f"serving republication changed runtime load ID {expected!r} to {published!r}")
-            self._phase = "serving"
-            return published
+            return self._publication.republish(self._runtime_load_id)
 
     def prepare_training_step(
         self,
@@ -785,8 +778,8 @@ class TrainBridgeActorImpl:
     def _manager_call(self, method: str, *args: Any) -> Any:
         return self._manager_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
 
-    def _pause_generation(self) -> None:
-        if self._generation_paused:
+    def _pause_generation(self, *, reconcile: bool = False) -> None:
+        if self._generation_paused and not reconcile:
             return
         self._manager_call("pause_generation_for_update")
         self._generation_paused = True
@@ -1014,7 +1007,7 @@ class _SlimeWeightPublisher:
     def __init__(self, bridge: TrainBridgeActorImpl) -> None:
         self._bridge = bridge
 
-    def recover(self, marker: Mapping[str, Any]) -> None:
+    def recover(self, marker: Mapping[str, Any] | None) -> None:
         bridge = self._bridge
         bridge._manager_call("recover_updatable_engines")
         if bridge._history is not None:
@@ -1024,7 +1017,18 @@ class _SlimeWeightPublisher:
             bridge._recover_scenario_adapters(marker)
 
     def pause(self) -> None:
-        self._bridge._pause_generation()
+        # Reassert the owner barrier even if the bridge cached a prior pause;
+        # replacement controllers/engines may not have observed that RPC.
+        self._bridge._pause_generation(reconcile=True)
+
+    def republish(self, runtime_load_id: str, marker: Mapping[str, Any] | None) -> str:
+        bridge = self._bridge
+        bridge._group.restore_runtime_load_id_for_republication(runtime_load_id)
+        try:
+            return bridge._update_serving(force_full=True, scenario=bridge._marker_scenario(marker))
+        finally:
+            # A failed/mismatched transfer must not replace the retry identity.
+            bridge._runtime_load_id = runtime_load_id
 
     def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str:
         bridge = self._bridge

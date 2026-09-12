@@ -2,5 +2,6 @@
 
 Backends retain admission, data preparation, optimizer execution, checkpoint I/O
 and tensor transport. Reef owns job identity/replay, RUNNING/CHECKPOINT ordering,
-publication ordering and recovery without importing a concrete model framework.
+publication ordering, unchanged-weight republication and recovery without
+importing a concrete model framework.
 """

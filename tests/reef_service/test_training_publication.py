@@ -19,7 +19,8 @@ class MemoryPublisher:
         self.version = "engine:1"
 
     def _event(self, name):
-        self.events.append((name, markers.read_marker(self.path)["status"]))
+        marker = markers.read_marker(self.path)
+        self.events.append((name, None if marker is None else marker["status"]))
         if self.fail == name:
             raise RuntimeError(f"failed {name}")
 
@@ -33,6 +34,11 @@ class MemoryPublisher:
     def publish(self, marker, *, force_full):
         assert self.paused
         self._event("full-transfer" if force_full else "transfer")
+        return self.version
+
+    def republish(self, runtime_load_id, marker):
+        assert self.paused
+        self._event("republish")
         return self.version
 
     def resume(self):
@@ -274,3 +280,115 @@ def test_malformed_publication_identity_never_reaches_commit(publication, versio
     with pytest.raises(RuntimeError, match="empty runtime load ID"):
         coordinator.finish_recovery(marker, version)
     assert markers.read_marker(path)["status"] == "UPDATING_WEIGHTS"
+
+
+@pytest.mark.parametrize("status", ["READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"])
+def test_republication_preserves_commit_gate_and_identity(publication, status):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    marker.update(status=status, runtime_load_id=publisher.version, commit_acknowledged=status != "READY_TO_COMMIT")
+    markers.write_marker(path, marker)
+    assert coordinator.republish("engine:1") == "engine:1"
+    assert publisher.events[:3] == [("pause", status), ("recover", status), ("republish", status)]
+    result = markers.read_marker(path)
+    assert result["runtime_load_id"] == "engine:1"
+    if status == "READY_TO_COMMIT":
+        assert publisher.paused
+        assert coordinator.phase == "awaiting_commit"
+        assert result == marker
+        coordinator.acknowledge("job-1")
+        assert publisher.events[-1] == ("resume", "HEAD_COMMITTED")
+    else:
+        assert not publisher.paused
+        assert coordinator.phase == "serving"
+        assert result["status"] == "COMPLETE"
+        assert publisher.events[-1][0] == "resume"
+
+
+@pytest.mark.parametrize("status", ["RUNNING", "CHECKPOINT", "UPDATING_WEIGHTS", "REJECTING", "REJECTED"])
+def test_republication_refuses_trainer_state_that_may_contain_a_candidate(publication, status):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    marker["status"] = status
+    markers.write_marker(path, marker)
+    with pytest.raises(RuntimeError, match="use training job recovery"):
+        coordinator.republish("engine:1")
+    assert publisher.events == []
+    assert markers.read_marker(path) == marker
+
+
+@pytest.mark.parametrize("configured_path", [False, True])
+def test_republication_without_a_job_resumes_verified_weights(publication, configured_path):
+    _, publisher, path = publication
+    path.unlink()
+    coordinator = TrainingPublication(path if configured_path else None, publisher)
+    assert coordinator.republish("engine:1") == "engine:1"
+    assert [name for name, _ in publisher.events] == ["pause", "recover", "republish", "resume"]
+    assert not path.exists()
+    assert coordinator.phase == "serving"
+
+
+@pytest.mark.parametrize("failure", ["pause", "recover", "republish", "resume"])
+def test_failed_republication_stays_fenced_and_retries_same_committed_version(publication, failure):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    marker.update(status="COMPLETE", runtime_load_id="engine:1")
+    markers.write_marker(path, marker)
+    publisher.fail = failure
+    with pytest.raises(RuntimeError, match=f"failed {failure}"):
+        coordinator.republish("engine:1")
+    assert publisher.paused
+    assert coordinator.phase == "weight_sync_failed"
+    assert markers.read_marker(path) == marker
+    publisher.fail = None
+    publisher.events.clear()
+    assert coordinator.republish("engine:1") == "engine:1"
+    assert not publisher.paused
+
+
+def test_mismatched_republication_aborts_before_resume(publication):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    marker.update(status="COMPLETE", runtime_load_id="engine:1")
+    markers.write_marker(path, marker)
+    with pytest.raises(RuntimeError, match="does not match"):
+        coordinator.republish("wrong-seed")
+    assert publisher.events == []
+    publisher.version = "wrong-result"
+    with pytest.raises(RuntimeError, match="changed runtime load ID"):
+        coordinator.republish("engine:1")
+    assert publisher.paused
+    assert publisher.events[-1][0] == "abort"
+    assert not any(name == "resume" for name, _ in publisher.events)
+    assert markers.read_marker(path) == marker
+
+
+def test_failed_republication_completion_write_remains_retryable(publication, monkeypatch):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    marker.update(status="HEAD_COMMITTED", runtime_load_id="engine:1", commit_acknowledged=True)
+    markers.write_marker(path, marker)
+    write = markers.write_marker
+
+    def fail_complete(path, value):
+        if value["status"] == "COMPLETE":
+            raise OSError("disk full")
+        write(path, value)
+
+    with monkeypatch.context() as context:
+        context.setattr(markers, "write_marker", fail_complete)
+        with pytest.raises(OSError, match="disk full"):
+            coordinator.republish("engine:1")
+    assert publisher.paused
+    assert markers.read_marker(path) == marker
+    coordinator.republish("engine:1")
+    assert markers.read_marker(path)["status"] == "COMPLETE"
+    assert not publisher.paused
+
+
+def test_stopped_coordinator_cannot_republish(publication):
+    coordinator, publisher, _ = publication
+    coordinator.phase = "stopped"
+    with pytest.raises(RuntimeError, match="stopped"):
+        coordinator.republish("engine:1")
+    assert publisher.events == []

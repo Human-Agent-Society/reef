@@ -445,3 +445,22 @@ def test_the_base_stays_released_without_lora_or_colocation(tmp_path, _local_ray
     """Full-weight training rewrites the served weights; releasing them is the point."""
     actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), keep_lora_base_resident=True)
     assert actor._release_tags is None
+
+
+@pytest.mark.unit
+def test_republication_restores_peer_adapters_without_advancing_scenario_versions(tmp_path, _local_ray_get):
+    actor, group, manager, _ = _actor(tmp_path, _EngineVersion(0))
+    _run(actor, _job("a", 0, "inc:0"))
+    _run(actor, _job("b", 0, "inc:1"))
+    before = actor.health()
+    group.published.clear()
+    manager.paused.clear()
+    assert actor.republish_serving() == "inc:2"
+    assert manager.recovered == 1
+    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
+    after = actor.health()
+    assert after["lora_adapters"] == before["lora_adapters"]
+    assert after["completed_train_steps"] == before["completed_train_steps"]
+    assert after["training_job"] == before["training_job"]
+    assert manager.paused[0] == "pause" and manager.paused[-1] == "continue"
+    assert after["phase"] == "serving"

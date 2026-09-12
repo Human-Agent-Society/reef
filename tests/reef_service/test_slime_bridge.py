@@ -687,6 +687,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
         "pause_generation",
         "offload",
         "save_model",
+        "pause_generation",
         "onload_weights",
         "onload_kv",
     ]
@@ -695,6 +696,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
         "onload_kv",
         "pause_generation",
         "offload",
+        "pause_generation",
         "onload_weights",
         "onload_kv",
     ]
@@ -1343,6 +1345,9 @@ def test_serving_republication_preserves_current_runtime_load_id() -> None:
     group.restore_runtime_load_id_for_republication = restore_runtime_load_id
 
     assert actor.republish_serving() == "v1"
+    assert manager.lifecycle_calls == ["pause_generation", "recover_engines", "continue_generation"]
+    assert group.update_generation_management == [False]
+    assert group.update_force_full == [True]
     assert group.republication_calls == ["v1"]
     assert group.update_calls == 1
     assert actor.serving_runtime_load_id() == "v1"
@@ -2047,3 +2052,55 @@ def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_
     assert events == ["dispose-batch", "kill-batch"]
     assert groups["actor"][0] is allocation
     assert serving._closed is False
+
+
+@pytest.mark.unit
+def test_republication_reconciles_cached_pause_and_preserves_identity_after_failure():
+    manager = _FakeRolloutManager([])
+    group = _FakeGroup()
+    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    actor._generation_paused = True
+    terminated = []
+    manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
+    group._actor_handlers[0].version = manager.version = "unexpected"
+    with pytest.raises(RuntimeError, match="changed runtime load ID"):
+        actor.republish_serving()
+    assert manager.lifecycle_calls == ["pause_generation", "recover_engines"]
+    assert terminated
+    assert actor.health()["phase"] == "weight_sync_failed"
+    assert actor.serving_runtime_load_id() == "v1"
+    assert actor._generation_paused
+    group._actor_handlers[0].version = manager.version = "v1"
+    assert actor.republish_serving() == "v1"
+    assert group.republication_calls == ["v1", "v1"]
+    assert group.update_generation_management == [False, False]
+    assert group.update_force_full == [True, True]
+    assert manager.lifecycle_calls[-3:] == ["pause_generation", "recover_engines", "continue_generation"]
+    assert not actor._generation_paused
+    assert actor.health()["phase"] == "serving"
+
+
+@pytest.mark.unit
+def test_standalone_republication_cannot_publish_checkpointed_candidate(tmp_path):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "CHECKPOINT",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+        },
+    )
+    calls = group.update_calls
+    manager.lifecycle_calls.clear()
+    with pytest.raises(RuntimeError, match="use training job recovery"):
+        actor.republish_serving()
+    assert manager.lifecycle_calls == []
+    assert group.update_calls == calls
+    assert group.republication_calls == []

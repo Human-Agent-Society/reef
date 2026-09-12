@@ -733,3 +733,12 @@ def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
         assert not worker._health_monitors[0].is_checking_enabled()
     finally:
         worker.shutdown()
+
+
+def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(monkeypatch):
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    paused = []
+    engine = types.SimpleNamespace(pause_generation=types.SimpleNamespace(remote=lambda mode: paused.append(mode)))
+    worker = types.SimpleNamespace(args=types.SimpleNamespace(), updatable_rollout_engines=[None, engine])
+    module._SlimeInferenceEngines(worker).pause()
+    assert paused == ["retract"]
