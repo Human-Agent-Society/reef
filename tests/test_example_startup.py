@@ -64,9 +64,19 @@ if mode == 'hanging-probe':
     timeout = float(sys.argv[sys.argv.index('--max-time') + 1]) if '--max-time' in sys.argv else 120
     time.sleep(timeout)
     raise SystemExit(28)
+if mode == 'stale-ready':
+    # Answer only after Reef has exited, independent of process scheduling.
+    while not Path('work/service.pid').exists():
+        time.sleep(0.01)
+    pid = int(Path('work/service.pid').read_text())
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            raise SystemExit(0)
+        time.sleep(0.01)
 time.sleep(0.05)
-ready = mode == 'stale-ready' or mode in ('ready', 'workload-error') and Path('work/service-started').exists()
-raise SystemExit(0 if ready else 7)
+raise SystemExit(0 if mode in ('ready', 'workload-error') and Path('work/service-started').exists() else 7)
 """,
     )
     env = {
