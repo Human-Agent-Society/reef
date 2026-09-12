@@ -9,6 +9,7 @@ import pytest
 
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
+from reef.runtime.sglang.config import SGLangConfig
 
 torch = pytest.importorskip("torch")
 
@@ -133,7 +134,7 @@ def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = Fal
     raw_rollout = _load_rollout_module(monkeypatch)
     path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "batches.py"
     if serving:
-        path = path.parent / "executors" / "rollout_worker.py"
+        path = Path(__file__).parents[2] / "reef" / "runtime" / "sglang" / "worker.py"
     name = "reef.train.slime_backend.reef_adapters._rollout_manager_recovery_test"
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -164,12 +165,12 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
 
 
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
-    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+    from reef.runtime.sglang.control import SGLangControl
 
-    args = types.SimpleNamespace(reef_rollout_executor_backend=_RecordingRolloutExecutor)
-    manager = SlimeInferenceWorker(args, "placement")
+    args = SGLangConfig("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
+    manager = SGLangControl(args, "placement")
     executor = manager._serving
-    assert executor.config.options == {"args": args, "pg": "placement"}
+    assert executor.config.options == {"config": args, "pg": "placement"}
     methods = [
         "inference_url",
         "get_runtime_load_ids",
@@ -197,37 +198,45 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
 
 
 def test_rollout_executor_rejects_uni_before_gpu_startup(monkeypatch):
-    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+    from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
 
     with pytest.raises(ValueError, match="Slime-compatible"):
-        SlimeInferenceWorker(types.SimpleNamespace(reef_rollout_executor_backend="uni"), None)
+        slime_executor_class("uni", role="rollout")
 
 
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     server = types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])
-    monkeypatch.setattr(module, "install_sglang_extensions", lambda: None)
-    monkeypatch.setattr(module, "start_rollout_servers", lambda args, pg: ({"actor": server}, ["init"]))
+
+    class Cluster:
+        def __init__(self, config, pg):
+            self.servers = {"actor": server}
+            self.routers = []
+
+        def start(self):
+            raise RuntimeError("failed init")
+
+    monkeypatch.setattr(module, "SGLangCluster", Cluster)
     monkeypatch.setattr(
         module.ray, "get", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("failed init"))
     )
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda worker, **kwargs: killed.append(worker))
-    args = types.SimpleNamespace(debug_train_only=False, rollout_external=False)
+    args = SGLangConfig("model", 1, 1, 1)
     with pytest.raises(RuntimeError, match="failed init"):
-        module.SlimeRayRolloutWorker(args, "borrowed-placement")
+        module.SGLangWorker(args, "borrowed-placement")
     assert killed == [engine]
 
 
 def test_rollout_shutdown_keeps_external_engines_and_releases_owned_lock(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SlimeRayRolloutWorker)
-    worker.args = types.SimpleNamespace(rollout_external=True)
+    worker = object.__new__(module.SGLangWorker)
+    worker.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
     worker._closed = False
     worker._health_monitors = []
     worker._routers = []
-    worker.servers = {"borrowed": object()}
+    worker.servers = {"borrowed": types.SimpleNamespace(server_groups=[])}
     lock = object()
     worker.rollout_engine_lock = lock
     killed = []
@@ -235,7 +244,7 @@ def test_rollout_shutdown_keeps_external_engines_and_releases_owned_lock(monkeyp
     worker.shutdown()
     worker.shutdown()
     assert killed == [lock]
-    assert "borrowed" in worker.servers
+    assert worker.servers == {}
 
 
 class _ServerGroup:
@@ -275,7 +284,7 @@ class _RemoteMethod:
 @pytest.mark.unit
 def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.train.slime_backend.reef_adapters.executors.rollout_worker import recover_server
+    from reef.runtime.sglang.worker import recover_server
 
     group = _ServerGroup([object(), object()], num_new_engines=2)
     server = module.RolloutServer(server_groups=[group])
@@ -289,7 +298,7 @@ def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: py
 @pytest.mark.unit
 def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_rollout_module(monkeypatch)
-    from reef.train.slime_backend.reef_adapters.executors.rollout_worker import recover_server
+    from reef.runtime.sglang.worker import recover_server
 
     group = _ServerGroup([object(), None], num_new_engines=0)
     server = module.RolloutServer(server_groups=[group])
@@ -341,9 +350,9 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     group = _ServerGroup(list(engines), num_new_engines=0)
     server = raw_rollout.RolloutServer(server_groups=[group])
     pauses: list[str] = []
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=False)
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     manager.servers = {"actor": server}
     manager._health_monitors = [types.SimpleNamespace(pause=lambda: pauses.append("pause"))]
     killed = []
@@ -365,9 +374,9 @@ def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
     server = types.SimpleNamespace(
         update_weights=True, server_groups=[types.SimpleNamespace(all_engines=[engine])], engines=[engine]
     )
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=True)
+    manager.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
     manager.servers = {"actor": server}
     manager._health_monitors = []
     killed = []
@@ -400,10 +409,10 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
         pause=lambda: lifecycle.append("monitor_pause"),
         resume=lambda: lifecycle.append("monitor_resume"),
     )
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=False)
-    manager.args = types.SimpleNamespace(weight_update_pause_mode="in_place", rollout_external=False)
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
+    manager.config = SGLangConfig("model", 1, 1, 1)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": False, "poisoned": False}))
     manager._health_monitors = [monitor]
@@ -424,10 +433,10 @@ def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
     old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=False)
-    manager.args = types.SimpleNamespace(rollout_external=False)
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock
     manager._health_monitors = [
@@ -457,10 +466,10 @@ def test_poisoned_external_update_requires_deployment_restart(
 ) -> None:
     raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=False)
-    manager.args = types.SimpleNamespace(rollout_external=True)
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
+    manager.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
     manager._health_monitors = [types.SimpleNamespace(pause=lambda: None, resume=lambda: None)]
@@ -478,10 +487,10 @@ def test_recovery_replaces_an_orphaned_locked_transport(
     old_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": False}))
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
-    manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
-    manager.args = types.SimpleNamespace(rollout_external=False)
-    manager.args = types.SimpleNamespace(rollout_external=False)
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
+    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock
     manager._health_monitors = []
@@ -612,7 +621,7 @@ def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
 
 def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SlimeRayRolloutWorker)
+    worker = object.__new__(module.SGLangWorker)
     worker._control = worker._create_control()
     worker._control.paused = True
     resumed = []
@@ -625,8 +634,8 @@ def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatc
 
 def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SlimeRayRolloutWorker)
-    worker.args = types.SimpleNamespace(rollout_external=False)
+    worker = object.__new__(module.SGLangWorker)
+    worker.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     worker._closed = False
     worker._routers = []
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
@@ -670,9 +679,12 @@ def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
     _, module = _load_manager_module(monkeypatch, serving=True)
     group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)
     server = types.SimpleNamespace(server_groups=[group])
-    monkeypatch.setattr(module, "install_sglang_extensions", lambda: None)
-    monkeypatch.setattr(module, "start_rollout_servers", lambda args, pg: ({"actor": server}, []))
-    monkeypatch.setattr(module.SlimeRayRolloutWorker, "_new_rollout_engine_lock", lambda self: object())
+    monkeypatch.setattr(
+        module,
+        "SGLangCluster",
+        lambda config, pg: types.SimpleNamespace(servers={"actor": server}, routers=[], start=lambda: None),
+    )
+    monkeypatch.setattr(module.SGLangWorker, "_new_rollout_engine_lock", lambda self: object())
     configs = []
 
     class RecordingMonitor(EngineHealthMonitor):
@@ -681,15 +693,10 @@ def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
             super().__init__(checks, config)
 
     monkeypatch.setattr(module, "EngineHealthMonitor", RecordingMonitor)
-    args = types.SimpleNamespace(
-        debug_train_only=False,
-        rollout_external=False,
-        use_fault_tolerance=True,
-        rollout_health_check_interval=10,
-        rollout_health_check_timeout=2,
-        rollout_health_check_first_wait=60,
+    args = SGLangConfig(
+        "model", 1, 1, 1, health_enabled=True, health_interval=10, health_timeout=2, health_first_wait=60
     )
-    worker = module.SlimeRayRolloutWorker(args, None)
+    worker = module.SGLangWorker(args, None)
     try:
         assert configs == [HealthMonitorConfig(interval=10, timeout=2, first_wait=60)]
         assert len(worker._health_monitors) == 1
@@ -704,22 +711,27 @@ def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(mo
     _, module = _load_manager_module(monkeypatch, serving=True)
     paused = []
     engine = types.SimpleNamespace(pause_generation=types.SimpleNamespace(remote=lambda mode: paused.append(mode)))
-    worker = types.SimpleNamespace(args=types.SimpleNamespace(), updatable_rollout_engines=[None, engine])
-    module._SlimeInferenceEngines(worker).pause()
+    worker = types.SimpleNamespace(
+        config=SGLangConfig("model", 1, 1, 1, pause_mode="retract"), updatable_rollout_engines=[None, engine]
+    )
+    module._SGLangInferenceEngines(worker).pause()
     assert paused == ["retract"]
 
 
 @pytest.mark.parametrize("offload", [False, True])
 def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, offload):
-    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+    from reef.runtime.sglang.control import SGLangControl
 
-    args = types.SimpleNamespace(
-        reef_rollout_executor_backend=_RecordingRolloutExecutor,
-        check_weight_update_equal=True,
-        offload_rollout=offload,
-        keep_lora_base_resident=True,
+    args = SGLangConfig(
+        "model",
+        1,
+        1,
+        1,
+        executor=_RecordingRolloutExecutor,
+        check_weights=True,
+        offload=offload,
     )
-    worker = SlimeInferenceWorker(args, "placement")
+    worker = SGLangControl(args, "placement")
     worker.prepare_training_connection()
     expected = [
         ("prepare_training_connection", (), {}),
@@ -740,14 +752,18 @@ def test_inference_owner_prepares_memory_before_training_attaches(monkeypatch, o
 
 @pytest.mark.parametrize("failure", ["check_weights", "offload"])
 def test_inference_preparation_failure_is_not_acknowledged(monkeypatch, failure):
-    from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+    from reef.runtime.sglang.control import SGLangControl
 
-    args = types.SimpleNamespace(
-        reef_rollout_executor_backend=_RecordingRolloutExecutor,
-        check_weight_update_equal=True,
-        offload_rollout=True,
+    args = SGLangConfig(
+        "model",
+        1,
+        1,
+        1,
+        executor=_RecordingRolloutExecutor,
+        check_weights=True,
+        offload=True,
     )
-    worker = SlimeInferenceWorker(args, "placement")
+    worker = SGLangControl(args, "placement")
 
     def fail(*args):
         raise RuntimeError("cannot prepare inference")

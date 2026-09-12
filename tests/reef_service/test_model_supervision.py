@@ -8,8 +8,8 @@ import pytest
 
 from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
 from reef.runtime.adapters.ray_runtime import NamedRayTrainGroupHandle
+from reef.runtime.sglang.service import RayHealthProbe
 from reef.service.training_driver import ModelDeployment, supervise_deployment
-from reef.train.slime_backend.resources import RayHealthProbe
 
 from .test_model_deployment import plan_for
 from .test_ray_runtime import FakeTrainGroupHandle

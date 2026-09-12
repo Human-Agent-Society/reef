@@ -1,7 +1,6 @@
-"""Slime's inference control adapter, separate from training-batch processing.
+"""SGLang inference control actor, independent of the training backend.
 
-The RPC vocabulary stays inside this integration while inference ownership is
-extracted. Engine handles and locks travel through control RPCs; weight tensors
+Engine handles and locks travel through control RPCs; weight tensors
 continue to travel directly between training workers and inference engines.
 """
 
@@ -11,21 +10,21 @@ from collections.abc import Sequence
 from typing import Any
 
 from reef.runtime.executor import Executor, ExecutorConfig
-from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
+from reef.runtime.sglang.config import SGLangConfig
 
 
-class SlimeInferenceWorker:
+class SGLangControl:
     """Own the selected serving executor inside Reef's inference control actor."""
 
-    def __init__(self, args: Any, pg: Any) -> None:
+    def __init__(self, config: SGLangConfig, pg: Any) -> None:
         serving = Executor.create(
             ExecutorConfig(
-                backend=rollout_executor_class(args),
-                options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
+                backend=config.executor,
+                options={**config.executor_options, "config": config, "pg": pg},
             )
         )
         self._serving = serving
-        self._args = args
+        self._config = config
         self._prepared = False
         self._closed = False
 
@@ -65,10 +64,10 @@ class SlimeInferenceWorker:
     def prepare_training_connection(self) -> None:
         """Fence serving and release shared memory before training workers exist."""
         self._serving.rpc(0, "prepare_training_connection", timeout=14_400)
-        if not self._prepared and getattr(self._args, "check_weight_update_equal", False):
+        if not self._prepared and self._config.check_weights:
             self.check_weights("snapshot")
             self.check_weights("reset_tensors")
-        if getattr(self._args, "offload_rollout", False):
+        if self._config.offload:
             # Every trainer attachment needs the whole allocation, even when
             # later LoRA steps keep the frozen base resident. The engine skips
             # regions already released by an earlier attachment attempt.

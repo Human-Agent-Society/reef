@@ -8,7 +8,7 @@ from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings, select_executor
 
 DEFAULT_EXECUTOR_BACKEND = "reef.train.slime_backend.reef_adapters.executors.ray:SlimeRayExecutor"
-DEFAULT_ROLLOUT_EXECUTOR = "reef.train.slime_backend.reef_adapters.executors.rollout:SlimeRayRolloutExecutor"
+DEFAULT_ROLLOUT_EXECUTOR = "reef.runtime.sglang.executor:SGLangExecutor"
 
 
 def slime_executor_class(

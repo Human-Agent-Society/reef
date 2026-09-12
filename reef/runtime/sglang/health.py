@@ -1,4 +1,4 @@
-"""Bounded Ray health probes and identity-safe retirement of Slime engine groups."""
+"""Bounded Ray health probes and identity-safe retirement of SGLang engine groups."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import ray
 from reef.runtime.health_monitor import EngineHealthTarget
 
 
-class SlimeEngineHealthChecks:
+class SGLangEngineHealthChecks:
     """Snapshot node-0 probe targets with every node of the same logical engine."""
 
     def __init__(self, group: Any) -> None:
@@ -21,13 +21,13 @@ class SlimeEngineHealthChecks:
         group = self._group
         width = group.nodes_per_engine
         return [
-            _SlimeEngineHealthTarget(group, offset, tuple(group.all_engines[offset : offset + width]))
+            _SGLangEngineHealthTarget(group, offset, tuple(group.all_engines[offset : offset + width]))
             for offset in range(0, len(group.all_engines), width)
             if group.all_engines[offset] is not None
         ]
 
 
-class _SlimeEngineHealthTarget:
+class _SGLangEngineHealthTarget:
     def __init__(self, group: Any, offset: int, engines: tuple[Any, ...]) -> None:
         self._group = group
         self._offset = offset

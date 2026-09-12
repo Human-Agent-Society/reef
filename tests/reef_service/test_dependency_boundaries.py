@@ -427,6 +427,5 @@ def test_inference_recovery_and_update_lock_require_no_model_framework() -> None
 
 def test_ray_update_lock_wrapper_does_not_import_slime() -> None:
     _assert_isolated_import(
-        "import sys; sys.modules['slime'] = None; "
-        "from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock"
+        "import sys; sys.modules['slime'] = None; from reef.runtime.sglang.lock import ReefRolloutLock"
     )

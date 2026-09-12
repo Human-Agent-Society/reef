@@ -156,7 +156,7 @@ def _staleness_admission(
 ) -> _StalenessDecision:
     # The reef wheel ships without the slime distribution; staleness admission
     # only runs inside a live bridge, where slime is installed.
-    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+    from reef.runtime.runtime_load_id import RuntimeLoadId
 
     try:
         serving = RuntimeLoadId.parse(serving_runtime_load_id)
@@ -230,7 +230,7 @@ def _scenario_staleness_admission(
     lag is the number of *this* scenario's publications that postdate the
     version its tokens were produced under.
     """
-    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+    from reef.runtime.runtime_load_id import RuntimeLoadId
 
     if _uses_staleness_admission(payload):
         producing_groups = _admission_runtime_load_id_groups(payload)
@@ -1079,9 +1079,7 @@ def prepare_bridge(
     from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
 
     slime_executor_class(getattr(args, "reef_executor_backend", "auto"), role="training")
-    from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
-
-    rollout_executor_class(args)
+    slime_executor_class(getattr(args, "reef_rollout_executor_backend", "auto"), role="rollout")
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
     # tests/reef_service/test_dependency_boundaries.py).

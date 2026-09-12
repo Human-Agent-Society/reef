@@ -10,7 +10,8 @@ from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.train.slime_backend.reef_adapters.inference import SlimeInferenceWorker
+from reef.runtime.sglang.config import SGLangConfig
+from reef.runtime.sglang.control import SGLangControl
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -84,8 +85,8 @@ def test_remote_training_borrows_inference_and_transfers_directly_to_engine(monk
                 options={"num_cpus": 1, "num_gpus": 0},
                 workers=(
                     WorkerSpec(
-                        SlimeInferenceWorker,
-                        args=(SimpleNamespace(reef_rollout_executor_backend=CpuServingExecutor), None),
+                        SGLangControl,
+                        args=(SGLangConfig("model", 1, 1, 1, executor=CpuServingExecutor), None),
                     ),
                 ),
             )
@@ -124,8 +125,10 @@ def test_remote_training_borrows_inference_and_transfers_directly_to_engine(monk
 
 def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monkeypatch):
     from reef.runtime.deployment import ModelDeploymentPlan
+    from reef.runtime.sglang.config import SGLangConfig
+    from reef.runtime.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
     from reef.service.training_driver import ModelDeployment
-    from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, SlimeDeploymentResources, SlimeInferenceService
+    from reef.train.slime_backend.resources import SlimeDeploymentResources
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
@@ -141,7 +144,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
     class CpuReservations(SlimeDeploymentResources):
         def start(self):
             super().start()
-            self.placement_groups["rollout"] = None
+            self.placement_groups["rollout"] = (None, [], [])
 
     class CpuTraining:
         inference_protocol = INFERENCE_PROTOCOL
@@ -181,7 +184,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
                 allocate_models=False,
                 runtime_env={"env_vars": {"PYTHONPATH": os.pathsep.join((str(root), str(root / "tests")))}},
             ),
-            SlimeInferenceService(args),
+            SGLangInferenceService(SGLangConfig("model", 1, 1, 1, executor=args.reef_rollout_executor_backend)),
             training,
         )
     )
@@ -196,7 +199,7 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
 
 def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
     from reef.runtime.inference_control import InferenceControl
-    from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock
+    from reef.runtime.sglang.lock import ReefRolloutLock
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
@@ -280,7 +283,7 @@ def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
 def test_real_ray_probe_timeout_does_not_wait_for_engine_response(monkeypatch):
     from threading import Event
 
-    from reef.train.slime_backend.reef_adapters.executors.health import SlimeEngineHealthChecks
+    from reef.runtime.sglang.health import SGLangEngineHealthChecks
 
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
@@ -308,7 +311,7 @@ def test_real_ray_probe_timeout_does_not_wait_for_engine_response(monkeypatch):
         engine = BlockedEngine.remote()
         ray.get(engine.__ray_ready__.remote(), timeout=30)
         group = SimpleNamespace(all_engines=[engine], nodes_per_engine=1)
-        target = SlimeEngineHealthChecks(group).targets()[0]
+        target = SGLangEngineHealthChecks(group).targets()[0]
         # Even an engine ignoring its HTTP timeout cannot hold the monitor's
         # Ray wait forever. The queued probe remains live until retirement.
         with pytest.raises(ray.exceptions.GetTimeoutError):

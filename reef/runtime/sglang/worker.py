@@ -1,23 +1,18 @@
-"""Slime/Ray SGLang launch, placement, recovery and weight-control boundary."""
+"""Own SGLang engines, recovery and update control independently of training."""
 
 from __future__ import annotations
 
-import multiprocessing
 from contextlib import suppress
 from typing import Any
 
 import ray
-from slime.ray.rollout import start_rollout_servers
-from slime.ray.utils import add_default_ray_env_vars
-from slime.utils.http_utils import init_http_client
-from slime.utils.logging_utils import configure_logger
 
 from reef.runtime.health_monitor import EngineHealthMonitor, HealthMonitorConfig
 from reef.runtime.inference_control import InferenceControl
-from reef.train.slime_backend.reef_adapters.executors.health import SlimeEngineHealthChecks
-from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock
-from reef.train.slime_backend.reef_adapters.sglang.engine import install_sglang_extensions
-from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
+from reef.runtime.sglang.config import SGLangConfig
+from reef.runtime.sglang.health import SGLangEngineHealthChecks
+from reef.runtime.sglang.launch import SGLangCluster, engine_environment
+from reef.runtime.weight_update import WeightUpdateLock
 
 
 def recover_server(server) -> None:
@@ -27,47 +22,39 @@ def recover_server(server) -> None:
     server.recover()
 
 
-class SlimeRayRolloutWorker:
+class SGLangWorker:
     """Own serving engines, their update lock, monitors and locally launched routers."""
 
-    def __init__(self, args, pg):
-        configure_logger()
-        install_sglang_extensions()
-        self.args = args
+    def __init__(self, config: SGLangConfig, pg):
+        self.config = config
         self.pg = pg
-        self.servers = {}
+        self._cluster = SGLangCluster(config, pg)
+        self.servers = self._cluster.servers
         self._health_monitors = []
-        self._routers = []
+        self._routers = self._cluster.routers
         self._closed = False
-        children_before = set(multiprocessing.active_children())
         try:
-            if not args.debug_train_only:
-                init_http_client(args)
-                self.servers, init_handles = start_rollout_servers(args, pg)
-                if init_handles:
-                    ray.get(init_handles)
+            self._cluster.start()
             self.rollout_engine_lock = self._new_rollout_engine_lock()
             self._control = self._create_control()
-            if not args.debug_train_only and args.use_fault_tolerance:
+            if config.health_enabled and not config.external_engines:
                 for server in self.servers.values():
                     for group in server.server_groups:
                         monitor = EngineHealthMonitor(
-                            SlimeEngineHealthChecks(group),
+                            SGLangEngineHealthChecks(group),
                             HealthMonitorConfig(
-                                interval=args.rollout_health_check_interval,
-                                timeout=args.rollout_health_check_timeout,
-                                first_wait=args.rollout_health_check_first_wait,
+                                interval=config.health_interval,
+                                timeout=config.health_timeout,
+                                first_wait=config.health_first_wait,
                             ),
                         )
                         self._health_monitors.append(monitor)
                         monitor.start()
                         monitor.resume()
         except BaseException:
-            self._routers = [child for child in multiprocessing.active_children() if child not in children_before]
             with suppress(Exception):
                 self.shutdown()
             raise
-        self._routers = [child for child in multiprocessing.active_children() if child not in children_before]
 
     def dispose(self):
         failures = []
@@ -97,19 +84,11 @@ class SlimeRayRolloutWorker:
         return ray.get([engine.get_runtime_load_id.remote() for engine in self.updatable_rollout_engines])
 
     def inference_url(self) -> str | None:
-        """The SGLang router URL slime bound, once the servers are up.
-
-        slime binds the router to the machine's LAN IP (never localhost) and
-        records it on ``args`` inside this actor; this is the only place Reef
-        can learn it without re-deriving the address itself.
-        """
-        ip = getattr(self.args, "sglang_router_ip", None)
-        port = getattr(self.args, "sglang_router_port", None)
-        return None if not ip or not port else f"http://{ip}:{port}"
+        return self._cluster.endpoint
 
     def _create_control(self) -> InferenceControl:
         return InferenceControl(
-            _SlimeInferenceEngines(self), _SlimeWeightUpdateConnection(self), _SlimeInferenceMonitor(self)
+            _SGLangInferenceEngines(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
         )
 
     def pause_generation_for_update(self):
@@ -141,9 +120,7 @@ class SlimeRayRolloutWorker:
         self.health_monitoring_pause()
         if not tags:
             return [server.offload() for server in self.servers.values()]
-        # Slime's group offload takes no tags, so a tagged release goes to the
-        # engines directly. The needs_offload skip and the node-0 engine
-        # selection are slime's and are reproduced here on purpose.
+        # Only node-zero engines in shared allocations receive memory operations.
         handles = [
             engine.release_memory_occupation.remote(tags=list(tags))
             for server in self.servers.values()
@@ -176,14 +153,17 @@ class SlimeRayRolloutWorker:
             server.num_new_engines = 0
         self._control.acknowledge_reconnect()
 
-    @staticmethod
-    def _new_rollout_engine_lock():
-        env_vars = add_default_ray_env_vars(reef_rollout_env_vars())
-        return ReefRolloutLock.options(
-            num_cpus=1,
-            num_gpus=0,
-            runtime_env={"env_vars": env_vars},
-        ).remote()
+    def _new_rollout_engine_lock(self):
+        env_vars = engine_environment(self.config)
+        return (
+            ray.remote(WeightUpdateLock)
+            .options(
+                num_cpus=1,
+                num_gpus=0,
+                runtime_env={"env_vars": env_vars},
+            )
+            .remote()
+        )
 
     def health_monitoring_pause(self):
         for monitor in self._health_monitors:
@@ -212,7 +192,7 @@ class SlimeRayRolloutWorker:
         self.dispose()
         self._closed = True
         # External engines and shared placement groups are borrowed resources.
-        if not getattr(self.args, "rollout_external", False):
+        if self.servers:
             engines = [
                 engine
                 for server in self.servers.values()
@@ -236,8 +216,7 @@ class SlimeRayRolloutWorker:
             with suppress(Exception):
                 ray.kill(lock, no_restart=True)
             self.rollout_engine_lock = None
-        # Slime starts routers as multiprocessing children in this manager.
-        # Only children created during this worker's launch belong to it.
+        # Only routers launched by this inference owner belong to it.
         for router in self._routers:
             if router.is_alive():
                 router.terminate()
@@ -249,18 +228,18 @@ class SlimeRayRolloutWorker:
         self._routers = []
 
 
-class _SlimeInferenceEngines:
-    """Ray fan-out and Slime server replacement behind Reef's control contract."""
+class _SGLangInferenceEngines:
+    """Ray fan-out and SGLang engine replacement behind Reef's control contract."""
 
-    def __init__(self, worker: SlimeRayRolloutWorker) -> None:
+    def __init__(self, worker: SGLangWorker) -> None:
         self._worker = worker
 
     @property
     def owned(self) -> bool:
-        return not getattr(self._worker.args, "rollout_external", False)
+        return not self._worker.config.external_engines
 
     def pause(self) -> Any:
-        mode = getattr(self._worker.args, "weight_update_pause_mode", "retract")
+        mode = self._worker.config.pause_mode
         return ray.get(
             [
                 engine.pause_generation.remote(mode)
@@ -302,10 +281,10 @@ class _SlimeInferenceEngines:
         return len(indexed_engines)
 
 
-class _SlimeWeightUpdateConnection:
+class _SGLangWeightUpdateConnection:
     """Keep Ray lock handles and their replacement private to the integration."""
 
-    def __init__(self, worker: SlimeRayRolloutWorker) -> None:
+    def __init__(self, worker: SGLangWorker) -> None:
         self._worker = worker
 
     def is_usable(self) -> bool:
@@ -319,8 +298,8 @@ class _SlimeWeightUpdateConnection:
             ray.kill(old_lock, no_restart=True)
 
 
-class _SlimeInferenceMonitor:
-    def __init__(self, worker: SlimeRayRolloutWorker) -> None:
+class _SGLangInferenceMonitor:
+    def __init__(self, worker: SGLangWorker) -> None:
         self._worker = worker
 
     def pause(self) -> None:

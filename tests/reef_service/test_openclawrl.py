@@ -619,7 +619,7 @@ def test_truncated_reasoning_never_comes_back_as_the_reply() -> None:
     cap, not an answer. Handing it back as content is what makes a judge score
     chain-of-thought as the agent's reply.
     """
-    from reef.train.slime_backend.reef_adapters.sglang.chat import SGLangChatTrainingInferenceBackend
+    from reef.runtime.sglang.chat import SGLangChatTrainingInferenceBackend
 
     truncated = "Okay, the user wants me to solve this. First I should read the file"
     leaked, _ = SGLangChatTrainingInferenceBackend._assistant_message(truncated, None)

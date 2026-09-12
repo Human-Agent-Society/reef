@@ -213,17 +213,16 @@ def create_model_plan(
     _stamp_loss_family_reference(args, loss_family)
     from reef.train.slime_backend.reef_adapters.bridge import prepare_bridge
     from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
-    from reef.train.slime_backend.resources import (
-        SlimeDeploymentHealth,
-        SlimeDeploymentResources,
-        SlimeInferenceService,
-    )
+    from reef.train.slime_backend.resources import SlimeDeploymentHealth, SlimeDeploymentResources
     from reef.train.slime_backend.training import SlimeTrainingService
 
     configure_reef_loss_args(args)
     spec.validate_backend_args(args, recipe=recipe)
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
-    inference = SlimeInferenceService(args)
+    from reef.runtime.sglang.service import SGLangInferenceService
+    from reef.train.slime_backend.inference import inference_config
+
+    inference = SGLangInferenceService(inference_config(args))
     training = SlimeTrainingService(
         args,
         preparation=prepared,

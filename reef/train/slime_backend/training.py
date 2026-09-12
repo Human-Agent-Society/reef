@@ -9,8 +9,9 @@ import ray
 
 from reef.runtime.deployment import DeploymentResources, InferenceConnection
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure
+from reef.runtime.sglang.service import INFERENCE_PROTOCOL, RayHealthProbe
 from reef.train.slime_backend.reef_adapters.bridge import BridgePreparation, start_bridge
-from reef.train.slime_backend.resources import INFERENCE_PROTOCOL, RayHealthProbe, SlimeDeploymentResources
+from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 
 class SlimeTrainingService:

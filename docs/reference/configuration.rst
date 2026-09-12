@@ -184,6 +184,14 @@ for those legacy deployments. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. ``ready-file`` is managed
 by Reef and cannot be supplied through native options.
 
+The training-capable SGLang implementation lives in ``reef.runtime.sglang``.
+Its native engine launch and control do not depend on Slime. Slime converts its
+training requirements to ``SGLangConfig`` and supplies the weight transport;
+the inference component receives ordinary configuration and borrowed GPU
+reservations. Custom inference executors now receive ``config`` and ``pg``
+instead of Slime's argument namespace. See `Worker executors
+<../developer-guide/executors.rst#independent-sglang-backend>`__ for the boundary.
+
 This continues `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 Training GPU capacity remains in ``training.options.actor-num-*``; the shared
 physical node size remains ``training.options.num-gpus-per-node``. Inference

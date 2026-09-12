@@ -16,7 +16,7 @@ inference:
   tensor-parallel-size: "1"
   model-path: work/model
   timeout-s: 7200
-  backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  backend-factory: reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend
 recipe:
   implementation: recipes.beta.coral.recipe:CoralRecipe
   config:

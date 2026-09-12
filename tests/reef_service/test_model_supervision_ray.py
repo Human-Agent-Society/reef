@@ -17,10 +17,11 @@ import pytest
 from reef.runtime.adapters.ray_runtime import connect_ray_runtime
 from reef.runtime.deployment import InferenceConnection, ModelDeploymentPlan
 from reef.runtime.executor.ray import RayExecutor
+from reef.runtime.sglang.service import RayHealthProbe
 from reef.runtime.training_job.marker import read_marker, write_marker
 from reef.runtime.training_job.publication import TrainingPublication
 from reef.service.training_driver import run_deployment
-from reef.train.slime_backend.resources import RayHealthProbe, SlimeDeploymentHealth, SlimeDeploymentResources
+from reef.train.slime_backend.resources import SlimeDeploymentHealth, SlimeDeploymentResources
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 

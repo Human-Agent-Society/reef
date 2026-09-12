@@ -7,6 +7,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from reef.runtime.deployment import ModelDeploymentPlan
+from reef.runtime.sglang import service as inference_service
+from reef.runtime.sglang.config import SGLangConfig
 from reef.service.training_driver import ModelDeployment
 from reef.train.slime_backend import resources
 
@@ -68,7 +70,7 @@ def resource_runtime(monkeypatch):
         def from_workers(cls, workers):
             return SimpleNamespace(workers=workers, owned=False)
 
-    monkeypatch.setattr(resources, "RayExecutor", Executor)
+    monkeypatch.setattr(inference_service, "RayExecutor", Executor)
     return state
 
 
@@ -82,7 +84,7 @@ def plan_for(state, *, colocate=False):
     )
 
     class Training:
-        inference_protocol = resources.INFERENCE_PROTOCOL
+        inference_protocol = inference_service.INFERENCE_PROTOCOL
 
         def start(self, supplied, inference):
             assert supplied is allocation
@@ -95,7 +97,11 @@ def plan_for(state, *, colocate=False):
         def close(self):
             state.events.append("training-close")
 
-    return ModelDeploymentPlan(allocation, resources.SlimeInferenceService(args), Training())
+    return ModelDeploymentPlan(
+        allocation,
+        inference_service.SGLangInferenceService(SGLangConfig("model", 4, 2, 4, env_vars={"TEST": "1"})),
+        Training(),
+    )
 
 
 @pytest.mark.parametrize("colocate", [False, True])
@@ -204,7 +210,7 @@ def test_training_adapter_attaches_without_allocating_or_closing_inference(resou
     allocation = plan_for(resource_runtime).resources
     allocation.start()
     borrowed = SimpleNamespace(owned=False)
-    connection = resources.InferenceConnection(resources.INFERENCE_PROTOCOL, borrowed)
+    connection = inference_service.InferenceConnection(inference_service.INFERENCE_PROTOCOL, borrowed)
 
     def shutdown():
         resource_runtime.events.append("training-close")

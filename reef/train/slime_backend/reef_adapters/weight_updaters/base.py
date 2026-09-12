@@ -18,7 +18,7 @@ from slime.backends.megatron_utils.update_weight.update_weight_from_distributed 
 from slime.utils.distributed_utils import get_gloo_group
 from tqdm import tqdm
 
-from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
+from reef.runtime.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
 
 
 class _TransportRuntimeLoadId(RuntimeLoadId):

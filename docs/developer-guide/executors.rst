@@ -28,7 +28,7 @@ class, while callers use the same methods for each backend.
        B --> I[Inference control actor]
        W --> I
        I --> RE[Rollout Executor]
-       RE --> SR[SlimeRayRolloutExecutor: SGLang engines / routers / update lock]
+       RE --> SR[SGLangExecutor: SGLang engines / routers / update lock]
        RE --> CR[Custom rollout executor]
 
 The coordinator executor targets one worker for each training-job RPC. The
@@ -208,8 +208,11 @@ outputs on non-final pipeline stages.
 
 The inference control actor owns the serving ``Executor`` selected by ``execution.rollout`` or
 ``--reef-rollout-executor-backend``. The default ``ray`` selection maps to
-``SlimeRayRolloutExecutor``: Slime-specific launch, placement, routers, health
-monitors, update locks, offload/onload and recovery live in its backend worker.
+``reef.runtime.sglang.executor:SGLangExecutor``. Its independent SGLang backend
+owns native engine launch, routers, health monitors, update locks, memory
+operations and recovery. It never imports Slime or a concrete training backend.
+Custom inference executors receive ``config`` (``SGLangConfig``) and ``pg``
+(borrowed Ray reservations), replacing the old Slime ``args`` payload.
 The training coordinator runs external-batch packing and DP scheduling locally
 through ``TrainingBatchProcessor``; there is no batch-manager Ray actor or
 inference RPC relay. NIXL tensor transport is enabled on the training coordinator
@@ -220,7 +223,7 @@ Alternative rollout executors must support the existing Slime weight-transport
 contract (including engine/lock handles); selecting a backend does not rewrite
 that data plane. There is no built-in torchrun, Slurm or Kubernetes backend,
 and no online TP/PP resizing. ``uni/mp`` are rejected for Slime GPU worker roles;
-it remains valid for launching standalone SGLang/PRM service processes.
+it remains valid for standalone inference and recipe-owned external processes.
 
 ``ReefRayTrainGroup`` remains an import alias for ``SlimeTrainGroup``. Its
 ``async_*`` methods now return executor futures (or an already available value)
@@ -409,16 +412,19 @@ allocation, then starts resources, inference and training in order. It checks
 inference readiness before attachment and again after training initialization;
 the readiness file is published only when both components are ready.
 
-The Slime integration supplies ``SlimeDeploymentResources``,
-``SlimeInferenceService`` and ``SlimeTrainingService``. Argument parsing and
-preflight live in ``reef.train.slime_backend.driver``. The service layer resolves
+The Slime integration supplies ``SlimeDeploymentResources`` and
+``SlimeTrainingService``. Inference is supplied by the independent
+``reef.runtime.sglang.service.SGLangInferenceService``. Argument parsing and
+preflight live in ``reef.train.slime_backend.driver``. Its ``inference_config``
+adapter translates training requirements into a serializable ``SGLangConfig``;
+no Slime namespace or Megatron object is passed to inference. The service layer resolves
 the recipe and passes its declared loss family into that integration, keeping
 recipe discovery out of the training package.
 
 For managed full-weight and LoRA training, including colocated deployments,
 resources connect one Ray client job
 and use Slime's existing placement helper once for coordinated model allocation.
-Inference borrows those reservations and owns ``SlimeInferenceWorker`` as a
+Inference borrows those reservations and owns ``SGLangControl`` as a
 separate Ray control actor. It reserves one CPU and zero model GPUs; model
 placement groups account for engine GPUs separately. Training receives the
 existing inference connection and reservations and calls ``start_bridge`` with
@@ -434,8 +440,8 @@ leaves an external cluster running; an already initialized client session is
 rejected without disconnecting it.
 
 The minimal shared ``InferenceConnection`` contains a borrowed executor and a
-versioned control-protocol identifier. Slime's engine handles and placement
-representations remain private to its adapters. Weight transfer remains directly
+versioned control-protocol identifier. Engine handles and Ray placement
+representations stay inside the concrete inference and training adapters. Weight transfer remains directly
 between training workers and engines. This protocol identifies the supported
 attachment vocabulary; it is not a general engine capability negotiation API.
 
@@ -450,8 +456,8 @@ Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
 Checkpoint production and backend-specific startup recovery remain in the
 Slime adapters. Managed process recovery is described below. Independent
-replacement that preserves surviving components, native inference launch/attachment
-adapters and validation of additional backend combinations remain in
+replacement that preserves surviving components and validation of additional
+backend combinations remain in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
 
 Inference recovery and reconnect
@@ -521,7 +527,8 @@ deployment recovery path below; GPU validation remains separate work.
 Training-coordinator restart attachment
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Slime control protocol is now ``slime-sglang-control-v2``. Its additional
+The attachment protocol retains the wire identifier ``slime-sglang-control-v2``
+for compatibility; its inference implementation is now independent of Slime. Its additional
 ``prepare_training_connection`` RPC is called by ``start_bridge`` before creating
 training workers when inference and reservations are supplied by the deployment
 owner. It records pause intent, drains monitoring, recovers engines/connections
@@ -826,3 +833,30 @@ cleanup, bounded probes and owner-lease loss. To run the real Ray/HTTP tests:
 
 These are control-plane tests, not a GPU SGLang/Megatron validation or a
 multi-machine networking benchmark.
+
+Independent SGLang backend
+--------------------------
+
+``reef/runtime/sglang/`` owns the chat/capture backend, SGLang plugin, native
+engine process, router, Ray engine groups and inference lifecycle. Native
+``ServerArgs`` and ``launch_server`` come directly from SGLang; Reef no longer
+calls Slime's ``start_rollout_servers`` or inherits its ``SGLangEngine``.
+The runtime-load-ID value type lives in ``reef.runtime.runtime_load_id``.
+
+Install ``reef-infra[sglang]`` for Python-side inference dependencies and install
+native SGLang in the selected GPU environment. This extra does not install
+Slime or Megatron. The Slime training extra includes the inference dependencies
+for existing training deployments. Pure inference still uses the direct native
+``sglang.launch_server`` command binding in the deployment launcher.
+
+Slime retains checkpoint I/O, optimizer steps, batch partitioning and tensor
+transport. Its native argument parser and legacy group-file parser run only at
+the configuration boundary. Checkpoint pull RPCs receive explicit source and
+local directories from the training updater; inference does not read training
+checkpoint arguments. Existing configs and plugin name ``reef`` are preserved;
+custom import paths pointing into the former Slime SGLang subtree must move to
+``reef.runtime.sglang``. Maintained examples use the new paths.
+
+CPU tests cover native launch bindings, multi-node rendezvous, shared placement,
+external engine validation/ownership, capture, LoRA requirements and recovery.
+Actual GPU execution and backend combinations still require acceptance testing.

@@ -17,7 +17,7 @@ from reef.runtime.inference import InferenceBackendFactory
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
 from reef.train.deployment import TrainingDeployment
 
-_NATIVE_INFERENCE = "reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend"
+_NATIVE_INFERENCE = "reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend"
 _READY_PROBE = (
     "import os, pathlib, sys; "
     "p = pathlib.Path(os.environ['REEF_BRIDGE_READY_FILE']); "

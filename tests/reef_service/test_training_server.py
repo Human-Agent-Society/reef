@@ -451,7 +451,7 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
         connected.update(kwargs)
         return StubRuntime()
 
-    dotted_path = "reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend"
+    dotted_path = "reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend"
     deploy.build_dispatcher(
         _settings(
             inference_backend_factory=dotted_path,

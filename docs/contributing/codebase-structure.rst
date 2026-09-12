@@ -157,6 +157,9 @@ retain admission, model operations, checkpoint and tensor I/O.
 ``runtime/inference_control.py`` owns inference pause/recovery and reconnect
 ordering; ``runtime/health_monitor.py`` owns probe scheduling and drain barriers.
 ``runtime/weight_update.py`` owns the transport lock's failure state.
+``runtime/sglang/`` owns SGLang engine launch, capture and control independently
+of training. ``train/slime_backend/inference.py`` only translates Slime options
+into that backend's configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions;
 ``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.
 

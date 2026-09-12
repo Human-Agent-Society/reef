@@ -19,6 +19,9 @@ resumption; concrete backends provide model operations and weight transport.
 ``inference_memory`` pairs acknowledged engine memory release/resume operations;
 ``weight_update`` supplies the transport lock's failure/phase semantics.
 
+``sglang`` owns native SGLang launch, capture, engine control and inference
+lifecycle without depending on Slime or Megatron.
+
 Training batches and candidate evaluation contracts come from ``reef.core``.
 This package never imports ``reef.train``.
 

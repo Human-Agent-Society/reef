@@ -279,6 +279,7 @@ jobs:
               "pylatexenc",
               "qwen-vl-utils",
               "ray",
+              "requests",
               "safetensors",
               "sglang-router",
               "tensorboard",
@@ -296,14 +297,22 @@ jobs:
           source_root = Path(os.environ["GITHUB_WORKSPACE"])
           expected_backend_files = {
               str(path.relative_to(source_root))
-              for path in (
-                  source_root / "reef" / "train" / "slime_backend"
-              ).rglob("*")
+              for directory in ("reef/train/slime_backend", "reef/runtime/sglang")
+              for path in (source_root / directory).rglob("*")
               if path.suffix in {".cu", ".md", ".py"}
           }
           expected_backend_files.add("reef/train/__init__.py")
           installed_files = {str(path) for path in reef.files or ()}
           assert expected_backend_files <= installed_files
+          assert "reef/runtime/runtime_load_id.py" in installed_files
+          assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)
+          inference = {
+              canonicalize_name(requirement.name)
+              for requirement in requirements
+              if requirement.marker is not None
+              and requirement.marker.evaluate({"extra": "sglang"})
+          } - core
+          assert inference == {"httpx", "psutil", "ray", "requests", "sglang-router"}, inference
           PY
       # Run outside the repo so `import reef` resolves to the installed wheel,
       # not the source tree. Proves the wheel is complete: core modules import,

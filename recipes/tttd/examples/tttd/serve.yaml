@@ -22,7 +22,7 @@ inference:
     cuda-graph-max-bs-decode: "128"
   model-path: work/model
   timeout-s: 7200
-  backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  backend-factory: reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
   config:

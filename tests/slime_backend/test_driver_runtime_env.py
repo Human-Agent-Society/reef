@@ -73,6 +73,12 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
     from reef.train.slime_backend.reef_adapters import bridge, slime_arguments
 
     args = SimpleNamespace(
+        hf_checkpoint="model",
+        rollout_num_gpus=4,
+        rollout_num_gpus_per_engine=2,
+        num_gpus_per_node=4,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=4,
         colocate="colocate" in mode,
         rollout_external=mode == "external",
         keep_lora_base_resident=mode == "lora-colocate-keep-base",

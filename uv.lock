@@ -5117,6 +5117,13 @@ dev = [
 postgres = [
     { name = "psycopg", extra = ["binary"] },
 ]
+sglang = [
+    { name = "httpx" },
+    { name = "psutil" },
+    { name = "ray", extra = ["default"] },
+    { name = "requests" },
+    { name = "sglang-router" },
+]
 slime = [
     { name = "e2b" },
     { name = "httpx", extra = ["http2"] },
@@ -5128,6 +5135,7 @@ slime = [
     { name = "pylatexenc" },
     { name = "qwen-vl-utils" },
     { name = "ray", extra = ["default"] },
+    { name = "requests" },
     { name = "safetensors" },
     { name = "sglang-router" },
     { name = "tensorboard" },
@@ -5151,6 +5159,7 @@ requires-dist = [
     { name = "aiohttp" },
     { name = "alembic", specifier = ">=1.13,<2" },
     { name = "e2b", marker = "extra == 'slime'" },
+    { name = "httpx", marker = "extra == 'sglang'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
     { name = "huggingface-hub" },
     { name = "memray", marker = "extra == 'slime'" },
@@ -5159,6 +5168,7 @@ requires-dist = [
     { name = "peft", marker = "extra == 'slime'" },
     { name = "pillow", marker = "extra == 'slime'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "psutil", marker = "extra == 'sglang'", specifier = ">=5.9" },
     { name = "psutil", marker = "extra == 'slime'", specifier = ">=5.9" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1,<4" },
     { name = "pylatexenc", marker = "extra == 'slime'" },
@@ -5166,11 +5176,15 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pyyaml" },
     { name = "qwen-vl-utils", marker = "extra == 'slime'" },
+    { name = "ray", extras = ["default"], marker = "extra == 'sglang'" },
     { name = "ray", extras = ["default"], marker = "extra == 'slime'" },
     { name = "reef-client", specifier = ">=0.2.0" },
     { name = "reef-eval", extras = ["harbor"], marker = "python_full_version >= '3.12' and extra == 'terminus'", specifier = ">=0.1.1" },
+    { name = "requests", marker = "extra == 'sglang'" },
+    { name = "requests", marker = "extra == 'slime'" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.6" },
     { name = "safetensors", marker = "extra == 'slime'" },
+    { name = "sglang-router", marker = "extra == 'sglang'", specifier = ">=0.3.2" },
     { name = "sglang-router", marker = "extra == 'slime'", specifier = ">=0.3.2" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "tensorboard", marker = "extra == 'slime'" },
@@ -5180,7 +5194,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'slime'", specifier = ">=0.29.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.29.0" },
 ]
-provides-extras = ["postgres", "terminus", "wandb", "slime", "dev"]
+provides-extras = ["sglang", "postgres", "terminus", "wandb", "slime", "dev"]
 
 [package.metadata.requires-dev]
 runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=41014d1f29e201137fdffce737bb8bac65bc5219" }]

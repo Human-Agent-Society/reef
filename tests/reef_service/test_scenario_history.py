@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+from reef.runtime.runtime_load_id import RuntimeLoadId
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 
 

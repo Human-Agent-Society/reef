@@ -146,7 +146,16 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
 
         def activate() -> None:
             if self.args.update_weight_local_checkpoint_dir:
-                ray.get([engine.pull_weights.remote(self.weight_update_sequence) for engine in self.rollout_engines])
+                ray.get(
+                    [
+                        engine.pull_weights.remote(
+                            self.weight_update_sequence,
+                            source_dir=self.args.update_weight_disk_dir,
+                            local_checkpoint_dir=self.args.update_weight_local_checkpoint_dir,
+                        )
+                        for engine in self.rollout_engines
+                    ]
+                )
                 model_path = self.args.update_weight_local_checkpoint_dir
             else:
                 model_path = version_dir
@@ -187,7 +196,16 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
             os.makedirs(self.delta_dir, exist_ok=True)
             if self._post_write_hook is not None:
                 self._post_write_hook(self.args, self.delta_dir, list(self.rollout_engines))
-            ray.get([engine.pull_weights.remote(target_version=0) for engine in self.rollout_engines])
+            ray.get(
+                [
+                    engine.pull_weights.remote(
+                        target_version=0,
+                        source_dir=self.args.update_weight_disk_dir,
+                        local_checkpoint_dir=self.args.update_weight_local_checkpoint_dir,
+                    )
+                    for engine in self.rollout_engines
+                ]
+            )
 
         self._run_rank_zero_action(prepare_base, phase="materialize delta baseline")
         read_hf = make_tensor_reader(self.args.hf_checkpoint)
@@ -273,7 +291,16 @@ class ReefUpdateWeightFromDiskDelta(SynchronizedWeightUpdateMixin, UpdateWeightF
         self._raise_synchronized_update_error(local_error, phase="publish delta checkpoint")
 
         def reload_engines() -> None:
-            ray.get([engine.pull_weights.remote(self.weight_update_sequence) for engine in self.rollout_engines])
+            ray.get(
+                [
+                    engine.pull_weights.remote(
+                        self.weight_update_sequence,
+                        source_dir=self.args.update_weight_disk_dir,
+                        local_checkpoint_dir=self.args.update_weight_local_checkpoint_dir,
+                    )
+                    for engine in self.rollout_engines
+                ]
+            )
             if manage_generation:
                 pause_mode = getattr(self.args, "weight_update_pause_mode", "retract")
                 ray.get([engine.pause_generation.remote(pause_mode) for engine in self.rollout_engines])
