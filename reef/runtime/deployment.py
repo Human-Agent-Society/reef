@@ -29,6 +29,8 @@ class InferenceConnection:
 
     The protocol identifies the RPC vocabulary, including direct weight-update
     attachment. An HTTP endpoint alone does not satisfy this connection.
+    Reusing it for replacement training workers requires the owning deployment
+    to retire the prior trainer and perform the protocol's attachment handshake.
     """
 
     protocol: str

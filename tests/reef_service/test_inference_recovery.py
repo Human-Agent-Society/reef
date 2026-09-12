@@ -284,3 +284,27 @@ def test_republication_restores_engine_and_monitor_pause_through_commit_gate(con
         publication.acknowledge("job")
     assert not controller.paused and not engines.paused and not monitor.paused
     assert events[-2:] == ["resume_engines", "resume_monitor"]
+
+
+def test_new_trainer_requires_attachment_even_to_healthy_engines(control):
+    controller, engines, _, monitor, events = control
+    controller.prepare_training_connection()
+    assert events == ["pause_monitor", "lock_status", "recover_engines", "pause_engines"]
+    assert controller.paused and engines.paused and monitor.paused
+    assert controller.reconnect_required
+    controller.acknowledge_reconnect()
+    controller.resume()
+    events.clear()
+    controller.prepare_training_connection()
+    assert controller.reconnect_required
+    assert "replace_lock" not in events
+    assert "resume_monitor" not in events
+
+
+def test_failed_new_trainer_attachment_remains_fenced(control):
+    controller, engines, _, monitor, events = control
+    engines.failure = "recover_engines"
+    with pytest.raises(RuntimeError, match="failed recover_engines"):
+        controller.prepare_training_connection()
+    assert controller.paused and monitor.paused and controller.reconnect_required
+    assert "resume_monitor" not in events

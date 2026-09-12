@@ -392,3 +392,23 @@ def test_stopped_coordinator_cannot_republish(publication):
     with pytest.raises(RuntimeError, match="stopped"):
         coordinator.republish("engine:1")
     assert publisher.events == []
+
+
+@pytest.mark.parametrize("status", [None, "COMPLETE", "READY_TO_COMMIT"])
+def test_startup_backend_failure_aborts_even_a_committed_or_marker_free_restart(publication, status):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    if status is None:
+        path.unlink()
+        marker = None
+    else:
+        marker.update(status=status, runtime_load_id="engine:1")
+        markers.write_marker(path, marker)
+    with pytest.raises(RuntimeError, match="restore failed"), coordinator.recovery(marker):
+        assert publisher.paused
+        assert coordinator.phase == "recovering"
+        raise RuntimeError("restore failed")
+    assert publisher.paused
+    assert publisher.events[-1][0] == "abort"
+    assert coordinator.phase == "weight_sync_failed"
+    assert markers.read_marker(path) == marker

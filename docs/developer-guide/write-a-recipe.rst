@@ -257,12 +257,20 @@ resuming generation. Use ``TrainingPublication.republish`` to coordinate this
 operation after an engine replacement; it validates marker eligibility and
 resumes only through the durable commit gate. Retain the last verified runtime
 load ID if a transfer fails or returns a different one.
+Wrap backend startup reconstruction in ``TrainingPublication.recovery(marker)``
+and call ``finish_recovery`` inside the scope after verifying engine identities.
+This reasserts pause even for a committed marker and aborts failed checkpoint
+restoration before serving can reopen.
 Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
 with concrete engine, monitoring and update-connection adapters. Serialize calls
 in the owning actor, and route legacy monitoring controls through the same pause
 state. Its ``resume`` is an internal operation authorized by the training commit
 gate, not a public serving action. Backend handles and weight transport remain
 inside adapters; an HTTP URL alone is not an update connection.
+After the deployment owner retires a prior trainer, use
+``InferenceControl.prepare_training_connection`` to require a fresh attachment
+and keep inference paused even when the engines are already healthy. Slime's
+v2 control RPC forwards this handshake before replacement workers are created.
 Monitoring must drain active probes and retirement before engine mutation.
 ``EngineHealthMonitor`` provides this barrier using backend ``EngineHealthChecks``
 snapshots. Each ``EngineHealthTarget`` must bound its probe/retirement operations

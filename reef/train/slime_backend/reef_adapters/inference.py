@@ -53,6 +53,9 @@ class SlimeInferenceControl:
     def onload_kv(self) -> Any:
         return self._serving.rpc(0, "onload_kv", timeout=14_400)
 
+    def prepare_training_connection(self) -> Any:
+        return self._serving.rpc(0, "prepare_training_connection", timeout=14_400)
+
     def recover_updatable_engines(self) -> Any:
         return self._serving.rpc(0, "recover_updatable_engines", timeout=14_400)
 

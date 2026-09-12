@@ -163,6 +163,9 @@ class SlimeRayRolloutWorker:
     def onload_kv(self):
         return [server.onload_kv() for server in self.servers.values()]
 
+    def prepare_training_connection(self):
+        self._control.prepare_training_connection()
+
     def recover_updatable_engines(self):
         self._control.recover()
         return self.get_updatable_engines_and_lock()

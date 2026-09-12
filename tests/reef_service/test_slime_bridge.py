@@ -682,8 +682,10 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
 
     assert result.outcome == "complete"
     assert timeline == [
+        "pause_generation",
         "onload_weights",
         "onload_kv",
+        "continue_generation",
         "pause_generation",
         "offload",
         "save_model",
@@ -692,8 +694,10 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
         "onload_kv",
     ]
     assert manager.lifecycle_calls == [
+        "pause_generation",
         "onload_weights",
         "onload_kv",
+        "continue_generation",
         "pause_generation",
         "offload",
         "pause_generation",
@@ -749,6 +753,8 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     group = _DurableGroup(template)
     manager = _FakeRolloutManager(["packed"])
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
     payload = _payload(loss="sft")
     payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
@@ -760,14 +766,14 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     assert marker["status"] == "CHECKPOINT"
     assert manager.lifecycle_calls == []
     assert group.update_calls == 1  # startup publication only
-    assert group.update_generation_management == [True]
+    assert group.update_generation_management == [False]
 
     updated = actor.update_serving_weights(checkpoint.training_job_id)
 
     assert updated.outcome == "complete"
     assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "READY_TO_COMMIT"
     assert manager.lifecycle_calls == ["pause_generation"]
-    assert group.update_generation_management == [True, False]
+    assert group.update_generation_management == [False, False]
     assert actor.health()["training_job"]["status"] == "READY_TO_COMMIT"
 
     actor.acknowledge_training_commit(checkpoint.training_job_id)
@@ -1198,7 +1204,7 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
         assert recovered["commit_acknowledged"] is True
         assert group.update_force_full == [True]
         if status == "UPDATING_WEIGHTS":
-            assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
+            assert manager.lifecycle_calls[:2] == ["pause_generation", "recover_engines"]
     assert not group.train_calls
 
 
@@ -1260,7 +1266,7 @@ def test_weight_update_recovery_converges_disagreeing_engines_before_startup_val
     group = RecoveryGroup(template)
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
 
-    assert manager.lifecycle_calls[:2] == ["recover_engines", "pause_generation"]
+    assert manager.lifecycle_calls[:2] == ["pause_generation", "recover_engines"]
     assert group.update_force_full == [True]
     assert actor.health()["training_job"]["status"] == "READY_TO_COMMIT"
     assert actor.serving_runtime_load_id() == "engine:3"
@@ -1336,6 +1342,8 @@ def test_serving_republication_preserves_current_runtime_load_id() -> None:
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
 
     def restore_runtime_load_id(runtime_load_id):
         group.republication_calls.append(runtime_load_id)
@@ -2012,11 +2020,12 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
 
 
 def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_path, monkeypatch):
-    from reef.runtime.executor import ExecutorConfig
     from reef.runtime.executor.uniproc import UniProcExecutor
 
     events = []
-    serving = UniProcExecutor(ExecutorConfig(backend="uni"))
+    serving = UniProcExecutor.from_workers(
+        [SimpleNamespace(prepare_training_connection=lambda: events.append("attach-paused"))]
+    )
     manager = SimpleNamespace(dispose=SimpleNamespace(remote=lambda: events.append("dispose-batch")))
     allocation = SimpleNamespace(id="borrowed")
     groups = {"actor": (allocation, [], []), "rollout": (allocation, [], [])}
@@ -2040,6 +2049,7 @@ def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_
     def fail_training(args, placements, batch_manager):
         assert placements is groups
         assert batch_manager is manager
+        assert events == ["attach-paused"]
         raise RuntimeError("training startup failed")
 
     connection = serving
@@ -2049,7 +2059,7 @@ def test_attached_bridge_failure_keeps_deployment_inference_and_allocations(tmp_
     args = _bridge_args(save_hf=str(tmp_path / "hf/{rollout_id}"), save=str(tmp_path / "megatron"))
     with pytest.raises(RuntimeError, match="training startup failed"):
         bridge.start_bridge(args, serving=serving, placement_groups=groups)
-    assert events == ["dispose-batch", "kill-batch"]
+    assert events == ["attach-paused", "dispose-batch", "kill-batch"]
     assert groups["actor"][0] is allocation
     assert serving._closed is False
 
@@ -2059,6 +2069,8 @@ def test_republication_reconciles_cached_pause_and_preserves_identity_after_fail
     manager = _FakeRolloutManager([])
     group = _FakeGroup()
     actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=None)
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    manager.lifecycle_calls.clear()
     actor._generation_paused = True
     terminated = []
     manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
@@ -2104,3 +2116,62 @@ def test_standalone_republication_cannot_publish_checkpointed_candidate(tmp_path
     assert manager.lifecycle_calls == []
     assert group.update_calls == calls
     assert group.republication_calls == []
+
+
+@pytest.mark.unit
+def test_committed_restart_reasserts_pause_before_checkpoint_transfer(tmp_path):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "COMPLETE",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+            "runtime_load_id": "v1",
+        },
+    )
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    actor = bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    assert group.update_generation_management == [False]
+    assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
+    assert actor.health()["phase"] == "serving"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["versions", "restore"])
+def test_startup_reconstruction_failure_aborts_supplied_inference(tmp_path, failure):
+    template = str(tmp_path / "checkpoint-{rollout_id}")
+    checkpoint = Path(template.format(rollout_id=0))
+    checkpoint.mkdir()
+    write_marker(
+        tmp_path / ".reef-latest-job.json",
+        {
+            "status": "COMPLETE",
+            "job_id": JOB_ID,
+            "rollout_id": 0,
+            "checkpoint_path": str(checkpoint),
+            "runtime_load_id": "v1",
+        },
+    )
+    manager = _FakeRolloutManager([])
+    group = _DurableGroup(template)
+    terminated = []
+    manager.terminate_updatable_engines = _RemoteMethod(lambda: terminated.append(True))
+    if failure == "versions":
+        manager.versions = []
+    else:
+
+        def fail_restore(version):
+            raise RuntimeError("checkpoint seed unavailable")
+
+        group.restore_runtime_load_id_for_republication = fail_restore
+    with pytest.raises(RuntimeError):
+        bridge.TrainBridgeActorImpl(group, manager, save_hf_template=template)
+    assert terminated
+    assert manager.lifecycle_calls == ["pause_generation"]
+    assert group.update_calls == 0
+    assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "COMPLETE"

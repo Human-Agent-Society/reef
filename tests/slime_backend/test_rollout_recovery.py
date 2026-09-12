@@ -179,6 +179,7 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
         "offload",
         "onload_weights",
         "onload_kv",
+        "prepare_training_connection",
         "recover_updatable_engines",
         "clear_updatable_num_new_engines",
         "health_monitoring_pause",

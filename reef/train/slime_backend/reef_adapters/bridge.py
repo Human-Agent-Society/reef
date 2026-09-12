@@ -449,6 +449,11 @@ class TrainBridgeActorImpl:
             else None
         )
         marker = self._recover_marker() if self._save_hf_template is not None else None
+        with self._publication.recovery(marker):
+            self._restore_serving(marker)
+
+    def _restore_serving(self, marker: dict[str, Any] | None) -> None:
+        """Reconstruct backend state inside Reef's startup recovery barrier."""
         marker_status = None if marker is None else str(marker["status"])
         if marker_status == "UPDATING_WEIGHTS":
             # The previous fan-out may have updated only some engines. Recover
@@ -460,6 +465,7 @@ class TrainBridgeActorImpl:
                 raise RuntimeError("REJECTING marker status has no marker payload")
             self._publication.reject(str(marker["job_id"]))
             marker["status"] = marker_status = "REJECTED"
+            self._pause_generation(reconcile=True)
         self._inference_url = self._manager_call("inference_url")
         versions = self._manager_call("get_runtime_load_ids")
         if not versions or (marker_status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
@@ -482,7 +488,6 @@ class TrainBridgeActorImpl:
             self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
         if self._history is not None:
             self._recover_scenario_adapters(marker)
-        self._publication.prepare_recovery(marker)
         if self._save_hf_template is not None and marker_status != "REJECTED" and not (self._lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot SGLang. Publish actor weights before construction returns
@@ -1140,6 +1145,10 @@ def start_bridge(
     actor_group = None
     critic_group = None
     try:
+        if serving is not None:
+            # The owner has retired the previous trainer. Fence its replacement
+            # before creating workers, including healthy-engine reattachment.
+            serving.rpc(0, "prepare_training_connection", timeout=_TRAIN_RPC_TIMEOUT_S)
         rollout_manager = (
             create_rollout_manager(args, pgs["rollout"])
             if serving is None

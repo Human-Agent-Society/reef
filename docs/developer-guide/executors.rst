@@ -507,6 +507,40 @@ Slime retains tensor transfer and restoration of other scenarios' adapters.
 This is in-process engine recovery; independent controller-process restart and
 GPU validation remain separate work.
 
+Training-coordinator restart attachment
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The Slime control protocol is now ``slime-sglang-control-v2``. Its additional
+``prepare_training_connection`` RPC is called by ``start_bridge`` before creating
+training workers when inference and reservations are supplied by the deployment
+owner. It records pause intent, drains monitoring, recovers engines/connections
+and requires worker attachment even when every engine and the update lock are
+healthy. The existing attachment tuple carries that requirement through its
+new-engine count; acknowledgement clears it only after workers have connected.
+
+The owner must stop the previous training workers before attaching their
+replacement. This handshake does not elect a leader or authorize two trainers
+to write to one inference deployment. It reuses the supplied executor and
+reservations; startup failure leaves borrowed resources with their owner.
+Custom Slime serving executors must implement the additional RPC.
+
+``TrainingPublication.recovery(marker)`` fences the entire backend startup
+restoration, including committed and marker-free startup. The bridge restores
+checkpoint identity and adapters inside that scope, with updater-controlled
+generation resumption disabled. ``finish_recovery`` preserves the commit gate:
+uncommitted candidates stay paused; committed identities resume generation and
+monitoring only after verification. Version discovery, checkpoint seeding and
+other reconstruction failures abort recovery, including failures before tensor
+transfer starts. Persisted marker formats do not change.
+
+Real Ray CPU tests replace the training coordinator process while preserving
+inference, restore checkpoint values and version identity, retain pending commit
+barriers and keep serving paused after a damaged-checkpoint restart. These tests
+use CPU backend fixtures; they do not validate GPU checkpoint loading. Automatic
+process supervision, reconnecting a running HTTP service to a replacement named
+bridge, and recreating an inference controller with surviving engine handles are
+still separate work. The CLI does not gain an automatic component-restart mode.
+
 Engine health monitoring
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -672,7 +706,8 @@ Custom rollout executors expose one control rank. Its RPC vocabulary is
 ``inference_url``, ``get_runtime_load_ids``, ``get_updatable_engines_and_lock``,
 ``pause_generation_for_update``, ``continue_generation_after_update``,
 ``offload``, ``onload(tags)``, ``onload_weights``, ``onload_kv``,
-``terminate_updatable_engines``, ``recover_updatable_engines``,
+``terminate_updatable_engines``, ``prepare_training_connection``,
+``recover_updatable_engines``,
 ``clear_updatable_num_new_engines``, ``health_monitoring_pause``,
 ``health_monitoring_resume`` and ``check_weights(action)``. Executor shutdown
 owns serving resource teardown; the manager does not manipulate backend

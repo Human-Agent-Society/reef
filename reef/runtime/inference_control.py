@@ -102,6 +102,17 @@ class InferenceControl:
             self.paused = True
             raise
 
+    def prepare_training_connection(self) -> None:
+        """Fence a new trainer attachment even when all engines are healthy.
+
+        The deployment owner must retire the previous training workers first.
+        This is a serialized attachment handshake, not leader election. Engine
+        and lock recovery keep their existing ownership rules.
+        """
+        self.paused = True
+        self.reconnect_required = True
+        self.recover()
+
     def acknowledge_reconnect(self) -> None:
         """Called only after training workers have attached to the current targets."""
         self.reconnect_required = False

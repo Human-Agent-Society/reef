@@ -14,7 +14,7 @@ from reef.runtime.deployment import DeploymentResources, InferenceConnection
 from reef.runtime.executor import ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
-INFERENCE_PROTOCOL = "slime-sglang-control-v1"
+INFERENCE_PROTOCOL = "slime-sglang-control-v2"
 
 
 class SlimeDeploymentResources:

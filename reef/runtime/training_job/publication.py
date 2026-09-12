@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -188,18 +188,28 @@ class TrainingPublication:
         transition_marker(self._require_path(), marker, "COMPLETE", commit_acknowledged=True)
         self.phase = "serving"
 
+    @contextmanager
+    def recovery(self, marker: dict[str, Any] | None) -> Iterator[None]:
+        """Fence startup restoration and abort any failed backend reconstruction.
+
+        The backend restores checkpoint state and calls ``finish_recovery``
+        inside this scope. A successful transfer alone cannot resume serving.
+        """
+        try:
+            self.prepare_recovery(marker)
+            yield
+        except BaseException:
+            self._abort()
+            raise
+
     def prepare_recovery(self, marker: dict[str, Any] | None) -> None:
-        """Fence a recovered candidate before the backend republishes its checkpoint."""
-        if marker is None or marker["status"] not in {
-            "CHECKPOINT",
-            "UPDATING_WEIGHTS",
-            "READY_TO_COMMIT",
-            "HEAD_COMMITTED",
-        }:
-            return
+        """Reassert startup pause, including committed and marker-free restarts."""
+        if marker is not None and marker["status"] == "RUNNING":
+            raise RuntimeError(f"ambiguous training job {marker['job_id']}")
         try:
             self._publisher.pause()
-            if marker["status"] == "CHECKPOINT":
+            self.phase = "recovering"
+            if marker is not None and marker["status"] == "CHECKPOINT":
                 transition_marker(self._require_path(), marker, "UPDATING_WEIGHTS")
         except BaseException:
             self._abort()
