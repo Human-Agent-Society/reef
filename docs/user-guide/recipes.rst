@@ -3,10 +3,10 @@ Choose a recipe for agent learning
 
 A recipe is picked along two axes: the **task type** your workload is, and
 **what the recipe evolves**, model weights or the agent harness. Each task type
-below names the standard benchmarks its examples have measured and, where one
-is proposed, the benchmark still to run. Recipes that evolve model weights need
-GPUs and the training stack in `Train model weights from agent feedback
-<evolve-your-model.rst>`__; harness recipes need only a model endpoint.
+below names the standard benchmarks its examples have measured. Recipes that
+evolve model weights need GPUs and the training stack in `Train model weights
+from agent feedback <evolve-your-model.rst>`__; harness recipes need only a
+model endpoint.
 
 Reefine ships with ``reef-infra``; the other implementations live in the
 repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
@@ -21,8 +21,8 @@ Scientific discovery
 One hard problem, repeated attempts, and a measurable objective. The recipe
 trains on the attempts it generates itself, at test time.
 
-- Measured: TriMul (Guidance-TTT); circle packing (n = 26 and 32) and Erdős
-  minimum overlap (TTT-Discover).
+Measured benchmarks: TriMul (Guidance-TTT); circle packing (n = 26 and 32)
+and Erdős minimum overlap (TTT-Discover).
 
 .. list-table::
    :header-rows: 1
@@ -52,11 +52,9 @@ Continual learning on a task stream
 Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
-- Measured: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO), and the
-  Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades three
-  fixed coding tasks rather than a standard benchmark.
-- Proposed: `CEO-Bench <https://arxiv.org/abs/2606.18543>`__ as a long-horizon
-  showcase; expensive per run, with license and cost still unverified.
+Measured benchmarks: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO),
+and the Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades
+three fixed coding tasks rather than a standard benchmark.
 
 .. list-table::
    :header-rows: 1
@@ -93,8 +91,8 @@ Learning from usage
 Real interaction with no explicit score, or delayed feedback. The recipe reads
 the signal out of the traffic it already serves.
 
-- Measured: the OpenClaw-RL simulated-student homework stream, 72 GSM8K
-  sessions (OpenClaw-RL).
+Measured benchmarks: the OpenClaw-RL simulated-student homework stream,
+72 GSM8K sessions (OpenClaw-RL).
 
 .. list-table::
    :header-rows: 1

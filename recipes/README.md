@@ -13,22 +13,22 @@ Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 
 The catalog below groups recipes by the **task type** they serve, then by
 **what they evolve**: model weights or the agent harness. Each task type lists
-the standard benchmarks its examples have measured and, where one is proposed,
-the benchmark still to run. Recipes that evolve model weights need the GPU
-training stack; harness recipes need only a model endpoint. Reefine ships with
-`reef-infra`; every other recipe here is a cookbook package. [Basic](#basic) is
-the record-only starting stack and stays outside the catalog, and
-[beta recipes](#beta-recipes) join it once they publish learning results. The
-root [README](../README.md#recipes-and-examples) and the
-[recipes guide](../docs/user-guide/recipes.rst) present the same catalog.
+the standard benchmarks its examples have measured. Recipes that evolve model
+weights need the GPU training stack; harness recipes need only a model
+endpoint. Reefine ships with `reef-infra`; every other recipe here is a
+cookbook package. [Basic](#basic) is the record-only starting stack and stays
+outside the catalog, and [beta recipes](#beta-recipes) join it once they
+publish learning results. The root [README](../README.md#recipes-and-examples)
+and the [recipes guide](../docs/user-guide/recipes.rst) present the same
+catalog.
 
 ## Scientific discovery
 
 One hard problem, repeated attempts, and a measurable objective. The recipe
 trains on the attempts it generates itself, at test time.
 
-- Measured: TriMul (Guidance-TTT); circle packing (n = 26 and 32) and Erdős
-  minimum overlap (TTT-Discover).
+Measured benchmarks: TriMul (Guidance-TTT); circle packing (n = 26 and 32)
+and Erdős minimum overlap (TTT-Discover).
 
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
@@ -54,11 +54,9 @@ to Reef's training or inference-token capture path.
 Independent tasks, each scored by a verifier. The recipe learns from the
 feedback on each task as the stream goes by.
 
-- Measured: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO), and the
-  Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades three
-  fixed coding tasks rather than a standard benchmark.
-- Proposed: [CEO-Bench](https://arxiv.org/abs/2606.18543) as a long-horizon
-  showcase; expensive per run, with license and cost still unverified.
+Measured benchmarks: AIME 2025 (GEPA), three IMOAnswerBench problems (SAO),
+and the Terminal-Bench 30-task hard subset (Meta-Harness). Reefine grades
+three fixed coding tasks rather than a standard benchmark.
 
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
@@ -112,8 +110,8 @@ directly, no Harbor task or reef-eval.
 Real interaction with no explicit score, or delayed feedback. The recipe reads
 the signal out of the traffic it already serves.
 
-- Measured: the OpenClaw-RL simulated-student homework stream, 72 GSM8K
-  sessions (OpenClaw-RL).
+Measured benchmarks: the OpenClaw-RL simulated-student homework stream,
+72 GSM8K sessions (OpenClaw-RL).
 
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
