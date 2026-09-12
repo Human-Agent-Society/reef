@@ -251,6 +251,12 @@ the checkpoint and must never suppress execution failures. Return a
 all required optimizer/model state and recovery metadata synchronously. Reef
 owns job-marker writes. Share the publication coordinator's ``state`` with
 execution and serialize both with the same operation lock.
+Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
+with concrete engine, monitoring and update-connection adapters. Serialize calls
+in the owning actor, and route legacy monitoring controls through the same pause
+state. Its ``resume`` is an internal operation authorized by the training commit
+gate, not a public serving action. Backend handles and weight transport remain
+inside adapters; an HTTP URL alone is not an update connection.
 See `commit-gated weight publication <executors.rst#commit-gated-weight-publication>`__
 for retry and startup-recovery requirements.
 

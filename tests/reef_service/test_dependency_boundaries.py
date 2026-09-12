@@ -413,3 +413,19 @@ def test_training_publication_import_requires_no_model_framework() -> None:
         "from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher; "
         "from reef.runtime.training_job.execution import TrainingExecution, TrainingJobBackend"
     )
+
+
+def test_inference_recovery_and_update_lock_require_no_model_framework() -> None:
+    _assert_isolated_import(
+        "import sys; "
+        "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
+        "from reef.runtime.inference_control import InferenceControl; "
+        "from reef.runtime.weight_update import WeightUpdateLock"
+    )
+
+
+def test_ray_update_lock_wrapper_does_not_import_slime() -> None:
+    _assert_isolated_import(
+        "import sys; sys.modules['slime'] = None; "
+        "from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock"
+    )

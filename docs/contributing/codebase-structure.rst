@@ -154,6 +154,8 @@ with surface contracts, while checkpoint cadence is recipe policy.
 ``runtime/training_job/`` owns job identity/replay, train/checkpoint ordering,
 durable markers and commit-gated publication; concrete training integrations
 retain admission, model operations, checkpoint and tensor I/O.
+``runtime/inference_control.py`` owns inference pause/recovery and reconnect
+ordering; ``runtime/weight_update.py`` owns the transport lock's failure state.
 ``train/slime_backend/driver.py`` supplies Slime component definitions;
 ``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.
 

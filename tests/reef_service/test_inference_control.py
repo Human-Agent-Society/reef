@@ -183,3 +183,86 @@ def test_reef_driver_owns_real_ray_components_and_training_borrows_engines(monke
         owner.close()
     assert training.inference_survived is True
     assert not ray.is_initialized()
+
+
+def test_real_ray_update_lock_replacement_forces_trainer_reconnect(monkeypatch):
+    from reef.runtime.inference_control import InferenceControl
+    from reef.train.slime_backend.reef_adapters.rollout.lock import ReefRolloutLock
+
+    ray = pytest.importorskip("ray")
+    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    root = Path(__file__).resolve().parents[2]
+    ray.init(
+        address="local",
+        num_cpus=2,
+        include_dashboard=False,
+        runtime_env={"env_vars": {"PYTHONPATH": str(root)}},
+    )
+    locks = []
+    events = []
+
+    class Engines:
+        owned = True
+
+        def pause(self):
+            events.append("pause_engines")
+
+        def resume(self):
+            events.append("resume_engines")
+
+        def recover(self):
+            events.append("recover_engines")
+
+        def terminate(self):
+            return 0
+
+    class Monitor:
+        def pause(self):
+            events.append("pause_monitor")
+
+        def resume(self):
+            events.append("resume_monitor")
+
+    class Connection:
+        def __init__(self):
+            self.actor = None
+            self.replace()
+
+        def is_usable(self):
+            return ray.get(self.actor.status.remote(), timeout=30) == {"locked": False, "poisoned": False}
+
+        def replace(self):
+            old = self.actor
+            self.actor = ReefRolloutLock.options(num_cpus=0).remote()
+            locks.append(self.actor)
+            if old is not None:
+                ray.kill(old, no_restart=True)
+
+    try:
+        connection = Connection()
+        old_lock = connection.actor
+        assert ray.get(old_lock.acquire.remote(), timeout=30)
+        ray.get(old_lock.complete_phase.remote("weights", "failed fan-out"), timeout=30)
+        ray.get(old_lock.poison.remote(), timeout=30)
+        with pytest.raises(ray.exceptions.RayTaskError, match="poisoned"):
+            ray.get(old_lock.acquire.remote(), timeout=30)
+        owner = InferenceControl(Engines(), connection, Monitor())
+        owner.pause()
+        events.clear()
+        owner.recover()
+        assert owner.reconnect_required
+        assert events == ["pause_monitor", "recover_engines", "pause_engines"]
+        # Ray kill is asynchronous; until it completes the poisoned actor must
+        # still refuse acquisition. Either outcome fences the old transport.
+        with pytest.raises((ray.exceptions.RayActorError, ray.exceptions.RayTaskError)):
+            ray.get(old_lock.acquire.remote(), timeout=30)
+        assert ray.get(connection.actor.acquire.remote(), timeout=30)
+        ray.get(connection.actor.release.remote(), timeout=30)
+        owner.acknowledge_reconnect()
+        assert not owner.reconnect_required
+        owner.resume()
+        assert events[-2:] == ["resume_engines", "resume_monitor"]
+    finally:
+        for actor in locks:
+            ray.kill(actor, no_restart=True)
+        ray.shutdown()

@@ -440,9 +440,48 @@ Reef owner.
 Managed configurations use ``inference.num-gpus``,
 ``inference.tensor-parallel-size`` and ``inference.options`` in all modes.
 Checkpoint production and backend-specific startup recovery remain in the
-Slime adapters. Independent component restarts, migration of concrete inference
-control and validation of additional real backend combinations remain in
+Slime adapters. Independent component restarts, native inference launch/attachment
+adapters and validation of additional real backend combinations remain in
 `RFC #425 <https://github.com/Human-Agent-Society/reef/issues/425>`__.
+
+Inference recovery and reconnect
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``reef.runtime.inference_control.InferenceControl`` owns pause intent and
+recovery/reconnect ordering through three backend contracts: ``InferenceEngines``
+for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
+and replacement, and ``InferenceMonitor`` for background recovery. The Slime
+serving worker supplies these adapters; engine handles, GPU topology and Ray
+fan-out remain private to it. The existing training-side RPC vocabulary and
+six-field engine/lock attachment tuple are unchanged.
+
+Pause intent is recorded before the engine barrier, so a partial pause failure
+still fences replacement engines on retry. Recovery stops monitoring, checks the
+update lock, replaces an uncertain managed lock and marks worker reconnect as
+required. It then recovers dead engines and reapplies any pending generation
+pause. The reconnect flag is cleared only by the existing acknowledgement after
+training workers reconnect. Healthy-engine and initial-connect behavior remains
+in the concrete engine adapter.
+
+A paused publication keeps monitoring paused after recovery. Recovery failures
+also retain pause intent; neither the recovery path nor the legacy monitor-resume
+RPC can restart background recovery before generation is allowed to resume.
+The training publication coordinator retains the durable commit gate. An
+external deployment with an uncertain lock requires operator restart, and the
+shared controller never terminates borrowed engines.
+
+``reef.runtime.weight_update.WeightUpdateLock`` owns lock poisoning and transport
+phase-result bookkeeping without Slime or Ray imports. The legacy
+``ReefRolloutLock`` entrypoint wraps it as a serial Ray actor. Existing weight
+updaters use the same lock methods and continue transferring directly between
+workers and engines. There is no tensor relay through the shared controller.
+
+This extraction does not make the Slime launch helper or attachment tuple a
+universal inference API. Complete controller-process restart/reconnection,
+backend-neutral engine launch and real GPU combinations remain separate work.
+Slime's native monitor still owns its probe threads: pausing stops scheduling
+new checks but does not drain a probe already in flight. That concurrency path
+needs validation before claiming independent restart of the full deployment.
 
 Training-step coordination
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

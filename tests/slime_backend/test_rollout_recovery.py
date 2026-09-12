@@ -338,6 +338,8 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     server = raw_rollout.RolloutServer(server_groups=[group])
     pauses: list[str] = []
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=False)
     manager.servers = {"actor": server}
     manager._health_monitors = [types.SimpleNamespace(pause=lambda: pauses.append("pause"))]
     killed = []
@@ -356,8 +358,12 @@ def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
 ) -> None:
     _, module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
-    server = types.SimpleNamespace(update_weights=True, server_groups=[], engines=[engine])
+    server = types.SimpleNamespace(
+        update_weights=True, server_groups=[types.SimpleNamespace(all_engines=[engine])], engines=[engine]
+    )
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=True)
     manager.servers = {"actor": server}
     manager._health_monitors = []
     killed = []
@@ -391,16 +397,18 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
         resume=lambda: lifecycle.append("monitor_resume"),
     )
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=False)
     manager.args = types.SimpleNamespace(weight_update_pause_mode="in_place", rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": False, "poisoned": False}))
     manager._health_monitors = [monitor]
-    manager._generation_paused_for_update = True
-    manager._weight_update_reconnect_required = False
+    manager._control.paused = True
+    manager._control.reconnect_required = False
 
     manager.recover_updatable_engines()
 
-    assert lifecycle == ["monitor_pause", "pause:in_place", "monitor_resume"]
+    assert lifecycle == ["monitor_pause", "pause:in_place"]
 
 
 @pytest.mark.unit
@@ -413,6 +421,8 @@ def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=False)
     manager.args = types.SimpleNamespace(rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock
@@ -422,8 +432,8 @@ def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
             resume=lambda: lifecycle.append("monitor_resume"),
         )
     ]
-    manager._generation_paused_for_update = False
-    manager._weight_update_reconnect_required = False
+    manager._control.paused = False
+    manager._control.reconnect_required = False
     manager._new_rollout_engine_lock = lambda: new_lock
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda actor, **kwargs: killed.append((actor, kwargs)))
@@ -432,7 +442,7 @@ def test_recovery_replaces_a_poisoned_update_lock_and_forces_reconnect(
 
     assert result[1] is new_lock
     assert result[2] == 1
-    assert manager._weight_update_reconnect_required is True
+    assert manager._control.reconnect_required is True
     assert killed == [(old_lock, {"no_restart": True})]
     assert lifecycle == ["monitor_pause", "monitor_resume"]
 
@@ -444,6 +454,8 @@ def test_poisoned_external_update_requires_deployment_restart(
     raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=False)
     manager.args = types.SimpleNamespace(rollout_external=True)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = types.SimpleNamespace(status=_RemoteMethod({"locked": True, "poisoned": True}))
@@ -463,12 +475,14 @@ def test_recovery_replaces_an_orphaned_locked_transport(
     new_lock = object()
     server = raw_rollout.RolloutServer(server_groups=[_ServerGroup([object()], num_new_engines=0)])
     manager = object.__new__(module.SlimeRayRolloutWorker)
+    manager._control = manager._create_control()
+    manager.args = types.SimpleNamespace(rollout_external=False)
     manager.args = types.SimpleNamespace(rollout_external=False)
     manager.servers = {"actor": server}
     manager.rollout_engine_lock = old_lock
     manager._health_monitors = []
-    manager._generation_paused_for_update = False
-    manager._weight_update_reconnect_required = False
+    manager._control.paused = False
+    manager._control.reconnect_required = False
     manager._new_rollout_engine_lock = lambda: new_lock
     monkeypatch.setattr(module.ray, "kill", lambda *_args, **_kwargs: None)
 
@@ -629,3 +643,16 @@ def test_manager_startup_probe_failure_disposes_batch_actor_without_closing_borr
     assert implementation._closed
     assert not executor.closed
     executor.shutdown()
+
+
+def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):
+    _, module = _load_manager_module(monkeypatch, serving=True)
+    worker = object.__new__(module.SlimeRayRolloutWorker)
+    worker._control = worker._create_control()
+    worker._control.paused = True
+    resumed = []
+    worker._health_monitors = [types.SimpleNamespace(resume=lambda: resumed.append(True))]
+
+    worker.health_monitoring_resume()
+
+    assert resumed == []
