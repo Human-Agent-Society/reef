@@ -40,7 +40,7 @@ and Erdős minimum overlap (TTT-Discover).
    * - Guidance-TTT
      - guidance-model weights; the executor stays frozen
      - ``recipes/tttd/``
-     - `TTT-Discover <recipes/tttd.rst>`__
+     - `Guidance-TTT <../../recipes/tttd/examples/guidance_ttt/README.md>`__
      - `example <../../recipes/tttd/examples/guidance_ttt/README.md>`__ · `results <../../recipes/tttd/examples/guidance_ttt/results/README.md>`__
 
 No recipe evolves the harness for this task type yet. CORAL TTT targets it and

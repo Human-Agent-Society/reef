@@ -33,7 +33,7 @@ and Erdős minimum overlap (TTT-Discover).
 | Recipe | Evolves | Code | Docs | Example and results |
 |---|---|---|---|---|
 | TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [`tttd/examples/tttd/`](tttd/examples/tttd/README.md) · [results](tttd/examples/tttd/README.md#formal-8x64-results) |
-| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [`tttd/examples/guidance_ttt/`](tttd/examples/guidance_ttt/README.md) · [results](tttd/examples/guidance_ttt/results/README.md) |
+| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [`tttd/examples/guidance_ttt/`](tttd/examples/guidance_ttt/README.md) · [results](tttd/examples/guidance_ttt/results/README.md) |
 
 No recipe evolves the harness for this task type yet. CORAL TTT targets it and
 is in [beta](#beta-recipes).
