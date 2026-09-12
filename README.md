@@ -257,8 +257,8 @@ page documents its task, evaluation setup, measurements, and limitations.
 
 <div align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.gif">
-  <img src="docs/assets/architecture-light.gif" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current release serving." width="1200">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
+  <img src="docs/assets/architecture-light.svg" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current release serving." width="1200">
 </picture>
 </div>
 
