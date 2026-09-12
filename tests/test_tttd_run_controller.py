@@ -14,6 +14,7 @@ from recipes.tttd.examples.tttd.harness.run_controller import (
     TTTDRunIdentity,
     TTTDRunStateError,
     TTTDRunStateStore,
+    TTTDTrainingTimeoutError,
 )
 
 
@@ -294,3 +295,27 @@ def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path
 
     with pytest.raises(TTTDRunStateError, match="mixed_release_ids"):
         controller.run(1)
+
+
+@pytest.mark.unit
+def test_controller_training_deadline_is_not_a_builtin_timeout(tmp_path, monkeypatch) -> None:
+    store = TTTDRunStateStore(tmp_path / "state.json", _identity())
+    store.save_pending(next_step=1, previous_runtime_load_id="v0", archive={"steps": [0]})
+    controller = TTTDRunController(
+        _Harness([]),
+        _StatusReader([_status(0, "v0")]),
+        store,
+        train_timeout_s=1,
+        poll_interval_s=0.01,
+        sleep=lambda _seconds: None,
+    )
+    monotonic = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(
+        "recipes.tttd.examples.tttd.harness.run_controller.time.monotonic",
+        lambda: next(monotonic),
+    )
+
+    with pytest.raises(TTTDTrainingTimeoutError, match="did not restore step 1 after 1s") as raised:
+        controller.run(1)
+
+    assert not isinstance(raised.value, TimeoutError)

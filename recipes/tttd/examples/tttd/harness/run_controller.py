@@ -20,6 +20,10 @@ class TTTDRunStateError(RuntimeError):
     """The search archive and Reef's durable training state do not align."""
 
 
+class TTTDTrainingTimeoutError(RuntimeError):
+    """Reef did not commit a TTTD training step before its deadline."""
+
+
 @dataclass(frozen=True)
 class TTTDRunIdentity:
     scenario: str
@@ -411,7 +415,7 @@ class TTTDRunController:
                     # weights after checkpoint recovery.
                     return last
             self._sleep(self.poll_interval_s)
-        raise TimeoutError(
+        raise TTTDTrainingTimeoutError(
             f"Reef scenario did not restore step {expected_step} after {self.train_timeout_s:g}s: {last}"
         )
 
@@ -438,4 +442,5 @@ __all__ = [
     "TTTDRunOutcome",
     "TTTDRunStateError",
     "TTTDRunStateStore",
+    "TTTDTrainingTimeoutError",
 ]
