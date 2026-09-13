@@ -107,6 +107,12 @@ def test_startup_failure_rolls_back_healthy_dependencies(tmp_path):
         ({"executor": "ray", "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "num_gpus"),
         ({"executor": "uni", "resources": {"num_gpus": 1}}, "reservations require"),
         ({"ready_timeout": 0}, "positive"),
+        ({"ready_timeout": float("nan")}, "finite"),
+        ({"ready_timeout": float("inf")}, "finite"),
+        ({"ready_timeout": float("-inf")}, "finite"),
+        ({"ready_timeout": "nan"}, "finite"),
+        ({"ready_timeout": "inf"}, "finite"),
+        ({"ready_timeout": "-inf"}, "finite"),
         ({"executor": {"backend": "ray", "options": {"max_restarts": -1}}}, "replay"),
     ],
 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -156,7 +157,10 @@ def validate_services(config: Mapping[str, Any], config_path: str | Path) -> lis
         if not isinstance(service.get("env", {}), Mapping):
             raise DeployConfigError(f"service {service['name']!r}: env must be an object")
         try:
-            if float(service.get("ready_timeout", config.get("ready_timeout", 3600))) <= 0:
+            ready_timeout = float(service.get("ready_timeout", config.get("ready_timeout", 3600)))
+            if not math.isfinite(ready_timeout):
+                raise ValueError("ready_timeout must be finite")
+            if ready_timeout <= 0:
                 raise ValueError("ready_timeout must be positive")
             service_executor_config(config, service, Path("."), 3600, Path(config_path))
         except (ValueError, TypeError, ImportError, AttributeError) as exc:
