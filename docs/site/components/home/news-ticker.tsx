@@ -1,12 +1,10 @@
 import type { NewsItem } from "@/lib/news";
 
-const labels: Record<NewsItem["kind"], string> = { news: "Milestone", release: "Release", pull: "Merged" };
-
 function Item({ item }: { item: NewsItem }) {
   const external = item.href.startsWith("http");
   return (
     <a className={`ticker-item ${item.kind}`} href={item.href} target={external ? "_blank" : undefined} rel={external ? "noreferrer" : undefined}>
-      <span className="ticker-tag">{labels[item.kind]}</span>
+      {item.kind === "release" && <span className="ticker-tag">Release</span>}
       <span>{item.text}</span>
       <time dateTime={item.date}>{new Date(item.date).toLocaleDateString("en", { month: "short", day: "numeric", timeZone: "UTC" })}</time>
     </a>

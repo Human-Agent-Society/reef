@@ -209,15 +209,14 @@ kbd { padding: 1px 5px; color: var(--muted); border: 1px solid var(--border); bo
 .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); animation: live-pulse 2.2s ease-out infinite; }
 @keyframes live-pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--brand) 45%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
 .ticker-viewport { flex: 1; min-width: 0; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 48px), transparent); }
-.ticker-track { height: 100%; width: max-content; display: flex; align-items: center; animation: ticker 70s linear infinite; }
+.ticker-track { height: 100%; width: max-content; display: flex; align-items: center; animation: ticker 36s linear infinite; }
 .news-ticker:hover .ticker-track { animation-play-state: paused; }
 @keyframes ticker { to { transform: translateX(-50%); } }
-.ticker-item { padding: 0 26px 0 6px; display: inline-flex; align-items: center; gap: 10px; color: var(--text); white-space: nowrap; }
+.ticker-item { padding: 0 34px 0 6px; display: inline-flex; align-items: center; gap: 10px; color: var(--text); white-space: nowrap; }
 .ticker-item:hover { color: var(--foreground); }
 .ticker-item time { color: var(--muted); font: 12px var(--font-mono); }
 .ticker-tag { padding: 2px 7px; color: var(--muted); border: 1px solid var(--border); border-radius: 5px; font: 500 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 .ticker-item.release .ticker-tag { color: var(--brand-strong); border-color: color-mix(in srgb, var(--brand) 40%, var(--border)); background: var(--brand-soft); }
-.ticker-item.news .ticker-tag { color: var(--foreground); border-color: color-mix(in srgb, var(--foreground) 40%, var(--border)); }
 
 /* Home: hero */
 .home-hero { grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); align-items: end; gap: 48px; min-height: 0; padding-top: 84px; padding-bottom: 44px; }

@@ -46,7 +46,7 @@ export default function Home() {
   const stats = getRepoStats();
   const now = stats.fetchedAt ? new Date(stats.fetchedAt) : new Date();
   const commits = stats.commitsByDay.reduce((sum, day) => sum + day.count, 0);
-  const ticker = tickerItems(stats.recentPulls, stats.version, stats.versionDate, siteConfig.repository);
+  const ticker = tickerItems(stats.version, stats.versionDate, siteConfig.repository);
   const heroStats = [
     stats.stars !== null && { label: "GitHub stars", value: stats.stars, style: "compact" as const },
     stats.contributors.length > 0 && { label: "Contributors", value: stats.contributors.length, style: "plain" as const },
