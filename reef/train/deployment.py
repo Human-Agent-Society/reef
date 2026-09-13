@@ -15,6 +15,8 @@ from reef.runtime.registry import runtime_factory_for
 class TrainingDeployment(ABC):
     """Lightweight integration definition; preparation never allocates model resources."""
 
+    requires_local_model: bool = True
+
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
         """Validate integration inputs and describe dependencies of the HTTP process.

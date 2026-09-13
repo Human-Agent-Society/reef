@@ -103,7 +103,9 @@ and checkpoint paths still need the complete options for the selected recipe.
 The same path supports CLI-only training with
 ``--recipe.implementation package.module:WeightRecipe``,
 ``--inference.model-path`` and the corresponding ``--training.options.*`` flags.
-``training.backend`` defaults to ``slime`` for compatibility. It also accepts an
+``training.backend`` defaults to ``slime`` for compatibility. The optional
+``tinker`` backend provides remote LoRA training and immutable sampling without
+local GPUs; see `Train with Tinker <../user-guide/tinker.rst>`__. It also accepts an
 installed ``reef.training_backends`` entry-point name or an importable
 ``package.module:Deployment`` class. The selected definition owns the process
 plan and HTTP runtime connection; other backends do not inherit Slime's Ray,
@@ -770,7 +772,7 @@ Read by the weight-training stack. See `Evolve your model
 
 .. config::
 
-   training.backend | slime | built-in, installed entry-point name, or dotted TrainingDeployment class
+   training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
    training.ready-timeout | 3600 | backend-owned component startup deadline; in-process model loading is covered by reef.ready-timeout
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not reserve GPUs for the driver or set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step. Must equal the recipe's ``batch_size``.

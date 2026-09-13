@@ -877,3 +877,21 @@ training job, admit an artifact, or mutate the release chain. Artifact admission
 is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
+
+Tinker integration
+------------------
+
+``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
+``tinker`` backend. Its ``runtime_factory`` constructs ``TinkerRuntime`` from
+``TinkerConfig`` only after deployment selection. ``TrainingDeployment``
+defaults ``requires_local_model`` to true; hosted integrations set it to false
+to preserve remote model identifiers during deployment resolution.
+
+Methods register a ``TinkerLoss`` instance with ``register_tinker_loss(name,
+loss)`` from ``reef.train.tinker_backend.losses``. Its ``inputs(rows,
+base_logprobs, kl_coef=...)`` returns one token-aligned dictionary per row;
+``loss_fn`` names the Tinker built-in objective, and ``needs_base_logprobs``
+requests frozen-base scores for a nonzero KL coefficient. ``TokenRow.inputs``
+shifts prediction targets by one token and pads prompt advantages with zeros.
+The adapter boundary constructs SDK ``Datum`` objects only after this shaping.
+See `Train with Tinker <../user-guide/tinker.rst>`__ for supported contracts.

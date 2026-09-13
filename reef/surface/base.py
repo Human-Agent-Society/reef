@@ -8,6 +8,7 @@ they use.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -43,6 +44,17 @@ class WeightRuntime(ServingRuntime, Protocol):
     def serving_runtime_load_id(self) -> str | None: ...
 
     def restore_checkpoint(self, artifact: Artifact) -> str: ...
+
+
+class PublishedWeightRuntime(ABC):
+    """Optional runtime capability for binding a materialized, published head.
+
+    Remote snapshot runtimes need the recovered artifact before they can choose
+    their sampler and the optimizer state from which the next candidate starts.
+    """
+
+    @abstractmethod
+    def activate_checkpoint(self, artifact: Artifact) -> str: ...
 
 
 class ArtifactLoader(Protocol):
@@ -137,6 +149,7 @@ __all__ = [
     "InferenceHooks",
     "InferenceLease",
     "LeasingInferenceHooks",
+    "PublishedWeightRuntime",
     "ServingRuntime",
     "Surface",
     "WeightRuntime",

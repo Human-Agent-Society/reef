@@ -278,6 +278,11 @@ def resolve_model_paths(config: dict[str, Any]) -> bool:
     """
     changed = False
     reef_section = config.get("reef")
+    if isinstance(reef_section, dict) and reef_section.get("training_backend"):
+        from reef.service.deploy.training import training_deployment_for
+
+        if not training_deployment_for(reef_section["training_backend"]).requires_local_model:
+            return False
     if isinstance(reef_section, dict) and isinstance(reef_section.get("model_path"), str):
         resolved = resolve_hf_snapshot(reef_section["model_path"])
         if resolved != reef_section["model_path"]:

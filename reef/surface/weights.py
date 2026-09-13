@@ -8,7 +8,7 @@ from reef.artifact.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
-from reef.surface.base import ServingRuntime, Surface, WeightRuntime
+from reef.surface.base import PublishedWeightRuntime, ServingRuntime, Surface, WeightRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,12 @@ class WeightLoader:
 
     def __init__(self, scenario: str | None = None) -> None:
         self._scenario = scenario
+
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+        """Bind snapshot runtimes after materialization, including at startup."""
+        if isinstance(runtime, PublishedWeightRuntime):
+            return runtime.activate_checkpoint(artifact)
+        return artifact.ref.release_id
 
     def recover(
         self,

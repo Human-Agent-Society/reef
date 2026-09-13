@@ -18,8 +18,11 @@ from recipes.tttd.preparer import TttdPreparer
 from recipes.tttd.processor import TTTDProcessor
 from recipes.tttd.recipe import TTTDRecipe
 from recipes.tttd.report import TTTDGroupedRolloutReport
+from recipes.tttd.tinker import TttdTinkerLoss
 from reef.train.algos.registry import register_loss_family_ref
+from reef.train.tinker_backend.losses import register_tinker_loss
 
 register_loss_family_ref("tttd", "recipes.tttd.slime:TttdAlgorithm")
+register_tinker_loss("tttd", TttdTinkerLoss())
 
 __all__ = ["TTTDGroupedRolloutReport", "TTTDProcessor", "TTTDRecipe", "TttdPreparer"]

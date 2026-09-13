@@ -151,3 +151,14 @@ capability protocol only when no existing call site can express the consumer
 interaction. The package depends only on ``artifact/`` and ``core/``; it sees
 runtimes structurally, through the ``ServingRuntime`` and ``WeightRuntime``
 protocols, and never imports a concrete one.
+
+Remote weight snapshots
+------------------------
+
+A runtime may implement ``PublishedWeightRuntime`` from ``reef.surface``.
+``WeightLoader.activate`` then calls its ``activate_checkpoint(artifact)``
+when a materializable head becomes available, including startup recovery.
+The runtime owns checkpoint validation and binding of its remote sampler and
+training state. Runtimes without this capability retain their existing loading
+behavior. Tinker uses it to restore the authoritative artifact before the
+scenario serves requests; the surface layer never imports the concrete SDK.

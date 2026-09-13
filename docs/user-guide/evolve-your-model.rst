@@ -15,6 +15,9 @@ answering across the update.
 | Engine                   | SGLang, serving the current weights           |
 +--------------------------+-----------------------------------------------+
 
+For hosted LoRA training from a CPU machine, see `Train with Tinker <tinker.rst>`__.
+The GPU deployment below uses the default Slime backend.
+
 When it fits
 ------------
 
@@ -25,7 +28,7 @@ harness or another text artifact, see `Evolve your harness
 Before you start
 ----------------
 
-Weight training needs the supported GPU environment: Ray, a Slime driver, and
+The Slime backend needs the supported GPU environment: Ray, a Slime driver, and
 CUDA-specific builds of torch, SGLang, and Megatron. ``pip install -e .`` from
 the quickstart brings none of them; build the image as described in
 `Installation <../getting-started/installation.rst#gpu-image-for-weight-training>`__, then get

@@ -15,7 +15,9 @@ the recipe's candidate gate; ``Trainer`` runs it between prepare and settle.
 
 The package does not import recipes or service assembly. ``CordisRecipe``
 lives in ``reef.recipe.cordis``; the Slime process entrypoint lives in
-``reef.service.slime_driver``.
+``reef.service.slime_driver``. ``tinker_backend`` owns remote LoRA training,
+immutable samplers, and checkpoint manifests; SDK imports stay inside its
+client adapter, and method loss policy remains in the recipe package.
 
 Tests and deployment configuration stay at repository level, never inside an
 integration subtree: ``tests/slime_backend/`` for runtime internals,
