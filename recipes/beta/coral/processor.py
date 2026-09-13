@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Hashable, Mapping
+from dataclasses import replace
 from typing import Any
 
 from reef.train.processors.reported import (
@@ -50,6 +51,10 @@ class CoralProcessor(ReportedFeedbackProcessor):
       parent's group trains. CORAL sibling counts are dynamic, so this is a
       recipe-level barrier, not a CORAL invariant; parents that never accrue
       enough scored children simply never train.
+    - ``group_by`` (default ``parent``): ``parent`` groups scored siblings of
+      one parent commit; ``release`` groups scored attempts produced under one
+      policy release, which is what a single-agent linear evolution needs to
+      ever form a group.
     """
 
     output_schema = GroupedPolicyBatch
@@ -61,10 +66,14 @@ class CoralProcessor(ReportedFeedbackProcessor):
         self.group_size = int(config.get("group_size", 4))
         if self.group_size < 2:
             raise ValueError("group_size must be at least two (relative rewards need contrast)")
+        self.group_by = str(config.get("group_by", "parent"))
+        if self.group_by not in ("parent", "release"):
+            raise ValueError("group_by must be 'parent' or 'release'")
         config.setdefault("accept_multi_turn_policy_samples", True)
         assembly_config = context.with_config(config)
         self._assembly = SampleAssembly.from_config(assembly_config)
         self._mixed_release_groups: dict[str, tuple[str, ...]] = {}
+        self._terminal_call_fallbacks = 0
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
     @staticmethod
@@ -90,10 +99,23 @@ class CoralProcessor(ReportedFeedbackProcessor):
             raise RuntimeError("eligible CORAL report is not fully resolved")
         try:
             sample = self._assembly.build(context, score)
+            if sample is None and len(context.inferences) > 1:
+                # A coding-agent episode is not always one linear prompt
+                # extension: the runtime compacts or re-renders history
+                # between calls, and the shared assembler treats that as a
+                # fork. The last call is the one that produced the graded
+                # submission, so train on it alone rather than dropping the
+                # attempt.
+                sample = self._assembly.build(replace(context, inferences=context.inferences[-1:]), score)
+                if sample is not None:
+                    self._terminal_call_fallbacks += 1
         except (TypeError, ValueError) as error:
             return ReportDecision.never(f"sample assembly failed: {error}")
-        if sample is None or policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs):
-            return ReportDecision.never("policy tensor contract violation")
+        if sample is None:
+            return ReportDecision.never("sample assembly produced no trainable episode")
+        violation = policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs)
+        if violation:
+            return ReportDecision.never(f"policy tensor contract violation: {violation}")
         release_ids = {
             inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
         }
@@ -102,7 +124,15 @@ class CoralProcessor(ReportedFeedbackProcessor):
             # set of rollout log probs.
             return ReportDecision.never(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
         parent = coral.get("parent_hash")
-        group_key = parent if isinstance(parent, str) and parent else ROOT_GROUP
+        if self.group_by == "release":
+            # A single agent evolving one lineage produces a chain, not a
+            # tree: every attempt has a different parent, so parent groups
+            # never reach group_size. Grouping by the policy release that
+            # produced the attempts gives the TTT-Discover comparison set
+            # instead: scored attempts at the same problem under one policy.
+            group_key = f"release:{next(iter(release_ids), 'none')}"
+        else:
+            group_key = parent if isinstance(parent, str) and parent else ROOT_GROUP
         return ReportDecision.train(
             _CoralRow(sample, next(iter(release_ids), None)),
             group_key=group_key,
@@ -134,6 +164,9 @@ class CoralProcessor(ReportedFeedbackProcessor):
             # Why reports did not train — the first thing to look at when a
             # group never releases on a live deployment.
             "never_reasons": dict(self.never_reasons),
+            # Attempts whose call sequence could not be linearized and were
+            # trained on their terminal call instead.
+            "terminal_call_fallbacks": self._terminal_call_fallbacks,
         }
 
     def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> GroupedPolicyBatch:
