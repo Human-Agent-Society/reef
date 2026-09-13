@@ -94,8 +94,8 @@ export default function Home() {
       {(stats.commitsByDay.length > 0 || stats.recentPulls.length > 0) && (
         <section className="home-section pulse">
           <div className="pulse-chart">
-            <p className="section-label">Momentum</p>
-            <h2>Shipping daily</h2>
+            <p className="section-label">Activity</p>
+            <h2>Recent activity</h2>
             <p className="pulse-caption">
               {commits > 0 && <><strong>{commits}</strong> commits</>}
               {commits > 0 && stats.mergedPulls.recent !== null && " and "}
@@ -136,10 +136,10 @@ export default function Home() {
         <div className="home-section quick-start">
           <div>
             <p className="section-label">Quickstart</p>
-            <h2>Up in three commands</h2>
+            <h2>Start a local stack</h2>
             <p>Start a stack, send a provider-native request, grade the receipt Reef returns.</p>
             <div className="home-actions">
-              <Link className="primary-action" href="/docs/getting-started/quickstart">Run the loop <ArrowRight size={16} /></Link>
+              <Link className="primary-action" href="/docs/getting-started/quickstart">Open the quickstart <ArrowRight size={16} /></Link>
             </div>
           </div>
           <pre className="terminal"><code>{`export REEF_TOKEN="$(openssl rand -hex 16)"
