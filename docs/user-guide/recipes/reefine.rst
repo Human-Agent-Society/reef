@@ -3,8 +3,8 @@ Reefine
 
 Reefine is the built-in recipe for refining a pi coding harness from plain
 language instructions. Its implementation is
-``reef.recipe.reefine:ReefineRecipe``; its proposer and evaluator ship in the
-Reef wheel, so the service needs no tutorial checkout or training GPUs.
+``reef.recipe.reefine:ReefineRecipe``, and its proposer and evaluator ship in
+the Reef wheel, so the service needs no tutorial checkout or training GPUs.
 
 Start the bundled profile with an OpenAI-compatible endpoint:
 
@@ -37,7 +37,8 @@ Behavior and configuration
 The bundled evaluator recognizes only the profile's sieve, Fibonacci, and CSV
 tasks. These measure arithmetic regressions, not whether a requested workflow
 works. Set both ``evolution.tasks`` and ``evolution.evaluate`` for a different
-workload; use ``evolution.selection: score_comparison`` to require improvement.
+workload, and use ``evolution.selection: score_comparison`` to require
+improvement.
 All ``CordisRecipe`` evolution settings remain available, including custom
 proposers, seeds, execution settings, and publication policies.
 

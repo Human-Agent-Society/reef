@@ -1,44 +1,102 @@
 Choose a recipe for agent learning
 ==================================
 
-A recipe is picked along two axes: **what it evolves**, and **how it learns**.
+Pick a recipe by the **task type** of your workload and by **what it
+evolves**, model weights or the agent harness. Weight recipes need GPUs and
+the training stack in `Train model weights from agent feedback
+<evolve-your-model.rst>`__, while harness recipes need only a model endpoint.
 
-+-------------------------+--------------------------------------------------+------------------------------------------+
-|                         | **Reactive:** learns from the traffic            | **Proactive:** generates its own         |
-|                         | it already serves                                | attempts                                 |
-+=========================+==================================================+==========================================+
-| **Model weights**       | ``sao``: feedback on each attempt over a stream  | ``tttd``: repeated attempts at one       |
-|                         | of tasks                                         | problem, at test time                    |
-|                         |                                                  |                                          |
-|                         | ``openclawrl``: multi-turn traffic,              |                                          |
-|                         | reward read from the next state                  |                                          |
-+-------------------------+--------------------------------------------------+------------------------------------------+
-| **Harness:** prompts,   | ``skillclaw``: grows a skill pool from           | not available                            |
-| rules, skills, config,  | the failures in its own served traffic           |                                          |
-| tools, loop             |                                                  |                                          |
-|                         | ``gepa``: rewrites the tree by reflecting on     |                                          |
-|                         | the transcripts it already served                |                                          |
-+-------------------------+--------------------------------------------------+------------------------------------------+
+Reefine ships with ``reef-infra``, and the other implementations live in the
+repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
+``recipes/basic/`` is the record-only starting stack and stays outside the
+catalog, and beta recipes join it once they publish learning results. The root
+`README <../../README.md#recipes-and-examples>`__ and `recipes/README.md
+<../../recipes/README.md>`__ show the same catalog.
 
-Pick by the signal your workload can produce.
+Scientific discovery
+--------------------
 
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| The signal you have                           | Recipe                                          | Evolves       | Needs GPUs |
-+===============================================+=================================================+===============+============+
-| Feedback on each attempt, over a stream of    | `sao <recipes/sao.rst>`__                       | model weights | yes        |
-| tasks                                         |                                                 |               |            |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| A fixed grid of sibling attempts at one       | `tttd <recipes/tttd.rst>`__                     | model weights | yes        |
-| problem                                       |                                                 |               |            |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| Agent conversations without reports           | `openclawrl <recipes/openclawrl.rst>`__         | model weights | yes        |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| Feedback on individual requests, and failures | `skillclaw <recipes/skillclaw.rst>`__           | harness tree  | no         |
-| worth learning from                           | (built into Reef)                               |               |            |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
-| A score per request, and a stronger model to  | `gepa <recipes/gepa.rst>`__                     | harness tree  | no         |
-| reflect with                                  | (built into Reef)                               |               |            |
-+-----------------------------------------------+-------------------------------------------------+---------------+------------+
+One hard problem with a measurable objective, where the recipe makes repeated
+attempts and trains on those attempts at test time.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Recipe
+     - Evolves
+     - Code
+     - Docs
+     - Example
+   * - TTT-Discover
+     - model weights
+     - ``recipes/tttd/``
+     - `TTT-Discover <recipes/tttd.rst>`__
+     - `TTT-Discover on circle packing and Erdős minimum overlap <../../recipes/tttd/examples/tttd/README.md>`__
+   * - Guidance-TTT
+     - guidance-model weights; the executor stays frozen
+     - ``recipes/tttd/``
+     - `Guidance-TTT <../../recipes/tttd/examples/guidance_ttt/README.md>`__
+     - `Guidance-TTT on TriMul <../../recipes/tttd/examples/guidance_ttt/README.md>`__
+
+Continual learning on a task stream
+-----------------------------------
+
+A stream of independent tasks that a verifier scores one by one, so the recipe
+learns from each score before the next task arrives.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Recipe
+     - Evolves
+     - Code
+     - Docs
+     - Example
+   * - SAO
+     - model weights
+     - ``recipes/sao/``
+     - `SAO <recipes/sao.rst>`__
+     - `SAO on IMOAnswerBench <../../recipes/sao/examples/sao/README.md>`__
+   * - GEPA
+     - harness tree: rules, skills, and agent commands
+     - ``recipes/gepa/``
+     - `GEPA <recipes/gepa.rst>`__
+     - `GEPA on AIME 2025 <../../recipes/gepa/examples/aime/README.md>`__
+   * - Meta-Harness
+     - harness: complete compositions
+     - ``recipes/meta_harness/``
+     - `Meta-Harness <../../recipes/meta_harness/README.md>`__
+     - `Meta-Harness on Terminal-Bench <../../recipes/meta_harness/README.md>`__
+
+Learning from usage
+-------------------
+
+Real interaction where no one reports a score or the feedback arrives late, so
+the recipe reads the signal out of the traffic it already serves.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Recipe
+     - Evolves
+     - Code
+     - Docs
+     - Example
+   * - OpenClaw-RL
+     - model weights
+     - ``recipes/openclawrl/``
+     - `OpenClaw-RL <recipes/openclawrl.rst>`__
+     - `OpenClaw-RL on the GSM8K homework stream <../../recipes/openclawrl/examples/openclawrl/README.md>`__
+   * - SkillClaw
+     - harness skill pool
+     - ``recipes/skillclaw/``
+     - `SkillClaw <recipes/skillclaw.rst>`__
+     - `SkillClaw on WildClawBench <../../recipes/skillclaw/README.md>`__
+   * - Reefine
+     - harness: skills, rules, agent commands, and pi extensions
+     - ``reef/recipe/reefine/``
+     - `Reefine <recipes/reefine.rst>`__
+     - `Reefine on reef-pi <../../tutorials/reefine/README.md>`__
 
 How a recipe is selected
 ------------------------
@@ -58,7 +116,7 @@ point deployments configured with different recipes at the same repository.
        batch-size: 1
 
 ``recipe.implementation`` accepts the core value ``recipe``, a dotted class, or a preset.
-Reefine ships in Reef; other learning methods are imported only when selected. The ``recipes/`` tree in
+Reefine ships in Reef, and other learning methods are imported only when selected. The ``recipes/`` tree in
 this repository is a cookbook; installed method packages work the same way.
 `Configuration <../reference/configuration.rst#recipe-configuration>`__
 describes each spelling.
@@ -90,4 +148,4 @@ Beta recipes
 `coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
 **beta** until complete, reproducible learning results are published. Both
 live under ``recipes/beta/coral/``. Integration and smoke tests validate the
-wiring; they do not establish learning performance.
+wiring but do not establish learning performance.
