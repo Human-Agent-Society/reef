@@ -38,7 +38,7 @@ from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import ReefError
-from reef.runtime.base import InferenceRuntime, ModelRuntime
+from reef.runtime.base import InferenceRuntime, TrainingRuntime
 
 
 class RuntimeConfigError(ReefError):
@@ -53,7 +53,7 @@ class RuntimeFactory(ABC):
 
     Implement:
         ``__call__`` — receive ``(config, model_path, recipe_config, environ)``
-        and return an :class:`InferenceRuntime` or a composed :class:`ModelRuntime`.
+        and return an :class:`InferenceRuntime` or a ``(TrainingRuntime, InferenceRuntime)`` pair.
     """
 
     kind: str
@@ -90,8 +90,8 @@ class RuntimeFactory(ABC):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> InferenceRuntime | ModelRuntime:
-        """Build a ready runtime instance from a config section."""
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
+        """Build inference alone or separate training and inference components."""
 
 
 class _CallableRuntimeFactory(RuntimeFactory):
@@ -104,7 +104,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
 
     kind = ""
 
-    def __init__(self, fn: Callable[..., InferenceRuntime | ModelRuntime]) -> None:
+    def __init__(self, fn: Callable[..., InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]]) -> None:
         self._fn = fn
 
     def __call__(
@@ -113,7 +113,7 @@ class _CallableRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> InferenceRuntime | ModelRuntime:
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
         return self._fn(config, model_path, recipe_config, environ)
 
 
@@ -195,7 +195,7 @@ class RuntimeRegistry:
         model_path: str,
         recipe_config: Mapping[str, Any] | None = None,
         environ: Mapping[str, str] | None = None,
-    ) -> InferenceRuntime | ModelRuntime:
+    ) -> InferenceRuntime | tuple[TrainingRuntime, InferenceRuntime]:
         runtime_type = config.get("type")
         if not isinstance(runtime_type, str) or not runtime_type:
             raise RuntimeConfigError("runtime.type must be a non-empty string")

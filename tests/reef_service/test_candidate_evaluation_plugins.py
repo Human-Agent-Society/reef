@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
 from reef.recipe import RecipeConfigError
@@ -32,7 +32,7 @@ def test_dotted_factory_builds_scenario_local_candidate_evaluator() -> None:
         environ={"EVALUATION_TOKEN": "secret"},
     )
 
-    evaluator = build_candidate_evaluation(config, runtime=runtime, scenario="math")
+    evaluator = build_candidate_evaluation(config, **runtime_bindings(runtime), scenario="math")
 
     assert evaluator.scenario == "math"
     assert evaluator.token == "secret"
@@ -50,7 +50,7 @@ def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config=config,
-        runtime=runtime,
+        **runtime_bindings(runtime),
     )
 
     trainer = recipe.build("math", SQLiteRecordStore())
@@ -75,7 +75,7 @@ def test_factory_must_return_the_declared_evaluator_contract(factory, match) -> 
     )
 
     with pytest.raises(CandidateEvaluationConfigError, match=match):
-        build_candidate_evaluation(config, runtime=StubTrainingRuntime(), scenario="math")
+        build_candidate_evaluation(config, **runtime_bindings(StubTrainingRuntime()), scenario="math")
 
 
 @pytest.mark.unit
@@ -93,4 +93,4 @@ def test_invalid_evaluation_plugins_fail_before_training(config, match) -> None:
     recipe_config = SAORecipe.service_config({}, model_path="/models/student")
     recipe_config["evaluation"] = config
     with pytest.raises(RecipeConfigError, match=match):
-        SAORecipe.from_environment({}, config=recipe_config, runtime=runtime)
+        SAORecipe.from_environment({}, config=recipe_config, **runtime_bindings(runtime))

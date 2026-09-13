@@ -40,7 +40,7 @@ from reef.recipe import (
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import DataProcessor, Trainer
-from reef.runtime import ActivatedModel, InferenceRuntime, ModelCandidate, ModelRuntime, TrainingRuntime
+from reef.runtime import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
@@ -62,7 +62,6 @@ __all__ = [
     "EveryNVersions",
     "InferenceRuntime",
     "ModelCandidate",
-    "ModelRuntime",
     "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",

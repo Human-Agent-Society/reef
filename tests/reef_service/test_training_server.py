@@ -8,7 +8,8 @@ import time
 from pathlib import Path
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime as StubRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime
+
 
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service import deploy
@@ -53,6 +54,11 @@ def _example_owned(relative_path: str):
             reason="example-owned stack: shipped with the repo, not with the package",
         ),
     )
+
+
+def stub_runtimes(**kwargs):
+    training = StubTrainingRuntime(**kwargs)
+    return training, training.inference
 
 
 def _settings(**overrides) -> ServiceConfig:
@@ -242,7 +248,7 @@ def test_build_dispatcher_connects_runtime_and_injects_selected_recipe(monkeypat
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime()
+        return stub_runtimes()
 
     def factory(repository, **kwargs):
         backend["repository"] = repository
@@ -357,7 +363,7 @@ def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) 
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={},
-        connector=lambda **kwargs: StubRuntime(),
+        connector=lambda **kwargs: stub_runtimes(),
     )
     recipe = dispatcher._recipe
     captured["batch_size"] = recipe.batch_size
@@ -385,7 +391,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
             agent_record_dir=str(tmp_path / "agent-record"),
         ),
         environ={"EVALUATION_TOKEN": "secret"},
-        connector=lambda **kwargs: StubRuntime(),
+        connector=lambda **kwargs: stub_runtimes(),
     )
 
     recipe = dispatcher._recipe
@@ -431,7 +437,7 @@ def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, 
                 agent_record_dir=str(tmp_path / "agent-record"),
             ),
             environ={},
-            connector=lambda **kwargs: StubRuntime(),
+            connector=lambda **kwargs: stub_runtimes(),
         )
     # The error lists what the recipe would consume.
     assert "reef.batch_size" in str(excinfo.value)
@@ -449,7 +455,7 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime()
+        return stub_runtimes()
 
     dotted_path = "reef.runtime.sglang.chat.SGLangChatTrainingInferenceBackend"
     deploy.build_dispatcher(
@@ -470,13 +476,13 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
 @pytest.mark.unit
 def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -> None:
     # A training recipe must route through the runtime-injection branch, not
-    # the inference loader; SAORecipe requires an injected ModelRuntime and
+    # the inference loader; SAORecipe requires an injected TrainingRuntime and
     # would otherwise raise RecipeConfigError at load time.
     connected = {}
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime(max_staleness=kwargs["max_staleness"])
+        return stub_runtimes(max_staleness=kwargs["max_staleness"])
 
     monkeypatch.setattr(
         deploy.GitLFSRepositoryBackend,
@@ -517,7 +523,7 @@ def test_build_dispatcher_resolves_max_staleness_environment_for_runtime(
 
     def connector(**kwargs):
         connected.update(kwargs)
-        return StubRuntime(max_staleness=kwargs.get("max_staleness", 0))
+        return stub_runtimes(max_staleness=kwargs.get("max_staleness", 0))
 
     dispatcher = deploy.build_dispatcher(
         _settings(recipe=OPENCLAWRL_RECIPE, agent_record_dir=str(tmp_path / "agent-record")),
@@ -542,7 +548,7 @@ def test_build_dispatcher_requires_runtime_locations(attribute, monkeypatch) -> 
         deploy.build_dispatcher(
             _settings(**{attribute: ""}),
             environ={},
-            connector=lambda **kwargs: StubRuntime(),
+            connector=lambda **kwargs: stub_runtimes(),
         )
 
 

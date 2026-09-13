@@ -63,6 +63,7 @@ def _bind(
         trainer=trainer,
         scenario_step=0,
         runtime=runtime,
+        training_runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
     )
     dispatcher._registry = SimpleNamespace(
@@ -128,7 +129,7 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
     class Runtime:
         open = False
         current = "engine:old"
-        # This double stands in for ModelRuntime, so it carries every
+        # This double stands in for TrainingRuntime, so it carries every
         # attribute the dispatcher reads off that interface.
         concurrent_training_scenarios = False
 
@@ -143,7 +144,7 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
         def current_runtime_load_id(self):
             return self.current
 
-    monkeypatch.setattr(dispatcher_module, "ModelRuntime", Runtime)
+    monkeypatch.setattr(dispatcher_module, "TrainingRuntime", Runtime)
     dispatcher = _dispatcher()
     _bind(
         dispatcher,

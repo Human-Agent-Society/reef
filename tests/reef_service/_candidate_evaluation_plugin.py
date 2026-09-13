@@ -58,7 +58,7 @@ class EvaluatorOnly(CandidateEvaluator):
         )
 
 
-def build_evaluator(config, *, runtime, scenario, environ):
+def build_evaluator(config, *, runtime, training_runtime, scenario, environ):
     del runtime
     token_env = config.get("token_env")
     return CheckpointEvaluator(
@@ -69,11 +69,11 @@ def build_evaluator(config, *, runtime, scenario, environ):
     )
 
 
-def build_evaluator_only(config, *, runtime, scenario, environ):
+def build_evaluator_only(config, *, runtime, training_runtime, scenario, environ):
     del runtime, scenario, environ
     return EvaluatorOnly(score=float(config["score"]))
 
 
-def build_invalid(config, *, runtime, scenario, environ):
+def build_invalid(config, *, runtime, training_runtime, scenario, environ):
     del config, runtime, scenario, environ
     return object()

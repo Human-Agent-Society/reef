@@ -12,7 +12,7 @@ from threading import Event
 from typing import Any
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOProcessor
@@ -108,7 +108,7 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
     assert recipe_class_for(reference) is SAORecipe
     assert recipe_class_for("sao") is None
 
-    recipe = build_recipe(reference, {}, runtime=_StubTrainingRuntime())
+    recipe = build_recipe(reference, {}, **runtime_bindings(_StubTrainingRuntime()))
 
     assert isinstance(recipe, SAORecipe)
     assert recipe.name == "sao"
@@ -116,7 +116,7 @@ def test_sao_recipe_resolves_by_dotted_reference() -> None:
 
 @pytest.mark.unit
 def test_sao_recipe_defaults_are_reef_side_only() -> None:
-    recipe = SAORecipe(_StubTrainingRuntime())
+    recipe = SAORecipe(**runtime_bindings(_StubTrainingRuntime()))
 
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only batching and checkpoint cadence.
@@ -132,7 +132,7 @@ def test_sao_recipe_reads_reef_side_config() -> None:
             "data": {"batch_size": 2},
             "artifact": {"checkpoint_every_n_versions": 4},
         },
-        runtime=_StubTrainingRuntime(),
+        **runtime_bindings(_StubTrainingRuntime()),
     )
 
     assert recipe.batch_size == 2
@@ -147,7 +147,7 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
         SAORecipe.from_environment(
             {},
             config={"optimization": {"eps_low": 0.8}},
-            runtime=_StubTrainingRuntime(),
+            **runtime_bindings(_StubTrainingRuntime()),
         )
 
 
@@ -363,7 +363,9 @@ class _StubTrainingRuntime(StubTrainingRuntime):
     def serving_runtime_load_id(self):
         return self._served_version
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         assert isinstance(batch, PolicyBatch)
         sample = batch.samples[0]
         prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
@@ -428,7 +430,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        SAORecipe(runtime),
+        SAORecipe(**runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -471,7 +473,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
                 },
             }
         },
-        runtime=runtime,
+        **runtime_bindings(runtime),
     )
     dispatcher = Dispatcher(
         recipe,
@@ -511,7 +513,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        SAORecipe(runtime, checkpoint_strategy=EveryNVersions(99)),
+        SAORecipe(**runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -550,7 +552,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            SAORecipe(runtime),
+            SAORecipe(**runtime_bindings(runtime)),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,

@@ -9,7 +9,7 @@ from typing import Any
 
 from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
 from reef.runtime.executor import Executor
 
 
@@ -17,13 +17,12 @@ class TrainingRuntimeError(ReefError):
     """Raised when a training backend violates the runtime contract."""
 
 
-class TrainingGroupHandle(TrainingRuntime, ABC):
+class TrainingGroupHandle(ABC):
     """Train group handle: the transport-independent training backend contract.
 
-    Implements the independent TrainingRuntime and also exposes the existing
-    remote publication connection. Only ModelRuntime calls those additional
-    serving/commit methods; they are not required by TrainingRuntime. Backends
-    keep their actor groups and payload formats private.
+    Legacy transport used by the separate training and inference adapters.
+    It is not a runtime or a recipe-facing interface. Backends keep their
+    actor groups and payload formats private.
     """
 
     reconnects = False
@@ -51,6 +50,17 @@ class TrainingGroupHandle(TrainingRuntime, ABC):
     def acknowledge_training_commit(self, training_job_id: str) -> None:
         """Acknowledge Reef's durable commit for an activated candidate."""
         ...
+
+    @abstractmethod
+    def prepare_training_step(
+        self, batch: TrainingBatch, step_preparer: str, algorithm_state: Mapping[str, Any]
+    ) -> PreparedTrainingStep: ...
+
+    @abstractmethod
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult: ...
+
+    def shutdown(self) -> None:
+        return
 
 
 class ExecutorTrainGroupHandle(TrainingGroupHandle):
@@ -123,3 +133,64 @@ class ExecutorTrainGroupHandle(TrainingGroupHandle):
     def shutdown(self) -> None:
         """Release the executor; its ownership policy protects attached workers."""
         self._executor.shutdown()
+
+
+def training_job_status(handle: TrainingGroupHandle) -> Mapping[str, Any]:
+    health = handle.health()
+    if not isinstance(health, Mapping):
+        raise TrainingRuntimeError(f"train group handle returned invalid health: {type(health).__name__}")
+    healthy = health.get("ok")
+    if healthy is not None and not isinstance(healthy, bool):
+        raise TrainingRuntimeError("train group returned malformed health status")
+    # A group that reports its failure as recoverable is retried through
+    # the normal reconciliation path instead of being declared dead.
+    if healthy is False and health.get("recoverable") is not True:
+        phase = health.get("phase")
+        detail = f" in phase {phase!r}" if isinstance(phase, str) and phase else ""
+        raise TrainingRuntimeError(f"train group is unhealthy{detail}")
+    status = health.get("training_job")
+    if not isinstance(status, Mapping):
+        raise TrainingRuntimeError("train group health is missing training_job status")
+    deferred = status.get("deferred_weight_update")
+    colocate = health.get("colocate", False)
+    lora_adapter = health.get("lora_adapter")
+    state = status.get("status", "COMPLETE")
+    if deferred is not True:
+        raise TrainingRuntimeError("Reef requires deferred serving-weight updates")
+    if not isinstance(colocate, bool) or not isinstance(state, str):
+        raise TrainingRuntimeError("train group returned malformed training-job status")
+    if lora_adapter is not None and (not isinstance(lora_adapter, str) or not lora_adapter):
+        raise TrainingRuntimeError("train group returned a malformed serving adapter name")
+    lora_mode = health.get("lora_mode")
+    if lora_mode is not None and lora_mode not in {"shared", "scenario"}:
+        raise TrainingRuntimeError(f"train group returned unknown LoRA mode: {lora_mode!r}")
+    lora_adapters = health.get("lora_adapters")
+    if lora_adapters is not None and not isinstance(lora_adapters, Mapping):
+        raise TrainingRuntimeError("train group returned malformed per-scenario adapters")
+    adapter_residency = health.get("adapter_residency")
+    if adapter_residency is not None and not isinstance(adapter_residency, Mapping):
+        raise TrainingRuntimeError("train group returned malformed adapter residency")
+    if "commit_acknowledged" in status and not isinstance(status["commit_acknowledged"], bool):
+        raise TrainingRuntimeError("train group returned malformed commit acknowledgement")
+    if state not in {
+        "IDLE",
+        "RUNNING",
+        "CHECKPOINT",
+        "UPDATING_WEIGHTS",
+        "READY_TO_COMMIT",
+        "HEAD_COMMITTED",
+        "COMPLETE",
+        "REJECTED",
+        "REJECTING",
+    }:
+        raise TrainingRuntimeError(f"train group returned unknown training-job status: {state!r}")
+    return {
+        "inference_url": health.get("inference_url"),
+        **dict(status),
+        "serving_healthy": healthy is not False and health.get("phase") != "recovering",
+        "colocate": colocate,
+        "lora_adapter": lora_adapter,
+        "lora_mode": lora_mode,
+        "lora_adapters": dict(lora_adapters) if lora_adapters else {},
+        "adapter_residency": dict(adapter_residency) if adapter_residency is not None else None,
+    }

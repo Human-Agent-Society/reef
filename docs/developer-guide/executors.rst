@@ -1,8 +1,9 @@
 Worker executors
 ================
 
-Reef separates service orchestration and model semantics from worker execution. The runtime owns
-candidate checkpoints, serving admission, activation and commit acknowledgement.
+Reef separates service orchestration and model semantics from worker execution. Training and inference runtimes own
+checkpoint production and serving respectively; the existing training backend
+coordinates activation with durable commit acknowledgement.
 An ``Executor`` owns worker launch, ordered control RPC, health and shutdown.
 The interface follows vLLM's executor pattern: configuration selects a concrete
 class, while callers use the same methods for each backend.
@@ -16,7 +17,8 @@ class, while callers use the same methods for each backend.
        SE --> CW[Custom executor]
        LW --> SV[Inference / training driver / Reef]
        RW --> SV
-       R[ExecutorModelRuntime] --> H[TrainingGroupHandle]
+       T[ExecutorTrainingRuntime] --> H[TrainingGroupHandle]
+       R[ExecutorInferenceRuntime] --> H
        H --> C[Coordinator Executor]
        C --> B[Training coordinator / Slime bridge]
        B --> G[SlimeTrainGroup: train, checkpoint, publish]
@@ -142,9 +144,9 @@ Training runtime configuration
 ------------------------------
 
 Existing ``type: ray_training`` configurations keep discovering a named Ray
-bridge in the selected namespace. ``RayRuntime`` and ``RayTrainGroupHandle``
-remain compatibility aliases for ``ExecutorModelRuntime`` and
-``TrainingGroupHandle``.
+bridge in the selected namespace and return separate ``ExecutorTrainingRuntime``
+and ``ExecutorInferenceRuntime`` instances. ``RayTrainGroupHandle`` remains a
+compatibility alias for ``TrainingGroupHandle``.
 
 For a custom coordinator, ``executor_training`` creates its executor from
 configuration. The selected worker implements ``TrainingGroupHandle``'s RPC

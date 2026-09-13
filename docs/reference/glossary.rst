@@ -162,7 +162,7 @@ Runtime
 
 ``InferenceRuntime`` executes inference requests and owns admission;
 ``TrainingRuntime`` prepares training jobs and exports checkpoints. They are
-independent components. ``ModelRuntime`` composes both and coordinates
+independent components. The existing ``RuntimeTrainingBackend`` coordinates
 candidate activation, publication and recovery for weight recipes. Concrete
 backend integrations implement the component operations.
 

@@ -1,7 +1,7 @@
 """Ray connection adapter for the executor-independent training runtime.
 
 The historical Ray runtime names remain aliases for compatibility. Ray owns
-actor discovery here; training semantics live in ExecutorModelRuntime and
+actor discovery here; training semantics live in ExecutorTrainingRuntime and
 worker control RPC lives in RayExecutor.
 """
 
@@ -10,12 +10,13 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_option
-from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
-from reef.runtime.base import ModelRuntime
+from reef.runtime.adapters.executor_runtime import connect_executor_runtimes
+from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
@@ -24,7 +25,6 @@ from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_r
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
-RayRuntime = ExecutorModelRuntime
 RayRuntimeError = TrainingRuntimeError
 RayTrainGroupHandle = TrainingGroupHandle
 
@@ -118,8 +118,8 @@ def connect_ray_runtime(
     max_staleness: int = 0,
     inference_backend_factory: InferenceBackendFactory = build_http_inference_backend,
     inference_backend_config: Mapping[str, Any] | None = None,
-) -> RayRuntime:
-    """Connect to a named training actor and return a ready :class:`RayRuntime`.
+) -> tuple[TrainingRuntime, InferenceRuntime]:
+    """Connect to a named training actor and return separate training and inference runtimes.
 
     Reef and the backend run as separate services in one Ray cluster.
     ``namespace`` must match the namespace used when the backend actor was
@@ -129,7 +129,7 @@ def connect_ray_runtime(
     if not ray.is_initialized():
         ray.init(address=ray_address or "auto", namespace=namespace)
     # A training step legitimately outlasts an inference request.
-    return RayRuntime(
+    return connect_executor_runtimes(
         train_group_handle=NamedRayTrainGroupHandle(
             actor_name,
             namespace,
@@ -154,7 +154,7 @@ class RayRuntimeSettings(TrainingRuntimeSettings):
 
 @register_runtime_kind
 class RayTrainingRuntimeFactory(RuntimeFactory):
-    """Build (connect) a :class:`RayRuntime` from a runtime config section.
+    """Build separate training and inference runtimes from runtime configuration.
 
     The config mirrors :func:`connect_ray_runtime`'s keyword arguments. A
     ``connect`` entry may inject an alternative connector callable (tests use
@@ -179,7 +179,7 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> ModelRuntime:
+    ) -> tuple[TrainingRuntime, InferenceRuntime]:
         connect = config.get("connect", connect_ray_runtime)
         if not callable(connect):
             raise RuntimeConfigError("runtime.connect must be callable")
@@ -198,6 +198,16 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
             if key in config:
                 kwargs[key] = config[key]
         runtime = connect(**kwargs)
-        if not isinstance(runtime, ModelRuntime):
-            raise RuntimeConfigError(f"runtime connector returned {type(runtime).__name__}, not a ModelRuntime")
+        if not (
+            isinstance(runtime, tuple)
+            and len(runtime) == 2
+            and isinstance(runtime[0], TrainingRuntime)
+            and isinstance(runtime[1], InferenceRuntime)
+        ):
+            for component in runtime if isinstance(runtime, tuple) else (runtime,):
+                with suppress(Exception):
+                    component.shutdown()
+            raise RuntimeConfigError(
+                f"runtime connector returned {type(runtime).__name__}, not a (TrainingRuntime, InferenceRuntime) pair"
+            )
         return runtime

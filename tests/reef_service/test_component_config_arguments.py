@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 import yaml
+from reef_service.runtime_stubs import runtime_bindings, runtime_fixture
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
@@ -163,11 +164,11 @@ def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
         {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:runtime"}}},
         ["--reef.data.label", "001", "--reef.runtime.label", "true", "--no-reef.runtime.enabled"],
     )
-    runtime = RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={})
+    runtime = runtime_fixture(RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={}))
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
     assert runtime.parsed_config["type"] == "reef_config_extension:runtime"
-    recipe = ExtensionServingRecipe.from_environment({}, config=config["reef"], runtime=runtime)
+    recipe = ExtensionServingRecipe.from_environment({}, config=config["reef"], **runtime_bindings(runtime))
     assert recipe.label == "001"
 
 
@@ -175,7 +176,9 @@ def test_unknown_declared_recipe_and_runtime_fields_are_rejected(extension):
     with pytest.raises(RecipeConfigError, match=r"reef\.typo"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training", "typo": 4}})
     with pytest.raises(RuntimeConfigError, match=r"unknown config fields.*typo"):
-        RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
+        runtime_fixture(
+            RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
+        )
 
 
 def test_executor_aliases_preserve_profile_and_parse_resources(extension):
@@ -274,7 +277,8 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
     def connect(**kwargs):
         assert len(resolved) == 1
         assert kwargs["max_staleness"] == resolved[0]["max_staleness"]
-        return StubTrainingRuntime(max_staleness=kwargs["max_staleness"])
+        training = StubTrainingRuntime(max_staleness=kwargs["max_staleness"])
+        return training, training.inference
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
     settings = ServiceConfig(

@@ -11,7 +11,7 @@ import threading
 import time
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import (
     Artifact,
@@ -44,7 +44,9 @@ class CountingRuntime(StubTrainingRuntime):
     def inference_backend(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         del batch, step_preparer
         return PreparedTrainingStep(
             action="train",
@@ -151,7 +153,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -192,7 +194,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

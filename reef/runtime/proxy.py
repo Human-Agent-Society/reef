@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from reef.runtime.base import InferenceRuntime, ModelRuntime
+from reef.runtime.base import InferenceRuntime
 from reef.runtime.registry import RuntimeRegistry
 
 
 def resolve_proxy_runtime(
     values: Mapping[str, str],
-    runtime: InferenceRuntime | ModelRuntime | None,
-) -> InferenceRuntime | ModelRuntime | None:
+    runtime: InferenceRuntime | None,
+) -> InferenceRuntime | None:
     """Prefer an injected runtime, else build a proxy from environment values.
 
     Construction goes through the runtime registry's ``inference_proxy`` kind,
@@ -30,11 +30,15 @@ def resolve_proxy_runtime(
     timeout_raw = _env_value(values, "REEF_INFERENCE_TIMEOUT_S")
     if timeout_raw is not None:
         config["timeout_s"] = float(timeout_raw)
-    return RuntimeRegistry().build(
+    built = RuntimeRegistry().build(
         config,
         model_path=_env_value(values, "REEF_MODEL_PATH") or "",
         environ=values,
     )
+
+    if not isinstance(built, InferenceRuntime):
+        raise TypeError("inference proxy factory must return an InferenceRuntime")
+    return built
 
 
 def _env_value(values: Mapping[str, str], name: str) -> str | None:

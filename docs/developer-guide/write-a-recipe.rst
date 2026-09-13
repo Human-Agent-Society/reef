@@ -289,7 +289,7 @@ HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
   It must not download models, allocate devices or construct a runtime.
 * ``runtime_config(settings, *, max_staleness, connector=None)`` returns the
   configuration consumed by ``RuntimeRegistry`` in the HTTP process. The
-  result must construct a ``ModelRuntime``. ``connector`` is an optional
+  result must construct a ``(TrainingRuntime, InferenceRuntime)`` pair. ``connector`` is an optional
   legacy connection injection; an in-process backend rejects it.
 
 The Slime implementation in ``reef/train/slime_backend/launch.py`` owns the
@@ -324,7 +324,7 @@ fail explicitly, without falling back to Slime. Do not introduce a separate
 user-facing runtime selector for weight training: runtime wiring belongs to
 the selected backend. Method dependencies remain the Recipe's responsibility.
 
-Weight recipes use ``RuntimeTrainingBackend`` to adapt any ``ModelRuntime``
-to the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
+Weight recipes pass their separate ``training_runtime`` and inference ``runtime``
+to ``RuntimeTrainingBackend``, which coordinates the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
 an alias. Experiment metadata now reports ``RuntimeTrainingBackend`` and the
 actual runtime class instead of labeling all weight training as Slime.

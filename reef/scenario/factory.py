@@ -236,6 +236,7 @@ class ScenarioFactory:
                 binding=ScenarioBinding(
                     surface=surface,
                     runtime=runtime,
+                    training_runtime=recipe.training_runtime,
                     inference_backend=recipe.inference_backend,
                     artifact_validator=recipe.build_artifact_validator(),
                     report_type=trainer.report_type,

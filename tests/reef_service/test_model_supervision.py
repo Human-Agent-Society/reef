@@ -5,8 +5,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
-from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
 from reef.runtime.adapters.ray_runtime import NamedRayTrainGroupHandle
 from reef.runtime.sglang.service import RayHealthProbe
 from reef.service.training_driver import ModelDeployment, supervise_deployment
@@ -114,7 +114,7 @@ class ReconnectingHandle(FakeTrainGroupHandle):
 def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gate():
     async def run():
         handle = ReconnectingHandle()
-        runtime = ExecutorModelRuntime(train_group_handle=handle)
+        runtime = ExecutorRuntimeFixture(train_group_handle=handle)
         backend = runtime.inference_backend
         handle.endpoint = "http://replacement/"
         admission = await runtime.acquire_inference()
@@ -141,9 +141,9 @@ def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gat
 
 def test_explicit_endpoint_is_not_replaced():
     handle = ReconnectingHandle()
-    runtime = ExecutorModelRuntime(train_group_handle=handle, inference_url="http://gateway")
+    runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://gateway")
     handle.endpoint = "http://replacement"
-    runtime._training_job_status()
+    runtime.inference_runtime.serving_runtime_load_id()
     assert runtime.base_url == "http://gateway"
 
 

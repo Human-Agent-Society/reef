@@ -21,6 +21,7 @@ from reef.runtime.sglang.service import RayHealthProbe
 from reef.runtime.training_job.marker import read_marker, write_marker
 from reef.runtime.training_job.publication import TrainingPublication
 from reef.service.training_driver import run_deployment
+from reef.train.runtime_backend import RuntimeTrainingBackend
 from reef.train.slime_backend.resources import SlimeDeploymentHealth, SlimeDeploymentResources
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
@@ -289,7 +290,8 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
     import psutil
 
     ray, namespace = deployment.ray, deployment.namespace
-    runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
+    training, runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
+    RuntimeTrainingBackend(training, "sft", inference_runtime=runtime)
     backend = runtime.inference_backend
 
     async def infer():
@@ -325,6 +327,7 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
             assert runtime.inference_backend is backend
             assert ray.is_initialized()
         runtime.shutdown()
+        training.shutdown()
 
     asyncio.run(exercise())
 
@@ -343,7 +346,10 @@ def test_running_marker_stops_automatic_recovery_and_clears_readiness(deployment
 
 
 def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployment):
-    runtime = connect_ray_runtime(actor_name="training", namespace=deployment.namespace, inference_timeout_s=30)
+    training, runtime = connect_ray_runtime(
+        actor_name="training", namespace=deployment.namespace, inference_timeout_s=30
+    )
+    coordinator = RuntimeTrainingBackend(training, "sft", inference_runtime=runtime)
     path = deployment.directory / "job.json"
     marker = read_marker(path)
     (deployment.directory / "checkpoint.json").write_text(json.dumps({"version": "checkpoint:2"}))
@@ -369,12 +375,13 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
         assert read_marker(path)["status"] == "READY_TO_COMMIT"
         serving = json.loads((deployment.directory / "serving.json").read_text())
         assert serving == {"paused": True, "version": "checkpoint:2"}
-        await asyncio.to_thread(runtime.reconcile_training_job, 2, committed_training_job_id="next-job")
+        await asyncio.to_thread(coordinator.recover_pending_step, 2, committed_training_job_id="next-job")
         (await asyncio.wait_for(pending, timeout=10)).release()
         assert read_marker(path)["status"] == "COMPLETE"
         assert json.loads((deployment.directory / "serving.json").read_text())["paused"] is False
         assert runtime.current_runtime_load_id() == "checkpoint:2"
         runtime.shutdown()
+        training.shutdown()
 
     asyncio.run(check_gate())
 

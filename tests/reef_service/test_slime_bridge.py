@@ -1155,7 +1155,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
         manager,
         batch_processor=manager,
         save_hf_template=template,
-        storage_config=RetentionConfig(max_storage_bytes=pair_bytes),
+        storage_config=RetentionConfig(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
         megatron_save_root=str(megatron_root),
         source_hf=str(source_hf),
         source_megatron=str(source_megatron),

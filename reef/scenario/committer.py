@@ -179,6 +179,7 @@ class ScenarioCommitter:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
                 self._reconcile_recorded_artifact(recorded)
                 self._settle_trainer_commit(prepared, recorded, next_step)
+                self._resume_restored_weights()
                 return recorded.artifact_ref
             if self._store.durable:
                 self._synchronize_checkpoint()
@@ -186,6 +187,11 @@ class ScenarioCommitter:
             durable = self._store.durable
             surface = self._binding.surface
             self._binding.artifact_validator.validate(source)
+            if self._binding.training_runtime is not None:
+                if self._binding.runtime is None:
+                    raise ReefError("training checkpoint restore requires an inference runtime")
+                self._binding.runtime.pause_admission()
+                self._binding.training_runtime.restore_checkpoint(source)
             if surface.loader is not None:
                 surface.loader.load(source, self._binding.runtime)
             staged = artifacts.stage(next_step, source, parent=checkpoint)
@@ -236,7 +242,13 @@ class ScenarioCommitter:
                 artifacts.discard(staged)
                 raise
             self._settle_trainer_commit(prepared, record, next_step)
+            self._resume_restored_weights()
             return published_ref
+
+    def _resume_restored_weights(self) -> None:
+        if self._binding.training_runtime is not None and self._binding.runtime is not None:
+            self._binding.runtime.mark_published()
+            self._binding.runtime.resume_admission()
 
     def commit(self, result: TrainStepResult) -> Any:
         """Commit a pending training result as one atomic version record."""

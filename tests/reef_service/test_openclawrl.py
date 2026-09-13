@@ -6,7 +6,7 @@ import json
 import time
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
@@ -314,7 +314,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 @pytest.mark.unit
 def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
-    recipe = OpenClawRLRecipe(StubTrainingRuntime(), batch_size=4)
+    recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=4)
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
@@ -330,7 +330,7 @@ def test_recipe_reads_config() -> None:
     configured = OpenClawRLRecipe.from_environment(
         {},
         config={"data": {"batch_size": 2, "prm_timeout_s": 3600.0}},
-        runtime=StubTrainingRuntime(),
+        **runtime_bindings(StubTrainingRuntime()),
     )
     assert configured.batch_size == 2
     assert configured.prm_timeout_s == 3600.0
@@ -339,7 +339,7 @@ def test_recipe_reads_config() -> None:
 @pytest.mark.unit
 def test_recipe_requires_the_tokenizer_next_to_prm_url() -> None:
     with pytest.raises(ValueError, match="prm_tokenizer_path"):
-        OpenClawRLRecipe(StubTrainingRuntime(), prm_url="http://prm:23001")
+        OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_url="http://prm:23001")
 
 
 @pytest.mark.unit
@@ -641,6 +641,6 @@ def test_retired_openclawrl_fields_are_accepted_and_ignored(caplog) -> None:
     from recipes.openclawrl import OpenClawRLRecipe
 
     with caplog.at_level("WARNING"):
-        recipe = OpenClawRLRecipe(StubTrainingRuntime(), prm_teacher_timeout_s=5.0)
+        recipe = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), prm_teacher_timeout_s=5.0)
     assert recipe.prm_teacher_timeout_s == 5.0
     assert "prm_teacher_timeout_s is deprecated and ignored" in caplog.text

@@ -17,7 +17,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings, training_backend
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -37,7 +37,6 @@ from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.slime_backend.backend import SlimeTrainingBackend
 
 from ._policy_recipe import TestPolicyRecipe
 from ._threshold_processor import ThresholdProcessor
@@ -348,7 +347,9 @@ class RecordingRuntime(StubTrainingRuntime):
     def inference_backend(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         del step_preparer
         payload = {
             "rollout_id": scenario_step,
@@ -419,7 +420,7 @@ def build_training_dispatcher(
 ):
     return Dispatcher(
         TestPolicyRecipe(
-            runtime,
+            **runtime_bindings(runtime),
             batch_size=1,
             checkpoint_strategy=(checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1000)),
         ),
@@ -616,7 +617,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             processor_factory=lambda context: ProtectAllProcessor(
                 context.with_config({"batch_size": self.batch_size, "min_score": self.min_score})
             ),
-            training_backend=SlimeTrainingBackend(self.runtime, "sft"),
+            training_backend=training_backend(self.training_runtime, "sft"),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -636,7 +637,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = lambda runtime: (  # noqa: E731
         ProtectAllPolicyRecipe(
-            runtime,
+            **runtime_bindings(runtime),
             batch_size=1,
             checkpoint_strategy=EveryNVersions(1000),
         )
@@ -1015,7 +1016,7 @@ def build_harness_evolve_dispatcher(
     tasks=("task one",),
     agent_record_dir=None,
 ):
-    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, runtime=runtime)
+    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, **runtime_bindings(runtime))
     return Dispatcher(
         recipe,
         backend_factory,

@@ -10,13 +10,14 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service.runtime_stubs import runtime_bindings
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe, RecipeConfigError
-from reef.runtime.base import ModelRuntime
+from reef.runtime.base import TrainingRuntime
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import PreparedStep
@@ -935,10 +936,12 @@ def test_the_dispatched_training_thread_skips_a_failed_instruction(tmp_path):
                 training_mode=self.training_mode,
             )
 
-    dispatcher = _dispatcher(tmp_path, DispatchedRecipe(runtime=StubTrainingRuntime(), training_mode="manual"))
+    dispatcher = _dispatcher(
+        tmp_path, DispatchedRecipe(**runtime_bindings(StubTrainingRuntime()), training_mode="manual")
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("s")
-        assert isinstance(scenario.runtime, ModelRuntime)
+        assert isinstance(scenario.training_runtime, TrainingRuntime)
         dispatcher.accept_record(instruction("one"))
         assert _wait(lambda: _committed_skip(dispatcher, "one") == "instruction failed")
         assert calls == ["one"]

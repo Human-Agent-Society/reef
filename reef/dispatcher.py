@@ -34,7 +34,7 @@ from reef.observability import (
 )
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime.base import ModelRuntime, RuntimeContractError
+from reef.runtime.base import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
@@ -120,7 +120,7 @@ class Dispatcher:
 
     Invariant: at most one weight-training scenario per process. Its serial
     thread is bound to the first scenario using the deployment's
-    ``ModelRuntime``; resolving a second raises (enforced in
+    ``TrainingRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
     The dispatcher owns its recipe's runtime and closes it after all scenarios.
@@ -213,7 +213,7 @@ class Dispatcher:
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
-        if isinstance(current.runtime, ModelRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
         elif current.trainer.training_backend is not None:
             self._start_local_backend_worker(current.name)
@@ -392,7 +392,7 @@ class Dispatcher:
         stored = appended.item
         if not appended.inserted:
             return stored
-        if isinstance(current.runtime, ModelRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
             return stored
         if current.trainer.training_backend is not None:
@@ -698,10 +698,10 @@ class Dispatcher:
         current = self._registry.get_optional(name)
         if current is None:
             raise RuntimeContractError(f"training thread is not bound to scenario {name!r}")
-        runtime = current.runtime
-        if not isinstance(runtime, ModelRuntime):
+        runtime = current.training_runtime
+        if not isinstance(runtime, TrainingRuntime):
             raise RuntimeContractError(
-                f"training thread requires a ModelRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
+                f"training thread requires a TrainingRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
             )
         self._record_training_error(current.name, None)
         # A crash may leave remote serving updated but paused after Reef's
@@ -855,16 +855,18 @@ class Dispatcher:
             # A version is current only after Reef commits its head
             # and reopens admission. The backend may report it
             # earlier while the update is still being published.
-            "current_runtime_load_id": (
-                runtime.current_runtime_load_id() if isinstance(runtime, ModelRuntime) else None
-            ),
+            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
             "training_mode": current.trainer.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
-        if isinstance(runtime, ModelRuntime) and runtime.concurrent_training_scenarios:
+        if (
+            runtime is not None
+            and current.training_runtime is not None
+            and current.training_runtime.concurrent_training_scenarios
+        ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
         return block
 
@@ -930,10 +932,13 @@ class Dispatcher:
         except BaseException as exc:
             errors.append(exc)
         if self._recipe.runtime is not None:
-            try:
-                self._recipe.runtime.shutdown()
-            except BaseException as exc:
-                errors.append(exc)
+            self._recipe.runtime.pause_admission()
+        for component in (self._recipe.training_runtime, self._recipe.runtime):
+            if component is not None:
+                try:
+                    component.shutdown()
+                except BaseException as exc:
+                    errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:

@@ -57,7 +57,7 @@ for every scenario in a deployment.
 .. code:: text
 
    Recipe                       record-only by default   reef.recipe
-   ├── WeightTrainingRecipe     step preparer, loss family, ModelRuntime
+   ├── WeightTrainingRecipe     step preparer, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
@@ -94,9 +94,11 @@ Common members
 | ``name``                                          | ``str``                     | instance field; the default    |
 |                                                   |                             | registry key                   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``runtime``                                       | ``InferenceRuntime``,       | narrowed to a required         |
-|                                                   | ``ModelRuntime`` or         | ``ModelRuntime`` by            |
-|                                                   | ``None``                    | ``WeightTrainingRecipe``       |
+| ``runtime``                                       | ``InferenceRuntime`` or     | required inference component   |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
++---------------------------------------------------+-----------------------------+--------------------------------+
+| ``training_runtime``                              | ``TrainingRuntime`` or      | required training component    |
+|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
 |                                                   |                             | ``EveryNVersions(1)``          |
@@ -862,33 +864,41 @@ is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
 
-Runtime composition
--------------------
+Runtime responsibilities
+------------------------
 
-``InferenceRuntime`` and ``TrainingRuntime`` are independent interfaces.
-``InferenceRuntime`` provides request execution, endpoint reconnection and
-admission. ``TrainingRuntime`` provides ``health``, ``prepare_training_step``,
-``execute_training_job`` and ``shutdown``; executing training exports a durable
-checkpoint without activating it in inference.
+``TrainingRuntime`` and ``InferenceRuntime`` are independent interfaces. Neither
+inherits from the other, and there is no aggregate runtime.
 
-``ModelRuntime`` is the unified entry point used by weight recipes. It composes
-``inference: InferenceRuntime`` and ``training: TrainingRuntime``, and owns
-candidate activation/rejection, version tracking and durable commit
-reconciliation. Its inference methods delegate to the composed component, so
-both entry points share one admission gate. Component methods are backend
-operations; applications should use the model coordinator for training and
-publication ordering.
+* ``TrainingRuntime`` prepares batches, produces candidate checkpoints, rejects
+  candidates and restores training weights/optimizer state. It receives serving
+  versions as values; it does not own an inference endpoint or request backend.
+* ``InferenceRuntime`` executes requests, manages admission and reconnection,
+  loads selected weights or adapters, and reports serving versions. It restores
+  serving weights without restoring optimizer state.
+* The existing ``RuntimeTrainingBackend`` coordinates both: prepare/train,
+  evaluate, activate or reject, then acknowledge publication after Reef's durable
+  commit. ``ScenarioCommitter`` coordinates rollback across both runtimes and
+  commits the restored artifact before reopening inference.
 
-``ExecutorModelRuntime`` implements this coordination through the existing
-``TrainingGroupHandle`` control connection. That handle implements training
-execution and additionally exposes remote publication RPCs; these extra
-methods are not part of ``TrainingRuntime``. Native weight transport remains
-integration-specific. Splitting these Python contracts does not enable a new
-training/inference backend combination by itself.
+Weight recipes hold ``training_runtime: TrainingRuntime`` and
+``runtime: InferenceRuntime`` separately. Construction is explicit:
 
-Migration: subclasses of the former combined ``TrainingRuntime`` now extend
-``ModelRuntime`` and supply separate inference and training components to its
-constructor. ``ExecutorTrainingRuntime`` is renamed to ``ExecutorModelRuntime``.
-The ``RayRuntime`` alias and ``executor_training`` / ``ray_training`` config
-kinds remain available. Configuration, control RPCs and stored artifacts retain
-their existing formats.
+.. code:: python
+
+   recipe = SAORecipe(training_runtime=training, runtime=inference)
+
+Training deployment factories return ``(training_runtime, inference_runtime)``;
+inference-only factories return an ``InferenceRuntime``. ``connect_ray_runtime``
+and ``connect_executor_runtimes`` return the same pair.
+``ExecutorTrainingRuntime`` and ``ExecutorInferenceRuntime`` use the existing
+``TrainingGroupHandle`` control connection for their respective operations. That
+legacy RPC connection still exposes both training and publication operations;
+it is not a public runtime or a new backend-neutral weight transport.
+
+Migration: split implementations of the former combined training runtime into
+these two interfaces and inject both into the recipe. The aggregate runtime
+classes and the ``RayRuntime`` alias are removed. The ``executor_training`` and
+``ray_training`` config kinds, control RPCs and stored artifact formats remain
+unchanged. Adding another backend combination still requires compatible native
+weight transport and recovery behavior.
