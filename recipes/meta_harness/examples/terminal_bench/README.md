@@ -1,8 +1,8 @@
 # Meta-Harness on Terminal-Bench
 
-Run the [Meta-Harness recipe](../../README.md) on all 89 tasks in the pinned
-Terminal-Bench 2 revision. The [retained comparison](../../RESULTS.md) measured
-the 30-task hard subset at that same revision.
+Run the [Meta-Harness recipe](../../README.md) on the full pinned
+Terminal-Bench 2 suite. See the [retained comparison](../../RESULTS.md) for
+the recorded reproduction results.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
 module. The proposer rewrites that module, retains every valid candidate, and
 selects only strict improvements over the best recorded mean score.
@@ -58,7 +58,7 @@ export E2B_API_KEY=...
 # Small live wiring check: one task, one repeat, one candidate.
 ./run.sh --task extract-elf --iterations 1 --repeats 1
 
-# All 89 tasks, two repeats, up to four new candidates.
+# The full suite, two repeats, up to four new candidates.
 ./run.sh
 ```
 
@@ -101,7 +101,7 @@ as zero; a rollout that cannot launch stops the driver before a proposal.
 No infrastructure failure is automatically replaced with another trial.
 
 Four accepted candidate proposals cost at most 1,424 gate episodes
-(`4 x 2 sides x 89 tasks x 2 repeats`), plus one feedback rollout per proposal
+(`4 candidates x 2 sides x suite size x 2 repeats`), plus one feedback rollout per proposal
 attempt. Invalid and duplicate proposals can consume attempts without a
 gate; the default limit is eight attempts and therefore eight feedback
 rollouts. Here "accepted" means admitted for evaluation: a candidate need
@@ -135,11 +135,11 @@ commit cannot advance the search or publish a summary for that step.
 ## Distance from the recorded protocol
 
 - The dataset revision matches the retained comparison, but this example
-  defaults to all 89 tasks instead of its 30-task hard subset. The
+  defaults to the full suite instead of the hard subset. The
   [manifest](harness/tasks.json) lists every top-level task directory with a
   `task.toml` at the pinned upstream revision. The task files are fetched from
   upstream, not copied into Reef; the historical scores apply only to the
-  30-task subset.
+  recorded subset.
 - The historical runner measured the baseline once and each new candidate
   once. This example uses Reef's paired gate: the first gate supplies the
   baseline measurement, and later gates remeasure the incumbent even though
