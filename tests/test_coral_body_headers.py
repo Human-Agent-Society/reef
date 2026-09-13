@@ -102,3 +102,60 @@ def test_body_mirroring_can_be_disabled(tmp_path):
     )
     _run(mw, json.dumps({"messages": []}).encode(), CORAL_HEADERS)
     assert "extra_headers" not in json.loads(downstream.body)
+
+
+class StreamingDownstream:
+    """Reads the body, then polls receive() for the client disconnect the way
+    Starlette's StreamingResponse does while it streams."""
+
+    def __init__(self):
+        self.disconnect_seen = False
+        self.polls = 0
+
+    async def __call__(self, scope, receive, send):
+        while True:
+            message = await receive()
+            if not message.get("more_body"):
+                break
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        while self.polls < 50:
+            self.polls += 1
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                self.disconnect_seen = True
+                break
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+
+def test_receive_replay_passes_through_disconnect_after_the_body(tmp_path):
+    """Regression: fabricating empty http.request messages after the replay
+    starved a streaming response, which spins on receive() until disconnect."""
+    downstream = StreamingDownstream()
+    mw = ReefGatewayMiddleware(
+        downstream,
+        scenario="coral-demo",
+        journal=CallJournal(tmp_path / "j.jsonl"),
+        extra_tags={},
+    )
+
+    async def go():
+        messages = [
+            {"type": "http.request", "body": json.dumps({"messages": []}).encode(), "more_body": False},
+            {"type": "http.disconnect"},
+        ]
+
+        async def receive():
+            return messages.pop(0)
+
+        async def send(message):
+            pass
+
+        await mw(
+            {"type": "http", "method": "POST", "path": "/v1/chat/completions", "headers": list(CORAL_HEADERS)},
+            receive,
+            send,
+        )
+
+    asyncio.run(go())
+    assert downstream.disconnect_seen
+    assert downstream.polls == 1

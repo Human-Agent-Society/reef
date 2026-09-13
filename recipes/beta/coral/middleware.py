@@ -261,7 +261,12 @@ def _extra_headers_receive(receive: Any, reef_headers: Mapping[str, str], scope:
 
     async def replay() -> dict:
         if state["done"]:
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # After the rewritten body has been replayed, defer to the real
+            # receive. StreamingResponse runs listen_for_disconnect, which
+            # polls receive() until http.disconnect; fabricating empty
+            # http.request messages here spins that loop forever and starves
+            # the streaming response of the event loop.
+            return await receive()
         result = await buffered()
         state["done"] = True
         if result["passthrough"] is not None:
