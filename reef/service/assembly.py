@@ -22,7 +22,7 @@ from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 from reef.runtime.registry import RuntimeRegistry
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.service.app import InferenceRetryPolicy, create_app
@@ -73,7 +73,7 @@ def _connect_training_runtime(
     model_path: str,
     max_staleness: int,
     connector: Any = None,
-) -> TrainingRuntime:
+) -> ModelRuntime:
     """Build the selected integration's runtime, independently of its process topology."""
     TrainingRuntimeSettings(
         inference_timeout_s=settings.inference_timeout_s,
@@ -83,10 +83,10 @@ def _connect_training_runtime(
     backend = training_deployment_for(settings.training_backend)
     runtime_config = backend.runtime_config(asdict(settings), max_staleness=max_staleness, connector=connector)
     runtime = RuntimeRegistry().build(runtime_config, model_path=model_path)
-    if not isinstance(runtime, TrainingRuntime):
+    if not isinstance(runtime, ModelRuntime):
         with suppress(Exception):
             runtime.shutdown()
-        raise TypeError("training backend runtime factory must build a TrainingRuntime")
+        raise TypeError("training backend runtime factory must build a ModelRuntime")
     return runtime
 
 

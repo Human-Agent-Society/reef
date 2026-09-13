@@ -164,7 +164,7 @@ def test_naming_unification_renames_are_complete() -> None:
     assert not hasattr(Scenario, "algorithm")
     assert not hasattr(Scenario, "step_preparer")
     # Surface-side protocols use serving vocabulary without duplicating the
-    # concrete runtime package's InferenceRuntime / TrainingRuntime names.
+    # concrete runtime package's InferenceRuntime / ModelRuntime names.
     for name in ("SurfaceRuntime", "TrainingSurfaceRuntime", "ServingHost", "TrainingHost"):
         assert not hasattr(reef.surface.base, name)
     for name in ("ServingRuntime", "WeightRuntime"):

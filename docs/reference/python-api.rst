@@ -57,7 +57,7 @@ for every scenario in a deployment.
 .. code:: text
 
    Recipe                       record-only by default   reef.recipe
-   ├── WeightTrainingRecipe     step preparer, loss family, TrainingRuntime
+   ├── WeightTrainingRecipe     step preparer, loss family, ModelRuntime
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
@@ -94,9 +94,9 @@ Common members
 | ``name``                                          | ``str``                     | instance field; the default    |
 |                                                   |                             | registry key                   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``runtime``                                       | ``InferenceRuntime | None`` | narrowed to a required         |
-|                                                   |                             | ``TrainingRuntime`` by         |
-|                                                   |                             | ``WeightTrainingRecipe``       |
+| ``runtime``                                       | ``InferenceRuntime``,       | narrowed to a required         |
+|                                                   | ``ModelRuntime`` or         | ``ModelRuntime`` by            |
+|                                                   | ``None``                    | ``WeightTrainingRecipe``       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``checkpoint_strategy``                           | ``CheckpointStrategy``      | defaults to                    |
 |                                                   |                             | ``EveryNVersions(1)``          |
@@ -861,3 +861,34 @@ training job, admit an artifact, or mutate the release chain. Artifact admission
 is separate, through ``Recipe.build_artifact_validator()``. Native streaming
 behavior stays unchanged. A method should not add an HTTP proxy or copy Reef's
 record store.
+
+Runtime composition
+-------------------
+
+``InferenceRuntime`` and ``TrainingRuntime`` are independent interfaces.
+``InferenceRuntime`` provides request execution, endpoint reconnection and
+admission. ``TrainingRuntime`` provides ``health``, ``prepare_training_step``,
+``execute_training_job`` and ``shutdown``; executing training exports a durable
+checkpoint without activating it in inference.
+
+``ModelRuntime`` is the unified entry point used by weight recipes. It composes
+``inference: InferenceRuntime`` and ``training: TrainingRuntime``, and owns
+candidate activation/rejection, version tracking and durable commit
+reconciliation. Its inference methods delegate to the composed component, so
+both entry points share one admission gate. Component methods are backend
+operations; applications should use the model coordinator for training and
+publication ordering.
+
+``ExecutorModelRuntime`` implements this coordination through the existing
+``TrainingGroupHandle`` control connection. That handle implements training
+execution and additionally exposes remote publication RPCs; these extra
+methods are not part of ``TrainingRuntime``. Native weight transport remains
+integration-specific. Splitting these Python contracts does not enable a new
+training/inference backend combination by itself.
+
+Migration: subclasses of the former combined ``TrainingRuntime`` now extend
+``ModelRuntime`` and supply separate inference and training components to its
+constructor. ``ExecutorTrainingRuntime`` is renamed to ``ExecutorModelRuntime``.
+The ``RayRuntime`` alias and ``executor_training`` / ``ray_training`` config
+kinds remain available. Configuration, control RPCs and stored artifacts retain
+their existing formats.

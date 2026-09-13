@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -26,7 +27,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitLogScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -329,7 +330,7 @@ def test_records_reject_corruption_before_the_tail(tmp_path) -> None:
         log.records()
 
 
-class RecordingRuntime(TrainingRuntime):
+class RecordingRuntime(StubTrainingRuntime):
     """Training runtime that records the batches it trained."""
 
     def __init__(

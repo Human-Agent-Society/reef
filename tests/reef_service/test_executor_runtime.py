@@ -16,8 +16,8 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime import (
     Executor,
     ExecutorConfig,
+    ExecutorModelRuntime,
     ExecutorTrainGroupHandle,
-    ExecutorTrainingRuntime,
     PreparedTrainingStep,
     RayRuntime,
     RayRuntimeError,
@@ -59,7 +59,7 @@ class Coordinator(DeferredWeightUpdateTrainGroupHandle):
 
 
 def test_ray_public_names_remain_compatible_aliases():
-    assert RayRuntime is ExecutorTrainingRuntime
+    assert RayRuntime is ExecutorModelRuntime
     assert RayRuntimeError is TrainingRuntimeError
     assert RayTrainGroupHandle is TrainingGroupHandle
 
@@ -73,7 +73,7 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
         },
         model_path="model-path",
     )
-    assert isinstance(runtime, ExecutorTrainingRuntime)
+    assert isinstance(runtime, ExecutorModelRuntime)
     assert isinstance(runtime.train_group_handle, ExecutorTrainGroupHandle)
     worker = runtime.train_group_handle.executor.workers[0]
     try:
@@ -264,7 +264,7 @@ runtime:
     )
     recipe = build_named_recipe("local", config_directory=tmp_path, environ={})
     try:
-        assert isinstance(recipe.runtime, ExecutorTrainingRuntime)
+        assert isinstance(recipe.runtime, ExecutorModelRuntime)
         assert recipe.runtime.model_path == "test-model"
         assert recipe.runtime.base_url == "http://configured-router"
     finally:
@@ -283,7 +283,7 @@ runtime:
 """
     )
     worker = Coordinator()
-    runtime = ExecutorTrainingRuntime(
+    runtime = ExecutorModelRuntime(
         train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     registry = RuntimeRegistry({"injected": lambda *args: runtime})
@@ -299,7 +299,7 @@ def test_dispatcher_closes_runtime_after_all_scenarios_but_not_on_reload(tmp_pat
 
     events = []
     worker = SharedCoordinator(shutdown_events=events)
-    runtime = ExecutorTrainingRuntime(
+    runtime = ExecutorModelRuntime(
         train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
@@ -335,7 +335,7 @@ def test_dispatchers_close_their_runtimes_without_stopping_external_workers(tmp_
     worker = Coordinator()
     for _ in range(2):
         executor = UniProcExecutor.from_workers((worker,), owned=False)
-        runtime = ExecutorTrainingRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
+        runtime = ExecutorModelRuntime(train_group_handle=ExecutorTrainGroupHandle(executor))
         dispatcher = Dispatcher(
             Recipe(runtime=runtime),
             InMemoryRepositoryBackend.factory(tmp_path),
@@ -356,7 +356,7 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
     # background training failure reload the scenario before close is tested.
     monkeypatch.setattr(Dispatcher, "_start_training", lambda *args: None)
     worker = Coordinator()
-    runtime = ExecutorTrainingRuntime(
+    runtime = ExecutorModelRuntime(
         train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     initial = tmp_path / "initial"
@@ -383,7 +383,7 @@ def test_dispatcher_releases_runtime_when_scenario_teardown_fails(tmp_path, monk
 
 def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_path):
     worker = Coordinator()
-    runtime = ExecutorTrainingRuntime(
+    runtime = ExecutorModelRuntime(
         train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime))
@@ -402,7 +402,7 @@ def test_service_app_cleanup_shuts_down_its_owned_runtime_once(monkeypatch, tmp_
 
 def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     worker = Coordinator()
-    runtime = ExecutorTrainingRuntime(
+    runtime = ExecutorModelRuntime(
         train_group_handle=ExecutorTrainGroupHandle(UniProcExecutor.from_workers((worker,), owned=True))
     )
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime))

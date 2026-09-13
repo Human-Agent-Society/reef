@@ -11,6 +11,7 @@ import threading
 import time
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import (
     Artifact,
@@ -23,7 +24,7 @@ from reef.artifact import (
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import SelectionDecision
 from reef.train.types import TrainStepResult
@@ -31,7 +32,7 @@ from reef.train.types import TrainStepResult
 from ._policy_recipe import TestPolicyRecipe
 
 
-class CountingRuntime(TrainingRuntime):
+class CountingRuntime(StubTrainingRuntime):
     """Training runtime that counts durable jobs across threads."""
 
     def __init__(self) -> None:

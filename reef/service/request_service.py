@@ -27,7 +27,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceAdmissionHandle, TrainingRuntime
+from reef.runtime.base import InferenceAdmissionHandle, ModelRuntime
 from reef.runtime.inference import InferenceBackend, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
@@ -445,7 +445,7 @@ class RequestService:
             artifact=Artifact(ref, scenario.repository),
             backend=selected_backend,
             surface=scenario.surface,
-            durable=isinstance(scenario.runtime, TrainingRuntime),
+            durable=isinstance(scenario.runtime, ModelRuntime),
             admission=admission,
         )
 

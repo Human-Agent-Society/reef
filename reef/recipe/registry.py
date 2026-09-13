@@ -21,7 +21,7 @@ from typing import Any
 from reef.recipe.base import Recipe
 from reef.recipe.config import load_recipe_config, recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 from reef.runtime.registry import RuntimeRegistry
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -57,7 +57,7 @@ def build_recipe(
     implementation: str,
     environ: Mapping[str, str] | None = None,
     config: Mapping[str, Any] | None = None,
-    runtime: InferenceRuntime | None = None,
+    runtime: InferenceRuntime | ModelRuntime | None = None,
 ) -> Recipe:
     recipe_class = recipe_class_for(implementation)
     if recipe_class is None:
@@ -70,7 +70,7 @@ def build_named_recipe(
     environ: Mapping[str, str] | None = None,
     *,
     config_directory: str | Path | None = None,
-    default_runtime: InferenceRuntime | None = None,
+    default_runtime: InferenceRuntime | ModelRuntime | None = None,
     runtime_registry: RuntimeRegistry | None = None,
     preset_config: Mapping[str, Any] | None = None,
 ) -> Recipe:

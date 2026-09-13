@@ -12,6 +12,7 @@ from threading import Event
 from typing import Any
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOProcessor
@@ -21,7 +22,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.runtime.candidates import StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
@@ -333,7 +334,7 @@ def test_backend_preparation_advances_step_state() -> None:
 # --- e2e: accept -> train -> commit ----------------------------------------
 
 
-class _StubTrainingRuntime(TrainingRuntime):
+class _StubTrainingRuntime(StubTrainingRuntime):
     """A durable SAO runtime driven by the background training worker.
 
     Mirrors the runtime's prepare/train/activate contract: training exports a

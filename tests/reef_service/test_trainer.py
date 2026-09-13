@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 import reef.train.processors.reported as reported_module
 from recipes.sao import SAOProcessor
@@ -11,7 +12,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
@@ -77,7 +78,7 @@ class _PreparingBackend(TrainingBackend):
 def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> None:
     calls = []
 
-    class Runtime(TrainingRuntime):
+    class Runtime(StubTrainingRuntime):
         @property
         def inference_backend(self):
             return None
@@ -787,7 +788,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     checkpoint.mkdir()
     (checkpoint / "adapter.safetensors").write_text("trained")
 
-    class FakeTrainingRuntime(TrainingRuntime):
+    class FakeTrainingRuntime(StubTrainingRuntime):
         def __init__(self):
             super().__init__(base_url="http://trainer")
             self.calls = []

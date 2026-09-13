@@ -11,16 +11,23 @@ from typing import Any
 from reef.core.batches import TrainingBatch, policy_samples
 from reef.core.config import config_option
 from reef.core.evaluation import SelectionDecision
-from reef.runtime.base import InferenceAdmissionHandle, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime.adapters.backend_runtime import BackendInferenceRuntime
+from reef.runtime.base import (
+    InferenceAdmissionHandle,
+    InferenceRuntime,
+    ModelRuntime,
+    PreparedTrainingStep,
+    TrainingJobResult,
+)
 from reef.runtime.candidates import ActivatedModel, CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
-from reef.runtime.inference import InferenceBackend, InferenceBackendFactory, build_http_inference_backend
+from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
 from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_runtime_kind
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
 
-class ExecutorTrainingRuntime(TrainingRuntime):
+class ExecutorModelRuntime(ModelRuntime):
     """Training lifecycle independent of worker placement and RPC transport.
 
     The training handle owns backend-specific payloads and worker control.
@@ -31,6 +38,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         self,
         *,
         train_group_handle: TrainingGroupHandle,
+        inference: InferenceRuntime | None = None,
         inference_url: str | None = None,
         model_path: str = "",
         inference_timeout_s: float = 300.0,
@@ -41,11 +49,12 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if not isinstance(max_staleness, int) or isinstance(max_staleness, bool) or max_staleness < 0:
             raise ValueError("max_staleness must be a non-negative integer")
         self._train_group_handle = train_group_handle
-        self._discover_inference_url = not inference_url
-        if not inference_url:
-            # The training backend started the serving engines, so it is the
-            # authority on where they listen; a deployment only overrides
-            # this when it fronts the engines with something else.
+        if inference is not None and inference_url is not None:
+            raise ValueError("pass inference or inference_url, not both")
+        self._discover_inference_url = inference is None and not inference_url
+        if inference is None and not inference_url:
+            # The deployment coordinator reports its independently owned
+            # inference endpoint through the existing control connection.
             reported = self._train_group_handle.health().get("inference_url")
             if not isinstance(reported, str) or not reported:
                 raise TrainingRuntimeError(
@@ -53,15 +62,22 @@ class ExecutorTrainingRuntime(TrainingRuntime):
                     "set reef.inference_url or update the training actor"
                 )
             inference_url = reported
-        super().__init__(base_url=inference_url, inference_timeout_s=inference_timeout_s)
+        if inference is None:
+            if inference_url is None:
+                raise TrainingRuntimeError("inference_url is unset")
+            inference = BackendInferenceRuntime(
+                backend=inference_backend_factory(
+                    inference_url.rstrip("/"),
+                    model_path=model_path,
+                    timeout_s=inference_timeout_s,
+                    **dict(inference_backend_config or {}),
+                ),
+                base_url=inference_url,
+                inference_timeout_s=inference_timeout_s,
+            )
+        super().__init__(inference=inference, training=train_group_handle)
         self._model_path = model_path
         self._max_staleness = max_staleness
-        self._inference_backend = inference_backend_factory(
-            self.base_url,
-            model_path=model_path,
-            timeout_s=self.inference_timeout_s,
-            **dict(inference_backend_config or {}),
-        )
         training_job = self._training_job_status()
         self._colocated = bool(training_job.get("colocate", False))
         adapter = training_job.get("lora_adapter")
@@ -81,10 +97,6 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     @property
     def max_staleness(self) -> int:
         return self._max_staleness
-
-    @property
-    def inference_backend(self) -> InferenceBackend:
-        return self._inference_backend
 
     async def acquire_inference(self) -> InferenceAdmissionHandle:
         if not self._train_group_handle.reconnects:
@@ -151,7 +163,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedTrainingStep:
-        prepared = self._train_group_handle.prepare_training_step(batch, step_preparer, algorithm_state)
+        prepared = self.training.prepare_training_step(batch, step_preparer, algorithm_state)
         if not isinstance(prepared, PreparedTrainingStep):
             raise TrainingRuntimeError(
                 f"train group handle returned invalid prepared training step: {type(prepared).__name__}"
@@ -225,10 +237,10 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             # the head committed below. Already-admitted requests stay inside
             # SGLang: the colocated bridge retracts their KV before handing
             # the GPUs to Megatron, then SGLang re-prefills them after resume.
-            self._inference_admission.close()
+            self.inference.pause_admission()
 
         try:
-            checkpoint = self._validated_result(self._train_group_handle.execute_training_job(payload))
+            checkpoint = self._validated_result(self.training.execute_training_job(payload))
         except BaseException:
             # A colocated pause may have succeeded before the backend rejected
             # the job. Reopen only when the durable status proves that no
@@ -238,17 +250,17 @@ class ExecutorTrainingRuntime(TrainingRuntime):
                 with suppress(Exception):
                     job_state = self._training_job_status().get("status")
             if job_state == "IDLE":
-                self._inference_admission.open()
+                self.inference.resume_admission()
             raise
         if checkpoint.outcome in {"stale", "storage_blocked"}:
             if self._colocated:
-                self._inference_admission.open()
+                self.inference.resume_admission()
             return checkpoint
         if checkpoint.outcome == "complete":
             if self._training_job_status().get("commit_acknowledged") is True:
-                self._inference_admission.open()
+                self.inference.resume_admission()
             else:
-                self._inference_admission.close()
+                self.inference.pause_admission()
             return checkpoint
         if checkpoint.outcome != "checkpoint" or checkpoint.training_job_id is None:
             raise TrainingRuntimeError("deferred weight updates require a checkpoint with a training_job_id")
@@ -256,7 +268,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         if not self._colocated:
             # Training and checkpointing may overlap inference on disjoint
             # GPUs. Close admission only for the short serving-weight update.
-            self._inference_admission.close()
+            self.inference.pause_admission()
         updated = self._validated_result(self._train_group_handle.update_serving_weights(checkpoint.training_job_id))
         if updated.outcome != "complete" or updated.training_job_id != checkpoint.training_job_id:
             raise TrainingRuntimeError("serving-weight update returned an invalid completed result")
@@ -266,26 +278,26 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         """Train through checkpoint export without changing serving weights."""
         current = self.current_runtime_load_id()
         if self._colocated:
-            self._inference_admission.close()
+            self.inference.pause_admission()
         try:
-            checkpoint = self._validated_result(self._train_group_handle.execute_training_job(payload))
+            checkpoint = self._validated_result(self.training.execute_training_job(payload))
         except BaseException:
             job_state = None
             if self._colocated:
                 with suppress(Exception):
                     job_state = self._training_job_status().get("status")
             if job_state == "IDLE":
-                self._inference_admission.open()
+                self.inference.resume_admission()
             raise
         if checkpoint.outcome == "storage_blocked":
             if self._colocated:
-                self._inference_admission.open()
+                self.inference.resume_admission()
             if not isinstance(checkpoint.storage, Mapping):
                 raise TrainingRuntimeError("training runtime returned invalid checkpoint storage status")
             raise CandidateTrainingDeferred(checkpoint.storage)
         if checkpoint.outcome == "stale":
             if self._colocated:
-                self._inference_admission.open()
+                self.inference.resume_admission()
             raise StaleCandidate(checkpoint.metrics)
         if checkpoint.outcome != "checkpoint" or checkpoint.training_job_id is None:
             raise TrainingRuntimeError("candidate training must stop after exporting a checkpoint")
@@ -302,7 +314,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         """Apply one selected checkpoint to serving."""
         if not self._colocated:
-            self._inference_admission.close()
+            self.inference.pause_admission()
         updated = self._validated_result(self._train_group_handle.update_serving_weights(candidate.training_job_id))
         if updated.outcome != "complete" or updated.training_job_id != candidate.training_job_id:
             raise TrainingRuntimeError("serving-weight update returned an invalid completed result")
@@ -310,7 +322,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
 
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         self._train_group_handle.reject_training_candidate(candidate.training_job_id)
-        self._inference_admission.open()
+        self.inference.resume_admission()
 
     def reconcile_training_job(
         self,
@@ -341,7 +353,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             if not isinstance(training_job_id, str) or not training_job_id:
                 raise TrainingRuntimeError("rejecting training job is missing its durable identity")
             self._train_group_handle.reject_training_candidate(training_job_id)
-            self._inference_admission.open()
+            self.inference.resume_admission()
             return
         if status not in {"UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
             return
@@ -377,7 +389,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     def _finish_committed_training_job(self, training_job_id: str) -> None:
         self._train_group_handle.acknowledge_training_commit(training_job_id)
         current_runtime_load_id = self.serving_runtime_load_id()
-        self._inference_admission.open()
+        self.inference.resume_admission()
         self._current_runtime_load_id = current_runtime_load_id
 
     def _sync_inference_admission(self, training_job: Mapping[str, Any]) -> bool:
@@ -387,18 +399,18 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             status == "COMPLETE" and training_job.get("commit_acknowledged") is True
         ):
             current_runtime_load_id = self.serving_runtime_load_id()
-            self._inference_admission.open()
+            self.inference.resume_admission()
             self._current_runtime_load_id = current_runtime_load_id
             return True
         if status in {"RUNNING", "CHECKPOINT"}:
             if self._colocated:
-                self._inference_admission.close()
+                self.inference.pause_admission()
             else:
                 if self._current_runtime_load_id is None:
                     self._current_runtime_load_id = self.serving_runtime_load_id()
-                self._inference_admission.open()
+                self.inference.resume_admission()
             return True
-        self._inference_admission.close()
+        self.inference.pause_admission()
         return False
 
     def _training_job_status(self) -> Mapping[str, Any]:
@@ -419,8 +431,7 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             if not isinstance(reported, str) or not reported:
                 raise TrainingRuntimeError("training coordinator stopped reporting its inference endpoint")
             if reported.rstrip("/") != self.base_url:
-                self._inference_backend.reconnect(reported)
-                self._base_url = reported.rstrip("/")
+                self.inference.reconnect(reported)
         status = health.get("training_job")
         if not isinstance(status, Mapping):
             raise TrainingRuntimeError("train group health is missing training_job status")
@@ -473,11 +484,6 @@ class ExecutorTrainingRuntime(TrainingRuntime):
             raise TrainingRuntimeError(f"train group handle returned invalid training result: {type(result).__name__}")
         return result
 
-    def shutdown(self) -> None:
-        """Stop admitting inference and release resources owned by the handle."""
-        self._inference_admission.close()
-        self._train_group_handle.shutdown()
-
 
 def _executor_config(value: Mapping[str, Any]) -> ExecutorConfig:
     workers = value.get("workers", ())
@@ -515,7 +521,7 @@ class ExecutorRuntimeSettings(TrainingRuntimeSettings):
 
 
 @register_runtime_kind
-class ExecutorTrainingRuntimeFactory(RuntimeFactory):
+class ExecutorModelRuntimeFactory(RuntimeFactory):
     """Create a training coordinator using a configured executor.
 
     The executor entry accepts an existing Executor, an ExecutorConfig, or a
@@ -530,7 +536,9 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
         return ExecutorRuntimeSettings
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
-        injected = {key: config[key] for key in ("executor", "inference_backend_factory") if key in config}
+        injected = {
+            key: config[key] for key in ("executor", "inference", "inference_backend_factory") if key in config
+        }
         values = super().parse_config({key: value for key, value in config.items() if key not in injected}, environ)
         return {**values, **injected}
 
@@ -540,7 +548,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> TrainingRuntime:
+    ) -> ModelRuntime:
         value = config.get("executor")
         if isinstance(value, Mapping):
             value = _executor_config(value)
@@ -564,6 +572,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             )
             kwargs: dict[str, Any] = {"train_group_handle": handle, "model_path": model_path}
             for key in (
+                "inference",
                 "inference_url",
                 "inference_timeout_s",
                 "max_staleness",
@@ -572,7 +581,7 @@ class ExecutorTrainingRuntimeFactory(RuntimeFactory):
             ):
                 if key in config:
                     kwargs[key] = config[key]
-            return ExecutorTrainingRuntime(**kwargs)
+            return ExecutorModelRuntime(**kwargs)
         except BaseException:
             if created:
                 with suppress(Exception):

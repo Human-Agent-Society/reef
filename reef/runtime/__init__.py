@@ -1,11 +1,10 @@
 """Runtime contracts and adapters for external model services.
 
-Every request needs an ``InferenceRuntime`` — it is what ``service/`` calls
-to answer with the provider's API — which is why the package belongs to
-serving even though ``train/`` also drives it for recipes that train.
-``TrainingRuntime`` extends it with the durable candidate lifecycle:
-candidate training exports a checkpoint without changing serving, and Reef
-evaluates it before choosing activation or rejection.
+``InferenceRuntime`` owns request execution and admission. ``TrainingRuntime``
+prepares training jobs and exports checkpoints without requiring inference.
+Neither inherits the other. ``ModelRuntime`` composes them and provides the
+recipe-facing candidate lifecycle: training exports a checkpoint, Reef selects
+activation or rejection, and serving resumes only after durable publication.
 
 ``model_config.ModelConfig`` is the concrete, in-memory model selection shared
 by a scenario and its recipe. It has no file paths or persistence behavior.
@@ -28,7 +27,7 @@ This package never imports ``reef.train``.
 Boundaries this package holds:
 
 - No concrete training backend is imported here. Backends implement
-  ``TrainingGroupHandle`` and ``ExecutorTrainingRuntime`` drives only the
+  ``TrainingGroupHandle`` and ``ExecutorModelRuntime`` drives only the
   handle; ``reef.train.slime`` never appears at module scope.
 - Malformed results and missing capabilities surface as contract errors
   (``RuntimeContractError``, ``TrainingRuntimeError``), never as silent fallbacks.
@@ -44,7 +43,7 @@ boot. Or set the config ``type`` to a dotted ``package.module:factory_name``
 reference, which ``runtime_factory_for`` imports on resolution.
 """
 
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
+from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.adapters.ray_runtime import (
     RayRuntime,
@@ -53,7 +52,7 @@ from reef.runtime.adapters.ray_runtime import (
     RemoteRayTrainGroupHandle,
     connect_ray_runtime,
 )
-from reef.runtime.base import InferenceRuntime, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.candidates import ActivatedModel, ModelCandidate
 from reef.runtime.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec
 from reef.runtime.proxy import resolve_proxy_runtime
@@ -72,11 +71,12 @@ __all__ = [
     "Executor",
     "ExecutorConfig",
     "ExecutorFuture",
+    "ExecutorModelRuntime",
     "ExecutorTrainGroupHandle",
-    "ExecutorTrainingRuntime",
     "InferenceProxyRuntime",
     "InferenceRuntime",
     "ModelCandidate",
+    "ModelRuntime",
     "PreparedTrainingStep",
     "RayRuntime",
     "RayRuntimeError",

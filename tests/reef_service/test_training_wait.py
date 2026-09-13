@@ -128,7 +128,7 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
     class Runtime:
         open = False
         current = "engine:old"
-        # This double stands in for TrainingRuntime, so it carries every
+        # This double stands in for ModelRuntime, so it carries every
         # attribute the dispatcher reads off that interface.
         concurrent_training_scenarios = False
 
@@ -143,7 +143,7 @@ def test_status_keeps_the_published_version_until_inference_reopens(monkeypatch)
         def current_runtime_load_id(self):
             return self.current
 
-    monkeypatch.setattr(dispatcher_module, "TrainingRuntime", Runtime)
+    monkeypatch.setattr(dispatcher_module, "ModelRuntime", Runtime)
     dispatcher = _dispatcher()
     _bind(
         dispatcher,

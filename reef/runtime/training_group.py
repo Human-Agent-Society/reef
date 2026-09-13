@@ -9,7 +9,7 @@ from typing import Any
 
 from reef.core.batches import TrainingBatch
 from reef.core.errors import ReefError
-from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
+from reef.runtime.base import PreparedTrainingStep, TrainingJobResult, TrainingRuntime
 from reef.runtime.executor import Executor
 
 
@@ -17,11 +17,13 @@ class TrainingRuntimeError(ReefError):
     """Raised when a training backend violates the runtime contract."""
 
 
-class TrainingGroupHandle(ABC):
+class TrainingGroupHandle(TrainingRuntime, ABC):
     """Train group handle: the transport-independent training backend contract.
 
-    Each backend wraps its own actor group and payload format behind this
-    handle. ``ExecutorTrainingRuntime`` depends only on this contract.
+    Implements the independent TrainingRuntime and also exposes the existing
+    remote publication connection. Only ModelRuntime calls those additional
+    serving/commit methods; they are not required by TrainingRuntime. Backends
+    keep their actor groups and payload formats private.
     """
 
     reconnects = False
@@ -49,23 +51,6 @@ class TrainingGroupHandle(ABC):
     def acknowledge_training_commit(self, training_job_id: str) -> None:
         """Acknowledge Reef's durable commit for an activated candidate."""
         ...
-
-    @abstractmethod
-    def prepare_training_step(
-        self,
-        batch: TrainingBatch,
-        step_preparer: str,
-        algorithm_state: Mapping[str, Any],
-    ) -> PreparedTrainingStep:
-        """Prepare the step signal and backend payload for one reserved batch."""
-
-    @abstractmethod
-    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
-        """Execute one idempotent training job, through its durable checkpoint."""
-
-    def shutdown(self) -> None:
-        """Release owned resources, if this handle manages worker lifetime."""
-        return
 
 
 class ExecutorTrainGroupHandle(TrainingGroupHandle):

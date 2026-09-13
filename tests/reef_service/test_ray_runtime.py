@@ -10,12 +10,12 @@ import pytest
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
 from reef.runtime import (
+    ModelRuntime,
     PreparedTrainingStep,
     RayRuntime,
     RayRuntimeError,
     RayTrainGroupHandle,
     TrainingJobResult,
-    TrainingRuntime,
 )
 from reef.runtime.adapters.ray_runtime import RemoteRayTrainGroupHandle
 from reef.runtime.base import InferenceAdmissionController
@@ -205,7 +205,7 @@ def grouped_policy_batch(*, versions: tuple[str | None, str | None] = ("v0", "v0
 def test_ray_runtime_is_a_training_runtime() -> None:
     runtime = RayRuntime(train_group_handle=FakeTrainGroupHandle(), inference_url="http://router")
 
-    assert isinstance(runtime, TrainingRuntime)
+    assert isinstance(runtime, ModelRuntime)
     assert runtime.inference_backend is not None
 
 

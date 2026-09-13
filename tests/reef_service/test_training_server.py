@@ -470,7 +470,7 @@ def test_build_dispatcher_loads_configured_inference_backend(monkeypatch, tmp_pa
 @pytest.mark.unit
 def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -> None:
     # A training recipe must route through the runtime-injection branch, not
-    # the inference loader; SAORecipe requires an injected TrainingRuntime and
+    # the inference loader; SAORecipe requires an injected ModelRuntime and
     # would otherwise raise RecipeConfigError at load time.
     connected = {}
 

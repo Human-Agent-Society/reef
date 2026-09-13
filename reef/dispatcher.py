@@ -34,7 +34,7 @@ from reef.observability import (
 )
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
+from reef.runtime.base import ModelRuntime, RuntimeContractError
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordRetention
@@ -120,7 +120,7 @@ class Dispatcher:
 
     Invariant: at most one weight-training scenario per process. Its serial
     thread is bound to the first scenario using the deployment's
-    ``TrainingRuntime``; resolving a second raises (enforced in
+    ``ModelRuntime``; resolving a second raises (enforced in
     :class:`ScenarioRegistry`).
     Local training backends are unlimited and drain on per-scenario threads.
     The dispatcher owns its recipe's runtime and closes it after all scenarios.
@@ -213,7 +213,7 @@ class Dispatcher:
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
-        if isinstance(current.runtime, TrainingRuntime):
+        if isinstance(current.runtime, ModelRuntime):
             self._training.ready.set()
         elif current.trainer.training_backend is not None:
             self._start_local_backend_worker(current.name)
@@ -392,7 +392,7 @@ class Dispatcher:
         stored = appended.item
         if not appended.inserted:
             return stored
-        if isinstance(current.runtime, TrainingRuntime):
+        if isinstance(current.runtime, ModelRuntime):
             self._training.ready.set()
             return stored
         if current.trainer.training_backend is not None:
@@ -699,9 +699,9 @@ class Dispatcher:
         if current is None:
             raise RuntimeContractError(f"training thread is not bound to scenario {name!r}")
         runtime = current.runtime
-        if not isinstance(runtime, TrainingRuntime):
+        if not isinstance(runtime, ModelRuntime):
             raise RuntimeContractError(
-                f"training thread requires a TrainingRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
+                f"training thread requires a ModelRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
             )
         self._record_training_error(current.name, None)
         # A crash may leave remote serving updated but paused after Reef's
@@ -856,7 +856,7 @@ class Dispatcher:
             # and reopens admission. The backend may report it
             # earlier while the update is still being published.
             "current_runtime_load_id": (
-                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
+                runtime.current_runtime_load_id() if isinstance(runtime, ModelRuntime) else None
             ),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
@@ -864,7 +864,7 @@ class Dispatcher:
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
-        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+        if isinstance(runtime, ModelRuntime) and runtime.concurrent_training_scenarios:
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
         return block
 

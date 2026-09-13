@@ -6,11 +6,12 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService
@@ -22,7 +23,7 @@ _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
 
 
-class DurableRuntime(TrainingRuntime):
+class DurableRuntime(StubTrainingRuntime):
     def __init__(
         self,
         checkpoint_root: Path,

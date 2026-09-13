@@ -16,7 +16,7 @@ class, while callers use the same methods for each backend.
        SE --> CW[Custom executor]
        LW --> SV[Inference / training driver / Reef]
        RW --> SV
-       R[ExecutorTrainingRuntime] --> H[TrainingGroupHandle]
+       R[ExecutorModelRuntime] --> H[TrainingGroupHandle]
        H --> C[Coordinator Executor]
        C --> B[Training coordinator / Slime bridge]
        B --> G[SlimeTrainGroup: train, checkpoint, publish]
@@ -143,7 +143,7 @@ Training runtime configuration
 
 Existing ``type: ray_training`` configurations keep discovering a named Ray
 bridge in the selected namespace. ``RayRuntime`` and ``RayTrainGroupHandle``
-remain compatibility aliases for ``ExecutorTrainingRuntime`` and
+remain compatibility aliases for ``ExecutorModelRuntime`` and
 ``TrainingGroupHandle``.
 
 For a custom coordinator, ``executor_training`` creates its executor from

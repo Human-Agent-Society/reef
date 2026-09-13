@@ -1,7 +1,7 @@
 """Ray connection adapter for the executor-independent training runtime.
 
 The historical Ray runtime names remain aliases for compatibility. Ray owns
-actor discovery here; training semantics live in ExecutorTrainingRuntime and
+actor discovery here; training semantics live in ExecutorModelRuntime and
 worker control RPC lives in RayExecutor.
 """
 
@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.config import config_option
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
-from reef.runtime.base import TrainingRuntime
+from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
+from reef.runtime.base import ModelRuntime
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.inference import InferenceBackendFactory, build_http_inference_backend
@@ -24,7 +24,7 @@ from reef.runtime.registry import RuntimeConfigError, RuntimeFactory, register_r
 from reef.runtime.settings import TrainingRuntimeSettings
 from reef.runtime.training_group import ExecutorTrainGroupHandle, TrainingGroupHandle, TrainingRuntimeError
 
-RayRuntime = ExecutorTrainingRuntime
+RayRuntime = ExecutorModelRuntime
 RayRuntimeError = TrainingRuntimeError
 RayTrainGroupHandle = TrainingGroupHandle
 
@@ -179,7 +179,7 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
         model_path: str,
         recipe_config: Mapping[str, Any],
         environ: Mapping[str, str],
-    ) -> TrainingRuntime:
+    ) -> ModelRuntime:
         connect = config.get("connect", connect_ray_runtime)
         if not callable(connect):
             raise RuntimeConfigError("runtime.connect must be callable")
@@ -198,6 +198,6 @@ class RayTrainingRuntimeFactory(RuntimeFactory):
             if key in config:
                 kwargs[key] = config[key]
         runtime = connect(**kwargs)
-        if not isinstance(runtime, TrainingRuntime):
-            raise RuntimeConfigError(f"runtime connector returned {type(runtime).__name__}, not a TrainingRuntime")
+        if not isinstance(runtime, ModelRuntime):
+            raise RuntimeConfigError(f"runtime connector returned {type(runtime).__name__}, not a ModelRuntime")
         return runtime

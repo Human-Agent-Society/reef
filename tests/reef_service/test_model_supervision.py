@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
+from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
 from reef.runtime.adapters.ray_runtime import NamedRayTrainGroupHandle
 from reef.runtime.sglang.service import RayHealthProbe
 from reef.service.training_driver import ModelDeployment, supervise_deployment
@@ -114,7 +114,7 @@ class ReconnectingHandle(FakeTrainGroupHandle):
 def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gate():
     async def run():
         handle = ReconnectingHandle()
-        runtime = ExecutorTrainingRuntime(train_group_handle=handle)
+        runtime = ExecutorModelRuntime(train_group_handle=handle)
         backend = runtime.inference_backend
         handle.endpoint = "http://replacement/"
         admission = await runtime.acquire_inference()
@@ -122,11 +122,11 @@ def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gat
         assert runtime.base_url == "http://replacement"
         assert runtime.inference_backend is backend
         assert backend._upstream_url == "http://replacement"
-        runtime._inference_admission.close()
+        runtime.inference.pause_admission()
         request = asyncio.create_task(runtime.acquire_inference())
         await asyncio.sleep(0.05)
         assert not request.done()
-        runtime._inference_admission.open()
+        runtime.inference.resume_admission()
         (await request).release()
         handle.status = "READY_TO_COMMIT"
         request = asyncio.create_task(runtime.acquire_inference())
@@ -141,7 +141,7 @@ def test_managed_endpoint_refresh_preserves_backend_and_never_reopens_commit_gat
 
 def test_explicit_endpoint_is_not_replaced():
     handle = ReconnectingHandle()
-    runtime = ExecutorTrainingRuntime(train_group_handle=handle, inference_url="http://gateway")
+    runtime = ExecutorModelRuntime(train_group_handle=handle, inference_url="http://gateway")
     handle.endpoint = "http://replacement"
     runtime._training_job_status()
     assert runtime.base_url == "http://gateway"

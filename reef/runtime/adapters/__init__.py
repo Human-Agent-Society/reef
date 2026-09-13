@@ -1,6 +1,6 @@
 """Runtime adapters for external model services."""
 
-from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
+from reef.runtime.adapters.executor_runtime import ExecutorModelRuntime
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.adapters.ray_runtime import (
     RayRuntime,
@@ -11,7 +11,7 @@ from reef.runtime.adapters.ray_runtime import (
 )
 
 __all__ = [
-    "ExecutorTrainingRuntime",
+    "ExecutorModelRuntime",
     "InferenceProxyRuntime",
     "RayRuntime",
     "RayRuntimeError",

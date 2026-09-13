@@ -7,13 +7,14 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service.runtime_stubs import StubTrainingRuntime
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.runtime.inference import InferenceBackend
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
@@ -23,7 +24,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from ._policy_recipe import TestPolicyRecipe
 
 
-class RollbackRuntime(TrainingRuntime):
+class RollbackRuntime(StubTrainingRuntime):
     def __init__(self, checkpoint_dir) -> None:
         super().__init__(base_url="http://trainer")
         self.checkpoint_dir = checkpoint_dir

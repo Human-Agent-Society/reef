@@ -209,6 +209,21 @@ class InferenceRuntime(ABC):
     def inference_admission_status(self) -> Mapping[str, Any]:
         return self._inference_admission.status
 
+    def pause_admission(self, *, wait: bool = False, timeout: float | None = None) -> None:
+        """Close request admission; optionally wait for admitted work to finish."""
+        self._inference_admission.close(wait=wait, timeout=timeout)
+
+    def resume_admission(self) -> None:
+        """Reopen request admission after the coordinator permits serving."""
+        self._inference_admission.open()
+
+    def reconnect(self, base_url: str) -> None:
+        """Retarget the request backend after managed inference recovery."""
+        if not base_url:
+            raise ValueError("base_url must be non-empty")
+        self.inference_backend.reconnect(base_url)
+        self._base_url = base_url.rstrip("/")
+
     @property
     @abstractmethod
     def inference_backend(self) -> InferenceBackend:
@@ -223,8 +238,83 @@ class InferenceRuntime(ABC):
         return
 
 
-class TrainingRuntime(InferenceRuntime, ABC):
-    """A runtime that produces selectable model candidates."""
+class TrainingRuntime(ABC):
+    """Training execution independent of inference and candidate publication.
+
+    Implementations prepare backend payloads and export durable checkpoints.
+    They need no inference endpoint, request backend or admission controller.
+    Reef's model coordinator owns selection, activation and commit ordering.
+    """
+
+    @abstractmethod
+    def health(self) -> Mapping[str, Any]:
+        """Report training health and checkpoint progress."""
+
+    @abstractmethod
+    def prepare_training_step(
+        self,
+        batch: TrainingBatch,
+        step_preparer: str,
+        algorithm_state: Mapping[str, Any],
+    ) -> PreparedTrainingStep:
+        """Prepare the signal and backend payload for a reserved batch."""
+
+    @abstractmethod
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        """Execute idempotent training through durable checkpoint export."""
+
+    def shutdown(self) -> None:
+        """Release training resources owned by this component."""
+        return
+
+
+class ModelRuntime(ABC):
+    """Recipe-facing coordination of separate inference and training runtimes.
+
+    Own candidate activation, durable commit reconciliation and admission
+    ordering here. The inference component owns the one admission controller;
+    both direct inference users and the coordinator observe the same gate.
+    """
+
+    def __init__(self, *, inference: InferenceRuntime, training: TrainingRuntime) -> None:
+        """Own both components; scenarios share the coordinator, not its cleanup."""
+        self._inference = inference
+        self._training = training
+
+    @property
+    def inference(self) -> InferenceRuntime:
+        return self._inference
+
+    @property
+    def training(self) -> TrainingRuntime:
+        return self._training
+
+    @property
+    def base_url(self) -> str:
+        return self.inference.base_url
+
+    @property
+    def inference_timeout_s(self) -> float:
+        return self.inference.inference_timeout_s
+
+    @property
+    def inference_backend(self) -> InferenceBackend:
+        return self.inference.inference_backend
+
+    async def acquire_inference(self) -> InferenceAdmissionHandle:
+        return await self.inference.acquire_inference()
+
+    @property
+    def inference_admission_status(self) -> Mapping[str, Any]:
+        return self.inference.inference_admission_status
+
+    def shutdown(self) -> None:
+        """Close admission and release both components, including failed cleanup."""
+        self.inference.pause_admission()
+        try:
+            self.training.shutdown()
+        finally:
+            self.inference.shutdown()
 
     @property
     def max_staleness(self) -> int:
@@ -315,6 +405,7 @@ class TrainingRuntime(InferenceRuntime, ABC):
         trains several scenarios at once (see
         :attr:`concurrent_training_scenarios`).
         """
+        return
 
     @abstractmethod
     def prepare_training_step(

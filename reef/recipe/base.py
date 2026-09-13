@@ -19,7 +19,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.runtime.model_config import ModelConfig
 from reef.runtime.proxy import resolve_proxy_runtime
@@ -46,7 +46,7 @@ class Recipe:
     """Opaque config sections validated by the recipe alongside its declared fields."""
 
     name: str = "recipe"
-    runtime: InferenceRuntime | None = None
+    runtime: InferenceRuntime | ModelRuntime | None = None
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted; none by default."""
@@ -61,7 +61,7 @@ class Recipe:
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
-        if config.runtime is not None and isinstance(self.runtime, TrainingRuntime):
+        if config.runtime is not None and isinstance(self.runtime, ModelRuntime):
             raise RecipeConfigError("model overrides require an inference-only runtime")
         return self
 
@@ -71,7 +71,7 @@ class Recipe:
         environ: Mapping[str, str] | None = None,
         *,
         config: Mapping[str, Any] | None = None,
-        runtime: InferenceRuntime | None = None,
+        runtime: InferenceRuntime | ModelRuntime | None = None,
     ) -> Recipe:
         values = os.environ if environ is None else environ
         settings = config or {}
@@ -85,7 +85,7 @@ class Recipe:
         field_values: Mapping[str, Any],
         *,
         environ: Mapping[str, str],
-        runtime: InferenceRuntime | None = None,
+        runtime: InferenceRuntime | ModelRuntime | None = None,
     ) -> Recipe:
         """Construct from values resolved before runtime allocation.
 
@@ -104,7 +104,9 @@ class Recipe:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 
     @classmethod
-    def _resolve_runtime(cls, values: Mapping[str, str], runtime: InferenceRuntime | None) -> InferenceRuntime | None:
+    def _resolve_runtime(
+        cls, values: Mapping[str, str], runtime: InferenceRuntime | ModelRuntime | None
+    ) -> InferenceRuntime | ModelRuntime | None:
         return resolve_proxy_runtime(values, runtime)
 
     @classmethod
@@ -193,7 +195,7 @@ class WeightTrainingSpec:
 class WeightTrainingRecipe(Recipe):
     """Shared recipe contract for backend algorithms that update weights.
 
-    Narrows the base ``runtime`` field to a required :class:`TrainingRuntime`
+    Narrows the base ``runtime`` field to a required :class:`ModelRuntime`
     (the first positional argument of every training recipe).
 
     :meth:`training_spec` binds the data processor, step preparer, and backend
@@ -221,7 +223,7 @@ class WeightTrainingRecipe(Recipe):
     recipe never repeats a setting's name or type anywhere else.
     """
 
-    runtime: TrainingRuntime = field(kw_only=False)
+    runtime: ModelRuntime = field(kw_only=False)
     max_staleness: int = config_field(0, env="REEF_MAX_STALENESS")
     candidate_evaluation: CandidateEvaluationConfig | None = field(default=None, repr=False, compare=False)
 
@@ -259,14 +261,14 @@ class WeightTrainingRecipe(Recipe):
         return None if status is None else {"adapters": status}
 
     @classmethod
-    def resolve_training_runtime(cls, runtime: InferenceRuntime | None) -> TrainingRuntime:
+    def resolve_training_runtime(cls, runtime: InferenceRuntime | ModelRuntime | None) -> ModelRuntime:
         if runtime is None:
             raise RecipeConfigError(
                 f"{cls.__name__} requires a training runtime; pass one via the "
                 "'runtime' argument (e.g. a RayRuntime injected from your training backend)"
             )
-        if not isinstance(runtime, TrainingRuntime):
-            raise TypeError(f"{cls.__name__} requires a TrainingRuntime, got {type(runtime).__name__}")
+        if not isinstance(runtime, ModelRuntime):
+            raise TypeError(f"{cls.__name__} requires a ModelRuntime, got {type(runtime).__name__}")
         return runtime
 
     @classmethod
@@ -311,7 +313,9 @@ class WeightTrainingRecipe(Recipe):
         return config
 
     @classmethod
-    def _resolve_runtime(cls, values: Mapping[str, str], runtime: InferenceRuntime | None) -> TrainingRuntime:
+    def _resolve_runtime(
+        cls, values: Mapping[str, str], runtime: InferenceRuntime | ModelRuntime | None
+    ) -> ModelRuntime:
         return cls.resolve_training_runtime(runtime)
 
     @classmethod
@@ -399,7 +403,7 @@ class WeightTrainingRecipe(Recipe):
         # first training step. Only the resolvability check happens here: the
         # trainer keeps carrying the *name*, because the runtime boundary
         # ships the string to the backend process, which resolves it again in
-        # its own registry (``TrainingRuntime.prepare_training_step``). A
+        # its own registry (``ModelRuntime.prepare_training_step``). A
         # recipe whose preparer lives outside ``reef.train.algos`` must import
         # that module before calling this build.
         resolve_preparer(spec.step_preparer)

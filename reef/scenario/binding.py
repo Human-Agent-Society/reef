@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.surface.base import ArtifactValidator, Surface
 
@@ -15,7 +15,7 @@ class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
     surface: Surface
-    runtime: InferenceRuntime | None
+    runtime: InferenceRuntime | ModelRuntime | None
     inference_backend: InferenceBackend | None
     artifact_validator: ArtifactValidator
     #: The report contract selected by the recipe while building its trainer;

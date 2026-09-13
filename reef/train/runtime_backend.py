@@ -1,4 +1,4 @@
-"""Adapt any TrainingRuntime to the shared training lifecycle."""
+"""Adapt any ModelRuntime to the shared training lifecycle."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.runtime.base import RuntimeContractError, TrainingRuntime
+from reef.runtime.base import ModelRuntime, RuntimeContractError
 from reef.runtime.candidates import CandidateTrainingDeferred, ModelCandidate, StaleCandidate
 from reef.train.backend import PreparedStep, TrainingBackend
 from reef.train.types import TrainingBatch, TrainStepResult
@@ -17,7 +17,7 @@ class RuntimeTrainingBackend(TrainingBackend):
 
     def __init__(
         self,
-        runtime: TrainingRuntime,
+        runtime: ModelRuntime,
         step_preparer: str,
         *,
         loss_family: str | None = None,
@@ -31,7 +31,7 @@ class RuntimeTrainingBackend(TrainingBackend):
         self._scenario = scenario
 
     @property
-    def runtime(self) -> TrainingRuntime:
+    def runtime(self) -> ModelRuntime:
         return self._runtime
 
     @property

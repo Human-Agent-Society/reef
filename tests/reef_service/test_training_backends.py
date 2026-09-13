@@ -111,7 +111,7 @@ def test_runtime_type_is_checked_and_wrong_runtime_is_closed(monkeypatch):
     closed = []
     monkeypatch.setattr(runtime, "shutdown", lambda: closed.append(True))
     monkeypatch.setattr(type(runtime_factory), "__call__", lambda *args: runtime)
-    with pytest.raises(TypeError, match="TrainingRuntime"):
+    with pytest.raises(TypeError, match="ModelRuntime"):
         _connect_training_runtime(
             ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", max_staleness=0
         )

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 from reef.runtime.registry import RuntimeRegistry
 
 
 def resolve_proxy_runtime(
     values: Mapping[str, str],
-    runtime: InferenceRuntime | None,
-) -> InferenceRuntime | None:
+    runtime: InferenceRuntime | ModelRuntime | None,
+) -> InferenceRuntime | ModelRuntime | None:
     """Prefer an injected runtime, else build a proxy from environment values.
 
     Construction goes through the runtime registry's ``inference_proxy`` kind,

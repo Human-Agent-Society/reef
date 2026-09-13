@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
-from reef.runtime.base import TrainingRuntime
+from reef.runtime.base import ModelRuntime
 
 
 class CandidateEvaluationConfigError(ReefError):
@@ -37,7 +37,7 @@ class CandidateEvaluationPluginFactory(Protocol):
         self,
         config: Mapping[str, Any],
         *,
-        runtime: TrainingRuntime,
+        runtime: ModelRuntime,
         scenario: str,
         environ: Mapping[str, str],
     ) -> CandidateEvaluationPlugin: ...
@@ -102,7 +102,7 @@ def _dotted_factory(reference: str, what: str) -> Any:
 def build_candidate_evaluation(
     config: CandidateEvaluationConfig,
     *,
-    runtime: TrainingRuntime,
+    runtime: ModelRuntime,
     scenario: str,
 ) -> CandidateEvaluationPlugin:
     """Resolve and build one scenario's external candidate evaluation plugin."""

@@ -160,14 +160,11 @@ the rest of the tree. Updating one needs no GPU.
 Runtime
 -------
 
-Two meanings.
-
-1. **The request-plane contract:** ``InferenceRuntime`` and
-   ``TrainingRuntime``: the external service that executes model work.
-   ``InferenceRuntime`` is always required while ``TrainingRuntime`` is only
-   required for weight recipes.
-2. **A training backend integration:** a concrete implementation of that
-   contract, such as Reef's Slime runtime.
+``InferenceRuntime`` executes inference requests and owns admission;
+``TrainingRuntime`` prepares training jobs and exports checkpoints. They are
+independent components. ``ModelRuntime`` composes both and coordinates
+candidate activation, publication and recovery for weight recipes. Concrete
+backend integrations implement the component operations.
 
 SAO
 ---

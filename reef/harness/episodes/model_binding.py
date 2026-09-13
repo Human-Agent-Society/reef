@@ -27,7 +27,7 @@ from typing import Any, Protocol
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, ModelRuntime
 
 #: The API dialects a binding can speak. ``openai`` is Chat Completions,
 #: ``responses`` is OpenAI Responses, and ``anthropic`` is Messages.
@@ -104,7 +104,7 @@ class ModelBinding:
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
 
     @classmethod
-    def from_runtime(cls, runtime: InferenceRuntime, *, model: str | None = None) -> ModelBinding:
+    def from_runtime(cls, runtime: InferenceRuntime | ModelRuntime, *, model: str | None = None) -> ModelBinding:
         """Bind to ``runtime``'s endpoint; ``model`` overrides its model path."""
 
         name = model or getattr(runtime, "model_path", "") or ""
