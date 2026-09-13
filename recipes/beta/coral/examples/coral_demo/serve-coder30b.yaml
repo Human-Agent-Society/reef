@@ -1,9 +1,13 @@
-# Colocated Qwen3-Coder-30B-A3B (MoE) LoRA stack for the CORAL benchmark runs.
-# One 8-GPU node per task: TP8/EP8 Megatron actor colocated with an 8-GPU
-# SGLang engine. Derived from serve.yaml (schema 2) plus the 30B MoE knobs.
+# Colocated Qwen3-Coder-30B-A3B (MoE) LoRA stack for the CORAL benchmark runs:
+# one 8-GPU node per task, a TP8/EP8 Megatron actor colocated with eight
+# single-GPU SGLang engines. Derived from serve.yaml; the differences are the
+# model, the MoE parallelism knobs, the tool-call parser opencode needs, the
+# sequence length coding-agent contexts reach, and group_by=release so a
+# single agent's linear evolution can form comparison groups.
+# Download Qwen/Qwen3-Coder-30B-A3B-Instruct to work/model first.
 
 schema-version: 2
-service:
+reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
@@ -11,18 +15,20 @@ service:
   ready-timeout: 3600
 
 inference:
-  model-path: /fsx/xuanj/models/Qwen3-Coder-30B-A3B-Instruct
+  model-path: work/model
   timeout-s: 7200
   backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
   backend-config:
-    tool_call_parser: qwen3_coder
+    tool_call_parser: qwen3_coder   # opencode sends tools on every call
 recipe:
   implementation: recipes.beta.coral.recipe:CoralRecipe
   config:
-    group-size: 2
-    group-by: release
+    group-size: 2          # two scored attempts release a training group
+    group-by: release      # single-agent evolution is a chain; group by policy release
     checkpoint-every-n-versions: 1
 training:
+  backend: slime
+  ready-timeout: 3600
   ray-namespace: reef
   ray-actor-name: reef-train-bridge
   timeout-s: 14400
@@ -43,20 +49,24 @@ training:
     save: "${training.config.checkpoint_dir}/megatron"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
     save-interval: "${recipe.config.checkpoint-every-n-versions}"
-    megatron-to-hf-mode: "bridge"
     reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
     reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    # Cap per-run checkpoint storage: on a shared filesystem the fraction-based
+    # retention keeps everything until the free-space floor, and one Megatron
+    # checkpoint of this model is 58 GB. Two pairs keep the latest plus a reservation.
+    reef-checkpoint-max-storage: "130GB"
+    megatron-to-hf-mode: "bridge"
     num-rollout: "${training.config.steps}"
     rollout-batch-size: "2"
     n-samples-per-prompt: "${recipe.config.group-size}"
     global-batch-size: "4"
-    micro-batch-size: "1"
-    actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
     rollout-num-gpus: "${training.config.num_gpus}"
     rollout-num-gpus-per-engine: "1"
     num-gpus-per-node: "${training.config.num_gpus}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
     colocate: true
     tensor-model-parallel-size: "8"
     pipeline-model-parallel-size: "1"
@@ -109,23 +119,3 @@ observability:
     enabled: false
     project: reef
     directory: ${CORAL_TTT_STATE_DIR}/wandb
-
-services:
-  - name: slime-driver
-    command:
-      - ${REEF_PYTHON}
-      - -m
-      - reef.service.slime_driver
-    ready: test -f "$REEF_BRIDGE_READY_FILE"
-    ready_timeout: 3600
-    env:
-      REEF_RAY_NAMESPACE: reef
-      REEF_RAY_ACTOR_NAME: reef-train-bridge
-      CUDA_DEVICE_MAX_CONNECTIONS: "1"
-      NCCL_NVLS_ENABLE: "0"
-
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${service.port}/healthz
-    ready_timeout: 120
-    depends_on: [slime-driver]
