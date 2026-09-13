@@ -104,7 +104,7 @@ python3 -c "import reef; print(reef.__version__)"
 开发或运行下文的训练示例时，请使用源码安装。
 
 
-## 🛠️ 使用 Reef
+## 🔧 使用 Reef
 
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
@@ -248,7 +248,7 @@ recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Reci
 每个结果页面都会说明任务、评估设置、测量结果和局限性。
 
 
-## 🏗️ 架构
+## 📐 架构
 
 <div align="center">
 <picture>

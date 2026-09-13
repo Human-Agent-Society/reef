@@ -106,7 +106,7 @@ python3 -c "import reef; print(reef.__version__)"
 Use the source checkout for development and for the training examples below.
 
 
-## 🛠️ Using Reef
+## 🔧 Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
@@ -265,7 +265,7 @@ Each result page documents its task, evaluation setup, measurements, and
 limitations.
 
 
-## 🏗️ Architecture
+## 📐 Architecture
 
 <div align="center">
 <picture>
