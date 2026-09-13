@@ -1,6 +1,6 @@
 import type { NewsItem } from "@/lib/news";
 
-const labels: Record<NewsItem["kind"], string> = { news: "News", release: "Release", pull: "Merged" };
+const labels: Record<NewsItem["kind"], string> = { news: "Milestone", release: "Release", pull: "Merged" };
 
 function Item({ item }: { item: NewsItem }) {
   const external = item.href.startsWith("http");
@@ -17,8 +17,8 @@ function Item({ item }: { item: NewsItem }) {
 export function NewsTicker({ items }: { items: NewsItem[] }) {
   if (items.length === 0) return null;
   return (
-    <div className="news-ticker" aria-label="Latest from the project">
-      <span className="ticker-label"><span className="live-dot" aria-hidden="true" />Latest</span>
+    <div className="news-ticker" aria-label="Project news">
+      <span className="ticker-label"><span className="live-dot" aria-hidden="true" />News</span>
       <div className="ticker-viewport">
         <div className="ticker-track">
           {items.map((item) => <Item key={`a-${item.kind}-${item.href}`} item={item} />)}
