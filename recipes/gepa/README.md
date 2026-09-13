@@ -4,7 +4,7 @@ Reproduction of [GEPA](https://arxiv.org/abs/2507.19457) as a Reef harness-evolu
 
 - Paper: [arXiv:2507.19457](https://arxiv.org/abs/2507.19457)
 - Pins: upstream GEPA v0.1.2 (`92dadfffbe98c8ecf508179a1cab09c1bb85cd32`), Pi `0.84.2`, task model `gpt-4.1-mini-2025-04-14`, and reflection model `gpt-5-2025-08-07`; the example pins and hash-checks the 45/45/150 AIME train/validation/test split and uses a 150-metric-call search budget. The method has no upstream GEPA runtime dependency.
-- Claim scope: the [AIME-2025 validation contract](examples/aime/README.md#the-validation-contract) pairs two seeds with upstream GEPA under the same models, split, budget, scorer, and worker count. Mean held-out improvement is +16.00 percentage points for this method and +12.67 for upstream; the selected-score difference changes sign between seeds, so this is method validation, not evidence of superiority. Deterministic tests cover the scorer and driver, with an upstream fidelity comparison when GEPA is installed.
+- Claim scope: the [AIME-2025 validation contract](examples/aime/README.md#the-validation-contract) pairs two seeds with upstream GEPA under the same models, split, budget, scorer, and worker count. Mean held-out improvement is +16.00 percentage points for this method and +12.67 for upstream; the selected-score difference changes sign between seeds, so these results validate the method but do not establish superiority. Deterministic tests cover the scorer and driver, with an upstream fidelity comparison when GEPA is installed.
 
 ## Layout
 
