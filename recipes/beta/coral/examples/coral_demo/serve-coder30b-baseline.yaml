@@ -1,0 +1,123 @@
+# Frozen-policy control for serve-coder30b.yaml: the identical stack with a
+# group size that never releases, so no weight update ever happens.
+# Colocated Qwen3-Coder-30B-A3B (MoE) LoRA stack for the CORAL benchmark runs:
+# tensor/expert parallel 8 Megatron actor colocated with single-device SGLang
+# engines. Derived from serve.yaml; the differences are the
+# model, the MoE parallelism knobs, the tool-call parser opencode needs, the
+# sequence length coding-agent contexts reach, and group_by=release so a
+# single agent's linear evolution can form comparison groups.
+# Download Qwen/Qwen3-Coder-30B-A3B-Instruct to work/model first.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: ${CORAL_TTT_STATE_DIR}/stack
+  ready-timeout: 3600
+
+inference:
+  model-path: work/model
+  timeout-s: 7200
+  backend-factory: reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
+  backend-config:
+    tool_call_parser: qwen3_coder   # opencode sends tools on every call
+recipe:
+  implementation: recipes.beta.coral.recipe:CoralRecipe
+  config:
+    group-size: 100000     # never releases: the served policy stays frozen
+    group-by: release
+    checkpoint-every-n-versions: 1
+training:
+  backend: slime
+  ready-timeout: 3600
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  timeout-s: 14400
+  config:
+    num_gpus: 8
+    steps: 64
+    max_new_tokens: 8192
+    checkpoint_dir: ${CORAL_TTT_STATE_DIR}/checkpoints
+    checkpoint_retention:
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
+
+  options:
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    ref-load: "${inference.model-path}"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    save-interval: "${recipe.config.checkpoint-every-n-versions}"
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    # Cap per-run checkpoint storage: on a shared filesystem the fraction-based
+    # retention keeps everything until the free-space floor, and one Megatron
+    # checkpoint of this model is 58 GB. Two pairs keep the latest plus a reservation.
+    reef-checkpoint-max-storage: "130GB"
+    megatron-to-hf-mode: "bridge"
+    num-rollout: "${training.config.steps}"
+    rollout-batch-size: "2"
+    n-samples-per-prompt: "${recipe.config.group-size}"
+    global-batch-size: "4"
+    actor-num-gpus-per-node: "${training.config.num_gpus}"
+    rollout-num-gpus: "${training.config.num_gpus}"
+    rollout-num-gpus-per-engine: "1"
+    num-gpus-per-node: "${training.config.num_gpus}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    colocate: true
+    tensor-model-parallel-size: "8"
+    pipeline-model-parallel-size: "1"
+    expert-model-parallel-size: "8"
+    expert-tensor-parallel-size: "1"
+    sequence-parallel: true
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    qk-layernorm: true
+    normalization: "RMSNorm"
+    moe-token-dispatcher-type: "alltoall"
+    moe-router-topk: "8"
+    moe-grouped-gemm: true
+    moe-router-dtype: "fp32"
+    moe-permute-fusion: true
+    moe-aux-loss-coeff: "0"
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    megatron-lora-rank: "32"
+    megatron-lora-alpha: "32"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+    optimizer: "adam"
+    lr: "4e-5"
+    lr-decay-style: "constant"
+    loss-type: "custom_loss"
+    use-rollout-logprobs: true
+    kl-coef: "0.1"
+    rollout-temperature: "1"
+    rollout-max-response-len: "8192"
+    seq-length: "131072"
+    max-tokens-per-gpu: "131072"
+    log-probs-chunk-size: "512"
+storage:
+  artifact-repository: ${CORAL_TTT_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${CORAL_TTT_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${CORAL_TTT_STATE_DIR}/artifact-cache
+  agent-record-dir: ${CORAL_TTT_STATE_DIR}/agent-record
+
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    directory: ${CORAL_TTT_STATE_DIR}/wandb

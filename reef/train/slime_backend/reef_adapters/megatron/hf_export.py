@@ -103,9 +103,41 @@ class MegatronToHfWeightIterator:
         from slime.backends.megatron_utils.megatron_to_hf import postprocess_hf_param
         from slime.backends.megatron_utils.megatron_to_hf.processors import quantize_params
         from slime.backends.megatron_utils.misc_utils import strip_param_name_prefix
+
+        # The actor's CPU backup is keyed by whichever ``convert_to_global_name``
+        # slime's actor picked when it created the backuper. Modern actors set
+        # that flag on, so keys carry PP layer offsets and EP-shifted expert
+        # indices; Bridge's conversion tasks emit the model's *local* names
+        # (raw ``model.named_parameters()``). Build both key shapes from the
+        # backup so a task lookup works whichever format the backup used —
+        # global-only, vanilla-only, or a mix if the two conventions ever
+        # meet in one run. Iterating vanilla and global side by side ties
+        # each tensor to both its names without hard-coding slime's naming
+        # rules on the reef side.
+        from slime.backends.megatron_utils.update_weight.common import (
+            _named_params_and_buffers_global,
+            _named_params_and_buffers_vanilla,
+        )
         from slime.utils.misc import chunk_named_params_by_size
 
-        renamed = {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}
+        stripped = {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}
+        renamed = dict(stripped)
+        for (vanilla_name, _param), (global_name, _) in zip(
+            _named_params_and_buffers_vanilla(self.model),
+            _named_params_and_buffers_global(self.args, self.model),
+            strict=False,
+        ):
+            tensor = megatron_local_weights.get(global_name)
+            if tensor is None:
+                tensor = megatron_local_weights.get(vanilla_name)
+            if tensor is None:
+                tensor = stripped.get(strip_param_name_prefix(vanilla_name))
+            if tensor is None:
+                # The parameter wasn't in the backup at all — leave the
+                # earlier lookup to raise a helpful KeyError.
+                continue
+            renamed[vanilla_name] = tensor
+            renamed[strip_param_name_prefix(vanilla_name)] = tensor
         with _patched_megatron_model(self.model):
             model_bridge = self._bridge._model_bridge
             original_materialize = model_bridge.materialize_adapter_weights
@@ -191,14 +223,29 @@ class _MegatronNameResolver:
         return megatron_name
 
 
+def _lookup_backup_weight(backup_weights, vp_stage, param_name, *, kind):
+    """Look the parameter's tensor up in the CPU actor backup.
+
+    Slime's actor backup keys the CPU snapshot by whatever
+    ``named_params_and_buffers(convert_to_global_name=...)`` yielded — the
+    ``convert_to_global_name`` flag decides whether the key carries a
+    ``vp_stages.<i>.`` prefix. Reef's calling site cannot tell which mode
+    was used, so we try both key shapes before raising: the vp_stages-
+    prefixed key (vanilla format, what the older slime path emitted) and
+    the bare parameter name (global format, what the current actor uses).
+    """
+    for key in (f"vp_stages.{vp_stage}.{param_name}", param_name):
+        if key in backup_weights:
+            return backup_weights[key]
+    raise KeyError(f"{kind} weight 'vp_stages.{vp_stage}.{param_name}' is missing from the actor backup")
+
+
 def _replace_conversion_task_weights(tasks, weights):
     def replace(task):
         if task is None or task.param_weight is None:
             return task
-        key = f"vp_stages.{task.vp_stage}.{task.param_name}"
-        if key not in weights:
-            raise KeyError(f"HF export weight {key!r} is missing from the actor backup")
-        return dataclasses.replace(task, param_weight=weights[key].cuda())
+        weight = _lookup_backup_weight(weights, task.vp_stage, task.param_name, kind="HF export")
+        return dataclasses.replace(task, param_weight=weight.cuda())
 
     return _MapWithLength(replace, tasks)
 

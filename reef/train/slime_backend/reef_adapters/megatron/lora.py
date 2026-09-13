@@ -243,10 +243,12 @@ def replace_adapter_task_weights_from_backup(adapter_tasks, backup_weights):
     def _replace_task(task):
         if task.param_weight is None:
             return task
-        key = f"vp_stages.{task.vp_stage}.{task.param_name}"
-        if key not in backup_weights:
-            raise KeyError(f"LoRA adapter weight {key!r} is missing from the actor backup")
-        return replace(task, param_weight=backup_weights[key].cuda())
+        for key in (f"vp_stages.{task.vp_stage}.{task.param_name}", task.param_name):
+            if key in backup_weights:
+                return replace(task, param_weight=backup_weights[key].cuda())
+        raise KeyError(
+            f"LoRA adapter weight 'vp_stages.{task.vp_stage}.{task.param_name}' is missing from the actor backup"
+        )
 
     return [
         replace(
