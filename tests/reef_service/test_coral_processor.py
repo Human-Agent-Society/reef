@@ -20,8 +20,8 @@ from reef.train.types import ProcessorContext, TrainingBatch
 SCENARIO = "coral-demo"
 
 
-def _processor(group_size=2):
-    return CoralProcessor(ProcessorContext(SCENARIO, {"group_size": group_size}))
+def _processor(group_size=2, **config):
+    return CoralProcessor(ProcessorContext(SCENARIO, {"group_size": group_size, **config}))
 
 
 def _inference(record_id, tokens, loss_mask, log_probs):
@@ -156,4 +156,37 @@ def test_status_is_a_mapping_even_before_any_discard():
     status() call .items() on the base's discard set."""
     processor = _processor()
     status = processor.status()
-    assert status == {"discarded_groups": []}
+    assert status == {"discarded_groups": [], "terminal_call_fallbacks": 0}
+
+
+def test_forked_multi_call_attempt_falls_back_to_terminal_call():
+    """A call sequence the assembler cannot linearize trains on its last call."""
+    processor = _processor(group_size=2)
+    processor.ingest(_inference("i1", [1, 2, 3], [1], [-0.1]))
+    processor.ingest(_inference("i2", [9, 9, 4], [1], [-0.2]))  # diverges from i1's prompt: a fork
+    processor.ingest(_inference("i3", [5, 6], [1], [-0.3]))
+    processor.ingest(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
+    processor.ingest(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
+    assert processor.ready()
+    (group,) = trajectory_groups(processor.build_batch())
+    fallback = next(s for s in group if trajectory_reward(s) == 0.5)
+    assert fallback.training.get("turn_count", 1) == 1
+    assert list(fallback.training["tokens"]) == [9, 9, 4]
+    assert processor.status()["terminal_call_fallbacks"] == 1
+
+
+def test_group_by_release_groups_a_linear_lineage():
+    """Single-agent evolution is a chain: with group_by=parent no group ever fills."""
+    processor = _processor(group_size=2, group_by="release")
+    processor.ingest(_inference("i1", [1, 2], [1], [-0.1]))
+    processor.ingest(_inference("i2", [3, 4], [1], [-0.2]))
+    processor.ingest(_attempt_report("r1", "i1", 0.3, commit="c-a", parent="p0"))
+    processor.ingest(_attempt_report("r2", "i2", 0.9, commit="c-b", parent="c-a"))  # child of the first
+    assert processor.ready()
+    (group,) = trajectory_groups(processor.build_batch())
+    assert sorted(trajectory_reward(sample) for sample in group) == [0.3, 0.9]
+
+
+def test_group_by_rejects_unknown_mode():
+    with pytest.raises(ValueError):
+        _processor(group_by="commit")

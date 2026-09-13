@@ -45,6 +45,10 @@ class CoralProcessor(ReportedFeedbackProcessor):
       parent's group trains. CORAL sibling counts are dynamic, so this is a
       recipe-level barrier, not a CORAL invariant; parents that never accrue
       enough scored children simply never train.
+    - ``group_by`` (default ``parent``): ``parent`` groups scored siblings of
+      one parent commit; ``release`` groups scored attempts produced under one
+      policy release, which is what a single-agent linear evolution needs to
+      ever form a group.
     """
 
     output_schema = TrainingBatch
@@ -56,10 +60,14 @@ class CoralProcessor(ReportedFeedbackProcessor):
         self.group_size = int(config.get("group_size", 4))
         if self.group_size < 2:
             raise ValueError("group_size must be at least two (relative rewards need contrast)")
+        self.group_by = str(config.get("group_by", "parent"))
+        if self.group_by not in ("parent", "release"):
+            raise ValueError("group_by must be 'parent' or 'release'")
         config.setdefault("accept_multi_turn_policy_samples", True)
         assembly_config = context.with_config(config)
         self._assembly = SampleAssembly.from_config(assembly_config)
         self._mixed_release_groups: dict[str, tuple[str, ...]] = {}
+        self._terminal_call_fallbacks = 0
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
     @staticmethod
@@ -78,23 +86,50 @@ class CoralProcessor(ReportedFeedbackProcessor):
         coral = self._coral_metadata(context)
         if coral is None:
             raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
-        sample = self._assembly.build(context, context.require_score())
         release_ids = {
             inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
         }
         if len(release_ids) > 1:
             raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
+        score = context.require_score()
+        try:
+            sample = self._assembly.build(context, score)
+        except ValueError:
+            if len(context.inferences) < 2:
+                raise
+            # A coding-agent episode is not always one linear prompt
+            # extension: the runtime compacts or re-renders history between
+            # calls, and the shared assembler treats that as a fork. The last
+            # call is the one that produced the graded submission, so train on
+            # it alone rather than dropping the attempt.
+            sample = self._assembly.build(replace(context, inferences=context.inferences[-1:]), score)
+            self._terminal_call_fallbacks += 1
+        release_id = next(iter(release_ids), None)
         return sample.with_metadata(
-            coral={**coral, "group": self.grouping(context)[0], "release_id": next(iter(release_ids), None)}
+            coral={**coral, "group": self._group_key(coral, release_id), "release_id": release_id}
         )
+
+    def _group_key(self, coral: Mapping[str, Any], release_id: str | None) -> str:
+        if self.group_by == "release":
+            # A single agent evolving one lineage produces a chain, not a
+            # tree: every attempt has a different parent, so parent groups
+            # never reach group_size. Grouping by the policy release that
+            # produced the attempts gives the TTT-Discover comparison set
+            # instead: scored attempts at the same problem under one policy.
+            return f"release:{release_id or 'none'}"
+        parent = coral.get("parent_hash")
+        return parent if isinstance(parent, str) and parent else ROOT_GROUP
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         coral = self._coral_metadata(context)
         if coral is None:
             raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
-        parent = coral.get("parent_hash")
-        group = parent if isinstance(parent, str) and parent else ROOT_GROUP
-        return group, coral["commit_hash"]
+        release_ids = {
+            inference.artifact_ref.release_id
+            for inference in (context.inferences or ())
+            if inference.artifact_ref is not None
+        }
+        return self._group_key(coral, next(iter(release_ids), None)), coral["commit_hash"]
 
     def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
         if len(items) < self.group_size:
@@ -120,6 +155,9 @@ class CoralProcessor(ReportedFeedbackProcessor):
                 {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
                 for parent, versions in sorted(self._mixed_release_groups.items())
             ],
+            # Attempts whose call sequence could not be linearized and were
+            # trained on their terminal call instead.
+            "terminal_call_fallbacks": self._terminal_call_fallbacks,
         }
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:

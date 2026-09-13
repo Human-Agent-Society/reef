@@ -43,8 +43,9 @@ from recipes.beta.coral.gateway_launcher import attach_reef_adapter_to_agent_man
 from recipes.beta.coral.watcher import AttemptWatcher
 
 DEFAULT_REEF_URL = "http://127.0.0.1:8900"
-SCENARIO = "coral-demo"
-TASK_DIR = Path(__file__).resolve().parent / "task"
+DEMO_TASK_DIR = Path(__file__).resolve().parent / "task"
+REEF_LITELLM_CONFIG = DEMO_TASK_DIR / "litellm_config.yaml"
+REEF_MODEL = "openai/reef-policy"
 
 
 def _probe(url: str) -> bool:
@@ -64,17 +65,24 @@ def wait_healthy(url: str, deadline_s: int = 600) -> None:
     raise RuntimeError(f"{url} not healthy within {deadline_s}s")
 
 
-def load_config(args: argparse.Namespace, state: Path) -> CoralConfig:
+def load_config(args: argparse.Namespace, state: Path, task_dir: Path) -> CoralConfig:
     """The task config with the run-scoped values resolved for this launch.
 
     ``repo_path``/``results_dir`` become absolute (CORAL resolves them
     against the CWD otherwise) and ``task_dir`` is set the way
     ``coral start --config`` sets it, so the gateway config reference and
-    the grader install resolve against ``task/``.
+    the grader install resolve against the task directory.
+
+    Any well-formed CORAL task works, not just the bundled demo. A task
+    authored outside this example (``--task``) normally names a hosted
+    model and no gateway upstream config; in that case the launcher
+    substitutes the reef wiring: the bundled LiteLLM config (whose only
+    upstream is the Reef service) and, unless ``--model`` overrides it,
+    the served policy's model name.
     """
-    config = CoralConfig.from_yaml(TASK_DIR / "task.yaml")
-    config.task_dir = TASK_DIR
-    config.workspace.repo_path = str(TASK_DIR / "seed")
+    config = CoralConfig.from_yaml(task_dir / "task.yaml")
+    config.task_dir = task_dir
+    config.workspace.repo_path = str(task_dir / "seed")
     config.workspace.results_dir = str(state / "coral-results")
     config.run.session = "local"
     config.run.verbose = True
@@ -85,6 +93,16 @@ def load_config(args: argparse.Namespace, state: Path) -> CoralConfig:
     if args.model:
         config.agents.model = args.model
     config.agents.gateway.enabled = True
+    gateway_config = getattr(config.agents.gateway, "config", None)
+    if not gateway_config or not (task_dir / gateway_config).is_file():
+        config.agents.gateway.config = str(REEF_LITELLM_CONFIG)
+        if not args.model:
+            config.agents.model = REEF_MODEL
+        logging.getLogger(__name__).info(
+            "task has no reef gateway config; using %s with model %s",
+            REEF_LITELLM_CONFIG,
+            config.agents.model,
+        )
     if args.gateway_port:
         config.agents.gateway.port = args.gateway_port
     return config
@@ -93,6 +111,8 @@ def load_config(args: argparse.Namespace, state: Path) -> CoralConfig:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, default=Path("work") / "coral-demo")
+    parser.add_argument("--task", type=Path, default=DEMO_TASK_DIR, help="CORAL task package directory")
+    parser.add_argument("--scenario", default="coral-demo", help="reef scenario name for this task")
     parser.add_argument("--agents", type=int, default=2)
     parser.add_argument("--max-attempts", type=int, default=8, help="run budget: real attempts before auto-stop")
     parser.add_argument("--runtime", default="", help="CORAL runtime (default: task.yaml's, opencode)")
@@ -110,12 +130,15 @@ def main() -> int:
 
     wait_healthy(f"{args.reef_url}/healthz")
 
-    config = load_config(args, state)
+    task_dir = args.task.resolve()
+    if not (task_dir / "task.yaml").is_file():
+        raise SystemExit(f"--task {task_dir} does not contain a task.yaml")
+    config = load_config(args, state, task_dir)
     run_id = f"coral-ttt-{time.strftime('%Y%m%d-%H%M%S')}"
-    manager = AgentManager(config, verbose=True, config_dir=TASK_DIR)
+    manager = AgentManager(config, verbose=True, config_dir=task_dir)
     journal = attach_reef_adapter_to_agent_manager(
         manager,
-        scenario=SCENARIO,
+        scenario=args.scenario,
         journal_path=state / "reef" / "calls.jsonl",
         extra_tags={"coral-run": run_id},
     )
@@ -129,7 +152,7 @@ def main() -> int:
         coral_dir=manager.paths.coral_dir,
         journal=journal,
         reef_url=args.reef_url,
-        scenario=SCENARIO,
+        scenario=args.scenario,
         run_id=run_id,
         token=args.reef_token,
         state_path=state / "reef" / "reported.json",

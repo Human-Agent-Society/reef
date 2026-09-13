@@ -40,6 +40,8 @@ from __future__ import annotations
 import json
 import logging
 import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -126,6 +128,61 @@ def read_finalized_attempts(coral_dir: Path) -> list[FinalizedAttempt]:
     return attempts
 
 
+class _ServerRecordIndex:
+    """Reef-side view of this run's INFERENCE records, keyed by their tags.
+
+    The journal's receipts are the primary reference source, but a proxy hop
+    can strip them (LiteLLM re-serializes streamed chunks and drops the
+    ``reef`` receipt frame; provider response headers are not always
+    forwarded). The tags reef stored with each record survive any proxy,
+    so this index pages the scenario's records and reads each one's tags,
+    giving the watcher a second way to resolve an attempt's references.
+    """
+
+    def __init__(self, reef_url: str, scenario: str, run_id: str, token: str | None) -> None:
+        self._base = reef_url.rstrip("/")
+        self._scenario = scenario
+        self._run_id = run_id
+        self._token = token
+        self.after_sequence = 0
+        #: agent_record_id -> (agent_id, commit_hash), insertion ordered
+        self.records: dict[str, tuple[str, str]] = {}
+
+    def _get(self, path: str) -> Any:
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        request = urllib.request.Request(self._base + path, headers=headers)
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def refresh(self) -> None:
+        """Pull records added since the last refresh; network errors are skipped."""
+        scenario = urllib.parse.quote(self._scenario, safe="")
+        try:
+            while True:
+                page = self._get(f"/reef/scenarios/{scenario}/records?after_sequence={self.after_sequence}&limit=100")
+                items = page.get("records") or []
+                for item in items:
+                    record_id = item.get("agent_record_id")
+                    if item.get("request_type") != "inference" or not isinstance(record_id, str):
+                        continue
+                    if record_id in self.records:
+                        continue
+                    detail = self._get(f"/reef/scenarios/{scenario}/records/{record_id}")
+                    tags = (((detail or {}).get("payload") or {}).get("metadata") or {}).get("tags") or {}
+                    if tags.get("coral-run") != self._run_id:
+                        continue
+                    agent = tags.get("coral-agent")
+                    commit = tags.get("coral-commit")
+                    if isinstance(agent, str) and isinstance(commit, str):
+                        self.records[record_id] = (agent, commit)
+                next_after = page.get("next_after_sequence")
+                if not items or not isinstance(next_after, int) or next_after <= self.after_sequence:
+                    break
+                self.after_sequence = next_after
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            logger.warning("reef record index refresh failed (%s); using journal receipts only", exc)
+
+
 class AttemptWatcher:
     """Poll a run's attempts and report each finalized one to Reef once.
 
@@ -156,6 +213,7 @@ class AttemptWatcher:
         self.reports: list[AttemptReport] = []
         self._reported: set[str] = set()  # commit hashes acknowledged by reef
         self._claimed: set[str] = set()  # journal record ids attributed to a report
+        self._index = _ServerRecordIndex(reef_url, scenario, run_id, token)
         self._load_state()
 
     # -- state persistence --------------------------------------------------
@@ -167,6 +225,8 @@ class AttemptWatcher:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             self._reported = set(state.get("reported_commits", []))
             self._claimed = set(state.get("claimed_record_ids", []))
+            self._index.after_sequence = int(state.get("index_after_sequence", 0))
+            self._index.records = {k: (v[0], v[1]) for k, v in (state.get("index_records") or {}).items()}
         except (json.JSONDecodeError, OSError, TypeError):
             logger.warning("unreadable watcher state at %s; starting fresh", self.state_path)
 
@@ -176,6 +236,8 @@ class AttemptWatcher:
             {
                 "reported_commits": sorted(self._reported),
                 "claimed_record_ids": sorted(self._claimed),
+                "index_after_sequence": self._index.after_sequence,
+                "index_records": {k: list(v) for k, v in self._index.records.items()},
             }
         )
         tmp = self.state_path.with_suffix(".tmp")
@@ -198,6 +260,18 @@ class AttemptWatcher:
                 and commit_matches(record.commit_hash, attempt.parent_hash)
             ):
                 out.append(record.agent_record_id)
+        if out:
+            return tuple(out)
+        # No receipts survived the proxy hop: resolve through the tags reef
+        # stored with the records instead.
+        self._index.refresh()
+        for record_id, (agent_id, commit_hash) in self._index.records.items():
+            if (
+                agent_id == attempt.agent_id
+                and record_id not in self._claimed
+                and commit_matches(commit_hash, attempt.parent_hash)
+            ):
+                out.append(record_id)
         return tuple(out)
 
     # -- the poll ------------------------------------------------------------
