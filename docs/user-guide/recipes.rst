@@ -66,7 +66,9 @@ learns from each score before the next task arrives.
      - harness: complete compositions
      - ``recipes/meta_harness/``
      - `Meta-Harness <../../recipes/meta_harness/README.md>`__
-     - `Meta-Harness on Terminal-Bench <../../recipes/meta_harness/README.md>`__
+     - Meta-Harness on Terminal-Bench:
+       `example <../../recipes/meta_harness/examples/terminal_bench/README.md>`__,
+       `results <../../recipes/meta_harness/RESULTS.md>`__
 
 Learning from usage
 -------------------

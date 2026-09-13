@@ -1,0 +1,41 @@
+# run.py embeds this recipe in a durable Reef scenario and drives its reports.
+schema-version: 2
+recipe:
+  implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
+  config:
+    batch-size: 1
+    max-score: .inf
+    evolution:
+      adapter: terminus
+      binary: reef-terminus
+      evaluate: harness.benchmark:evaluate
+      seed: [harness.benchmark:SEED]
+      tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
+      episode_repeats: 2
+      episode_timeout_s: 9000
+      forbid_residue: true
+      executor: sandbox
+      sandbox:
+        egress_hosts: [api.e2b.dev, model-endpoint]
+        env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+      models:
+        proposer:
+          url: ${REEF_PROPOSER_URL}
+          model: ${REEF_PROPOSER_MODEL}
+          api: responses
+          api_key_env: REEF_PROPOSER_API_KEY
+          timeout_s: 1800
+      meta_harness:
+        archive: ${REEF_WORK}/population
+        mode: full_history
+        components: [code_extension]
+        max_candidates: 4
+        max_target_episodes: 480
+      max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL}
+  upstream-model: ${REEF_MODEL}
+execution:
+  evolution:
+    backend: auto
+    workers: ${REEF_META_HARNESS_WORKERS}

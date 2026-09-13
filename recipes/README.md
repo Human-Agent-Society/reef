@@ -50,7 +50,7 @@ learns from each score before the next task arrives.
 |---|---|---|---|---|
 | SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/sao/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
-| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | [Meta-Harness on Terminal-Bench](meta_harness/README.md) |
+| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 
 [SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
 SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
@@ -73,7 +73,8 @@ its seed-1 run gained the official 12 points.
 [Meta-Harness](meta_harness/README.md) searches complete harness compositions
 using all retained candidates and scores. It selects strict mean-score
 improvements and commits the population with Reef's serving state. See the
-[Terminal-Bench results](meta_harness/RESULTS.md) and selected harness.
+[Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
+[results](meta_harness/RESULTS.md), and selected harness.
 
 ## Learning from usage
 

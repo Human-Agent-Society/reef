@@ -130,8 +130,9 @@ where upstream spends one; budgets expressed in episodes are not directly
 comparable to upstream's iteration counts. Failed episodes count as zero; a
 non-finite score is rejected by Reef before settlement.
 
-The [Terminal-Bench results](RESULTS.md) compare a matched search with
-upstream and include the selected harness. The experiment measured the
+The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
+recipe on the pinned 30-task subset. The [results](RESULTS.md) compare a matched
+search with upstream and include the selected harness. The experiment measured the
 baseline once and each new candidate once per measurement; its local campaign
 tooling is separate from this reusable recipe.
 
