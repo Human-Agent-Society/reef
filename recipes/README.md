@@ -17,7 +17,7 @@ the GPU training stack, while harness recipes need only a model endpoint.
 Reefine ships with `reef-infra` and every other recipe here is a cookbook
 package. [Basic](#basic) is the record-only starting stack and stays outside
 the catalog, and [beta recipes](#beta-recipes) join it once they publish
-learning results. The root [README](../README.md#recipes-and-examples) and the
+learning results. The root [README](../README.md#-recipes-and-examples) and the
 [recipes guide](../docs/user-guide/recipes.rst) show the same catalog.
 
 ## Scientific discovery

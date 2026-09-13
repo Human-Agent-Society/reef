@@ -10,7 +10,7 @@ Reefine ships with ``reef-infra``, and the other implementations live in the
 repository's ``recipes/`` cookbook and do not ship in the Reef wheel.
 ``recipes/basic/`` is the record-only starting stack and stays outside the
 catalog, and beta recipes join it once they publish learning results. The root
-`README <../../README.md#recipes-and-examples>`__ and `recipes/README.md
+`README <../../README.md#-recipes-and-examples>`__ and `recipes/README.md
 <../../recipes/README.md>`__ show the same catalog.
 
 Scientific discovery
