@@ -1,7 +1,8 @@
 # Meta-Harness on Terminal-Bench
 
-Run the [Meta-Harness recipe](../../README.md) on the same pinned 30-task
-Terminal-Bench 2 hard subset as the [retained comparison](../../RESULTS.md).
+Run the [Meta-Harness recipe](../../README.md) on all 89 tasks in the pinned
+Terminal-Bench 2 revision. The [retained comparison](../../RESULTS.md) measured
+the 30-task hard subset at that same revision.
 The seed is vanilla Terminus 2, represented by a no-op `Agent(Terminus2)`
 module. The proposer rewrites that module, retains every valid candidate, and
 selects only strict improvements over the best recorded mean score.
@@ -55,11 +56,15 @@ export REEF_PROPOSER_MODEL=gpt-5.6-sol
 export E2B_API_KEY=...
 
 # Small live wiring check: one task, one repeat, one candidate.
-./run.sh --task cancel-async-tasks --iterations 1 --repeats 1
+./run.sh --task extract-elf --iterations 1 --repeats 1
 
-# The 30-task suite, two repeats, up to four new candidates.
+# All 89 tasks, two repeats, up to four new candidates.
 ./run.sh
 ```
+
+`--task` accepts any task in the pinned [manifest](harness/tasks.json) and can
+be repeated to select a smaller suite. With no `--task`, every task runs in
+each candidate and incumbent evaluation.
 
 The model names match the retained experiment and require an endpoint that
 serves them; replace both names with models available at your endpoint when
@@ -95,8 +100,8 @@ timeout, residue policy, and finite-score checks. Failed gate episodes count
 as zero; a rollout that cannot launch stops the driver before a proposal.
 No infrastructure failure is automatically replaced with another trial.
 
-Four accepted candidate proposals cost at most 480 gate episodes
-(`4 x 2 sides x 30 tasks x 2 repeats`), plus one feedback rollout per proposal
+Four accepted candidate proposals cost at most 1,424 gate episodes
+(`4 x 2 sides x 89 tasks x 2 repeats`), plus one feedback rollout per proposal
 attempt. Invalid and duplicate proposals can consume attempts without a
 gate; the default limit is eight attempts and therefore eight feedback
 rollouts. Here "accepted" means admitted for evaluation: a candidate need
@@ -129,9 +134,12 @@ commit cannot advance the search or publish a summary for that step.
 
 ## Distance from the recorded protocol
 
-- The dataset revision and 30-task list match the retained comparison. The
-  [manifest](harness/tasks.json) cites the upstream script that defines the
-  subset. The task files are fetched from upstream, not copied into Reef.
+- The dataset revision matches the retained comparison, but this example
+  defaults to all 89 tasks instead of its 30-task hard subset. The
+  [manifest](harness/tasks.json) lists every top-level task directory with a
+  `task.toml` at the pinned upstream revision. The task files are fetched from
+  upstream, not copied into Reef; the historical scores apply only to the
+  30-task subset.
 - The historical runner measured the baseline once and each new candidate
   once. This example uses Reef's paired gate: the first gate supplies the
   baseline measurement, and later gates remeasure the incumbent even though

@@ -217,7 +217,7 @@ def main() -> None:
     parser.add_argument(
         "--tasks-root", type=Path, default=Path(os.environ.get("REEF_TERMINAL_BENCH_DIR", "/opt/terminal-bench-2"))
     )
-    parser.add_argument("--task", action="append", help="run a smaller suite using names from the hard subset")
+    parser.add_argument("--task", action="append", help="run a smaller suite using names from the pinned manifest")
     parser.add_argument("--iterations", type=positive_int)
     parser.add_argument("--repeats", type=positive_int)
     parser.add_argument(

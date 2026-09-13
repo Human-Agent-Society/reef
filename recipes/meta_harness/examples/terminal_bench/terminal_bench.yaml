@@ -30,7 +30,7 @@ recipe:
         mode: full_history
         components: [code_extension]
         max_candidates: 4
-        max_target_episodes: 480
+        max_target_episodes: 1424  # Four gates, two sides, 89 tasks, two repeats.
       max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
 inference:
   upstream-url: ${REEF_UPSTREAM_URL}

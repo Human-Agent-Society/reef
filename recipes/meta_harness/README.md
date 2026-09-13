@@ -131,10 +131,11 @@ comparable to upstream's iteration counts. Failed episodes count as zero; a
 non-finite score is rejected by Reef before settlement.
 
 The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
-recipe on the pinned 30-task subset. The [results](RESULTS.md) compare a matched
-search with upstream and include the selected harness. The experiment measured the
-baseline once and each new candidate once per measurement; its local campaign
-tooling is separate from this reusable recipe.
+recipe on all 89 tasks in the pinned dataset. The [results](RESULTS.md) compare a
+matched search on the 30-task subset with upstream and include the selected
+harness. The experiment measured the baseline once and each new candidate
+once per measurement; its local campaign tooling is separate from this
+reusable recipe.
 
 The evaluation suite must stay fixed so historical scores remain comparable.
 Task promotion, periodic rechecks, and review-only publication are therefore

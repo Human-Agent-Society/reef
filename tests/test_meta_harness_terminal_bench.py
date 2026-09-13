@@ -79,9 +79,11 @@ def test_missing_failed_and_mismatched_verifier(driver):
 def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
     root = tmp_path / "tasks"
     root.mkdir()
-    task = root / "bn-fit-modify"
-    task.mkdir()
-    (task / "task.toml").write_text('version = "1.0"\n')
+    for name in driver.benchmark.MANIFEST["tasks"]:
+        task = root / name
+        task.mkdir()
+        (task / "task.toml").write_text('version = "1.0"\n')
+    task = root / "extract-elf"  # A task outside the historical hard subset.
     subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(root), "add", "."], check=True)
     subprocess.run(
@@ -93,6 +95,7 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="revision"):
         driver.benchmark.task_paths(root, [task.name])
     monkeypatch.setitem(driver.benchmark.MANIFEST, "revision", revision)
+    assert driver.benchmark.task_paths(root) == tuple(str(root / name) for name in driver.benchmark.MANIFEST["tasks"])
     assert driver.benchmark.task_paths(root, [task.name]) == (str(task.resolve()),)
     for names in [[], [task.name, task.name], ["../escape"]]:
         with pytest.raises(ValueError, match="unique names"):
@@ -104,8 +107,8 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
 
 def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch):
     full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None, None)
-    assert len(full["evolution"]["tasks"]) == 30
-    assert full["evolution"]["meta_harness"]["max_target_episodes"] == 480
+    assert len(full["evolution"]["tasks"]) == len(set(full["evolution"]["tasks"])) == 89
+    assert full["evolution"]["meta_harness"]["max_target_episodes"] == 1424
     short = driver.configuration(("task",), 1, 1)
     assert short["evolution"]["max_steps"] == 2
     assert short["evolution"]["meta_harness"]["max_target_episodes"] == 2

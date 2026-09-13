@@ -24,7 +24,7 @@ def task_paths(root: Path, names: list[str] | None = None) -> tuple[str, ...]:
     root = root.resolve()
     selected = MANIFEST["tasks"] if names is None else names
     if not selected or len(set(selected)) != len(selected) or any(name not in MANIFEST["tasks"] for name in selected):
-        raise ValueError("tasks must be unique names from the pinned 30-task manifest")
+        raise ValueError("tasks must be unique names from the pinned Terminal-Bench manifest")
     revision = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
     if revision != MANIFEST["revision"]:
         raise ValueError(f"Terminal-Bench revision must be {MANIFEST['revision']}; found {revision}")

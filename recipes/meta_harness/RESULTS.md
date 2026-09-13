@@ -1,8 +1,9 @@
 # Terminal-Bench reproduction results
 
-The [runnable example](examples/terminal_bench/README.md) uses the same pinned
-task subset through the current shared recipe and documents its differences
-from the internal runner used for these measurements.
+The [runnable example](examples/terminal_bench/README.md) defaults to all 89
+tasks at the same pinned dataset revision through the current shared recipe.
+It documents its differences from the internal runner used for these 30-task
+measurements.
 
 The comparison starts from vanilla Terminus 2 and runs a baseline plus four
 full-history iterations. Each measurement covers the same 30 tasks with two
