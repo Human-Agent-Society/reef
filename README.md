@@ -23,16 +23,16 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 
 </div>
 
-**[Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
-[Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
-[Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
-[Join Discord](https://discord.gg/5y8e5f937k) |
-[Join WeChat Group](docs/community/wechat.md)**
+**🚀 [Get started](https://reefinfra.ai/docs/getting-started/quickstart/) |
+🗺️ [Roadmap](https://github.com/Human-Agent-Society/reef/issues/25) |
+📣 [Launch post](https://x.com/ao_qu18465/status/2094867930081337730) |
+💬 [Join Discord](https://discord.gg/5y8e5f937k) |
+📱 [Join WeChat Group](docs/community/wechat.md)**
 
 </div>
 
 
-## When to use Reef
+## 🎯 When to use Reef
 
 Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
 
@@ -43,7 +43,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Scientific discoveries | Test-time training | An execution environment, a correctness checker, and a measurable objective |
 
 
-## How Reef fits your stack
+## 🧩 How Reef fits your stack
 
 | Ability | Inference engine (vLLM, SGLang, …) | RL training framework (Slime, veRL, AReaL, …) | **Reef** |
 |---|:---:|:---:|:---:|
@@ -54,7 +54,7 @@ Use Reef when you want your agent to keep improving simply by learning from how 
 | Evolves beyond weights (skills, harness) | ❌ | ❌ | ✅ |
 
 
-## How it works
+## 🔄 How it works
 
 <div align="center">
 <picture>
@@ -74,7 +74,7 @@ modules implement each step.
 | **4&nbsp;·&nbsp;Commit** | Apply the configured selection policy and publish accepted updates. | [`train/evaluation/`](reef/train/evaluation) — candidate evaluation<br>[`artifact/`](reef/artifact) — version history<br>[`surface/`](reef/surface) — artifact delivery |
 
 
-## Installation
+## 📦 Installation
 
 > 💡 **Note**
 >
@@ -106,7 +106,7 @@ python3 -c "import reef; print(reef.__version__)"
 Use the source checkout for development and for the training examples below.
 
 
-## Using Reef
+## 🛠️ Using Reef
 
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
@@ -241,7 +241,7 @@ To ask for a harness change in plain words and see the whole path from the ask t
 
 Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --model ollama/gemma4:26b`.
 
-## Recipes and examples
+## 📚 Recipes and examples
 
 Pick a recipe by the **task type** of your workload and by **what it should
 evolve**, model weights or the agent harness. Weight recipes need the GPU
@@ -265,7 +265,7 @@ Each result page documents its task, evaluation setup, measurements, and
 limitations.
 
 
-## Architecture
+## 🏗️ Architecture
 
 <div align="center">
 <picture>
@@ -274,7 +274,7 @@ limitations.
 </picture>
 </div>
 
-## Learn more
+## 📖 Learn more
 
 The [documentation](https://reefinfra.ai/docs/) is organized in the following order:
 
@@ -288,7 +288,7 @@ The [documentation](https://reefinfra.ai/docs/) is organized in the following or
 - [The core loop](https://reefinfra.ai/docs/getting-started/core-loop/): The core loop of Reef
 - [Glossary](https://reefinfra.ai/docs/reference/glossary/): Explanation of the terminologies used
 
-## Community & Contributing
+## 🤝 Community & Contributing
 
 Working on continual self-improving agent?
 
@@ -302,7 +302,7 @@ Working on continual self-improving agent?
 If Reef looks useful to you, please give it a ⭐ — it helps the community to discover and contribute to the project.
 
 
-## The Team
+## 👥 The Team
 
 Reef brings together people exploring how agents can learn from experience and
 improve over time. The people below help turn that idea into working infrastructure.
@@ -336,7 +336,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Dingyi Zhuang](https://github.com/ZhuangDingyi).
 
 
-## Star History
+## ⭐ Star History
 
 <a href="https://star-history.com/#Human-Agent-Society/reef&Date">
   <picture>
@@ -347,7 +347,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 </a>
 
 
-## Acknowledgements
+## 🙏 Acknowledgements
 
 We are particularly grateful to these projects which power important parts of Reef:
 
