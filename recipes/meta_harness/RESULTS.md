@@ -1,5 +1,9 @@
 # Terminal-Bench reproduction results
 
+The [runnable example](examples/terminal_bench/README.md) runs the full pinned
+dataset through the current shared recipe and documents its differences from
+the internal runner used for these measurements.
+
 The comparison starts from vanilla Terminus 2 and runs a baseline plus four
 full-history iterations. Each measurement covers the same 30 tasks with two
 repeats: 60 trials. A candidate replaces the current choice only when its mean
