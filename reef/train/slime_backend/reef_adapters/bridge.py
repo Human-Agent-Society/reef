@@ -17,13 +17,9 @@ dependency.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
-import sys
-import traceback
-from collections.abc import Mapping, Sequence
-from contextlib import nullcontext, suppress
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -34,14 +30,26 @@ import ray
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyManager
 from reef.runtime.base import PreparedTrainingStep, TrainingJobResult
-from reef.runtime.executor import resolve
+from reef.runtime.executor import Executor, resolve
+from reef.runtime.executor.failure import ExecutorFailureListener
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
+from reef.runtime.training_job.execution import (
+    PreparedTrainingJob,
+    TrainingCheckpoint,
+    TrainingExecution,
+    TrainingMetrics,
+)
+from reef.runtime.training_job.execution import max_staleness as _max_staleness
+from reef.runtime.training_job.execution import uses_staleness_admission as _uses_staleness_admission
+from reef.runtime.training_job.marker import marker_path, marker_result, marker_rollouts, read_marker
+from reef.runtime.training_job.publication import TrainingPublication
 from reef.surface.adapter import parse_adapter_name
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
     configure_rollout_runtime,
@@ -50,16 +58,6 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.training_job.marker import (
-    marker_checkpoint_result,
-    marker_disposition,
-    marker_path,
-    marker_result,
-    marker_rollouts,
-    read_marker,
-    transition_marker,
-    write_marker,
-)
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
@@ -74,33 +72,6 @@ _TRAIN_RPC_TIMEOUT_S = 14_400
 class _StalenessDecision:
     action: Literal["admit", "drop"]
     metrics: Mapping[str, Any]
-
-
-def _max_staleness(payload: Mapping[str, Any]) -> int:
-    value = payload.get("max_staleness", 0)
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("training job max_staleness must be a non-negative integer")
-    return value
-
-
-def _uses_staleness_admission(payload: Mapping[str, Any]) -> bool:
-    """Whether the serving version is an admission fence, not job identity."""
-    return _max_staleness(payload) > 0 or "producing_runtime_load_ids" in payload
-
-
-def _training_job_id(payload: Mapping[str, Any]) -> str:
-    identity = dict(payload)
-    # Admission policy controls whether a fresh execution may start; changing
-    # that policy must not turn a completed logical job into different work.
-    identity.pop("max_staleness", None)
-    if _uses_staleness_admission(payload):
-        # The serving fence is sampled at preparation and can legitimately be
-        # newer on a lost-ack replay after this job published. It fences only a
-        # fresh execution; sample rows and rollout id are the retry-stable
-        # logical job identity.
-        identity.pop("expected_runtime_load_id", None)
-    encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _source_agent_record_ids(payload: Mapping[str, Any]) -> tuple[str, ...]:
@@ -185,7 +156,7 @@ def _staleness_admission(
 ) -> _StalenessDecision:
     # The reef wheel ships without the slime distribution; staleness admission
     # only runs inside a live bridge, where slime is installed.
-    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+    from reef.runtime.runtime_load_id import RuntimeLoadId
 
     try:
         serving = RuntimeLoadId.parse(serving_runtime_load_id)
@@ -259,7 +230,7 @@ def _scenario_staleness_admission(
     lag is the number of *this* scenario's publications that postdate the
     version its tokens were produced under.
     """
-    from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
+    from reef.runtime.runtime_load_id import RuntimeLoadId
 
     if _uses_staleness_admission(payload):
         producing_groups = _admission_runtime_load_id_groups(payload)
@@ -304,19 +275,6 @@ def _scenario_staleness_admission(
             "staleness/scenario": scenario,
         },
     )
-
-
-def create_placement_groups(args):
-    """Load Slime's heavyweight placement-group module only in the driver."""
-    from slime.ray.placement_group import create_placement_groups as implementation
-
-    return implementation(args)
-
-
-def create_rollout_manager(args, placement_group):
-    from reef.train.slime_backend.reef_adapters.rollout.manager import create_rollout_manager as implementation
-
-    return implementation(args, placement_group)
 
 
 def create_train_groups(args, placement_groups, rollout_manager):
@@ -390,8 +348,9 @@ class TrainBridgeActorImpl:
     def __init__(
         self,
         actor_group,
-        rollout_manager,
+        inference,
         *,
+        batch_processor: TrainingBatchProcessor,
         save_hf_template: str | None,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
@@ -416,8 +375,8 @@ class TrainBridgeActorImpl:
         # saves would land in the actor's Megatron tree (path collision), so
         # the bridge falls back to the historical save-actor-only behavior.
         self._critic_save_root = critic_save_root if critic_group is not None else None
-        self._rollout_manager = rollout_manager
-        self._manager_executor = RayExecutor.from_workers([rollout_manager])
+        self._inference_executor = RayExecutor.from_workers([inference])
+        self._batch_processor = batch_processor
         self._save_hf_template = save_hf_template
         self._colocate = colocate
         # A LoRA deployment serves one adapter per scenario: the scenarios
@@ -434,7 +393,7 @@ class TrainBridgeActorImpl:
         # publication makes room through it, restart recovery reloads through
         # it, and its status is what the serving side reports.
         self._residency = AdapterResidencyManager(adapter_capacity) if lora else None
-        self._adapter_engine = _RolloutAdapterEngine(rollout_manager) if lora else None
+        self._adapter_engine = _RolloutAdapterEngine(inference) if lora else None
         # A LoRA run never rewrites the base, so releasing it copies identical
         # bytes to the host and back on every step. Opt in and the training
         # step releases only what it invalidates. Whether the base can stay
@@ -451,7 +410,15 @@ class TrainBridgeActorImpl:
             )
         else:
             self._algo = _NullAlgorithm()
-        self._phase = "serving"
+        self._publication = TrainingPublication(
+            marker_path(save_hf_template) if save_hf_template is not None else None,
+            _SlimeWeightPublisher(self),
+        )
+        self._execution = TrainingExecution(
+            marker_path(save_hf_template) if save_hf_template is not None else None,
+            _SlimeTrainingBackend(self),
+            self._publication.state,
+        )
         self._closed = False
         self._completed_train_steps = 0
         self._last_train_rollout_id: int | None = None
@@ -472,20 +439,30 @@ class TrainBridgeActorImpl:
             else None
         )
         marker = self._recover_marker() if self._save_hf_template is not None else None
+        with self._publication.recovery(marker):
+            self._restore_serving(marker)
+
+    def _restore_serving(self, marker: dict[str, Any] | None) -> None:
+        """Reconstruct backend state inside Reef's startup recovery barrier."""
         marker_status = None if marker is None else str(marker["status"])
         if marker_status == "UPDATING_WEIGHTS":
             # The previous fan-out may have updated only some engines. Recover
             # dead actors first, keep every engine paused, and force a complete
             # tensor transfer from the durable checkpoint-backed actor state.
-            self._manager_call("recover_updatable_engines")
+            self._inference_call("recover_updatable_engines")
+        if self._colocate and self._lora:
+            # Cold startup releases everything before training initializes.
+            # Restore the frozen base before registering scenario adapters,
+            # including runs that only release KV/graphs on later steps.
+            self._inference_call("onload_weights")
         if marker_status == "REJECTING":
             if marker is None:
                 raise RuntimeError("REJECTING marker status has no marker payload")
-            self._restore_incumbent_serving()
-            transition_marker(self._marker_path(), marker, "REJECTED")
-            marker_status = "REJECTED"
-        self._inference_url = self._manager_call("inference_url")
-        versions = self._manager_call("get_runtime_load_ids")
+            self._publication.reject(str(marker["job_id"]))
+            marker["status"] = marker_status = "REJECTED"
+            self._pause_generation(reconcile=True)
+        self._inference_url = self._inference_call("inference_url")
+        versions = self._inference_call("get_runtime_load_ids")
         if not versions or (marker_status != "UPDATING_WEIGHTS" and len({str(version) for version in versions}) != 1):
             raise RuntimeError(f"serving engines disagree at bridge startup: {versions!r}")
         # An UPDATING_WEIGHTS marker explicitly means this observation may be mixed.
@@ -506,17 +483,6 @@ class TrainBridgeActorImpl:
             self._group.restore_runtime_load_id_for_republication(recovered_runtime_load_id)
         if self._history is not None:
             self._recover_scenario_adapters(marker)
-        if marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS", "READY_TO_COMMIT", "HEAD_COMMITTED"}:
-            try:
-                self._pause_generation()
-            except BaseException:
-                with suppress(Exception):
-                    self._manager_call("terminate_updatable_engines")
-                raise
-        if marker_status == "CHECKPOINT":
-            if marker is None:
-                raise RuntimeError("CHECKPOINT marker status has no marker payload")
-            transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
         if self._save_hf_template is not None and marker_status != "REJECTED" and not (self._lora and marker is None):
             # The Megatron checkpoint can be newer than the HF checkpoint used
             # to boot SGLang. Publish actor weights before construction returns
@@ -534,43 +500,23 @@ class TrainBridgeActorImpl:
             # engines boot released: give them their weights and KV back
             # before the first request.
             if self._colocate:
-                self._manager_call("onload_weights")
-                self._manager_call("onload_kv")
+                self._inference_call("onload_weights")
+                self._inference_call("onload_kv")
             self._runtime_load_id = str(self._group.sync_serving_runtime_load_id())
-            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
+            observed = [str(value) for value in self._inference_call("get_runtime_load_ids")]
             if not observed or set(observed) != {self._runtime_load_id}:
                 raise RuntimeError(f"serving engines disagree after version sync: {observed!r}")
-        if recovered_runtime_load_id is not None and self._runtime_load_id != recovered_runtime_load_id:
-            raise RuntimeError(
-                "checkpoint republication changed runtime load ID "
-                f"{recovered_runtime_load_id!r} to {self._runtime_load_id!r}"
-            )
-        if marker is not None and marker_status in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "READY_TO_COMMIT",
-                runtime_load_id=self._runtime_load_id,
-            )
-            self._phase = "awaiting_commit"
-        elif marker_status == "READY_TO_COMMIT":
-            self._phase = "awaiting_commit"
-        elif marker is not None and marker_status == "HEAD_COMMITTED":
-            self._continue_generation()
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "COMPLETE",
-                commit_acknowledged=True,
-            )
-            self._phase = "serving"
-        else:
-            self._phase = "serving"
-            # Per-scenario recovery paused the engines itself; a serving
-            # bridge must not leave them paused.
-            self._continue_generation()
+        self._publication.finish_recovery(marker, self._runtime_load_id)
 
-    def _recover_scenario_adapters(self, marker: dict[str, Any] | None) -> None:
+    @property
+    def _phase(self) -> str:
+        return self._publication.phase
+
+    @_phase.setter
+    def _phase(self, phase: str) -> None:
+        self._publication.phase = phase
+
+    def _recover_scenario_adapters(self, marker: Mapping[str, Any] | None) -> None:
         """Re-register every scenario's committed adapter after a restart.
 
         The Megatron checkpoint restores only the slot's last occupant; the
@@ -591,6 +537,8 @@ class TrainBridgeActorImpl:
         if not pending and active is None:
             return
         self._pause_generation()
+        if self._colocate:
+            self._inference_call("onload_weights")
         for scenario, adapter in pending:
             _, version = parse_adapter_name(adapter)
             residency.activate(
@@ -629,7 +577,7 @@ class TrainBridgeActorImpl:
         return scenario
 
     def shutdown(self) -> None:
-        """Release training and rollout workers before retiring their bridge."""
+        """Release training workers; inference and reservations belong to Reef."""
         with self._operation_lock:
             if self._closed:
                 return
@@ -642,12 +590,6 @@ class TrainBridgeActorImpl:
                         group.release()
                     except Exception as exc:
                         errors.append(exc)
-            try:
-                self._manager_executor.rpc(0, "dispose", timeout=60)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                RayExecutor.from_workers([self._rollout_manager], owned=True).shutdown()
             if errors:
                 raise errors[0]
 
@@ -707,14 +649,7 @@ class TrainBridgeActorImpl:
         changed; the next optimizer-backed publication advances it normally.
         """
         with self._operation_lock:
-            expected = self._runtime_load_id
-            self._group.restore_runtime_load_id_for_republication(expected)
-            marker = read_marker(self._marker_path()) if self._save_hf_template is not None else None
-            published = self._update_serving(scenario=self._marker_scenario(marker))
-            if published != expected:
-                raise RuntimeError(f"serving republication changed runtime load ID {expected!r} to {published!r}")
-            self._phase = "serving"
-            return published
+            return self._publication.republish(self._runtime_load_id)
 
     def prepare_training_step(
         self,
@@ -729,141 +664,33 @@ class TrainBridgeActorImpl:
         return prepared
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
-        """Train and checkpoint one idempotent job without updating serving weights."""
-        job_id = _training_job_id(payload)
-        rollout_id = payload.get("rollout_id")
-        if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
-            raise ValueError("training job rollout_id must be non-negative")
-        scenario = self._job_scenario(payload)
-        marker_file = self._marker_path()
+        """Delegate job replay, train ordering and checkpoint recording to Reef."""
+        if self._save_hf_template is None:
+            raise RuntimeError("slime args.save_hf is not set")
         with self._operation_lock:
-            marker = read_marker(marker_file)
-            disposition = marker_disposition(marker, job_id)
-            if disposition == "conflict":
-                if marker is None:
-                    raise RuntimeError("conflicting training disposition has no marker")
-                raise RuntimeError(f"training marker is {marker['status']}; operator recovery required")
-            if disposition == "replay":
-                if marker is None:
-                    raise RuntimeError("replayed training disposition has no marker")
-                if marker["status"] == "COMPLETE":
-                    return marker_result(marker)
-                return marker_checkpoint_result(marker)
-            # Worker and loss-family telemetry is captured in the marker and
-            # returned through TrainingJobResult.metrics. The generic Reef
-            # training observer can then track any backend without knowing
-            # Slime's worker topology. A CHECKPOINT resume reuses the recorded
-            # metrics instead of draining workers again.
-            train_metrics: dict[str, Any] = {}
-            if disposition == "fresh":
-                step = self._run_train_step(payload, job_id, rollout_id, prior_marker=marker, scenario=scenario)
-                if isinstance(step, TrainingJobResult):
-                    return step
-                marker, train_metrics, _ = step
-            if marker is None:
-                raise RuntimeError("training job produced no checkpoint marker")
-            if train_metrics:
-                marker["train_metrics"] = dict(train_metrics)
-                write_marker(marker_file, marker)
-            return marker_checkpoint_result(marker)
+            return self._execution.execute(payload)
 
     def update_serving_weights(self, training_job_id: str) -> TrainingJobResult:
-        """Publish one checkpointed job while keeping generation paused."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
+        """Delegate durable publication ordering to Reef's shared coordinator."""
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            status = marker["status"]
-            if status in {"READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"}:
-                return marker_result(marker)
-            if status not in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
-                raise RuntimeError(f"training job is {status}; operator recovery required")
-
-            recovering = status == "UPDATING_WEIGHTS"
-            try:
-                if recovering:
-                    self._manager_call("recover_updatable_engines")
-                    if self._history is not None:
-                        # The failed publication terminated every updatable
-                        # engine, so recovery restarted them from the frozen
-                        # base with no adapters resident. Align residency with
-                        # that — a slot leaked against the dead engine must
-                        # not read as exhausted capacity forever — and reload
-                        # the other scenarios' committed adapters before this
-                        # scenario's forced full publication.
-                        self._require_residency().reconcile((), self._adapter_engine)
-                        self._recover_scenario_adapters(marker)
-                self._pause_generation()
-                if self._history is not None:
-                    # A restart between checkpoint and publication may have
-                    # left another scenario in the slot.
-                    self._group.activate_scenario(str(marker["scenario"]))
-                if not recovering:
-                    # Persist uncertainty only after every engine has crossed
-                    # the pause barrier. A pause failure has not changed any
-                    # weights and remains safely replayable from CHECKPOINT.
-                    transition_marker(self._marker_path(), marker, "UPDATING_WEIGHTS")
-                published = self._update_serving(force_full=recovering, scenario=self._marker_scenario(marker))
-                if self._history is not None:
-                    from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-
-                    scenario = str(marker["scenario"])
-                    self._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
-                transition_marker(
-                    self._marker_path(),
-                    marker,
-                    "READY_TO_COMMIT",
-                    runtime_load_id=published,
+            publication = self._publication.publish(training_job_id)
+            marker = publication.marker
+            if publication.published:
+                rollout_id = int(marker["rollout_id"])
+                self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
+                self._completed_train_steps += 1
+                self._last_train_rollout_id = rollout_id
+                recorded_train_metrics = marker.get("train_metrics")
+                self._last_train_metrics = (
+                    dict(recorded_train_metrics) if isinstance(recorded_train_metrics, Mapping) else {}
                 )
-                self._phase = "awaiting_commit"
-            except AdapterCapacityExhausted:
-                # Capacity failures are classified in _update_serving, which
-                # terminates the engines only for the eviction one an engine
-                # refused (#61). A plain refusal published nothing and touched
-                # no engine, so escalating here would terminate engines it
-                # never involved and then fail identically on the next
-                # attempt; only more slots resolve it (#65).
-                traceback.print_exc(file=sys.stderr)
-                raise
-            except BaseException:
-                self._phase = "weight_sync_failed"
-                with suppress(Exception):
-                    self._manager_call("terminate_updatable_engines")
-                traceback.print_exc(file=sys.stderr)
-                raise
-
-            rollout_id = int(marker["rollout_id"])
-            self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
-            self._completed_train_steps += 1
-            self._last_train_rollout_id = rollout_id
-            recorded_train_metrics = marker.get("train_metrics")
-            self._last_train_metrics = (
-                dict(recorded_train_metrics) if isinstance(recorded_train_metrics, Mapping) else {}
-            )
             return marker_result(marker)
 
     def reject_training_candidate(self, training_job_id: str) -> None:
         """Finish a checkpointed job without changing the serving weights."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            status = marker["status"]
-            if status == "REJECTED":
-                return
-            if status == "CHECKPOINT":
-                transition_marker(self._marker_path(), marker, "REJECTING")
-            elif status != "REJECTING":
-                raise RuntimeError(f"cannot reject training job {training_job_id!r} from {status}")
-            self._restore_incumbent_serving()
-            transition_marker(self._marker_path(), marker, "REJECTED")
-            rollout_id = int(marker["rollout_id"])
-            self._next_rollout_id = max(self._next_rollout_id, rollout_id + 1)
-            self._phase = "serving"
+            marker = self._publication.reject(training_job_id)
+            self._next_rollout_id = max(self._next_rollout_id, int(marker["rollout_id"]) + 1)
 
     def _restore_incumbent_serving(self) -> None:
         if not self._colocate:
@@ -872,215 +699,14 @@ class TrainBridgeActorImpl:
         # never released fails, because SGLang resumes by removing the tag
         # from the set release added it to.
         if self._release_tags is None:
-            self._manager_call("onload_weights")
-        self._manager_call("onload_kv")
+            self._inference_call("onload_weights")
+        self._inference_call("onload_kv")
         self._continue_generation()
 
     def acknowledge_training_commit(self, training_job_id: str) -> None:
-        """Resume paused requests only after Reef durably commits the new head."""
-        if not training_job_id:
-            raise ValueError("training_job_id must be non-empty")
+        """Resume requests only through Reef's durable commit gate."""
         with self._operation_lock:
-            marker = read_marker(self._marker_path())
-            if marker is None or marker["job_id"] != training_job_id:
-                raise RuntimeError(f"unknown training job {training_job_id!r}")
-            if marker["status"] == "COMPLETE":
-                if marker.get("commit_acknowledged") is not True:
-                    marker["commit_acknowledged"] = True
-                    write_marker(self._marker_path(), marker)
-                return
-            if marker["status"] == "READY_TO_COMMIT":
-                transition_marker(
-                    self._marker_path(),
-                    marker,
-                    "HEAD_COMMITTED",
-                    commit_acknowledged=True,
-                )
-            if marker["status"] != "HEAD_COMMITTED":
-                raise RuntimeError(f"cannot acknowledge training job {training_job_id!r} from {marker['status']}")
-            self._continue_generation()
-            transition_marker(
-                self._marker_path(),
-                marker,
-                "COMPLETE",
-                commit_acknowledged=True,
-            )
-            self._phase = "serving"
-
-    def _run_train_step(
-        self,
-        payload: Mapping[str, Any],
-        job_id: str,
-        rollout_id: int,
-        *,
-        prior_marker: dict[str, Any] | None,
-        scenario: str | None = None,
-    ) -> TrainingJobResult | tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        """Run train + checkpoint for a fresh job, up to the CHECKPOINT marker.
-
-        Returns an early ``TrainingJobResult`` (stale or storage-blocked) or
-        the CHECKPOINT-state marker with the drained worker metrics and the
-        loss family's durable telemetry.
-        """
-        scenario_step = rollout_id
-        if scenario is not None:
-            # Scenario steps are per scenario; the bridge's checkpoint index
-            # stays one monotonic sequence across all of them.
-            rollout_id = self._next_rollout_id
-        elif rollout_id != self._next_rollout_id:
-            raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
-        max_staleness = _max_staleness(payload)
-        train_metrics: dict[str, Any] = {}
-        durable_metrics: dict[str, Any] = {}
-        if scenario is not None:
-            admission = _scenario_staleness_admission(
-                payload,
-                scenario=scenario,
-                history=self._require_history(),
-                serving_runtime_load_id=self._runtime_load_id,
-                max_staleness=max_staleness,
-            )
-            if admission.action == "drop":
-                return TrainingJobResult(
-                    outcome="stale",
-                    runtime_load_id=self._runtime_load_id,
-                    metrics=admission.metrics,
-                )
-            durable_metrics.update(admission.metrics)
-        elif _uses_staleness_admission(payload):
-            producing_versions = [version for group in _admission_runtime_load_id_groups(payload) for version in group]
-            if payload.get("expected_runtime_load_id") != self._runtime_load_id:
-                admission = _stale_drop_decision(
-                    payload,
-                    serving_runtime_load_id=self._runtime_load_id,
-                    producing_runtime_load_ids=producing_versions,
-                    reason="execution_fence_mismatch",
-                )
-            else:
-                admission = _staleness_admission(
-                    payload,
-                    serving_runtime_load_id=self._runtime_load_id,
-                    max_staleness=max_staleness,
-                )
-            if admission.action == "drop":
-                return TrainingJobResult(
-                    outcome="stale",
-                    runtime_load_id=self._runtime_load_id,
-                    metrics=admission.metrics,
-                )
-            durable_metrics.update(admission.metrics)
-        elif payload.get("expected_runtime_load_id") != self._runtime_load_id:
-            return TrainingJobResult(outcome="stale", runtime_load_id=self._runtime_load_id)
-        checkpoint = Path(self._checkpoint_path(rollout_id))
-        if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
-            raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
-        rollout_data = to_slime_rollout_data(dict(payload))
-        rollout_versions = rollout_data.get("producing_runtime_load_ids")
-        if (
-            max_staleness > 0
-            and rollout_versions is not None
-            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
-        ):
-            raise ValueError("loss-family row producing versions do not match the shared training payload")
-        self._algo.validate_payload(rollout_data)
-        context: Any = nullcontext(None)
-        if self._storage is not None:
-            protected = marker_rollouts(prior_marker)
-            if self._history is not None:
-                # Every scenario's latest checkpoint is its restart source.
-                protected |= self._history.protected_rollouts()
-            context = self._storage.admit(
-                rollout_id=rollout_id,
-                active_rollouts=protected,
-            )
-        with context as storage_plan:
-            if storage_plan is not None and storage_plan["blocked"]:
-                return TrainingJobResult(
-                    outcome="storage_blocked",
-                    storage=storage_plan,
-                    runtime_load_id=self._runtime_load_id,
-                )
-            # The teacher is scored before the RUNNING marker so a
-            # scoring failure leaves no partial state: the job
-            # stays retryable under the same identity.
-            algorithm_metrics = self._algo.prepare_rollout(rollout_data)
-            # RolloutManager owns Slime's DP schedule and
-            # object-store transport contract. It returns one Box
-            # per DP rank, exactly what the training actors expect.
-            packed = self._manager_call("prepare_external_train_data", rollout_data)
-            marker = {
-                "status": "RUNNING",
-                "job_id": job_id,
-                "rollout_id": rollout_id,
-            }
-            if scenario is not None:
-                marker.update(scenario=scenario, scenario_step=scenario_step)
-            write_marker(self._marker_path(), marker)
-            try:
-                if self._colocate:
-                    # Retract active requests before SGLang releases its KV,
-                    # weights, and CUDA graphs. Their CPU request state stays
-                    # queued and is re-prefilled with the committed model when
-                    # generation resumes.
-                    self._pause_generation()
-                    self._manager_call("offload", self._release_tags)
-                if scenario is not None:
-                    # Put this scenario's adapter and optimizer state into the
-                    # slot; a first-time scenario starts from the pristine one.
-                    self._group.activate_scenario(scenario)
-                self._phase = "training"
-                training = self._algo.train(
-                    rollout_id,
-                    packed,
-                    actor_group=self._group,
-                    critic_group=self._critic_group,
-                    resolve=self._get,
-                )
-                train_results = training.worker_results
-                durable_metrics.update(training.durable_metrics)
-                durable_metrics.update(self._algo.rollout_metrics(rollout_data, self.serving_runtime_load_id()))
-                worker_metrics = dict(self._get(self._group.async_pop_rank0_metrics()))
-                train_metrics = next(
-                    (dict(result) for result in train_results if isinstance(result, Mapping) and result),
-                    {},
-                )
-                train_metrics.update(worker_metrics)
-                train_metrics.update(algorithm_metrics)
-                self._phase = "checkpointing"
-                self._group.save_model(rollout_id, force_sync=True)
-                if self._critic_save_root is not None:
-                    # Every commit — critic-only warmup included — persists the
-                    # critic's weights and optimizer alongside the actor pair;
-                    # otherwise the value head cold-starts on every reboot
-                    # (SAO's stated cold-start concern). No HF export: the
-                    # critic never serves.
-                    self._critic_group.save_model(rollout_id, force_sync=True)
-                if checkpoint.is_symlink() or not checkpoint.is_dir():
-                    raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint}")
-                if self._storage is not None:
-                    rewards = rollout_data["rewards"]
-                    self._storage.complete(
-                        job_id,
-                        rollout_id,
-                        reward=math.fsum(rewards) / len(rewards),
-                    )
-                if scenario is not None:
-                    self._require_history().record_checkpoint(scenario, rollout_id)
-                if durable_metrics:
-                    marker["metrics"] = dict(durable_metrics)
-                transition_marker(
-                    self._marker_path(),
-                    marker,
-                    "CHECKPOINT",
-                    checkpoint_path=str(checkpoint),
-                )
-            except BaseException:
-                self._phase = "training_failed" if self._phase == "training" else "checkpoint_failed"
-                # The caller's error slot is overwritten by later retries;
-                # keep a durable record of what actually failed.
-                traceback.print_exc(file=sys.stderr)
-                raise
-        return marker, train_metrics, durable_metrics
+            self._publication.acknowledge(training_job_id)
 
     def serving_runtime_load_id(self) -> str:
         """Return the last successfully published serving-runtime load ID.
@@ -1113,7 +739,7 @@ class TrainBridgeActorImpl:
         try:
             self._phase = "publishing"
             if self._colocate and self._release_tags is None:
-                self._manager_call("onload_weights")
+                self._inference_call("onload_weights")
             if residency is not None and scenario is not None:
                 residency.make_room(scenario, self._adapter_engine, supersede=True)
             self._group.update_weights(
@@ -1121,9 +747,9 @@ class TrainBridgeActorImpl:
                 force_full=force_full,
             )
             if self._colocate:
-                self._manager_call("onload_kv")
+                self._inference_call("onload_kv")
             raw_version = str(self._get(self._group.async_get_rank0_runtime_load_id()))
-            observed = [str(value) for value in self._manager_call("get_runtime_load_ids")]
+            observed = [str(value) for value in self._inference_call("get_runtime_load_ids")]
             if not observed or set(observed) != {raw_version}:
                 raise RuntimeError(f"serving engines disagree after update: {observed!r}")
             if residency is not None and scenario is not None:
@@ -1131,7 +757,7 @@ class TrainBridgeActorImpl:
         except AdapterEvictionFailed:
             self._phase = "weight_sync_failed"
             with suppress(Exception):
-                self._manager_call("terminate_updatable_engines")
+                self._inference_call("terminate_updatable_engines")
             raise
         except AdapterCapacityExhausted:
             # Admission was refused before any weight left the trainer.
@@ -1140,24 +766,24 @@ class TrainBridgeActorImpl:
         except BaseException:
             self._phase = "weight_sync_failed"
             with suppress(Exception):
-                self._manager_call("terminate_updatable_engines")
+                self._inference_call("terminate_updatable_engines")
             raise
         self._runtime_load_id = raw_version
         return raw_version
 
-    def _manager_call(self, method: str, *args: Any) -> Any:
-        return self._manager_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
+    def _inference_call(self, method: str, *args: Any) -> Any:
+        return self._inference_executor.rpc(0, method, args=args, timeout=_TRAIN_RPC_TIMEOUT_S)
 
-    def _pause_generation(self) -> None:
-        if self._generation_paused:
+    def _pause_generation(self, *, reconcile: bool = False) -> None:
+        if self._generation_paused and not reconcile:
             return
-        self._manager_call("pause_generation_for_update")
+        self._inference_call("pause_generation_for_update")
         self._generation_paused = True
 
     def _continue_generation(self) -> None:
         if not self._generation_paused:
             return
-        self._manager_call("continue_generation_after_update")
+        self._inference_call("continue_generation_after_update")
         self._generation_paused = False
 
     @staticmethod
@@ -1175,13 +801,250 @@ class TrainBridgeActorImpl:
         return marker_path(self._save_hf_template)
 
     def _recover_marker(self) -> dict[str, Any] | None:
-        marker = read_marker(self._marker_path())
+        marker = self._execution.recover()
         if marker is None:
             return None
-        if marker["status"] == "RUNNING":
-            raise RuntimeError(f"ambiguous training job {marker['job_id']}")
         self._next_rollout_id = max(self._next_rollout_id, marker["rollout_id"] + 1)
         return marker
+
+
+class _SlimeTrainingBackend:
+    """Slime admission, scoring, tensorization and checkpoint reservations."""
+
+    def __init__(self, bridge: TrainBridgeActorImpl) -> None:
+        self._bridge = bridge
+
+    @contextmanager
+    def prepare(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        job_id: str,
+        rollout_id: int,
+        prior_marker: Mapping[str, Any] | None,
+    ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
+        bridge = self._bridge
+        scenario = bridge._job_scenario(payload)
+        scenario_step = rollout_id
+        if scenario is not None:
+            # Scenario steps are per scenario; the bridge's checkpoint index
+            # stays one monotonic sequence across all of them.
+            rollout_id = bridge._next_rollout_id
+        elif rollout_id != bridge._next_rollout_id:
+            raise RuntimeError(f"expected rollout {bridge._next_rollout_id}, got {rollout_id}")
+        max_staleness = _max_staleness(payload)
+        durable_metrics: dict[str, Any] = {}
+        if scenario is not None:
+            admission = _scenario_staleness_admission(
+                payload,
+                scenario=scenario,
+                history=bridge._require_history(),
+                serving_runtime_load_id=bridge._runtime_load_id,
+                max_staleness=max_staleness,
+            )
+            if admission.action == "drop":
+                yield TrainingJobResult(
+                    outcome="stale",
+                    runtime_load_id=bridge._runtime_load_id,
+                    metrics=admission.metrics,
+                )
+                return
+            durable_metrics.update(admission.metrics)
+        elif _uses_staleness_admission(payload):
+            producing_versions = [version for group in _admission_runtime_load_id_groups(payload) for version in group]
+            if payload.get("expected_runtime_load_id") != bridge._runtime_load_id:
+                admission = _stale_drop_decision(
+                    payload,
+                    serving_runtime_load_id=bridge._runtime_load_id,
+                    producing_runtime_load_ids=producing_versions,
+                    reason="execution_fence_mismatch",
+                )
+            else:
+                admission = _staleness_admission(
+                    payload,
+                    serving_runtime_load_id=bridge._runtime_load_id,
+                    max_staleness=max_staleness,
+                )
+            if admission.action == "drop":
+                yield TrainingJobResult(
+                    outcome="stale",
+                    runtime_load_id=bridge._runtime_load_id,
+                    metrics=admission.metrics,
+                )
+                return
+            durable_metrics.update(admission.metrics)
+        elif payload.get("expected_runtime_load_id") != bridge._runtime_load_id:
+            yield TrainingJobResult(outcome="stale", runtime_load_id=bridge._runtime_load_id)
+            return
+        checkpoint = Path(bridge._checkpoint_path(rollout_id))
+        if bridge._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
+            raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
+        rollout_data = to_slime_rollout_data(dict(payload))
+        rollout_versions = rollout_data.get("producing_runtime_load_ids")
+        if (
+            max_staleness > 0
+            and rollout_versions is not None
+            and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
+        ):
+            raise ValueError("loss-family row producing versions do not match the shared training payload")
+        bridge._algo.validate_payload(rollout_data)
+        context: Any = nullcontext(None)
+        if bridge._storage is not None:
+            protected = marker_rollouts(prior_marker)
+            if bridge._history is not None:
+                # Every scenario's latest checkpoint is its restart source.
+                protected |= bridge._history.protected_rollouts()
+            context = bridge._storage.admit(
+                rollout_id=rollout_id,
+                active_rollouts=protected,
+            )
+        with context as storage_plan:
+            if storage_plan is not None and storage_plan["blocked"]:
+                yield TrainingJobResult(
+                    outcome="storage_blocked",
+                    storage=storage_plan,
+                    runtime_load_id=bridge._runtime_load_id,
+                )
+                return
+            # The teacher is scored before the RUNNING marker so a
+            # scoring failure leaves no partial state: the job
+            # stays retryable under the same identity.
+            algorithm_metrics = bridge._algo.prepare_rollout(rollout_data)
+            # Local batch processing preserves Slime's DP schedule and
+            # object-store transport: one Box per training DP rank.
+            packed = bridge._batch_processor.prepare_external_train_data(rollout_data)
+            yield _SlimePreparedTrainingJob(
+                bridge,
+                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
+                job_id=job_id,
+                rollout_data=rollout_data,
+                packed=packed,
+                algorithm_metrics=algorithm_metrics,
+                durable_metrics=durable_metrics,
+            )
+
+
+class _SlimePreparedTrainingJob:
+    """One prepared Slime step; Reef controls when training and saving run."""
+
+    def __init__(
+        self,
+        bridge: TrainBridgeActorImpl,
+        *,
+        checkpoint: TrainingCheckpoint,
+        job_id: str,
+        rollout_data: dict[str, Any],
+        packed: Any,
+        algorithm_metrics: Mapping[str, Any],
+        durable_metrics: Mapping[str, Any],
+    ) -> None:
+        self._bridge = bridge
+        self._checkpoint = checkpoint
+        self._job_id = job_id
+        self._rollout_data = rollout_data
+        self._packed = packed
+        self._algorithm_metrics = algorithm_metrics
+        self._durable_metrics = durable_metrics
+
+    @property
+    def checkpoint(self) -> TrainingCheckpoint:
+        return self._checkpoint
+
+    def train(self) -> TrainingMetrics:
+        bridge = self._bridge
+        if bridge._colocate:
+            # Retract requests before releasing weights/KV/graphs. Reef's
+            # publication commit gate decides when those requests can resume.
+            bridge._pause_generation()
+            bridge._inference_call("offload", bridge._release_tags)
+        if self.checkpoint.scenario is not None:
+            bridge._group.activate_scenario(self.checkpoint.scenario)
+        training = bridge._algo.train(
+            self.checkpoint.rollout_id,
+            self._packed,
+            actor_group=bridge._group,
+            critic_group=bridge._critic_group,
+            resolve=bridge._get,
+        )
+        durable_metrics = dict(self._durable_metrics)
+        durable_metrics.update(training.durable_metrics)
+        durable_metrics.update(bridge._algo.rollout_metrics(self._rollout_data, bridge.serving_runtime_load_id()))
+        worker_metrics = dict(bridge._get(bridge._group.async_pop_rank0_metrics()))
+        train_metrics = next(
+            (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
+            {},
+        )
+        train_metrics.update(worker_metrics)
+        train_metrics.update(self._algorithm_metrics)
+        return TrainingMetrics(training=train_metrics, durable=durable_metrics)
+
+    def save_checkpoint(self) -> None:
+        bridge = self._bridge
+        rollout_id = self.checkpoint.rollout_id
+        bridge._group.save_model(rollout_id, force_sync=True)
+        if bridge._critic_save_root is not None:
+            # Critic-only warmup also needs paired optimizer recovery; the
+            # critic checkpoint never becomes a serving model/HF export.
+            bridge._critic_group.save_model(rollout_id, force_sync=True)
+        checkpoint = self.checkpoint.path
+        if checkpoint.is_symlink() or not checkpoint.is_dir():
+            raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint}")
+        if bridge._storage is not None:
+            rewards = self._rollout_data["rewards"]
+            bridge._storage.complete(self._job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
+        if self.checkpoint.scenario is not None:
+            bridge._require_history().record_checkpoint(self.checkpoint.scenario, rollout_id)
+
+
+class _SlimeWeightPublisher:
+    """Slime transport and colocated/LoRA engine operations, without commit policy."""
+
+    def __init__(self, bridge: TrainBridgeActorImpl) -> None:
+        self._bridge = bridge
+
+    def recover(self, marker: Mapping[str, Any] | None) -> None:
+        bridge = self._bridge
+        bridge._inference_call("recover_updatable_engines")
+        if bridge._history is not None:
+            # Replacement engines boot without adapters. Restore other scenarios
+            # before this job's complete transfer, and release dead residency slots.
+            bridge._require_residency().reconcile((), bridge._adapter_engine)
+            bridge._recover_scenario_adapters(marker)
+
+    def pause(self) -> None:
+        # Reassert the owner barrier even if the bridge cached a prior pause;
+        # replacement controllers/engines may not have observed that RPC.
+        self._bridge._pause_generation(reconcile=True)
+
+    def republish(self, runtime_load_id: str, marker: Mapping[str, Any] | None) -> str:
+        bridge = self._bridge
+        bridge._group.restore_runtime_load_id_for_republication(runtime_load_id)
+        try:
+            return bridge._update_serving(force_full=True, scenario=bridge._marker_scenario(marker))
+        finally:
+            # A failed/mismatched transfer must not replace the retry identity.
+            bridge._runtime_load_id = runtime_load_id
+
+    def publish(self, marker: Mapping[str, Any], *, force_full: bool) -> str:
+        bridge = self._bridge
+        if bridge._history is not None:
+            bridge._group.activate_scenario(str(marker["scenario"]))
+        published = bridge._update_serving(force_full=force_full, scenario=bridge._marker_scenario(marker))
+        if bridge._history is not None:
+            from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
+
+            scenario = str(marker["scenario"])
+            bridge._history.record_publication(scenario, published, scenario_adapter_name(scenario, published))
+        return published
+
+    def resume(self) -> None:
+        self._bridge._continue_generation()
+
+    def restore_incumbent(self) -> None:
+        self._bridge._restore_incumbent_serving()
+
+    def abort(self) -> None:
+        self._bridge._inference_call("terminate_updatable_engines")
 
 
 # A concurrent health call must remain responsive while a training RPC is
@@ -1192,23 +1055,20 @@ class TrainBridgeActorImpl:
 TrainBridgeActor = ray.remote(max_concurrency=64)(TrainBridgeActorImpl)  # type: ignore[call-overload]
 
 
-def start_bridge(
-    args,
-    *,
-    retention: RetentionConfig | None = None,
-    loss_family: str | None = None,
-    loss_family_config: object | None = None,
-    actor_name: str = DEFAULT_BRIDGE_ACTOR_NAME,
-    namespace: str = DEFAULT_NAMESPACE,
-):
-    """Boot the slime training stack and publish it as a named bridge actor.
+@dataclass(frozen=True)
+class BridgePreparation:
+    """Validated bridge choices, resolved before model resources are allocated."""
 
-    Run this in the slime driver process. ``args`` is slime's
-    ``argparse.Namespace`` (see ``slime.utils.arguments.parse_args``);
-    ``num_rollout`` is the number of externally supplied Reef training steps
-    and ``save_hf`` is a checkpoint path template. The Reef service connects
-    with the same ``actor_name`` and ``namespace``.
-    """
+    retention: RetentionConfig
+    loss_family: str | None
+    lora: bool
+
+
+def prepare_bridge(
+    args: Any, *, retention: RetentionConfig | None = None, loss_family: str | None = None
+) -> BridgePreparation:
+    """Validate and configure training/inference invariants before either starts."""
+    retention = retention or RetentionConfig()
     spec = resolve_loss_family(loss_family) if loss_family is not None else None
     validate_bridge_args(args, spec)
     if loss_family is not None and ":" not in loss_family:
@@ -1219,35 +1079,75 @@ def start_bridge(
     from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
 
     slime_executor_class(getattr(args, "reef_executor_backend", "auto"), role="training")
-    from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
-
-    rollout_executor_class(args)
-    colocate = bool(getattr(args, "colocate", False))
+    slime_executor_class(getattr(args, "reef_rollout_executor_backend", "auto"), role="rollout")
     # Imported here, not at module scope: the LoRA module reaches the Megatron
     # stack, and importing the bridge actor must not drag that in (see
     # tests/reef_service/test_dependency_boundaries.py).
-    from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots, megatron_lora_enabled
+    from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
     lora = megatron_lora_enabled(args)
-    retention = retention or RetentionConfig()
     prepare_checkpoint_storage(args, retention)
-    if not ray.is_initialized():
-        ray.init(namespace=namespace)
-    pgs = create_placement_groups(args)
-    rollout_manager = None
+    return BridgePreparation(retention=retention, loss_family=loss_family, lora=lora)
+
+
+def start_bridge(
+    args,
+    *,
+    retention: RetentionConfig | None = None,
+    loss_family: str | None = None,
+    loss_family_config: object | None = None,
+    actor_name: str = DEFAULT_BRIDGE_ACTOR_NAME,
+    namespace: str = DEFAULT_NAMESPACE,
+    serving: Executor | None = None,
+    placement_groups: Mapping[str, Any] | None = None,
+    preparation: BridgePreparation | None = None,
+    failure_listener: ExecutorFailureListener | None = None,
+):
+    """Boot the slime training stack and publish it as a named bridge actor.
+
+    Run this in the slime driver process. ``args`` is slime's
+    ``argparse.Namespace`` (see ``slime.utils.arguments.parse_args``);
+    ``num_rollout`` is the number of externally supplied Reef training steps
+    and ``save_hf`` is a checkpoint path template. The Reef service connects
+    with the same ``actor_name`` and ``namespace``.
+
+    ``serving`` and ``placement_groups`` must be supplied by Reef's deployment
+    owner. This function creates training workers only. ``preparation`` carries
+    the preflight result for the same arguments before resource allocation.
+    """
+    prepared = preparation or prepare_bridge(args, retention=retention, loss_family=loss_family)
+    retention = prepared.retention
+    loss_family = prepared.loss_family
+    lora = prepared.lora
+    colocate = bool(getattr(args, "colocate", False))
+    from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
+
+    if serving is None or placement_groups is None:
+        raise ValueError("start_bridge requires Reef-owned inference and placement groups; use the model driver")
+    if not isinstance(serving, RayExecutor) or len(serving.workers) != 1:
+        raise ValueError("Slime training requires one Ray inference control actor")
+    inference = serving.workers[0]
     actor_group = None
     critic_group = None
     try:
-        rollout_manager = create_rollout_manager(args, pgs["rollout"])
+        serving.rpc(0, "prepare_training_connection", timeout=_TRAIN_RPC_TIMEOUT_S)
         # Loss families that train a value model need the critic actor group;
         # the others discard it. ``args.use_critic`` comes from the explicit
         # --use-critic driver flag (or implicitly from --advantage-estimator ppo),
         # so keeping the group here is what wires the value model into the bridge
         # schedule rather than leaving it uninitialized.
-        actor_group, critic_group = create_train_groups(args, pgs, rollout_manager)
-        return TrainBridgeActor.options(name=actor_name, namespace=namespace).remote(
+        actor_group, critic_group = create_train_groups(args, placement_groups, inference)
+        if failure_listener is not None:
+            for group in (actor_group, critic_group):
+                if group is not None:
+                    group.executor.register_failure_listener(failure_listener)
+        options: dict[str, Any] = {"name": actor_name, "namespace": namespace}
+        if getattr(args, "rollout_data_transport", "object-store") == "nixl":
+            options["enable_tensor_transport"] = True
+        return TrainBridgeActor.options(**options).remote(
             actor_group,
-            rollout_manager,
+            inference,
+            batch_processor=TrainingBatchProcessor(args, actor_group.train_parallel_config),
             save_hf_template=args.save_hf,
             start_rollout_id=getattr(args, "start_rollout_id", 0) or 0,
             storage_config=retention,
@@ -1270,18 +1170,4 @@ def start_bridge(
             if group is not None:
                 with suppress(Exception):
                     group.release()
-        if rollout_manager is not None:
-            with suppress(Exception):
-                RayExecutor.from_workers([rollout_manager]).rpc(0, "dispose", timeout=60)
-            with suppress(Exception):
-                RayExecutor.from_workers([rollout_manager], owned=True).shutdown()
-        # This function created the reservation; per-role executors only borrow it.
-        with suppress(Exception):
-            from ray.util.placement_group import remove_placement_group
-
-            released = set()
-            for placement in pgs.values():
-                if placement is not None and placement[0] is not None and placement[0].id not in released:
-                    released.add(placement[0].id)
-                    remove_placement_group(placement[0])
         raise

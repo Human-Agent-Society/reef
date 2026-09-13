@@ -7,9 +7,9 @@ import yaml
 from reef_service.config_helpers import deployment_layout
 
 from reef.recipe.config import recipe_config_from_mapping
-from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.execution import service_executor_selection, validate_services
+from reef.train.slime_backend.launch import driver_arguments
 
 ROOT = Path(__file__).resolve().parents[2]
 SERVICE_CONFIGS = (
@@ -65,7 +65,7 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
         assert config["reef"]["training_backend_options"]["colocate"] is True
     elif "sao" in relative:
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == "1"
-        assert config["reef"]["training_backend_options"]["rollout-num-gpus"] == "1"
+        assert config["reef"]["inference_num_gpus"] == 1
 
 
 def test_recipe_yamls_no_longer_launch_ray_head_services():
@@ -136,12 +136,17 @@ def test_openclawrl_isolates_external_models_from_reef_training():
     assert config["reef"]["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
     assert config["reef"]["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
-    flags = dict(
-        argument.removeprefix("--").split("=", 1)
-        for argument in native_arguments(config["reef"]["training_backend_options"])
-        if "=" in argument
-    )
+    flags = dict(argument.removeprefix("--").split("=", 1) for argument in driver_arguments(config) if "=" in argument)
     training_gpus = int(flags["actor-num-nodes"]) * int(flags["actor-num-gpus-per-node"])
     rollout_gpus = int(flags["rollout-num-gpus"])
     assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 5)
     assert training_gpus + rollout_gpus == len(pools["reef"])
+
+
+@pytest.mark.parametrize("relative", (*TRAINING_CONFIGS, "recipes/openclawrl/examples/openclawrl/serve.yaml"))
+def test_examples_keep_inference_flags_in_the_inference_namespace(relative):
+    raw = yaml.safe_load((ROOT / relative).read_text())
+    assert not any(key.startswith(("sglang-", "rollout-num-gpus")) for key in raw["training"]["options"])
+    config = deployment_layout(raw)
+    assert config["reef"]["inference_num_gpus"] > 0
+    assert config["reef"]["tensor_parallel_size"] == 1

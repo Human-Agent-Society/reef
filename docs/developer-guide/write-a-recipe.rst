@@ -210,6 +210,75 @@ overrides.
 Training backend deployment
 ----------------------------
 
+
+Managed model components can use Reef's shared process entrypoint,
+``python -m reef.service.training_driver``. Implement
+``TrainingDeployment.create_model_plan(config, *, loss_family)`` to return a
+``reef.runtime.deployment.ModelDeploymentPlan`` with configured, unstarted
+resource, inference and training components. Reef resolves the recipe; each
+backend decides how to interpret its declared loss family. Constructing the
+plan must validate the combination without allocating model resources.
+
+``DeploymentResources`` owns coordinated reservations and runtime connections.
+``InferenceService`` starts engines in supplied resources and returns an
+``InferenceConnection`` with a borrowed executor and a versioned control
+protocol. ``TrainingService`` declares the required protocol and attaches to
+that connection and those resources. Framework-specific arguments, engine
+handles and placement types stay inside the adapters. An HTTP provider URL
+alone does not establish weight-update compatibility.
+
+Reef starts these components in dependency order, probes readiness and closes
+them in reverse order. Every component's ``close`` must be idempotent and handle
+partial startup. A plan with no separate inference component explicitly selects
+a combined compatibility lifecycle; startup failure never selects it implicitly.
+Other deployment definitions, including in-process integrations, may keep their
+existing entrypoint and need not implement ``create_model_plan``. These startup
+contracts do not replace training, weight-update or version-commit contracts.
+
+A backend with checkpoint-first candidate training can use
+``reef.runtime.training_job.publication.TrainingPublication`` for publication
+and commit gating. Implement ``WeightPublisher`` with engine barriers and direct
+weight transport. Its ``publish`` must verify the returned runtime load ID on
+all engines and must leave requests paused. Serialize coordinator calls with
+training and shutdown; acknowledge only after Reef has durably committed its
+head. Reuse the runtime's durable marker format, while keeping checkpoint
+production and any backend-specific tensor/adapter restoration in the backend.
+Use ``TrainingExecution`` with ``TrainingJobBackend`` for checkpoint-first
+execution. Its preparation context must retain reservations until Reef records
+the checkpoint and must never suppress execution failures. Return a
+``PreparedTrainingJob`` with a ``TrainingCheckpoint``, ``train`` and
+``save_checkpoint``. Training returns ``TrainingMetrics``; saving must persist
+all required optimizer/model state and recovery metadata synchronously. Reef
+owns job-marker writes. Share the publication coordinator's ``state`` with
+execution and serialize both with the same operation lock.
+The publisher's ``republish(runtime_load_id, marker)`` resends unchanged trainer
+weights with a complete transfer, preserving the requested identity without
+resuming generation. Use ``TrainingPublication.republish`` to coordinate this
+operation after an engine replacement; it validates marker eligibility and
+resumes only through the durable commit gate. Retain the last verified runtime
+load ID if a transfer fails or returns a different one.
+Wrap backend startup reconstruction in ``TrainingPublication.recovery(marker)``
+and call ``finish_recovery`` inside the scope after verifying engine identities.
+This reasserts pause even for a committed marker and aborts failed checkpoint
+restoration before serving can reopen.
+Inference backends can compose ``reef.runtime.inference_control.InferenceControl``
+with concrete engine, monitoring and update-connection adapters. Serialize calls
+in the owning actor, and route legacy monitoring controls through the same pause
+state. Its ``resume`` is an internal operation authorized by the training commit
+gate, not a public serving action. Backend handles and weight transport remain
+inside adapters; an HTTP URL alone is not an update connection.
+After the deployment owner retires a prior trainer, use
+``InferenceControl.prepare_training_connection`` to require a fresh attachment
+and keep inference paused even when the engines are already healthy. Slime's
+v2 control RPC forwards this handshake before replacement workers are created.
+Monitoring must drain active probes and retirement before engine mutation.
+``EngineHealthMonitor`` provides this barrier using backend ``EngineHealthChecks``
+snapshots. Each ``EngineHealthTarget`` must bound its probe/retirement operations
+by the supplied timeout and retire only its captured engine handles. A failed
+drain must block replacement or cleanup until draining succeeds.
+See `commit-gated weight publication <executors.rst#commit-gated-weight-publication>`__
+for retry and startup-recovery requirements.
+
 ``training.backend`` selects one definition for both process preparation and
 HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
 ``reef.train.deployment`` and live under the owning integration:
@@ -220,7 +289,7 @@ HTTP runtime construction. Definitions implement ``TrainingDeployment`` from
   It must not download models, allocate devices or construct a runtime.
 * ``runtime_config(settings, *, max_staleness, connector=None)`` returns the
   configuration consumed by ``RuntimeRegistry`` in the HTTP process. The
-  result must construct a ``TrainingRuntime``. ``connector`` is an optional
+  result must construct a ``(TrainingRuntime, InferenceRuntime)`` pair. ``connector`` is an optional
   legacy connection injection; an in-process backend rejects it.
 
 The Slime implementation in ``reef/train/slime_backend/launch.py`` owns the
@@ -255,7 +324,7 @@ fail explicitly, without falling back to Slime. Do not introduce a separate
 user-facing runtime selector for weight training: runtime wiring belongs to
 the selected backend. Method dependencies remain the Recipe's responsibility.
 
-Weight recipes use ``RuntimeTrainingBackend`` to adapt any ``TrainingRuntime``
-to the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
+Weight recipes pass their separate ``training_runtime`` and inference ``runtime``
+to ``RuntimeTrainingBackend``, which coordinates the shared training lifecycle. The old ``SlimeTrainingBackend`` import remains
 an alias. Experiment metadata now reports ``RuntimeTrainingBackend`` and the
 actual runtime class instead of labeling all weight training as Slime.

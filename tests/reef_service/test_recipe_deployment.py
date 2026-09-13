@@ -8,6 +8,7 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from reef_service.runtime_stubs import runtime_bindings
 
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -87,7 +88,7 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     recipe = OpenClawRLRecipe.from_environment(
         {},
         config=OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path),
-        runtime=StubTrainingRuntime(),
+        **runtime_bindings(StubTrainingRuntime()),
     )
     assert recipe.prm_url == "http://other:9000"
     assert recipe.prm_tokenizer_path == "/models/other"

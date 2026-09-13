@@ -9,7 +9,7 @@ An evaluation section has this shape::
         threshold: 0.8
 
 The dotted reference names a factory called as
-``factory(config, runtime=..., scenario=..., environ=...)``. It returns one
+``factory(config, runtime=..., training_runtime=..., scenario=..., environ=...)``. It returns one
 scenario-local object implementing both ``evaluate(candidate)`` and
 ``decide(candidate, evaluation)``.
 """
@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
-from reef.runtime.base import TrainingRuntime
+from reef.runtime.base import InferenceRuntime, TrainingRuntime
 
 
 class CandidateEvaluationConfigError(ReefError):
@@ -37,7 +37,8 @@ class CandidateEvaluationPluginFactory(Protocol):
         self,
         config: Mapping[str, Any],
         *,
-        runtime: TrainingRuntime,
+        runtime: InferenceRuntime,
+        training_runtime: TrainingRuntime,
         scenario: str,
         environ: Mapping[str, str],
     ) -> CandidateEvaluationPlugin: ...
@@ -102,13 +103,16 @@ def _dotted_factory(reference: str, what: str) -> Any:
 def build_candidate_evaluation(
     config: CandidateEvaluationConfig,
     *,
-    runtime: TrainingRuntime,
+    runtime: InferenceRuntime,
+    training_runtime: TrainingRuntime,
     scenario: str,
 ) -> CandidateEvaluationPlugin:
     """Resolve and build one scenario's external candidate evaluation plugin."""
 
     factory: CandidateEvaluationPluginFactory = _dotted_factory(config.module, "candidate evaluation plugin factory")
-    evaluator = factory(config.config, runtime=runtime, scenario=scenario, environ=config.environ)
+    evaluator = factory(
+        config.config, runtime=runtime, training_runtime=training_runtime, scenario=scenario, environ=config.environ
+    )
     if not callable(getattr(evaluator, "evaluate", None)):
         raise CandidateEvaluationConfigError(
             f"candidate evaluation plugin factory {config.module!r} returned {type(evaluator).__name__}, "

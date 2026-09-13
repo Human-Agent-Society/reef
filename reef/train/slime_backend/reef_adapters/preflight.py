@@ -9,13 +9,10 @@ from __future__ import annotations
 
 import os
 
+from reef.runtime.sglang.lora_schema import require_lora_distributed_request_schema, require_lora_tensor_request_schema
+from reef.runtime.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
+from reef.runtime.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
-from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
-    require_lora_distributed_request_schema,
-    require_lora_tensor_request_schema,
-)
-from reef.train.slime_backend.reef_adapters.sglang.plugin import REEF_SGLANG_PLUGIN_ENV, SGLANG_PLUGIN_NAME
-from reef.train.slime_backend.reef_adapters.training_job.marker import marker_rollouts, read_marker
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
@@ -186,6 +183,13 @@ def prepare_checkpoint_storage(args, retention: RetentionConfig) -> CheckpointSt
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
         raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+    if marker is not None and marker["status"] in {"REJECTING", "REJECTED"}:
+        # The newest training checkpoint still contains the declined candidate;
+        # it cannot reconstruct the incumbent engines or committed adapters.
+        raise RuntimeError(
+            f"training job {marker['job_id']} is {marker['status']}; "
+            "restore the committed checkpoint before restarting inference"
+        )
     storage_plan = storage.validate_capacity(active_rollouts=marker_rollouts(marker))
     if storage_plan["blocked"]:
         reasons = "; ".join(storage_plan["reasons"])

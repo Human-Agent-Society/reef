@@ -6,7 +6,7 @@ from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.sao import SAOProcessor, SAORecipe
@@ -27,12 +27,12 @@ from ._threshold_processor import ThresholdProcessor
 @pytest.mark.unit
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
 def test_training_recipes_share_max_staleness(recipe_type) -> None:
-    assert recipe_type(StubTrainingRuntime()).max_staleness == 0
-    assert recipe_type(StubTrainingRuntime(max_staleness=2), max_staleness=2).max_staleness == 2
+    assert recipe_type(**runtime_bindings(StubTrainingRuntime())).max_staleness == 0
+    assert recipe_type(**runtime_bindings(StubTrainingRuntime(max_staleness=2)), max_staleness=2).max_staleness == 2
     with pytest.raises(ValueError, match="max_staleness must be a non-negative integer"):
-        recipe_type(StubTrainingRuntime(), max_staleness=-1)
+        recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=-1)
     with pytest.raises(ValueError, match="must match the training runtime"):
-        recipe_type(StubTrainingRuntime(), max_staleness=2)
+        recipe_type(**runtime_bindings(StubTrainingRuntime()), max_staleness=2)
 
 
 def test_recipe_class_resolver_has_no_method_short_names() -> None:
@@ -80,15 +80,21 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
     [
         (Recipe(), "recipe", DataProcessor, None, None),
         (
-            OpenClawRLRecipe(StubTrainingRuntime(), batch_size=3),
+            OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=3),
             "openclawrl",
             OpenClawRLProcessor,
             "openclawrl",
             None,
         ),
-        (SAORecipe(StubTrainingRuntime(), batch_size=1), "sao", SAOProcessor, "sao", ScoredRolloutReport),
         (
-            TTTDRecipe(StubTrainingRuntime(), groups_per_step=2, rollouts_per_group=3),
+            SAORecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=1),
+            "sao",
+            SAOProcessor,
+            "sao",
+            ScoredRolloutReport,
+        ),
+        (
+            TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), groups_per_step=2, rollouts_per_group=3),
             "tttd",
             TTTDProcessor,
             "tttd",
@@ -131,7 +137,7 @@ def test_build_rejects_an_unknown_step_preparer_before_any_training_step() -> No
             )
 
     with pytest.raises(ValueError, match=r"unknown step preparer 'online_grpo'.*available preparers"):
-        StalePreparerRecipe(StubTrainingRuntime()).build("math", SQLiteRecordStore())
+        StalePreparerRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
 
 
 def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process() -> None:
@@ -148,8 +154,8 @@ def test_tttd_build_resolves_its_backend_registered_preparer_in_a_fresh_process(
                 f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
                 "from recipes.tttd import TTTDRecipe\n"
                 "from reef.storage.sqlite import SQLiteRecordStore\n"
-                "from reef_service.runtime_stubs import StubTrainingRuntime\n"
-                "trainer = TTTDRecipe(StubTrainingRuntime(), groups_per_step=1, rollouts_per_group=2)"
+                "from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings\n"
+                "trainer = TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), groups_per_step=1, rollouts_per_group=2)"
                 ".build('math', SQLiteRecordStore())\n"
                 "assert trainer.training_backend.step_preparer == 'tttd'\n"
             ),
@@ -181,9 +187,9 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
 @pytest.mark.parametrize(
     ("recipe", "metadata"),
     [
-        (SAORecipe(StubTrainingRuntime()), {}),
+        (SAORecipe(**runtime_bindings(StubTrainingRuntime())), {}),
         (
-            TTTDRecipe(StubTrainingRuntime(), groups_per_step=1, rollouts_per_group=2),
+            TTTDRecipe(**runtime_bindings(StubTrainingRuntime()), groups_per_step=1, rollouts_per_group=2),
             {
                 "algorithm": "tttd",
                 "step": 0,
@@ -222,7 +228,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # The judging half lives inside the processor now: a report is consumed
     # held for retention only — terminal on sight, releasable, never a candidate.
-    trainer = OpenClawRLRecipe(StubTrainingRuntime()).build("math", SQLiteRecordStore())
+    trainer = OpenClawRLRecipe(**runtime_bindings(StubTrainingRuntime())).build("math", SQLiteRecordStore())
     processor = trainer.processor
     processor.ingest(
         AgentRecord.create(
@@ -250,13 +256,14 @@ def test_recipe_factory_keeps_method_configuration_inside_recipe() -> None:
             "REEF_TTTD_GROUPS_PER_STEP": "2",
             "REEF_TTTD_ROLLOUTS_PER_GROUP": "3",
         },
-        runtime=runtime,
+        **runtime_bindings(runtime),
     )
 
     assert isinstance(recipe, TTTDRecipe)
     assert recipe.groups_per_step == 2
     assert recipe.rollouts_per_group == 3
-    assert recipe.runtime is runtime
+    assert recipe.training_runtime is runtime
+    assert recipe.runtime is runtime.inference
 
 
 def test_training_recipe_requires_its_runtime_environment() -> None:
@@ -278,7 +285,7 @@ model:
     )
 
     settings = load_recipe_config(path)
-    recipe = build_recipe(settings["implementation"], {}, config=settings, runtime=StubTrainingRuntime())
+    recipe = build_recipe(settings["implementation"], {}, config=settings, **runtime_bindings(StubTrainingRuntime()))
 
     assert recipe.batch_size == 4
     assert recipe.checkpoint_strategy == EveryNVersions(3)

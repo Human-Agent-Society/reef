@@ -6,11 +6,12 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.dispatcher import Dispatcher
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingJobResult
 from reef.runtime.candidates import CandidateTrainingDeferred, StaleCandidate
 from reef.runtime.inference import InferenceBackend
 from reef.service.app import RequestService
@@ -22,7 +23,7 @@ _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
 
 
-class DurableRuntime(TrainingRuntime):
+class DurableRuntime(StubTrainingRuntime):
     def __init__(
         self,
         checkpoint_root: Path,
@@ -55,7 +56,9 @@ class DurableRuntime(TrainingRuntime):
     def serving_runtime_load_id(self):
         return self.serving_version
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         sample = batch.samples[0]
         payload = {
             "rollout_id": scenario_step,
@@ -179,7 +182,7 @@ def start_dispatcher(tmp_path: Path):
         runtime = DurableRuntime(tmp_path / "checkpoints", **runtime_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(runtime, batch_size=1),
+            TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1),
             factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=tmp_path / "agent-record",
@@ -273,28 +276,27 @@ def test_backend_failure_reaches_reef_status(start_dispatcher) -> None:
 
 
 @pytest.mark.unit
-def test_inference_resolves_while_lost_ack_publication_blocks(start_dispatcher) -> None:
+def test_inference_waits_until_lost_ack_publication_is_committed(start_dispatcher) -> None:
     BlockingLostAckBackend.started = Event()
     BlockingLostAckBackend.release = Event()
     BlockingLostAckBackend.failed = False
     runtime, dispatcher = start_dispatcher(BlockingLostAckBackend)
     _submit_pair(dispatcher)
     assert BlockingLostAckBackend.started.wait(1)
-    response, item = asyncio.run(
-        asyncio.wait_for(
-            RequestService(dispatcher).infer_with_data(
-                {"x-reef-scenario": "math"},
-                {"messages": [{"role": "user", "content": "hi"}]},
-                "/v1/chat/completions",
-                ImmediateBackend(),
-            ),
-            1,
-        )
-    )
-    assert response["metadata"]["runtime_load_id"] == item.payload["runtime_load_id"] == "v0"
-    BlockingLostAckBackend.release.set()
+    assert not runtime.inference.inference_admission_status["open"]
+
+    async def request_during_publication():
+        admission = asyncio.create_task(runtime.inference.acquire_inference())
+        await asyncio.sleep(0.05)
+        assert not admission.done()
+        BlockingLostAckBackend.release.set()
+        handle = await asyncio.wait_for(admission, 5)
+        handle.release()
+
+    asyncio.run(request_during_publication())
     _wait_for_step(dispatcher, 1)
     assert len(runtime.calls) == 1
+    assert runtime.inference.current_runtime_load_id() == "job:job-0"
 
 
 @pytest.mark.unit

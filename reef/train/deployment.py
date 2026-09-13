@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.errors import DeployConfigError
+from reef.runtime.deployment import ModelDeploymentPlan
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.runtime.registry import runtime_factory_for
 
@@ -29,6 +30,15 @@ class TrainingDeployment(ABC):
     ) -> dict[str, Any]:
         """Describe the runtime for RuntimeRegistry, without constructing it."""
 
+    def create_model_plan(self, config: Mapping[str, Any], *, loss_family: str) -> ModelDeploymentPlan:
+        """Provide unstarted components for Reef's optional model driver.
+
+        Integrations using their own process entrypoint or an in-process runtime
+        need not implement this method. Plan construction validates the selected
+        combination before Reef starts any of the returned components.
+        """
+        raise NotImplementedError("this backend does not use Reef's model deployment driver")
+
 
 class InProcessTrainingDeployment(TrainingDeployment):
     """An integration whose registered runtime owns local inference and training.
@@ -49,6 +59,7 @@ class InProcessTrainingDeployment(TrainingDeployment):
             "inference_backend_factory",
             "inference_backend_config",
             "tensor_parallel_size",
+            "inference_num_gpus",
             "inference_options",
         } & config["reef"].keys()
         if unsupported or {"training", "rollout"} & config.get("execution", {}).keys():

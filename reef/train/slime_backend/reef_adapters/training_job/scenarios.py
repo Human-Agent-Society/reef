@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.runtime.names import SCENARIO_HISTORY_FILENAME
-from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json, write_json
+from reef.runtime.runtime_load_id import RuntimeLoadId
+from reef.runtime.training_job.durable_io import read_json, write_json
 
 HISTORY_FILENAME = SCENARIO_HISTORY_FILENAME
 HISTORY_FORMAT = 1

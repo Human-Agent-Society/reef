@@ -1,15 +1,13 @@
-"""Failure-aware coordination actor for Slime weight transports."""
+"""Failure-aware update lock shared by direct weight transports."""
 
 from __future__ import annotations
 
-import ray
 
-from slime.ray.ray_actor import RayActor
+class WeightUpdateLock:
+    """Serialize fan-out and fence an uncertain transport.
 
-
-@ray.remote
-class ReefRolloutLock(RayActor):
-    """Serialize fan-out and permanently fence an uncertain transport."""
+    Host this object in a serial actor; it does not manage a thread or process.
+    """
 
     def __init__(self) -> None:
         self._locked = False
@@ -54,4 +52,4 @@ class ReefRolloutLock(RayActor):
         self._completed_phases.clear()
 
 
-__all__ = ["ReefRolloutLock"]
+__all__ = ["WeightUpdateLock"]

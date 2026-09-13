@@ -28,6 +28,10 @@ reef:
   ready-timeout: 3600
 
 inference:
+  num-gpus: "1"
+  tensor-parallel-size: "1"
+  options:
+    router-port: "30000"
   model-path: ~/models/Qwen2.5-1.5B-Instruct
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
@@ -44,7 +48,6 @@ training:
   # the client default to avoid a stale RUNNING marker.
   timeout-s: 14400
   config:
-    sglang_port: "30000"
     # Relative paths resolve against the directory reef serve runs from. The
     # checkpoint preflight requires roughly 16x the HF model size free on this
     # filesystem before the stack boots (the critic doubles the training state).
@@ -69,7 +72,6 @@ training:
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "100"
     save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
-    sglang-router-port: "${training.config.sglang_port}"
     num-rollout: "100000000"
     rollout-batch-size: "${training.config.global_batch_size}"
     global-batch-size: "${training.config.global_batch_size}"
@@ -82,8 +84,6 @@ training:
     normalization: "RMSNorm"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "1"
-    rollout-num-gpus: "1"
-    rollout-num-gpus-per-engine: "1"
     num-gpus-per-node: "2"
     tensor-model-parallel-size: "1"
     pipeline-model-parallel-size: "1"

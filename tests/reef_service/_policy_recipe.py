@@ -6,6 +6,7 @@ and concurrency tests can make a batch ready after one report.
 
 from __future__ import annotations
 
+
 from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
@@ -36,11 +37,12 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         *,
         config: Mapping[str, Any] | None = None,
         runtime: InferenceRuntime | None = None,
+        training_runtime: TrainingRuntime | None = None,
     ) -> TestPolicyRecipe:
         del environ, config
-        if not isinstance(runtime, TrainingRuntime):
+        if not isinstance(training_runtime, TrainingRuntime):
             raise TypeError("TestPolicyRecipe requires a TrainingRuntime")
-        return cls(runtime)
+        return cls(training_runtime, runtime=runtime)
 
     def build(
         self,
@@ -63,7 +65,9 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                     }
                 )
             ),
-            training_backend=SlimeTrainingBackend(self.runtime, "sft", scenario=scenario),
+            training_backend=SlimeTrainingBackend(
+                self.training_runtime, "sft", inference_runtime=self.runtime, scenario=scenario
+            ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

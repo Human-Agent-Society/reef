@@ -63,6 +63,7 @@ def _bind(
         trainer=trainer,
         scenario_step=0,
         runtime=runtime,
+        training_runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
     )
     dispatcher._registry = SimpleNamespace(

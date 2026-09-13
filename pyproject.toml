@@ -35,6 +35,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Python-side inference adapters; install native SGLang in its GPU environment.
+sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 postgres = ["psycopg[binary]>=3.1,<4"]
 terminus = [
     "reef-eval[harbor]>=0.1.1; python_version >= '3.12'",
@@ -55,8 +57,10 @@ slime = [
     "omegaconf",
     "peft",
     "pillow",
+    "psutil>=5.9",
     "pylatexenc",
     "qwen_vl_utils",
+    "requests",
     "ray[default]",
     "safetensors",
     "sglang-router>=0.3.2",
@@ -92,7 +96,7 @@ reef-native = "reef.harness.runners.native.__main__:main"
 reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
-reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
+reef = "reef.runtime.sglang.plugin:install_sglang_plugin"
 
 [tool.setuptools]
 include-package-data = true

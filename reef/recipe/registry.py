@@ -21,7 +21,7 @@ from typing import Any
 from reef.recipe.base import Recipe
 from reef.recipe.config import load_recipe_config, recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.registry import RuntimeRegistry
 
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -58,11 +58,12 @@ def build_recipe(
     environ: Mapping[str, str] | None = None,
     config: Mapping[str, Any] | None = None,
     runtime: InferenceRuntime | None = None,
+    training_runtime: TrainingRuntime | None = None,
 ) -> Recipe:
     recipe_class = recipe_class_for(implementation)
     if recipe_class is None:
         raise ValueError(f"unknown recipe reference {implementation!r}")
-    return recipe_class.from_environment(environ, config=config, runtime=runtime)
+    return recipe_class.from_environment(environ, config=config, runtime=runtime, training_runtime=training_runtime)
 
 
 def build_named_recipe(
@@ -126,10 +127,17 @@ def build_named_recipe(
         if runtime_config
         else default_runtime
     )
+    training_runtime = None
+    if isinstance(runtime, tuple):
+        training_runtime, runtime = runtime
     try:
-        return build_recipe(settings["implementation"], values, config=settings, runtime=runtime)
+        return build_recipe(
+            settings["implementation"], values, config=settings, runtime=runtime, training_runtime=training_runtime
+        )
     except BaseException:
-        if runtime_config and runtime is not None:
-            with suppress(Exception):
-                runtime.shutdown()
+        if runtime_config:
+            for component in (training_runtime, runtime):
+                if component is not None:
+                    with suppress(Exception):
+                        component.shutdown()
         raise

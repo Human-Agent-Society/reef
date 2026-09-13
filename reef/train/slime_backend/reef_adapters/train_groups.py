@@ -78,6 +78,7 @@ class SlimeTrainGroup:
         )
         self._executor: Executor | None = None
         self._rollout_manager: Any = None
+        self.train_parallel_config: dict[str, Any] = {}
         self._disk_weight_version = getattr(args, "update_weight_start_version", 0)
         self._released_runtime_load_id: str | None = None
 
@@ -163,9 +164,13 @@ class SlimeTrainGroup:
 
     def set_rollout_manager(self, rollout_manager):
         self._rollout_manager = rollout_manager
-        return self.executor.collective_rpc(
+        layouts = self.executor.collective_rpc(
             "set_rollout_manager", args=(rollout_manager,), timeout=TRAIN_RPC_TIMEOUT_S
         )
+        if not layouts or not isinstance(layouts[0], dict) or any(layout != layouts[0] for layout in layouts):
+            raise RuntimeError(f"Slime workers disagree on training parallel config: {layouts!r}")
+        self.train_parallel_config = layouts[0]
+        return layouts
 
     def _release_train_enabled(self):
         return self.role == "actor" and getattr(self.args, "release_train", False)

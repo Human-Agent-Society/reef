@@ -102,7 +102,7 @@ class WeightLoader:
 
     def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str:
         if not isinstance(runtime, WeightRuntime):
-            raise ReefError("weight rollback requires a training runtime")
+            raise ReefError("weight rollback requires an inference runtime")
         if artifact.local_path is None:
             raise ReefError("weight rollback requires a materialized checkpoint")
         runtime_load_id = runtime.restore_checkpoint(artifact)

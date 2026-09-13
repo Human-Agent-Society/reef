@@ -1,14 +1,25 @@
 """Runtime contracts and adapters for external model services.
 
-Every request needs an ``InferenceRuntime`` — it is what ``service/`` calls
-to answer with the provider's API — which is why the package belongs to
-serving even though ``train/`` also drives it for recipes that train.
-``TrainingRuntime`` extends it with the durable candidate lifecycle:
-candidate training exports a checkpoint without changing serving, and Reef
-evaluates it before choosing activation or rejection.
+``InferenceRuntime`` owns request execution and admission. ``TrainingRuntime``
+prepares training jobs and exports checkpoints without requiring inference.
+Neither inherits the other. The existing training backend coordinates their
+candidate lifecycle: training exports a checkpoint, Reef selects activation or
+rejection, and serving resumes only after durable publication.
 
 ``model_config.ModelConfig`` is the concrete, in-memory model selection shared
 by a scenario and its recipe. It has no file paths or persistence behavior.
+
+``deployment`` defines the minimal resource, inference-connection and training
+component contracts used by Reef's model driver. ``training_job`` owns durable
+job identity/replay, training/checkpoint ordering and commit-gated inference
+resumption; concrete backends provide model operations and weight transport.
+``inference_control`` coordinates engine pause/recovery and transport reconnect;
+``health_monitor`` drains engine probes before lifecycle changes;
+``inference_memory`` pairs acknowledged engine memory release/resume operations;
+``weight_update`` supplies the transport lock's failure/phase semantics.
+
+``sglang`` owns native SGLang launch, capture, engine control and inference
+lifecycle without depending on Slime or Megatron.
 
 Training batches and candidate evaluation contracts come from ``reef.core``.
 This package never imports ``reef.train``.
@@ -32,10 +43,10 @@ boot. Or set the config ``type`` to a dotted ``package.module:factory_name``
 reference, which ``runtime_factory_for`` imports on resolution.
 """
 
+from reef.runtime.adapters.executor_inference import ExecutorInferenceRuntime
 from reef.runtime.adapters.executor_runtime import ExecutorTrainingRuntime
 from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
 from reef.runtime.adapters.ray_runtime import (
-    RayRuntime,
     RayRuntimeError,
     RayTrainGroupHandle,
     RemoteRayTrainGroupHandle,
@@ -60,13 +71,13 @@ __all__ = [
     "Executor",
     "ExecutorConfig",
     "ExecutorFuture",
+    "ExecutorInferenceRuntime",
     "ExecutorTrainGroupHandle",
     "ExecutorTrainingRuntime",
     "InferenceProxyRuntime",
     "InferenceRuntime",
     "ModelCandidate",
     "PreparedTrainingStep",
-    "RayRuntime",
     "RayRuntimeError",
     "RayTrainGroupHandle",
     "RemoteRayTrainGroupHandle",

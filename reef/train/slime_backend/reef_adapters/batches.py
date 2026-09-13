@@ -1,4 +1,4 @@
-"""External-batch rollout manager composed from runtime primitives."""
+"""Slime tensorization and batch partitioning inside the training coordinator."""
 
 from __future__ import annotations
 
@@ -6,16 +6,6 @@ from collections.abc import Mapping
 from typing import Any
 
 import ray
-import torch
-from slime.ray.rollout import _tensorize_rollout_data_for_training
-from slime.ray.utils import add_default_ray_env_vars
-from slime.utils.dp_schedule import build_dp_schedule
-from slime.utils.logging_utils import configure_logger
-from slime.utils.misc import Box
-
-from reef.runtime.executor import Executor, ExecutorConfig
-from reef.train.slime_backend.reef_adapters.executors.rollout import rollout_executor_class
-from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars, resolve_tensor_dtype
 
 _PER_SAMPLE_KEYS = (
     "tokens",
@@ -39,11 +29,6 @@ _PER_SAMPLE_KEYS = (
     "teacher_log_probs",
 )
 
-_EXTERNAL_TENSOR_DTYPES = {
-    "advantages": torch.float32,
-    "returns": torch.float32,
-}
-
 
 def tensorize_external_fields(data: dict[str, Any], extra_dtypes: Mapping[str, str] | None = None) -> None:
     """Tensorize Reef payload fields absent from the runtime's rollout map.
@@ -53,7 +38,10 @@ def tensorize_external_fields(data: dict[str, Any], extra_dtypes: Mapping[str, s
     variable-length candidate token lists) stay undeclared and ride as plain
     lists.
     """
-    dtypes = dict(_EXTERNAL_TENSOR_DTYPES)
+    import torch
+    from reef.train.slime_backend.reef_adapters.worker_hooks import resolve_tensor_dtype
+
+    dtypes = {"advantages": torch.float32, "returns": torch.float32}
     for key, name in (extra_dtypes or {}).items():
         dtypes[key] = resolve_tensor_dtype(name)
     for key, dtype in dtypes.items():
@@ -61,85 +49,20 @@ def tensorize_external_fields(data: dict[str, Any], extra_dtypes: Mapping[str, s
             data[key] = [torch.as_tensor(value, dtype=dtype).detach().cpu().contiguous() for value in data[key]]
 
 
-def recover_server(server) -> None:
-    """Compatibility entry point for the default Slime/Ray recovery helper."""
-    from reef.train.slime_backend.reef_adapters.executors.rollout_worker import recover_server as implementation
+class TrainingBatchProcessor:
+    """Prepare rank-specific data without owning actors or inference connections."""
 
-    implementation(server)
-
-
-class ReefRolloutManagerImpl:
-    """Batch scheduling is independent of the serving launch/control backend."""
-
-    def __init__(self, args, pg):
-        configure_logger()
+    def __init__(self, args: Any, train_parallel_config: dict[str, Any]) -> None:
         self.args = args
-        self.pg = pg
-        self._serving = Executor.create(
-            ExecutorConfig(
-                backend=rollout_executor_class(args),
-                options={**getattr(args, "reef_rollout_executor_options", {}), "args": args, "pg": pg},
-            )
-        )
-
-    def dispose(self):
-        self._serving.shutdown()
-
-    def check_health(self):
-        self._serving.check_health(timeout=30)
-
-    def inference_url(self):
-        return self._serving.rpc(0, "inference_url", timeout=14_400)
-
-    def get_runtime_load_ids(self):
-        return self._serving.rpc(0, "get_runtime_load_ids", timeout=14_400)
-
-    def pause_generation_for_update(self):
-        return self._serving.rpc(0, "pause_generation_for_update", timeout=14_400)
-
-    def continue_generation_after_update(self):
-        return self._serving.rpc(0, "continue_generation_after_update", timeout=14_400)
-
-    def terminate_updatable_engines(self):
-        return self._serving.rpc(0, "terminate_updatable_engines", timeout=14_400)
-
-    def get_updatable_engines_and_lock(self):
-        return self._serving.rpc(0, "get_updatable_engines_and_lock", timeout=14_400)
-
-    def offload(self, tags=None):
-        return self._serving.rpc(0, "offload", args=(tags,), timeout=14_400)
-
-    def onload(self, tags=None):
-        return self._serving.rpc(0, "onload", args=(tags,), timeout=14_400)
-
-    def onload_weights(self):
-        return self._serving.rpc(0, "onload_weights", timeout=14_400)
-
-    def onload_kv(self):
-        return self._serving.rpc(0, "onload_kv", timeout=14_400)
-
-    def recover_updatable_engines(self):
-        return self._serving.rpc(0, "recover_updatable_engines", timeout=14_400)
-
-    def clear_updatable_num_new_engines(self):
-        return self._serving.rpc(0, "clear_updatable_num_new_engines", timeout=14_400)
-
-    def health_monitoring_pause(self):
-        return self._serving.rpc(0, "health_monitoring_pause", timeout=14_400)
-
-    def health_monitoring_resume(self):
-        return self._serving.rpc(0, "health_monitoring_resume", timeout=14_400)
-
-    def check_weights(self, action: str):
-        return self._serving.rpc(0, "check_weights", args=(action,), timeout=14_400)
-
-    def set_train_parallel_config(self, config: dict):
-        self.train_parallel_config = config
+        self.train_parallel_config = train_parallel_config
 
     def prepare_external_train_data(self, data):
         return self._split_train_data_by_dp(dict(data))
 
     def _split_train_data_by_dp(self, data):
+        from slime.ray.rollout import _tensorize_rollout_data_for_training
+        from slime.utils.misc import Box
+
         dp_size = self.train_parallel_config["dp_size"]
         total_lengths = [len(tokens) for tokens in data["tokens"]]
         data["total_lengths"] = total_lengths
@@ -199,6 +122,8 @@ class ReefRolloutManagerImpl:
         global into ``data``; micro-batch indices are local into each rank's
         partition, so they shift by the partition's length so far.
         """
+        from slime.utils.dp_schedule import build_dp_schedule
+
         dp_size = self.train_parallel_config["dp_size"]
         rollout_ids = data["rollout_ids"]
         total_lengths = data["total_lengths"]
@@ -228,34 +153,3 @@ class ReefRolloutManagerImpl:
             num_microbatches.extend(step_num_microbatches)
             global_batch_sizes.extend(step_batch_sizes)
         return partitions, micro_batch_indices, num_microbatches, global_batch_sizes
-
-
-ReefRolloutManager = ray.remote(ReefRolloutManagerImpl)
-
-
-def create_rollout_manager(args, pg):
-    runtime_env = add_default_ray_env_vars(reef_rollout_env_vars())
-    options = {
-        "num_cpus": 1,
-        "num_gpus": 0,
-        "runtime_env": {"env_vars": runtime_env},
-    }
-    if getattr(args, "rollout_data_transport", "object-store") == "nixl":
-        options["enable_tensor_transport"] = True
-    manager = ReefRolloutManager.options(**options).remote(args, pg)
-    if args.check_weight_update_equal:
-        ray.get(manager.check_weights.remote(action="snapshot"))
-        ray.get(manager.check_weights.remote(action="reset_tensors"))
-    if args.offload_rollout:
-        ray.get(manager.offload.remote())
-    return manager
-
-
-__all__ = [
-    "ReefRolloutManager",
-    "ReefRolloutManagerImpl",
-    "create_rollout_manager",
-    "recover_server",
-    "rollout_executor_class",
-    "tensorize_external_fields",
-]

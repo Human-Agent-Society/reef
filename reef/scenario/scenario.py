@@ -10,7 +10,7 @@ from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorab
 from reef.artifact.repository import Repository
 from reef.core.reports import ReportBase
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
-from reef.runtime.base import InferenceRuntime
+from reef.runtime.base import InferenceRuntime, TrainingRuntime
 from reef.runtime.inference import InferenceBackend
 from reef.runtime.model_config import ModelConfig
 from reef.scenario.binding import ScenarioBinding
@@ -63,6 +63,10 @@ class Scenario:
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def training_runtime(self) -> TrainingRuntime | None:
+        return self._binding.training_runtime
 
     @property
     def runtime(self) -> InferenceRuntime | None:

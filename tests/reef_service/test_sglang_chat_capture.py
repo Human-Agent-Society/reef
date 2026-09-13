@@ -10,9 +10,9 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.runtime.sglang.chat import SGLangChatTrainingInferenceBackend, _NativeStreamCapture
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
-from reef.train.slime_backend.reef_adapters.sglang.chat import SGLangChatTrainingInferenceBackend, _NativeStreamCapture
 
 
 class FakeTokenizer:

@@ -128,7 +128,7 @@ jobs:
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, and ray for the slime bridge suites; keeping
       # them here avoids expanding Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx "psycopg[binary]>=3.1,<4"
+      - run: uv pip install --system --python python pytest pytest-cov pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx "psutil>=5.9" "psycopg[binary]>=3.1,<4"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -275,9 +275,11 @@ jobs:
               "omegaconf",
               "peft",
               "pillow",
+              "psutil",
               "pylatexenc",
               "qwen-vl-utils",
               "ray",
+              "requests",
               "safetensors",
               "sglang-router",
               "tensorboard",
@@ -295,14 +297,22 @@ jobs:
           source_root = Path(os.environ["GITHUB_WORKSPACE"])
           expected_backend_files = {
               str(path.relative_to(source_root))
-              for path in (
-                  source_root / "reef" / "train" / "slime_backend"
-              ).rglob("*")
+              for directory in ("reef/train/slime_backend", "reef/runtime/sglang")
+              for path in (source_root / directory).rglob("*")
               if path.suffix in {".cu", ".md", ".py"}
           }
           expected_backend_files.add("reef/train/__init__.py")
           installed_files = {str(path) for path in reef.files or ()}
           assert expected_backend_files <= installed_files
+          assert "reef/runtime/runtime_load_id.py" in installed_files
+          assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)
+          inference = {
+              canonicalize_name(requirement.name)
+              for requirement in requirements
+              if requirement.marker is not None
+              and requirement.marker.evaluate({"extra": "sglang"})
+          } - core
+          assert inference == {"httpx", "psutil", "ray", "requests", "sglang-router"}, inference
           PY
       # Run outside the repo so `import reef` resolves to the installed wheel,
       # not the source tree. Proves the wheel is complete: core modules import,
@@ -355,7 +365,7 @@ jobs:
       # repo so the source tree cannot shadow them. Excluded: tests that
       # import the slime package (the wheel does not bundle it) or Slime's
       # optional dependencies.
-      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0
+      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0 "psutil>=5.9"
       # Exercise the repository cookbook as an external consumer of the
       # installed Reef wheel. Linking only recipes/ keeps the source reef/
       # package off sys.path, so it cannot shadow the wheel under test.

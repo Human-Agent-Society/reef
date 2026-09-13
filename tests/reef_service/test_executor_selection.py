@@ -102,7 +102,7 @@ def test_slime_rejects_unsupported_builtin_gpu_launchers(role, backend):
 
 def test_driver_auto_and_cli_auto_override_yaml(caplog):
     pytest.importorskip("ray")
-    from reef.service.slime_driver import _configure_executors
+    from reef.train.slime_backend.driver import _configure_executors
 
     args = SimpleNamespace(reef_executor_backend="auto", reef_rollout_executor_backend="auto")
     with caplog.at_level("INFO"):
@@ -126,12 +126,9 @@ def test_train_group_auto_resolves_before_create(gpus):
 
 
 def test_rollout_entrypoint_accepts_auto():
-    from reef.train.slime_backend.reef_adapters.executors.rollout import (
-        SlimeRayRolloutExecutor,
-        rollout_executor_class,
-    )
+    from reef.runtime.sglang.executor import SGLangExecutor
 
-    assert rollout_executor_class(SimpleNamespace(reef_rollout_executor_backend="auto")) is SlimeRayRolloutExecutor
+    assert slime_executor_class("auto", role="rollout") is SGLangExecutor
 
 
 def test_unknown_service_backend_does_not_fall_back(tmp_path):

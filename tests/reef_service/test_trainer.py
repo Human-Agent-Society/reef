@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 
 import pytest
+from reef_service.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, runtime_bindings, training_backend
 
 import reef.train.processors.reported as reported_module
 from recipes.sao import SAOProcessor
@@ -11,7 +12,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import ProcessorContext, Trainer
 from reef.train.backend import PreparedStep, TrainingBackend
@@ -23,7 +24,6 @@ from reef.train.evaluation import (
     UpdateCandidate,
 )
 from reef.train.processors import DataProcessor
-from reef.train.slime_backend.backend import SlimeTrainingBackend
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import PolicyBatch, PolicySample, TrainStepResult
 
@@ -77,45 +77,22 @@ class _PreparingBackend(TrainingBackend):
 def test_training_backend_names_both_sides_of_the_durable_commit_handshake() -> None:
     calls = []
 
-    class Runtime(TrainingRuntime):
-        @property
-        def inference_backend(self):
-            return None
+    class Receiver(StubInferenceRuntime):
+        def acknowledge_publication(self, training_job_id):
+            calls.append(training_job_id)
 
-        def reconcile_training_job(
-            self,
-            scenario_step,
-            *,
-            committed_training_job_id=None,
-            committed_training_without_job_id=False,
-        ):
-            calls.append((scenario_step, committed_training_job_id, committed_training_without_job_id))
-
-        def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
-            raise AssertionError("not used")
-
-        def train_candidate(self, payload):
-            raise AssertionError("not used")
-
-        def activate_candidate(self, candidate):
-            raise AssertionError("not used")
-
-        def reject_candidate(self, candidate, decision):
-            raise AssertionError("not used")
-
-    backend = SlimeTrainingBackend(Runtime(base_url="http://trainer"), "sft")
+    runtime = StubTrainingRuntime()
+    runtime.inference = Receiver(runtime, base_url="http://inference")
+    backend = training_backend(runtime, "sft")
 
     assert not hasattr(TrainingBackend, "reconcile")
     assert hasattr(TrainingBackend, "recover_pending_step")
     assert hasattr(TrainingBackend, "acknowledge_commit")
-    backend.recover_pending_step(
-        4,
-        committed_training_job_id=None,
-        committed_training_without_job_id=True,
-    )
+    backend.recover_pending_step(4)
+    assert calls == []
     backend.acknowledge_commit(5, "job-4")
-
-    assert calls == [(4, None, True), (5, "job-4", False)]
+    assert calls == ["job-4"]
+    assert runtime.inference.inference_admission_status["open"]
 
 
 def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
@@ -787,7 +764,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     checkpoint.mkdir()
     (checkpoint / "adapter.safetensors").write_text("trained")
 
-    class FakeTrainingRuntime(TrainingRuntime):
+    class FakeTrainingRuntime(StubTrainingRuntime):
         def __init__(self):
             super().__init__(base_url="http://trainer")
             self.calls = []
@@ -796,7 +773,9 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
         def inference_backend(self):
             return None
 
-        def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+        def prepare_training_step(
+            self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+        ):
             prepared = prepare_slime_step(batch, step_preparer, algorithm_state)
             assert prepared.payload is not None
             self.calls.append(("prepare", batch, step_preparer))
@@ -838,13 +817,13 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
                 scenario,
                 records,
                 processor_factory=lambda context: GroupedPolicyProcessor(context.with_config({"batch_size": 1})),
-                training_backend=SlimeTrainingBackend(self.runtime, self.step_preparer),
+                training_backend=training_backend(self.training_runtime, self.step_preparer),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
             )
 
     dispatcher = Dispatcher(
-        GroupedPgRecipe(training_runtime, name="grouped_pg"),
+        GroupedPgRecipe(**runtime_bindings(training_runtime), name="grouped_pg"),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

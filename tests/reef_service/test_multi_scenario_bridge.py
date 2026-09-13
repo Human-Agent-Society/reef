@@ -10,7 +10,8 @@ pytest.importorskip("ray")
 
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed
+from reef.runtime.adapter_residency import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
+from reef.runtime.inference_memory import InferenceMemory
 from reef.train.slime_backend.reef_adapters import bridge
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
 from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioHistory, history_path
@@ -115,6 +116,86 @@ class _Manager(_FakeRolloutManager):
         self.engine = _Engine()
 
 
+class _MemoryRegions:
+    def __init__(self):
+        self.resident = {"weights", "kv_cache", "cuda_graph"}
+
+    def release(self, regions):
+        assert set(regions) <= self.resident
+        self.resident.difference_update(regions)
+
+    def resume(self, regions):
+        assert not set(regions) & self.resident
+        self.resident.update(regions)
+
+
+class _ColocatedManager(_Manager):
+    """CPU engine fixture that enforces acknowledged memory transitions."""
+
+    def __init__(self, version):
+        super().__init__(version)
+        self.regions = _MemoryRegions()
+        self.memory = InferenceMemory(self.regions, ("weights", "kv_cache", "cuda_graph"))
+        self.memory.release()  # Inference owner makes room before the trainer starts.
+        self.generation_paused = True
+        self.pause_generation_for_update = _RemoteMethod(self._pause)
+        self.continue_generation_after_update = _RemoteMethod(self._continue)
+        self.onload_weights = _RemoteMethod(self._weights)
+        self.onload_kv = _RemoteMethod(self._kv)
+
+    def _pause(self):
+        self.generation_paused = True
+        self.paused.append("pause")
+
+    def _continue(self):
+        assert self.regions.resident == {"weights", "kv_cache", "cuda_graph"}
+        self.generation_paused = False
+        self.paused.append("continue")
+
+    def _offload(self, tags=None):
+        assert self.generation_paused
+        self.memory.release(tags)
+        super()._offload(tags)
+
+    def _weights(self):
+        self.memory.resume(["weights"])
+        self.memory_calls.append("onload_weights")
+
+    def _kv(self):
+        self.memory.resume(["kv_cache", "cuda_graph"])
+        self.memory_calls.append("onload_kv")
+
+    def _recover(self):
+        super()._recover()
+        self.regions = _MemoryRegions()
+        self.memory = InferenceMemory(self.regions, ("weights", "kv_cache", "cuda_graph"))
+        self.memory.release()
+        self.memory.resume(["weights"])
+
+
+class _ColocatedGroup(_SlottedGroup):
+    def __init__(self, template, version, manager):
+        super().__init__(template, version)
+        self.manager = manager
+
+    def _check_publication(self):
+        assert self.manager.generation_paused
+        assert self.manager.regions.resident == {"weights"}
+
+    def publish_adapter(self, scenario, lora_name):
+        self._check_publication()
+        super().publish_adapter(scenario, lora_name)
+
+    def update_weights(self, **kwargs):
+        self._check_publication()
+        super().update_weights(**kwargs)
+
+    def async_train(self, rollout_id, rollout_data_ref, external_data=None):
+        assert self.manager.generation_paused
+        assert not {"kv_cache", "cuda_graph"} & self.manager.regions.resident
+        return super().async_train(rollout_id, rollout_data_ref, external_data)
+
+
 def _actor(
     tmp_path: Path,
     version: _EngineVersion,
@@ -125,11 +206,12 @@ def _actor(
     keep_lora_base_resident: bool = False,
 ):
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
-    group = _SlottedGroup(template, version)
-    manager = _Manager(version)
+    manager = _ColocatedManager(version) if colocate else _Manager(version)
+    group = _ColocatedGroup(template, version, manager) if colocate else _SlottedGroup(template, version)
     actor = bridge.TrainBridgeActorImpl(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         start_rollout_id=start_rollout_id,
         lora=True,
@@ -258,9 +340,10 @@ def test_per_scenario_jobs_must_name_their_scenario(tmp_path, _local_ray_get) ->
 
 
 @pytest.mark.unit
-def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray_get) -> None:
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, False), (True, True)])
+def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray_get, colocate, keep_base) -> None:
     version = _EngineVersion(0)
-    actor, _, _, _ = _actor(tmp_path, version)
+    actor, _, _, _ = _actor(tmp_path, version, colocate=colocate, keep_lora_base_resident=keep_base)
     _run(actor, _job("a", 0, "inc:0"))
     _run(actor, _job("b", 0, "inc:1"))
     _run(actor, _job("c", 0, "inc:2"))
@@ -268,7 +351,9 @@ def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray
 
     # A new bridge over the same checkpoints (engines restarted at inc:0).
     restarted_version = _EngineVersion(4)
-    restarted, group, manager, _ = _actor(tmp_path, restarted_version, start_rollout_id=4)
+    restarted, group, manager, _ = _actor(
+        tmp_path, restarted_version, start_rollout_id=4, colocate=colocate, keep_lora_base_resident=keep_base
+    )
     # Other scenarios came back under their recorded names; the marker's
     # scenario was activated last and republished under its recorded version.
     assert group.published == [
@@ -445,3 +530,62 @@ def test_the_base_stays_released_without_lora_or_colocation(tmp_path, _local_ray
     """Full-weight training rewrites the served weights; releasing them is the point."""
     actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), keep_lora_base_resident=True)
     assert actor._release_tags is None
+
+
+@pytest.mark.unit
+def test_republication_restores_peer_adapters_without_advancing_scenario_versions(tmp_path, _local_ray_get):
+    actor, group, manager, _ = _actor(tmp_path, _EngineVersion(0))
+    _run(actor, _job("a", 0, "inc:0"))
+    _run(actor, _job("b", 0, "inc:1"))
+    before = actor.health()
+    group.published.clear()
+    manager.paused.clear()
+    assert actor.republish_serving() == "inc:2"
+    assert manager.recovered == 1
+    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
+    after = actor.health()
+    assert after["lora_adapters"] == before["lora_adapters"]
+    assert after["completed_train_steps"] == before["completed_train_steps"]
+    assert after["training_job"] == before["training_job"]
+    assert manager.paused[0] == "pause" and manager.paused[-1] == "continue"
+    assert after["phase"] == "serving"
+
+
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, False), (True, True)])
+def test_cold_lora_recovery_waits_for_commit_before_resuming(tmp_path, _local_ray_get, colocate, keep_base):
+    options = {"colocate": colocate, "keep_lora_base_resident": keep_base}
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))
+    checkpoint = actor.execute_training_job(_job("b", 0, "inc:1"))
+    published = actor.update_serving_weights(checkpoint.training_job_id)
+    # A crash loses all engines after publication, before Reef acknowledges its head.
+    restarted, group, manager, _ = _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
+    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
+    assert group.publications == [("b", "inc:2")]
+    assert manager.paused == ["pause"]
+    assert restarted.serving_runtime_load_id() == published.runtime_load_id
+    assert group.train_calls == []
+    restarted.acknowledge_training_commit(published.training_job_id)
+    assert manager.paused == ["pause", "continue"]
+    assert restarted.health()["phase"] == "serving"
+
+
+@pytest.mark.parametrize("keep_base", [False, True])
+def test_failed_colocated_adapter_restore_never_resumes_generation(tmp_path, _local_ray_get, monkeypatch, keep_base):
+    options = {"colocate": True, "keep_lora_base_resident": keep_base}
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))
+    _run(actor, _job("b", 0, "inc:1"))
+    managers = []
+
+    def fail_restore(group, scenario, name):
+        group._check_publication()
+        managers.append(group.manager)
+        raise RuntimeError("adapter reload failed")
+
+    monkeypatch.setattr(_ColocatedGroup, "publish_adapter", fail_restore)
+    with pytest.raises(AdapterResidencyError, match="adapter reload failed"):
+        _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
+    assert len(managers) == 1
+    assert managers[0].generation_paused
+    assert "continue" not in managers[0].paused

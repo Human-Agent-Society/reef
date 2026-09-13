@@ -172,11 +172,11 @@ class PreparedTrainingStep:
 
 
 class InferenceRuntime(ABC):
-    """A runtime owns at least an inference backend.
+    """Own inference requests, serving weights and admission.
 
-    The runtime itself is NOT an InferenceBackend: it composes one. This
-    separates the 'lifecycle owner' role from the 'request executor' role
-    and lets a runtime swap backends without subclassing.
+    An InferenceBackend executes individual requests. This runtime owns that
+    backend and its endpoint, weight activation and serving version state;
+    training and optimizer state belong to a separate TrainingRuntime.
     """
 
     def __init__(
@@ -192,6 +192,7 @@ class InferenceRuntime(ABC):
         self._base_url = base_url.rstrip("/")
         self._inference_timeout_s = inference_timeout_s
         self._inference_admission = InferenceAdmissionController()
+        self._current_runtime_load_id: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -209,6 +210,21 @@ class InferenceRuntime(ABC):
     def inference_admission_status(self) -> Mapping[str, Any]:
         return self._inference_admission.status
 
+    def pause_admission(self, *, wait: bool = False, timeout: float | None = None) -> None:
+        """Close request admission; optionally wait for admitted work to finish."""
+        self._inference_admission.close(wait=wait, timeout=timeout)
+
+    def resume_admission(self) -> None:
+        """Reopen request admission after the coordinator permits serving."""
+        self._inference_admission.open()
+
+    def reconnect(self, base_url: str) -> None:
+        """Retarget the request backend after managed inference recovery."""
+        if not base_url:
+            raise ValueError("base_url must be non-empty")
+        self.inference_backend.reconnect(base_url)
+        self._base_url = base_url.rstrip("/")
+
     @property
     @abstractmethod
     def inference_backend(self) -> InferenceBackend:
@@ -221,19 +237,6 @@ class InferenceRuntime(ABC):
         individual scenario. Proxy-only runtimes have no local resources.
         """
         return
-
-
-class TrainingRuntime(InferenceRuntime, ABC):
-    """A runtime that produces selectable model candidates."""
-
-    @property
-    def max_staleness(self) -> int:
-        """Largest producing-to-serving version lag this runtime admits.
-
-        Exact-version admission is the default. Runtimes that support a
-        positive bounded-staleness window override this property.
-        """
-        return 0
 
     def serving_runtime_load_id(self) -> str | None:
         """The runtime load ID the serving engine currently reports, if knowable.
@@ -258,10 +261,68 @@ class TrainingRuntime(InferenceRuntime, ABC):
         here is what lets the weight surface address every request to it, so
         no harness can silently sample the frozen base. ``None`` means the
         runtime publishes full weights and requests need no adapter name, or
-        that adapters are per scenario (see
-        :attr:`concurrent_training_scenarios`).
+        that adapters are per scenario.
         """
         return None
+
+    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
+        """The serving runtime load ID of ``scenario``'s resident adapter.
+
+        ``None`` when the runtime does not serve per-scenario adapters or the
+        scenario has published nothing yet (requests then sample the base).
+        """
+        return None
+
+    def restore_checkpoint(self, artifact: Artifact) -> str:
+        """Restore served weights from a durable artifact.
+
+        Runtimes that support weight rollback override this and return the new
+        serving-engine version token. The default fails explicitly: silently
+        moving Reef's artifact head while the engine keeps newer weights would
+        corrupt serving-version records.
+        """
+        raise ReefError(f"{type(self).__name__} does not support checkpoint restore")
+
+    def current_runtime_load_id(self) -> str | None:
+        """Return the version acknowledged as published by Reef."""
+        return self._current_runtime_load_id
+
+    def mark_published(self) -> None:
+        """Record the loaded version after the durable publication handshake."""
+        self._current_runtime_load_id = self.serving_runtime_load_id()
+
+    def adapter_residency_status(self) -> Mapping[str, Any] | None:
+        return None
+
+    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
+        """Load a selected checkpoint/adapter without authorizing new requests."""
+        raise ReefError(f"{type(self).__name__} does not support candidate activation")
+
+    def resume_weight_update(self, training_job_id: str) -> ActivatedModel:
+        """Resume an interrupted receiver update using its durable identity."""
+        raise ReefError(f"{type(self).__name__} does not support weight-update recovery")
+
+    def acknowledge_publication(self, training_job_id: str) -> None:
+        """Confirm the durable head to an engine with deferred publication."""
+        return
+
+
+class TrainingRuntime(ABC):
+    """Training preparation and checkpoint production, independent of inference.
+
+    Serving versions are input values, never an inference runtime dependency.
+    The existing training backend coordinates training with inference and Reef
+    publication. Implementations never receive an inference runtime object.
+    """
+
+    @property
+    def max_staleness(self) -> int:
+        """Largest producing-to-serving version lag this runtime admits.
+
+        Exact-version admission is the default. Runtimes that support a
+        positive bounded-staleness window override this property.
+        """
+        return 0
 
     @property
     def concurrent_training_scenarios(self) -> bool:
@@ -274,47 +335,13 @@ class TrainingRuntime(InferenceRuntime, ABC):
         """
         return False
 
-    def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
-        """The serving runtime load ID of ``scenario``'s resident adapter.
-
-        ``None`` when the runtime does not serve per-scenario adapters or the
-        scenario has published nothing yet (requests then sample the base).
-        """
+    def training_job_status(self) -> Mapping[str, Any] | None:
+        """Remote durable job state, or None for an in-process candidate trainer."""
         return None
 
-    def current_runtime_load_id(self) -> str | None:
-        """Return the version Reef has made available to new inference.
-
-        The default is suitable for runtimes whose serving update and Reef
-        publication are one operation. Runtimes with a deferred commit
-        handshake retain the previous value until that handshake completes.
-        """
-        return self.serving_runtime_load_id() if self.inference_admission_status.get("open") is True else None
-
-    def restore_checkpoint(self, artifact: Artifact) -> str:
-        """Restore training and serving weights from a durable artifact.
-
-        Runtimes that support weight rollback override this and return the new
-        serving-engine version token. The default fails explicitly: silently
-        moving Reef's artifact head while the engine keeps newer weights would
-        corrupt serving-version records.
-        """
-        raise ReefError(f"{type(self).__name__} does not support checkpoint restore")
-
-    def reconcile_training_job(
-        self,
-        scenario_step: int,
-        *,
-        committed_training_job_id: str | None = None,
-        committed_training_without_job_id: bool = False,
-        scenario: str | None = None,
-    ) -> None:
-        """Reconcile a backend training job against Reef's durable commit.
-
-        ``scenario`` is passed only by a backend bound to a runtime that
-        trains several scenarios at once (see
-        :attr:`concurrent_training_scenarios`).
-        """
+    def reject_training_job(self, training_job_id: str) -> None:
+        """Resume rejection of a durable job whose candidate was already exported."""
+        raise ReefError(f"{type(self).__name__} does not support durable rejection recovery")
 
     @abstractmethod
     def prepare_training_step(
@@ -323,19 +350,26 @@ class TrainingRuntime(InferenceRuntime, ABC):
         step_preparer: str,
         algorithm_state: Mapping[str, Any],
         scenario_step: int,
+        *,
+        serving_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep: ...
+
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        """Execute a backend-native durable job through checkpoint export."""
+        raise ReefError(f"{type(self).__name__} does not support native training jobs")
 
     @abstractmethod
     def train_candidate(self, payload: Mapping[str, Any]) -> ModelCandidate:
         """Train through durable checkpoint export without changing serving."""
-        ...
-
-    @abstractmethod
-    def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
-        """Apply a selected candidate to serving."""
-        ...
 
     @abstractmethod
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
-        """Finish a rejected candidate without changing serving."""
-        ...
+        """Finish a rejected training candidate."""
+
+    def restore_checkpoint(self, artifact: Artifact) -> None:
+        """Restore training weights and optimizer state, without touching inference."""
+        raise ReefError(f"{type(self).__name__} does not support training checkpoint restore")
+
+    def shutdown(self) -> None:
+        """Release only owned training resources."""
+        return

@@ -40,4 +40,4 @@ def test_group_size_floor():
 
     runtime = InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000")
     with pytest.raises(ValueError, match="at least two"):
-        recipe_cls(runtime=runtime, group_size=1)
+        recipe_cls(training_runtime=None, runtime=runtime, group_size=1)

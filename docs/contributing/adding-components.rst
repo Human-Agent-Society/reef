@@ -78,8 +78,9 @@ Implementation
 - Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
-- Implement ``TrainingDeployment`` in the integration to own process preparation
-  and its runtime connection. In-process integrations can extend
+- Implement ``TrainingDeployment`` in the integration to describe process preparation
+  and its runtime connection. Implement ``create_model_plan`` when using Reef's
+  shared model driver; return unstarted components and let Reef own their lifecycle. In-process integrations can extend
   ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
   ``reef.training_backends`` entry-point group; see `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.

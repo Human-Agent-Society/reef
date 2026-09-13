@@ -53,12 +53,13 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_backend_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
+        runtime, inference = _connect_training_runtime(settings, model_path=settings.model_path, max_staleness=2)
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
         assert runtime.config["label"] == "001"
         assert runtime.max_staleness == 2
+        inference.shutdown()
         runtime.shutdown()
         assert runtime.closed
 
@@ -128,10 +129,12 @@ def test_recipe_build_uses_generic_runtime_backend_and_preserves_cleanup(tmp_pat
     try:
         trainer = recipe.build("scenario", records)
         assert isinstance(trainer.training_backend, RuntimeTrainingBackend)
-        assert trainer.training_backend.runtime is recipe.runtime
+        assert trainer.training_backend.inference_runtime is recipe.runtime
+        assert trainer.training_backend.training_runtime is recipe.training_runtime
         assert trainer.training_backend.experiment_config()["runtime"] == "LocalRuntime"
     finally:
         recipe.runtime.shutdown()
+        recipe.training_runtime.shutdown()
         records.close()
 
 

@@ -15,6 +15,36 @@ CI supplies PostgreSQL 16 and runs these cases on all supported Python versions.
 Run the full suite
 ------------------
 
+Managed deployment recovery also has opt-in CPU tests using real Ray processes:
+
+.. code:: bash
+
+   REEF_TEST_RAY=1 PYTHONPATH="$PWD:$PWD/tests" NO_PROXY='*' \
+     .venv/bin/python -m pytest tests/reef_service/test_training_restart.py \
+       tests/reef_service/test_model_supervision_ray.py -q
+
+Install the Python dependencies from ``.[slime]`` first. These tests use private
+local Ray clusters and fake CPU weights. They inject process death and check
+durable publication, readiness, child cleanup and HTTP endpoint reconnection;
+they do not validate Slime's real GPU checkpoint or collective transport.
+
+LoRA and colocated contract tests run in the regular CPU suite:
+
+.. code:: bash
+
+   .venv/bin/python -m pytest tests/slime_backend/test_driver_runtime_env.py \
+     tests/slime_backend/test_rollout_recovery.py \
+     tests/slime_backend/test_sglang_engine.py \
+     tests/reef_service/test_multi_scenario_bridge.py -q
+
+These cover independent component selection, inference-owned startup offload,
+paired memory transitions, cold reconstruction of scenario adapters and the
+commit barrier, including retaining the frozen base between training steps.
+The memory fixture rejects publication without resident weights and training
+while inference KV/graphs remain resident. It models ordering, not GPU capacity;
+real LoRA IPC/NCCL transport, CUDA memory use and combined-mode performance
+require a supported GPU run.
+
 .. code:: bash
 
    pytest tests/

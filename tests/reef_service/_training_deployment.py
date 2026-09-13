@@ -48,7 +48,8 @@ class LocalFactory(RuntimeFactory):
         return Options
 
     def __call__(self, config, model_path, recipe_config, environ):
-        return LocalRuntime(config, model_path)
+        training = LocalRuntime(config, model_path)
+        return training, training.inference
 
 
 runtime_factory = LocalFactory()

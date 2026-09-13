@@ -151,7 +151,18 @@ interpretation live in ``core/requirements.py``. Storage owns commit record
 encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with surface contracts, while checkpoint cadence is recipe policy.
 ``recipe/cordis.py`` assembles the harness training backend, and
-``service/slime_driver.py`` starts the optional Slime process.
+``service/training_driver.py`` owns model-component startup and shutdown.
+``runtime/training_job/`` owns job identity/replay, train/checkpoint ordering,
+durable markers and commit-gated publication; concrete training integrations
+retain admission, model operations, checkpoint and tensor I/O.
+``runtime/inference_control.py`` owns inference pause/recovery and reconnect
+ordering; ``runtime/health_monitor.py`` owns probe scheduling and drain barriers.
+``runtime/weight_update.py`` owns the transport lock's failure state.
+``runtime/sglang/`` owns SGLang engine launch, capture and control independently
+of training. ``train/slime_backend/inference.py`` only translates Slime options
+into that backend's configuration.
+``train/slime_backend/driver.py`` supplies Slime component definitions;
+``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.
 
 The extension points those packages expose are in `Python API
 <../reference/python-api.rst>`__.

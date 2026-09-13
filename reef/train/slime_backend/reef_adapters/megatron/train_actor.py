@@ -83,6 +83,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 init_hook(self)
         return result
 
+    def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
+        """Attach directly to inference and return topology to Reef's trainer."""
+        self.rollout_manager = inference
+        return dict(self.train_parallel_config)
+
     # -- Per-scenario adapter slot --------------------------------------
 
     def activate_scenario(self, scenario: str) -> bool:

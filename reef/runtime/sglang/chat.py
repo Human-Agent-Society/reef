@@ -208,7 +208,7 @@ class _ReasoningStreamSplitter:
 
 
 def _build_sglang_tool_parser(tools: list[dict[str, Any]], parser_name: str) -> Any:
-    """Load the parser shipped with the same SGLang runtime as Slime."""
+    """Load the parser shipped with the selected SGLang runtime."""
 
     from sglang.srt.entrypoints.openai.protocol import Tool
     from sglang.srt.function_call.function_call_parser import FunctionCallParser

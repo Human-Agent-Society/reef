@@ -30,11 +30,15 @@ def resolve_proxy_runtime(
     timeout_raw = _env_value(values, "REEF_INFERENCE_TIMEOUT_S")
     if timeout_raw is not None:
         config["timeout_s"] = float(timeout_raw)
-    return RuntimeRegistry().build(
+    built = RuntimeRegistry().build(
         config,
         model_path=_env_value(values, "REEF_MODEL_PATH") or "",
         environ=values,
     )
+
+    if not isinstance(built, InferenceRuntime):
+        raise TypeError("inference proxy factory must return an InferenceRuntime")
+    return built
 
 
 def _env_value(values: Mapping[str, str], name: str) -> str | None:

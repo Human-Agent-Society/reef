@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
+from reef.runtime.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
 
 
 @pytest.mark.unit

@@ -213,7 +213,7 @@ class Dispatcher:
             return {"scenario": scenario, "training_mode": current.trainer.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
-        if isinstance(current.runtime, TrainingRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
         elif current.trainer.training_backend is not None:
             self._start_local_backend_worker(current.name)
@@ -392,7 +392,7 @@ class Dispatcher:
         stored = appended.item
         if not appended.inserted:
             return stored
-        if isinstance(current.runtime, TrainingRuntime):
+        if current.training_runtime is not None:
             self._training.ready.set()
             return stored
         if current.trainer.training_backend is not None:
@@ -698,7 +698,7 @@ class Dispatcher:
         current = self._registry.get_optional(name)
         if current is None:
             raise RuntimeContractError(f"training thread is not bound to scenario {name!r}")
-        runtime = current.runtime
+        runtime = current.training_runtime
         if not isinstance(runtime, TrainingRuntime):
             raise RuntimeContractError(
                 f"training thread requires a TrainingRuntime for scenario {current.name!r}, got {type(runtime).__name__}"
@@ -855,16 +855,18 @@ class Dispatcher:
             # A version is current only after Reef commits its head
             # and reopens admission. The backend may report it
             # earlier while the update is still being published.
-            "current_runtime_load_id": (
-                runtime.current_runtime_load_id() if isinstance(runtime, TrainingRuntime) else None
-            ),
+            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
             "training_mode": current.trainer.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
-        if isinstance(runtime, TrainingRuntime) and runtime.concurrent_training_scenarios:
+        if (
+            runtime is not None
+            and current.training_runtime is not None
+            and current.training_runtime.concurrent_training_scenarios
+        ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
         return block
 
@@ -930,10 +932,13 @@ class Dispatcher:
         except BaseException as exc:
             errors.append(exc)
         if self._recipe.runtime is not None:
-            try:
-                self._recipe.runtime.shutdown()
-            except BaseException as exc:
-                errors.append(exc)
+            self._recipe.runtime.pause_admission()
+        for component in (self._recipe.training_runtime, self._recipe.runtime):
+            if component is not None:
+                try:
+                    component.shutdown()
+                except BaseException as exc:
+                    errors.append(exc)
         try:
             self._experiment_tracker.close()
         except Exception:

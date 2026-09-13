@@ -310,8 +310,8 @@ def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
         "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
-        "from reef.train.slime_backend.reef_adapters.training_job "
-        "import durable_io, storage"
+        "from reef.runtime.training_job import durable_io; "
+        "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )
 
 
@@ -404,3 +404,28 @@ def test_storage_and_core_only_depend_on_lower_layers() -> None:
 def test_package_scan_includes_relative_local_and_facade_imports() -> None:
     tree = ast.parse("from ..storage import commits\ndef load():\n    import reef\n    from reef import Scenario\n")
     assert _imported_modules(tree, package="reef.scenario") == ["reef.storage.commits", "reef", "reef.Scenario"]
+
+
+def test_training_publication_import_requires_no_model_framework() -> None:
+    _assert_isolated_import(
+        "import sys; "
+        "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
+        "from reef.runtime.training_job.publication import TrainingPublication, WeightPublisher; "
+        "from reef.runtime.training_job.execution import TrainingExecution, TrainingJobBackend"
+    )
+
+
+def test_inference_recovery_and_update_lock_require_no_model_framework() -> None:
+    _assert_isolated_import(
+        "import sys; "
+        "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
+        "from reef.runtime.inference_control import InferenceControl; "
+        "from reef.runtime.health_monitor import EngineHealthMonitor; "
+        "from reef.runtime.weight_update import WeightUpdateLock"
+    )
+
+
+def test_ray_update_lock_wrapper_does_not_import_slime() -> None:
+    _assert_isolated_import(
+        "import sys; sys.modules['slime'] = None; from reef.runtime.sglang.lock import ReefRolloutLock"
+    )

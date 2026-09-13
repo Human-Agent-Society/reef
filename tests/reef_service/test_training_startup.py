@@ -60,7 +60,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         assert reef["training_backend"] == "slime"
         assert config["execution"] == {"training": "ray", "rollout": "ray"}
         driver, http = validate_services(config, "test")
-        assert driver["command"] == [sys.executable, "-m", "reef.service.slime_driver"]
+        assert driver["command"] == [sys.executable, "-m", "reef.service.training_driver"]
         assert driver["ready_timeout"] == 45
         assert interpolate_config(config, driver["env"]["REEF_RAY_NAMESPACE"]) == "custom"
         assert interpolate_config(config, driver["env"]["REEF_RAY_ACTOR_NAME"]) == "bridge-custom"
@@ -80,10 +80,21 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"training.options.hf-checkpoint": "different/model"}, "must match inference.model-path"),
         ({"training.options.ready-file": "/tmp/marker"}, "managed by Reef"),
         ({"training.options.ready": "/tmp/marker"}, "managed by Reef"),
-        ({"inference.upstream-url": "http://localhost:8000"}, "training-owned inference"),
+        ({"inference.upstream-url": "http://localhost:8000"}, "managed inference"),
         ({"inference.url": "http://localhost:8000"}, "connection from the bridge"),
-        ({"inference.options.tp-size": "2"}, "Slime owns inference workers"),
-        ({"inference.tensor-parallel-size": "2"}, "Slime owns inference workers"),
+        ({"inference.options.tp-size": "2"}, "managed by Reef"),
+        ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
+        ({"inference.num-gpus": "0"}, "must be positive"),
+        ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
+        ({"inference.num-gpus": "1.5"}, "valid int"),
+        ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
+        ({"training.options.rollout-num": "2"}, "configures inference"),
+        ({"training.options.sglang-context-length": "1024"}, "configures inference"),
+        ({"training.options.sglang-config": "engines.yaml"}, "configures inference"),
+        ({"training.options.rollout-external": "true"}, "configures inference"),
+        ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
+        ({"inference.options.pp-size": "2"}, "managed by Reef"),
+        ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
         ({"execution.training.backend": "uni"}, "requires execution.training.backend: ray"),
         ({"recipe.config.batch-szie": "2"}, "unknown configuration flag"),
     ],
@@ -260,7 +271,7 @@ import json, os, time
 from pathlib import Path
 keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME', 'SLIME_ARGS_FILE']
 Path('driver-env.json').write_text(json.dumps({key: os.environ[key] for key in keys}))
-Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-slime-bridge-ready')
+Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-training-ready')
 time.sleep(120)
 """
     http_script = """
@@ -268,7 +279,7 @@ import json, os
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import yaml
-assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-slime-bridge-ready'
+assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-training-ready'
 config = yaml.safe_load(Path(os.environ['REEF_CONFIG']).read_text())
 Path('http-config.json').write_text(json.dumps(config))
 class Handler(BaseHTTPRequestHandler):
@@ -305,3 +316,82 @@ HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
         for pid in json.loads(path.read_text())["pids"].values():
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("mode", [{}, {"colocate": True}, {"megatron-lora-rank": 8}])
+def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_path, mode):
+    from reef.train.slime_backend.launch import driver_arguments
+
+    raw = training_config()
+    raw["inference"].update(
+        {
+            "num-gpus": 2,
+            "tensor-parallel-size": 1,
+            "options": {"mem_fraction_static": 0.8, "router-port": 30000, "disable-cuda-graph": True},
+        }
+    )
+    raw["training"]["options"].update(mode)
+    overrides = {
+        "inference.num-gpus": "4",
+        "inference.tensor-parallel-size": "2",
+        "inference.options.mem-fraction-static": "0.6",
+        "inference.options.disable-cuda-graph": "false",
+    }
+    config, _ = resolve_deployment_config(raw, overrides, tmp_path / "serve.yaml")
+    equivalent = training_config()
+    equivalent["training"]["options"].update(mode)
+    equivalent["inference"].update(
+        {
+            "num-gpus": 4,
+            "tensor-parallel-size": 2,
+            "options": {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False},
+        }
+    )
+    file_only, _ = resolve_deployment_config(equivalent, None, tmp_path / "other.yaml")
+    assert driver_arguments(config) == driver_arguments(file_only)
+    argv = driver_arguments(config)
+    assert "--rollout-num-gpus=4" in argv
+    assert "--rollout-num-gpus-per-engine=2" in argv
+    assert "--sglang-mem-fraction-static=0.6" in argv
+    assert "--sglang-router-port=30000" in argv
+    assert "--sglang-disable-cuda-graph" not in argv
+    assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
+    assert raw["inference"]["num-gpus"] == 2
+
+
+def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config, _ = resolve_deployment_config(training_config(), {"inference.tensor-parallel-size": "4"}, tmp_path / "c")
+    assert config["reef"]["inference_num_gpus"] == 4
+    assert "--rollout-num-gpus=4" in driver_arguments(config)
+
+
+def test_legacy_native_driver_arguments_remain_available():
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config = {
+        "reef": {
+            "training_backend_options": {
+                "rollout-num-gpus": 3,
+                "sglang-context-length": 1024,
+                "rollout-external": True,
+            }
+        }
+    }
+    assert driver_arguments(config) == ["--rollout-num-gpus=3", "--sglang-context-length=1024", "--rollout-external"]
+
+
+def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp_path, monkeypatch):
+    from reef.train.slime_backend import driver as slime_driver
+
+    config, _ = resolve_deployment_config(training_config(), None, tmp_path / "c")
+    monkeypatch.setenv("RAY_ADDRESS", "local")
+    monkeypatch.setenv("REEF_CONFIG", str(tmp_path / "config"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("direct managed flags must fail before connecting or parsing Slime")
+
+    monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
+    with pytest.raises(RuntimeError, match="pass options through reef serve"):
+        slime_driver.create_model_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")

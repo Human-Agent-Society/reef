@@ -58,7 +58,14 @@ class ServiceConfig:
         None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
     )
     tensor_parallel_size: int | None = config_option(
-        None, public_path=("inference", "tensor_parallel_size"), help="Managed local inference GPU count (default: 1)."
+        None,
+        public_path=("inference", "tensor_parallel_size"),
+        help="Tensor parallel GPU count per inference engine (default: 1).",
+    )
+    inference_num_gpus: int | None = config_option(
+        None,
+        public_path=("inference", "num_gpus"),
+        help="Total inference GPUs; defaults to tensor-parallel-size. Slime can launch multiple engines.",
     )
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,

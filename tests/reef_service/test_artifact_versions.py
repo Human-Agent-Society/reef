@@ -7,13 +7,14 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import NullExperimentLogger
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.runtime.inference import InferenceBackend
 from reef.scenario import ReleaseNotRestorable
 from reef.service.app import RequestService, create_app
@@ -23,19 +24,22 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from ._policy_recipe import TestPolicyRecipe
 
 
-class RollbackRuntime(TrainingRuntime):
+class RollbackRuntime(StubTrainingRuntime):
     def __init__(self, checkpoint_dir) -> None:
         super().__init__(base_url="http://trainer")
         self.checkpoint_dir = checkpoint_dir
         self.trained = 0
         self.restored: list[str] = []
+        self.restore_order = []
         self.candidate_versions: dict[str, str] = {}
 
     @property
     def inference_backend(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         del batch, step_preparer
         return PreparedTrainingStep(
             action="train",
@@ -67,6 +71,12 @@ class RollbackRuntime(TrainingRuntime):
         self.candidate_versions.pop(candidate.candidate_id, None)
 
     def restore_checkpoint(self, artifact):
+        assert not self.inference.inference_admission_status["open"]
+        self.restore_order.append("training")
+
+    def restore_serving_checkpoint(self, artifact):
+        assert not self.inference.inference_admission_status["open"]
+        self.restore_order.append("inference")
         version = artifact.local_path.joinpath("model.txt").read_text()
         self.restored.append(version)
         return f"restored:{version}"
@@ -136,7 +146,7 @@ def dispatcher(tmp_path, *, checkpoint_every: int = 1, experiment_tracker=None):
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     value = Dispatcher(
         TestPolicyRecipe(
-            runtime,
+            **runtime_bindings(runtime),
             batch_size=1,
             checkpoint_strategy=EveryNVersions(checkpoint_every),
         ),
@@ -182,6 +192,8 @@ def test_versions_are_wal_backed_and_rollback_appends_a_new_commit(tmp_path) -> 
         == "w1"
     )
     assert runtime.restored == ["w1"]
+    assert runtime.restore_order == ["training", "inference"]
+    assert runtime.inference.inference_admission_status["open"]
     record = value.get_or_create_scenario("math").store.history()[-1]
     assert record.operation == "rollback"
     assert record.rollback_target_release_id == target_version
@@ -217,9 +229,11 @@ def test_rollback_retry_settles_the_recorded_release_without_republishing(tmp_pa
     recorded = scenario.store.history()[-1]
     assert recorded.step == 2
     assert recorded.operation == "rollback"
+    assert not scenario.runtime.inference_admission_status["open"]
 
     published = value.rollback("math", created)
 
+    assert scenario.runtime.inference_admission_status["open"]
     assert published == recorded.artifact_ref
     assert scenario.scenario_step == 2
     assert scenario.store.history()[-1] == recorded
@@ -268,7 +282,7 @@ def test_recovery_adopts_a_lost_rollback_record_without_treating_it_as_training(
 
     restarted = Dispatcher(
         TestPolicyRecipe(
-            RollbackRuntime(tmp_path / "restarted-export"),
+            **runtime_bindings(RollbackRuntime(tmp_path / "restarted-export")),
             checkpoint_strategy=EveryNVersions(1),
         ),
         backend_factory,
@@ -299,7 +313,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted_runtime = RollbackRuntime(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(restarted_runtime, checkpoint_strategy=EveryNVersions(1)),
+        TestPolicyRecipe(**runtime_bindings(restarted_runtime), checkpoint_strategy=EveryNVersions(1)),
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         agent_record_dir=tmp_path / "agent-record",
@@ -387,3 +401,22 @@ def test_version_and_rollback_http_api(tmp_path) -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("component", ["training", "inference"])
+def test_rollback_restore_failure_keeps_requests_closed_and_head_unchanged(tmp_path, monkeypatch, component):
+    value, training, _ = dispatcher(tmp_path)
+    created = value.get_or_create_scenario("math").releases()[0]["release_id"]
+    train(value, 1)
+    scenario = value.get_or_create_scenario("math")
+    head = scenario.current_artifact_ref()
+
+    def fail_restore(artifact):
+        raise RuntimeError("restore failed")
+
+    target = training if component == "training" else training.inference
+    monkeypatch.setattr(target, "restore_checkpoint", fail_restore)
+    with pytest.raises(RuntimeError, match="restore failed"):
+        value.rollback("math", created)
+    assert not training.inference.inference_admission_status["open"]
+    assert scenario.current_artifact_ref() == head

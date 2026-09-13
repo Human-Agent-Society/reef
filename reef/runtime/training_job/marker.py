@@ -1,4 +1,4 @@
-"""Durable training-job marker: the bridge's crash-recovery state machine.
+"""Durable training-job marker: Reef's crash-recovery state machine.
 
 One marker file (:data:`reef.runtime.names.LATEST_JOB_MARKER_FILENAME`) lives
 next to the HF checkpoints and records the latest training job's identity and
@@ -24,8 +24,8 @@ from typing import Any, Literal
 
 from reef.runtime.base import TrainingJobResult
 from reef.runtime.names import LATEST_JOB_MARKER_FILENAME
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import read_json
-from reef.train.slime_backend.reef_adapters.training_job.durable_io import write_json as write_marker
+from reef.runtime.training_job.durable_io import read_json
+from reef.runtime.training_job.durable_io import write_json as write_marker
 
 MarkerDisposition = Literal["replay", "resume", "conflict", "fresh"]
 MarkerStatus = Literal[
@@ -124,8 +124,9 @@ def transition_marker(
     current = marker.get("status")
     if current not in _MARKER_TRANSITIONS or status not in _MARKER_TRANSITIONS[current]:
         raise RuntimeError(f"invalid training marker transition {current!r} -> {status!r}")
-    marker.update(updates, status=status)
-    write_marker(path, marker)
+    updated = {**marker, **updates, "status": status}
+    write_marker(path, updated)
+    marker.update(updated)
     return marker
 
 
@@ -183,7 +184,7 @@ def marker_rollouts(marker: Mapping[str, Any] | None) -> set[int]:
 
 
 def _marker_metrics(marker: Mapping[str, Any]) -> dict[str, Any]:
-    """Merge durable method telemetry with Slime worker/loss metrics."""
+    """Merge durable method telemetry with backend training metrics."""
     durable = marker.get("metrics")
     worker = marker.get("train_metrics")
     return {

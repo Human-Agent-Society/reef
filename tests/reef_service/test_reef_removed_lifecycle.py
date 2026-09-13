@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
+from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 import reef
 from reef.train import processors
@@ -175,10 +176,9 @@ def test_naming_unification_renames_are_complete() -> None:
     assert not hasattr(routes, "register_agent_record_routes")
     assert hasattr(routes, "register_record_routes")
     # The Ray runtime speaks of one train group handle.
-    from reef.runtime.adapters.ray_runtime import RayRuntime
 
-    assert not hasattr(RayRuntime, "train_group")
-    assert hasattr(RayRuntime, "train_group_handle")
+    assert not hasattr(ExecutorRuntimeFixture, "train_group")
+    assert hasattr(ExecutorRuntimeFixture, "train_group_handle")
 
 
 @pytest.mark.unit

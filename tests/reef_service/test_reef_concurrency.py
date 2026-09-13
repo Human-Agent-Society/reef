@@ -11,6 +11,7 @@ import threading
 import time
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import (
     Artifact,
@@ -23,7 +24,7 @@ from reef.artifact import (
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
+from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import SelectionDecision
 from reef.train.types import TrainStepResult
@@ -31,7 +32,7 @@ from reef.train.types import TrainStepResult
 from ._policy_recipe import TestPolicyRecipe
 
 
-class CountingRuntime(TrainingRuntime):
+class CountingRuntime(StubTrainingRuntime):
     """Training runtime that counts durable jobs across threads."""
 
     def __init__(self) -> None:
@@ -43,7 +44,9 @@ class CountingRuntime(TrainingRuntime):
     def inference_backend(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
+    def prepare_training_step(
+        self, batch, step_preparer, algorithm_state, scenario_step, *, serving_runtime_load_id=None
+    ):
         del batch, step_preparer
         return PreparedTrainingStep(
             action="train",
@@ -150,7 +153,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -191,7 +194,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

@@ -59,7 +59,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         or settings.upstream_api != "openai"
     ):
         raise DeployConfigError(
-            "automatic weight training uses training-owned inference; remove upstream provider settings"
+            "automatic weight training requires managed inference; remove upstream provider settings"
         )
     if config.get("reef", {}).get("runtime"):
         raise DeployConfigError("weight training selects its runtime through training.backend; remove recipe.runtime")
