@@ -1,5 +1,5 @@
 diff --git a/src/saas_bench/agents/bash_agent/agent.py b/src/saas_bench/agents/bash_agent/agent.py
-index d36de40..e4601a6 100644
+index d36de40..62a4dc2 100644
 --- a/src/saas_bench/agents/bash_agent/agent.py
 +++ b/src/saas_bench/agents/bash_agent/agent.py
 @@ -82,6 +82,10 @@ class BashAgent(BaseAgent):
@@ -13,6 +13,17 @@ index d36de40..e4601a6 100644
  
          # Build system prompt
          self.system_prompt = system_prompt or self._default_system_prompt()
+@@ -503,7 +507,9 @@ class BashAgent(BaseAgent):
+                     'messages': messages,
+                     'tools': tools,
+                     'tool_choice': 'auto',
+-                    'max_completion_tokens': 16384,
++                    # SAAS_BENCH_MAX_COMPLETION_TOKENS caps the completion for endpoints
++                    # whose context window cannot hold the default 16384 plus the prompt.
++                    'max_completion_tokens': int(os.environ.get('SAAS_BENCH_MAX_COMPLETION_TOKENS', '16384')),
+                     'temperature': 1.0,
+                 }
+                 _is_together = 'api.together.xyz' in (str(getattr(self.client, 'base_url', '') or ''))
 diff --git a/src/saas_bench/customer_llm.py b/src/saas_bench/customer_llm.py
 index e5dff0a..9ccbf2b 100644
 --- a/src/saas_bench/customer_llm.py
@@ -95,19 +106,76 @@ index e5dff0a..9ccbf2b 100644
      # Parse structured response: "SCORE: <number>\nREASON: <text>"
      effect = 0.0
 diff --git a/src/saas_bench/server_entry.py b/src/saas_bench/server_entry.py
-index fa76401..8d854a6 100644
+index fa76401..d8b5f1d 100644
 --- a/src/saas_bench/server_entry.py
 +++ b/src/saas_bench/server_entry.py
-@@ -125,6 +125,12 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
+@@ -125,12 +125,24 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
  
  def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
      """Validate and serialize simulator-side LLM provider/model config."""
+-    valid_providers = {"bedrock", "anthropic", "openai"}
 +    # SAAS_BENCH_<FIELD> overrides the simulator roles' provider and model
 +    # without rebuilding the bundle, e.g. SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER.
 +    for attr in _SIMULATOR_LLM_CONFIG_FIELDS:
 +        override = os.environ.get(f"SAAS_BENCH_{attr.upper()}")
 +        if override:
 +            setattr(config, attr, override)
-     valid_providers = {"bedrock", "anthropic", "openai"}
++    # "none" runs the simulator without a customer LLM: social, macro, and
++    # competitor posts come from the built-in templates and agent posts are
++    # not judged. Both roles must agree; the engine has one customer simulator.
++    valid_providers = {"bedrock", "anthropic", "openai", "none"}
      for attr in ("social_post_llm_provider", "enterprise_llm_provider"):
          provider = getattr(config, attr)
+         if provider not in valid_providers:
+             print(f"Error: invalid simulator LLM provider for {attr}: {provider!r}", file=sys.stderr)
+             sys.exit(1)
++    if (config.social_post_llm_provider == "none") != (config.enterprise_llm_provider == "none"):
++        print("Error: simulator LLM provider 'none' must be set for both roles or neither", file=sys.stderr)
++        sys.exit(1)
+ 
+     if (
+         config.social_post_llm_provider == "anthropic"
+@@ -165,6 +177,17 @@ def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
+             setattr(config, attr, value)
+ 
+ 
++def _create_customer_simulator(config: BenchmarkConfig, conn):
++    """The customer simulator for the configured providers; None runs templates."""
++    if config.social_post_llm_provider == "none":
++        return None
++    return CustomerSimulator(
++        client=_create_simulator_openai_client(config),
++        conn=conn,
++        config=config,
++    )
++
++
+ def _create_simulator_openai_client(config: BenchmarkConfig):
+     if (
+         config.social_post_llm_provider != "openai"
+@@ -203,11 +226,7 @@ def cmd_new_session(args, base: Path):
+     conn = init_database(":memory:")
+ 
+     # Initialize simulator with customer simulator
+-    customer_sim = CustomerSimulator(
+-        client=_create_simulator_openai_client(config),
+-        conn=conn,
+-        config=config,
+-    )
++    customer_sim = _create_customer_simulator(config, conn)
+     simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
+     simulator.initialize()
+ 
+@@ -289,11 +308,7 @@ def cmd_start_server(args, base: Path):
+     _restore_simulator_llm_config(config, meta)
+     meta["simulator_llm"] = _apply_simulator_llm_config(config)
+ 
+-    customer_sim = CustomerSimulator(
+-        client=_create_simulator_openai_client(config),
+-        conn=conn,
+-        config=config,
+-    )
++    customer_sim = _create_customer_simulator(config, conn)
+     simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
+     simulator.initialize(resume=True)  # resume=True: skip DB writes, just set up _group_rngs
+     current_day = meta.get("current_day", 0)

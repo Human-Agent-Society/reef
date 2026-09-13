@@ -138,7 +138,7 @@ def test_harness_runs_one_episode_and_keeps_every_receipt_in_call_order(monkeypa
     assert env["SAAS_BENCH_ENTERPRISE_LLM_PROVIDER"] == "openai"
     assert sidecar.stopped
     assert environment.downloads == [(agent_module.RUNS_DIR, Path("/tmp/trial/agent/ceobench"))]
-    assert context.metadata["reef"] == {"agent_record_ids": ["r-1", "r-2"]}
+    assert context.metadata["reef"] == {"agent_record_ids": ["r-1", "r-2"], "agent_record_tokens": [13, 25]}
     assert context.metadata["ceobench"] == {"seed": 7, "days": 14, "turns": 3, "exit_code": 0}
     assert context.metadata["prior"] is True
     assert (context.n_input_tokens, context.n_output_tokens) == (30, 8)
@@ -156,7 +156,7 @@ def test_harness_fails_the_trial_when_the_runner_exits_nonzero(monkeypatch) -> N
 
     # The receipts and the run directory are kept even for a failed episode.
     assert sidecar.stopped
-    assert context.metadata["reef"] == {"agent_record_ids": ["r-1"]}
+    assert context.metadata["reef"] == {"agent_record_ids": ["r-1"], "agent_record_tokens": [0]}
     assert environment.downloads
 
 
@@ -198,6 +198,42 @@ def test_verifier_reward_is_reported_once_per_turn(monkeypatch) -> None:
         "bankrupt": 0,
     }
     assert "875000.0" in payloads[0]["feedback"] and "14 days" in payloads[0]["feedback"]
+
+
+@pytest.mark.unit
+def test_turns_longer_than_the_training_window_are_not_reported(monkeypatch) -> None:
+    _, report_module = _load_harness(monkeypatch, "ceobench")
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def report(self, scenario, payload, *, recipe=None):
+            self.calls.append(payload)
+            return {"accepted": True}
+
+    result = {
+        "id": "trial-8",
+        "task_name": "ceobench",
+        "agent_result": {
+            "metadata": {
+                "reef": {"agent_record_ids": ["r-1", "r-2", "r-3"], "agent_record_tokens": [9000, 50000, 48000]}
+            }
+        },
+        "verifier_result": {"rewards": {"reward": 1.01, "final_cash": 1010000.0, "survival_days": 14, "bankrupt": 0}},
+    }
+    client = Client()
+
+    posted = report_module.post_reports(result, client=client, scenario="ceobench-host-test", max_tokens=49152)
+
+    # The 50k-token turn was served and recorded but cannot be trained on.
+    assert len(posted) == 2
+    assert [payload["references"] for payload in client.calls] == [["r-1"], ["r-3"]]
+    assert [payload["metadata"]["ceobench"]["turn"] for payload in client.calls] == [0, 2]
+    # No limit reports every turn.
+    client.calls.clear()
+    report_module.post_reports(result, client=client, scenario="ceobench-host-test")
+    assert len(client.calls) == 3
 
 
 @pytest.mark.unit

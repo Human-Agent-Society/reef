@@ -1,21 +1,30 @@
 # SAO on CEO-Bench, for recipes/sao/examples/ceobench/run.sh.
 #
-# The policy is Qwen3-4B-Thinking-2507, the OpenClaw-RL example's model, so
-# the model-family flags below are that example's; the objective settings are
-# the SAO example's (the paper's reasoning-domain values). SAO trains one
-# rollout at a time: batch_size 1 means one train step the moment a report is
-# accepted. Here a rollout is one agent turn of the benchmark's bash agent, and
-# the episode's score reaches every turn of the episode at once when the
-# verifier finishes (harness/report.py), so max_staleness admits turns that
-# the steps before them have already aged.
+# The policy is Qwen3.6-27B trained through Megatron Bridge LoRA: the base
+# weights stay frozen in both the actor and the SAO critic, adapters and the
+# critic's value head train, and the rollout engine serves the adapter. The
+# architecture flags are Slime's reference set for the Qwen3.5 hybrid
+# (scripts/models/qwen3.5-27B.sh; sizes come from the HF config) and the
+# objective settings are the SAO example's, with the learning rates raised
+# for adapters. SAO trains one rollout at a time: batch_size 1 means one train
+# step the moment a report is accepted. Here a rollout is one agent turn of
+# the benchmark's bash agent, and the episode's score reaches every turn of
+# the episode at once when the verifier finishes (harness/report.py), so
+# max_staleness admits turns that the steps before them have already aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
-# until the agent calls next-week, and the agent asks for 16k-token
-# completions, so the rollout engine and the trainer both get a 128k window.
+# until the agent calls next-week, and the agent reads the benchmark's docs
+# early (40k tokens after four turns). The engine serves the model's window
+# (128k here); the trainer's is 48k because it materializes a sequence's
+# full-vocabulary logits (248k entries) in fp32 on every tensor-parallel
+# rank. The harness reports only turns that fit the trainer's window
+# (CEOBENCH_TRAIN_MAX_TOKENS in run.sh); longer turns are served and
+# recorded but do not train. See the README for what this ruled out.
 #
-# GPU budget: 4 actor GPUs (TP4, critic colocated) + 1 rollout GPU, the
-# devices docker-compose.yaml hands the container. Paths are the container's;
-# run.sh mounts the model directory and the run directory.
+# GPU budget: four actor GPUs (TP4, the critic colocated) and a two-GPU
+# rollout engine (TP2), the devices docker-compose.yaml hands the container.
+# Paths are the container's; run.sh mounts the model directory and the run
+# directory.
 
 schema-version: 2
 reef:
@@ -24,15 +33,14 @@ reef:
   port: 28900
   token: ${REEF_TOKEN}                 # run.sh mints one per run
 inference:
-  model-path: /root/models/Qwen3-4B-Thinking-2507
+  model-path: /root/models/Qwen3.6-27B
   timeout-s: 7200
   backend-factory: >-
     reef.train.slime_backend.reef_adapters.sglang.chat.SGLangChatTrainingInferenceBackend
   backend-config:
-    tool_call_parser: qwen25
-    # The bash agent pins temperature 1.0 and 16384 completion tokens on every
-    # request; these fill in what it leaves unset (Qwen3-4B-Thinking's
-    # generation_config).
+    tool_call_parser: qwen3_coder
+    # The bash agent pins temperature 1.0 and the completion budget on every
+    # request; these fill in what it leaves unset (the model's generation_config).
     sampling_defaults:
       top_p: 0.95
       top_k: 20
@@ -80,18 +88,42 @@ training:
     micro-batch-size: "1"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "4"
-    rollout-num-gpus: "1"
-    rollout-num-gpus-per-engine: "1"
-    num-gpus-per-node: "5"
+    rollout-num-gpus: "2"
+    rollout-num-gpus-per-engine: "2"
+    num-gpus-per-node: "6"
     tensor-model-parallel-size: "4"
     pipeline-model-parallel-size: "1"
-    seq-length: "131072"
+    seq-length: "49152"
     rollout-max-response-len: "16384"
     rollout-max-context-len: "131072"
     sglang-context-length: "131072"
-    sglang-reasoning-parser: "qwen3-thinking"
-    sglang-tool-call-parser: "qwen25"
-    rotary-base: "5000000"
+    sglang-reasoning-parser: "qwen3"
+    sglang-tool-call-parser: "qwen3_coder"
+    # LoRA serving: the adapter is published into the engine (tttd's settings).
+    sglang-mem-fraction-static: "0.5"
+    sglang-disable-prefill-cuda-graph: true
+    sglang-cuda-graph-max-bs-decode: "128"
+    # Qwen3.5/3.6 hybrid architecture, as in Slime's scripts/models/qwen3.5-27B.sh.
+    spec:
+      - slime_plugins.models.qwen3_5
+      - get_qwen3_5_spec
+    use-gated-attention: true
+    attention-output-gate: true
+    apply-layernorm-1p: true
+    rotary-percent: "0.25"
+    rotary-base: "10000000"
+    # Megatron Bridge LoRA on the attention and MLP projections; the
+    # critic trains the same adapters plus its value head.
+    megatron-lora-rank: "32"
+    megatron-lora-alpha: "32"
+    megatron-lora-dropout: "0"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+    check-lora-weight-equal: true
+    verify-lora-base-weights: true
     recompute-granularity: "full"
     recompute-method: "uniform"
     recompute-num-layers: "1"
@@ -99,14 +131,16 @@ training:
     ckpt-fully-parallel-save: true
     sequence-parallel: true
     use-dynamic-batch-size: true
-    max-tokens-per-gpu: "131072"
+    max-tokens-per-gpu: "49152"
     attention-dropout: "0.0"
     hidden-dropout: "0.0"
     attention-softmax-in-fp32: true
     accumulate-allreduce-grads-in-fp32: true
     attention-backend: "flash"
     optimizer: "adam"
-    lr: "1e-6"
+    # Adapter learning rates: ten times the paper's full-parameter values,
+    # keeping its 5:1 critic-to-policy ratio.
+    lr: "1e-5"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
     use-rollout-logprobs: true
@@ -114,7 +148,7 @@ training:
     eps-clip: "0.3"
     eps-clip-high: "5.0"
     critic-steps-per-actor: "2"
-    critic-lr: "5e-6"
+    critic-lr: "5e-5"
     num-critic-only-steps: "10"
     sao-length-adaptive-lambda: true
     sao-lambda-alpha: "1.5"
@@ -123,7 +157,7 @@ training:
     entropy-coef: "0.0"
     n-samples-per-prompt: "1"
     rollout-temperature: "1.0"
-    padded-vocab-size: "151936"
+    padded-vocab-size: "248320"
     position-embedding-type: "rope"
     swiglu: true
     disable-bias-linear: true

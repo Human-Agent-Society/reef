@@ -17,8 +17,14 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              # Four actor GPUs (critic colocated) and one rollout GPU.
-              device_ids: ["${REEF_GPU_0:-0}", "${REEF_GPU_1:-1}", "${REEF_GPU_2:-2}", "${REEF_GPU_3:-3}", "${REEF_GPU_4:-4}"]
+              # Four actor GPUs (critic colocated) and a two-GPU rollout engine.
+              device_ids:
+                - "${REEF_GPU_0:-0}"
+                - "${REEF_GPU_1:-1}"
+                - "${REEF_GPU_2:-2}"
+                - "${REEF_GPU_3:-3}"
+                - "${REEF_GPU_4:-4}"
+                - "${REEF_GPU_5:-5}"
               capabilities: [gpu]
     volumes:
       - ${MODEL_DIR}:/root/models

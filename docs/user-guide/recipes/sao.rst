@@ -110,7 +110,7 @@ the reward-shaping choice and its smoke run.
 .. code:: bash
 
    cd recipes/sao/examples/ceobench
-   hf download Qwen/Qwen3-4B-Thinking-2507 --local-dir ~/models/Qwen3-4B-Thinking-2507
+   hf download Qwen/Qwen3.6-27B --local-dir ~/models/Qwen3.6-27B
    export ANTHROPIC_API_KEY=...        # the simulator roles' provider
    CEOBENCH_DAYS=500 CEOBENCH_SEEDS=42,43,44 ./run.sh
 

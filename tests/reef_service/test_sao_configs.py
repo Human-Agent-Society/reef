@@ -135,7 +135,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--hidden-dropout",
         "--lr-decay-style",
         "--normalization",
+        "--no-save-optim",
         "--optimizer",
+        "--optimizer-cpu-offload",
+        "--overlap-cpu-optimizer-d2h-h2d",
+        "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
         "--pipeline-model-parallel-size",
@@ -147,6 +151,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--rotary-base",
         "--seq-length",
         "--sequence-parallel",
+        "--spec",
+        "--use-gated-attention",
+        "--rotary-percent",
+        "--attention-output-gate",
+        "--apply-layernorm-1p",
         "--swiglu",
         "--tensor-model-parallel-size",
         "--weight-decay",
@@ -290,6 +299,11 @@ def _parse_config(config_path: Path):
     while index < len(leftover):
         token = leftover[index]
         flag = token.split("=", 1)[0]
+        if flag == "--spec":
+            # ``--spec <module> <function>`` names a layer spec (Slime's Qwen3.5
+            # plugin); Megatron consumes exactly two values.
+            index += 3
+            continue
         assert flag.startswith("--") and flag in _MEGATRON_ONLY_FLAGS, (
             f"{config_path.name} passes {token!r}, which neither the Slime parser nor the "
             "Megatron-only allowlist recognizes — a typo or a removed flag"

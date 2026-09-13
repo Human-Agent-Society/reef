@@ -1,0 +1,79 @@
+{
+  "lab_rows": [
+    {
+      "key": "harbor:085b09315c35cb9f",
+      "kind": "episode",
+      "task": "/home/ubuntu/reef/recipes/sao/examples/ceobench/harbor",
+      "tags": {
+        "days": 14,
+        "position": 0,
+        "seed": 42,
+        "used_n_input_tokens": 501917.0,
+        "used_n_output_tokens": 40700.0,
+        "used_n_submissions": 0.0,
+        "used_n_total_tokens": 542617.0
+      },
+      "rewards": {
+        "bankrupt": 0,
+        "final_cash": 793046.7961,
+        "reward": 0.7930467961000001,
+        "survival_days": 14
+      },
+      "uri": "file:///home/ubuntu/reef/recipes/sao/examples/ceobench/work/lab/trials/harbor__WcjxCRH",
+      "created_at": 1789262263.3722944
+    }
+  ],
+  "trials": [
+    {
+      "id": "ed4bca0b-bb95-4e73-a4c1-19b6c81a51b2",
+      "task_name": "harbor",
+      "verifier": {
+        "reward": 0.7930467961000001,
+        "final_cash": 793046.7961,
+        "survival_days": 14,
+        "bankrupt": 0
+      },
+      "agent_metadata": {
+        "ceobench": {
+          "seed": 42,
+          "days": 14,
+          "turns": 35,
+          "exit_code": 0
+        }
+      },
+      "receipts": 35,
+      "n_input_tokens": 501917,
+      "n_output_tokens": 40700,
+      "started_at": "2026-09-13T01:06:57.848045Z",
+      "finished_at": "2026-09-13T01:17:43.369067Z",
+      "exception": null
+    }
+  ],
+  "runs": [
+    {
+      "run_id": "f9819fc2",
+      "model": "reef",
+      "provider": "openai",
+      "reasoning_effort": "none",
+      "seed": 42,
+      "total_days": 14,
+      "initial_cash": 1000000.0,
+      "session_id": "b776742638d1"
+    }
+  ],
+  "releases": {
+    "total": 2,
+    "training": 1
+  },
+  "policy": {
+    "model": "Qwen/Qwen3.6-27B",
+    "training": "Megatron Bridge LoRA rank 32 (actor and critic), TP4; rollout TP2",
+    "serving_window": 131072,
+    "training_window": 49152
+  },
+  "simulator_roles": {
+    "provider": "openai",
+    "model": "Qwen3-4B-Instruct-2507 on SGLang (local stand-in for Haiku 4.5 / Sonnet 4.5)"
+  },
+  "note": "Plumbing smoke: 14 simulated days, one seed; the simulator roles are local stand-ins, so the score is not comparable with the paper. releases counted at manifest time; training continued afterwards."
+}

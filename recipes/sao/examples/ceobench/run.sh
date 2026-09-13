@@ -15,14 +15,17 @@ RUN_DIR="${RUN_DIR:-$PWD/work}"
 HOST_IP="$(hostname -I | awk '{print $1}')"
 export REEF_SERVICE_URL="${REEF_SERVICE_URL:-http://${HOST_IP}:28900}"
 export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
+# The trainer's window (serve.yaml's seq-length): turns longer than this are
+# served and recorded but not reported for training.
+export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-49152}"
 
 # Prerequisites
 command -v uv >/dev/null || { echo "run.sh: uv not found (pip install uv)" >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "run.sh: Docker is not running" >&2; exit 1; }
 docker image inspect "$REEF_IMAGE" >/dev/null 2>&1 \
     || { echo "run.sh: image $REEF_IMAGE not found (build docker/Dockerfile.reef)" >&2; exit 1; }
-[ -d "$MODEL_DIR/Qwen3-4B-Thinking-2507" ] \
-    || { echo "run.sh: $MODEL_DIR/Qwen3-4B-Thinking-2507 not found (hf download Qwen/Qwen3-4B-Thinking-2507)" >&2; exit 1; }
+[ -d "$MODEL_DIR/Qwen3.6-27B" ] \
+    || { echo "run.sh: $MODEL_DIR/Qwen3.6-27B not found (hf download Qwen/Qwen3.6-27B)" >&2; exit 1; }
 mkdir -p "$RUN_DIR"
 [ -f "$RUN_DIR/token" ] || openssl rand -hex 16 > "$RUN_DIR/token"
 export REEF_TOKEN="$(cat "$RUN_DIR/token")"

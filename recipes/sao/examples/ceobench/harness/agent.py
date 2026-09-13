@@ -21,6 +21,11 @@ Connection settings come from the environment set by ``run.sh``:
 Variables named ``SAAS_BENCH_*``, ``OPENAI_*``, ``ANTHROPIC_*``, and ``AWS_*``
 are forwarded into the container for the simulator roles, so their credentials
 and any provider override stay outside the repository.
+
+``CEOBENCH_TRAIN_MAX_TOKENS`` (0 or unset: no limit) is the trainer's window:
+the engine serves the model's full context, but a turn whose prompt and
+completion together exceed this many tokens is recorded and never reported,
+because the trainer could not hold it.
 """
 
 import atexit
@@ -79,6 +84,12 @@ def runner_command(base_url: str, model: str, seed: int, days: int) -> str:
     return f"mkdir -p {RUNS_DIR} && cd {CEOBENCH_DIR} && {shlex.join(args)} > {RUNS_DIR}/runner.log 2>&1"
 
 
+def turn_tokens(turn: dict) -> int:
+    """Prompt plus completion tokens of one captured turn (0 when unreported)."""
+    usage = (turn.get("response") or {}).get("usage") or {}
+    return int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0)
+
+
 def forwarded_environment(environ: dict[str, str]) -> dict[str, str]:
     forwarded = {key: value for key, value in environ.items() if key.startswith(FORWARDED_ENV_PREFIXES)}
     # Reef serves /v1/chat/completions, not the Responses API the runner
@@ -133,11 +144,13 @@ class HarborAgent(BaseAgent):
             server.shutdown()
 
         turns = self._capture.snapshot()
-        receipts = [turn["receipt"] for turn in turns if turn["status"] == 200 and turn["receipt"]]
+        served = [turn for turn in turns if turn["status"] == 200 and turn["receipt"]]
+        receipts = [turn["receipt"] for turn in served]
+        tokens = [turn_tokens(turn) for turn in served]
         await environment.download_dir(RUNS_DIR, self.logs_dir / "ceobench")
         context.metadata = {
             **(context.metadata or {}),
-            "reef": {"agent_record_ids": receipts},
+            "reef": {"agent_record_ids": receipts, "agent_record_tokens": tokens},
             "ceobench": {"seed": self._seed, "days": self._days, "turns": len(turns), "exit_code": result.return_code},
         }
         usage = [((turn.get("response") or {}).get("usage") or {}) for turn in turns]
@@ -169,9 +182,13 @@ class HarborAgent(BaseAgent):
         if result.get("verifier_result") is None:
             self.logger.warning("trial %s ended without a verifier result; nothing reported", result.get("id"))
             return
-        posted = post_reports(result, client=self._client, scenario=self._scenario)
+        max_tokens = int(os.environ.get("CEOBENCH_TRAIN_MAX_TOKENS", "0") or 0)
+        posted = post_reports(result, client=self._client, scenario=self._scenario, max_tokens=max_tokens)
+        receipts = result["agent_result"]["metadata"]["reef"]["agent_record_ids"]
         self.logger.info(
-            "reported score %s to reef against %d receipts",
+            "reported score %s to reef against %d of %d receipts (turns over %d tokens skipped)",
             result["verifier_result"]["rewards"]["reward"],
             len(posted),
+            len(receipts),
+            max_tokens,
         )
