@@ -1,0 +1,1821 @@
+{
+ "run": "third_autocorr-base4",
+ "task": "third_autocorr",
+ "arm": "base4",
+ "agents": 4,
+ "training": false,
+ "coral_run_id": "coral-ttt-20260913-103126)",
+ "collected_at": "2026-09-13T21:48:49.489769+00:00",
+ "attempts": [
+  {
+   "time": "2026-09-13 10:37:31,770",
+   "eval_index": 1,
+   "commit": "aad271de5f37",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:38:13,396",
+   "eval_index": 2,
+   "commit": "4d6bb5bbfcde",
+   "score": 0.527709,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:39:43,249",
+   "eval_index": 3,
+   "commit": "55f1bf5e9f39",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:40:57,941",
+   "eval_index": 4,
+   "commit": "40ac653f18c8",
+   "score": 0.527709,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:42:15,258",
+   "eval_index": 5,
+   "commit": "534aa2cf6cc5",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:43:05,101",
+   "eval_index": 6,
+   "commit": "b190b5f77bdd",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:43:21,889",
+   "eval_index": 7,
+   "commit": "205d0b0e6f45",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 10:44:21,309",
+   "eval_index": 8,
+   "commit": "373087fb331e",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 10:45:16,630",
+   "eval_index": 9,
+   "commit": "a5af08d373bf",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:46:41,014",
+   "eval_index": 10,
+   "commit": "160572c43621",
+   "score": 0.727318,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 10:57:14,995",
+   "eval_index": 11,
+   "commit": "8e83abf75e4d",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:08:02,945",
+   "eval_index": 12,
+   "commit": "cfb106bb63c7",
+   "score": null,
+   "status": "timeout"
+  },
+  {
+   "time": "2026-09-13 11:08:16,352",
+   "eval_index": 13,
+   "commit": "aff0ecd13f8b",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 11:13:03,545",
+   "eval_index": 14,
+   "commit": "21fdbce41728",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:15:12,904",
+   "eval_index": 15,
+   "commit": "25b24d77f6d1",
+   "score": 0.729403,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 11:15:29,687",
+   "eval_index": 16,
+   "commit": "3124a52b23d8",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 11:16:50,322",
+   "eval_index": 17,
+   "commit": "2e0d9df1dbc5",
+   "score": 0.024813,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:19:42,841",
+   "eval_index": 18,
+   "commit": "88b6abba2478",
+   "score": 0.727821,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 11:20:08,541",
+   "eval_index": 19,
+   "commit": "acf513c5bf1e",
+   "score": 0.002093,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:21:08,137",
+   "eval_index": 20,
+   "commit": "ad79ac6d540c",
+   "score": 0.138082,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:22:13,709",
+   "eval_index": 21,
+   "commit": "6cbc1f04a521",
+   "score": 0.002093,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:23:17,666",
+   "eval_index": 22,
+   "commit": "cdacf99e9f77",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 11:24:34,818",
+   "eval_index": 23,
+   "commit": "bcbb8b4ce031",
+   "score": 0.002093,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:25:08,737",
+   "eval_index": 24,
+   "commit": "aa28f8f04012",
+   "score": 0.002093,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:26:18,483",
+   "eval_index": 25,
+   "commit": "a398301370ed",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:27:16,987",
+   "eval_index": 26,
+   "commit": "9a875d17fb5a",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:27:34,691",
+   "eval_index": 27,
+   "commit": "71766c49615c",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:29:49,977",
+   "eval_index": 28,
+   "commit": "683ee32842b8",
+   "score": 0.644763,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:32:07,703",
+   "eval_index": 29,
+   "commit": "329d7c06f3c1",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:33:50,022",
+   "eval_index": 30,
+   "commit": "98e10532ad02",
+   "score": 0.002093,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:34:53,849",
+   "eval_index": 31,
+   "commit": "b7679b1ec9f6",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:36:47,523",
+   "eval_index": 32,
+   "commit": "862759e96291",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:37:47,772",
+   "eval_index": 33,
+   "commit": "b4fedd9b481b",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:40:14,403",
+   "eval_index": 34,
+   "commit": "e5aa82cc45e0",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:41:26,382",
+   "eval_index": 35,
+   "commit": "49b9f256862f",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:43:50,453",
+   "eval_index": 36,
+   "commit": "718a860048e0",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:46:53,966",
+   "eval_index": 37,
+   "commit": "1e032dea45aa",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 11:47:43,136",
+   "eval_index": 38,
+   "commit": "474f2302de19",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 11:48:33,918",
+   "eval_index": 39,
+   "commit": "dbb4905d069e",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 11:49:12,948",
+   "eval_index": 40,
+   "commit": "8c68a89cf445",
+   "score": 0.257361,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 11:49:49,838",
+   "eval_index": 41,
+   "commit": "569b42efa5e3",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 12:00:26,159",
+   "eval_index": 42,
+   "commit": "518fdd74bfc9",
+   "score": null,
+   "status": "timeout"
+  },
+  {
+   "time": "2026-09-13 12:00:48,512",
+   "eval_index": 43,
+   "commit": "7e463875a709",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 12:01:07,613",
+   "eval_index": 44,
+   "commit": "86c3ca499723",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:01:22,723",
+   "eval_index": 45,
+   "commit": "59436bfefef5",
+   "score": 0.462202,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:03:42,061",
+   "eval_index": 46,
+   "commit": "7a0b2354864c",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:05:14,218",
+   "eval_index": 47,
+   "commit": "fb4fc2e2ba20",
+   "score": 0.727821,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 12:06:43,375",
+   "eval_index": 48,
+   "commit": "c1335ccb10d8",
+   "score": 1e-06,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:08:59,381",
+   "eval_index": 49,
+   "commit": "6a4067f634ea",
+   "score": 0.729403,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 12:09:59,752",
+   "eval_index": 50,
+   "commit": "bf4778febda1",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:10:31,583",
+   "eval_index": 51,
+   "commit": "3a6bf20e68f7",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:10:43,554",
+   "eval_index": 52,
+   "commit": "f58fe100dc82",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:10:57,690",
+   "eval_index": 53,
+   "commit": "0b44acb3a7b0",
+   "score": 0.32492,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:11:57,224",
+   "eval_index": 54,
+   "commit": "87b61fd24342",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:16:11,918",
+   "eval_index": 55,
+   "commit": "c26d5a70cf8c",
+   "score": 0.728694,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 12:16:23,560",
+   "eval_index": 56,
+   "commit": "a333bde36cb6",
+   "score": 0.115099,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:16:43,532",
+   "eval_index": 57,
+   "commit": "6affc0bfd3ac",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:19:05,913",
+   "eval_index": 58,
+   "commit": "6034458528b9",
+   "score": 0.729403,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 12:19:18,005",
+   "eval_index": 59,
+   "commit": "149be02b80d0",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:19:46,449",
+   "eval_index": 60,
+   "commit": "3471166c73a6",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:20:02,621",
+   "eval_index": 61,
+   "commit": "1e54b031153c",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:20:13,957",
+   "eval_index": 62,
+   "commit": "5f7764b87225",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:22:34,604",
+   "eval_index": 63,
+   "commit": "06e98c95e43d",
+   "score": 0.729403,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 12:22:45,633",
+   "eval_index": 64,
+   "commit": "b8dffa8f5e6c",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:26:28,370",
+   "eval_index": 65,
+   "commit": "c1bc032d1e63",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:28:28,547",
+   "eval_index": 66,
+   "commit": "193b900b487f",
+   "score": 0.115139,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:29:54,171",
+   "eval_index": 67,
+   "commit": "5ef3d43b6ed1",
+   "score": 0.030326,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:38:26,502",
+   "eval_index": 68,
+   "commit": "561e2ce23fab",
+   "score": 0.030326,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:43:40,700",
+   "eval_index": 69,
+   "commit": "f395d475f7af",
+   "score": 0.090978,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:45:40,471",
+   "eval_index": 70,
+   "commit": "eae780e85905",
+   "score": 0.727318,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:51:20,080",
+   "eval_index": 71,
+   "commit": "45d9406d912e",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:52:17,895",
+   "eval_index": 72,
+   "commit": "226af8e9b679",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 12:53:14,006",
+   "eval_index": 73,
+   "commit": "dc45db245dd8",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 12:55:57,070",
+   "eval_index": 74,
+   "commit": "669daccd6af3",
+   "score": 0.90701,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:04:37,225",
+   "eval_index": 75,
+   "commit": "948daf5f9765",
+   "score": 0.921657,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:06:49,289",
+   "eval_index": 76,
+   "commit": "1decd2eef720",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:09:20,357",
+   "eval_index": 77,
+   "commit": "2481bf117dd6",
+   "score": 0.90701,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:09:30,924",
+   "eval_index": 78,
+   "commit": "96dd71ebc9dc",
+   "score": 0.803643,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:17:31,178",
+   "eval_index": 79,
+   "commit": "e1b05248c235",
+   "score": 0.770722,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:17:42,104",
+   "eval_index": 80,
+   "commit": "c7c632e626a7",
+   "score": 0.375403,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:19:45,413",
+   "eval_index": 81,
+   "commit": "b59fa88f60c0",
+   "score": 0.90701,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 13:22:42,539",
+   "eval_index": 82,
+   "commit": "2bdfba28e4ed",
+   "score": 0.878485,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:23:16,796",
+   "eval_index": 83,
+   "commit": "18c0343eacdd",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 13:24:48,792",
+   "eval_index": 84,
+   "commit": "92fe8a5406c6",
+   "score": 0.12939,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:28:02,872",
+   "eval_index": 85,
+   "commit": "d35e90e89c9b",
+   "score": 0.932187,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:32:01,155",
+   "eval_index": 86,
+   "commit": "78cca5c692eb",
+   "score": 0.932518,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:32:12,031",
+   "eval_index": 87,
+   "commit": "17bcca12f7d2",
+   "score": 0.030326,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:36:57,179",
+   "eval_index": 88,
+   "commit": "c902bf40cafa",
+   "score": 0.899606,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:39:06,309",
+   "eval_index": 89,
+   "commit": "bb5d87a4fd1b",
+   "score": 0.90701,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 13:39:17,718",
+   "eval_index": 90,
+   "commit": "df814a51538d",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 13:43:21,523",
+   "eval_index": 91,
+   "commit": "7bc2a0c5cbf9",
+   "score": 0.899606,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:45:42,938",
+   "eval_index": 92,
+   "commit": "c5cbcd5ba7c6",
+   "score": 0.915529,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:45:57,858",
+   "eval_index": 93,
+   "commit": "ec9be8f3d0e8",
+   "score": 0.806351,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:48:29,859",
+   "eval_index": 94,
+   "commit": "244635c14939",
+   "score": 0.903271,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:48:52,727",
+   "eval_index": 95,
+   "commit": "28188c7e0d65",
+   "score": 0.727821,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:55:19,606",
+   "eval_index": 96,
+   "commit": "5749f6ef86bc",
+   "score": 0.912114,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:56:50,920",
+   "eval_index": 97,
+   "commit": "c64823e6a8fe",
+   "score": 0.901306,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 13:57:13,204",
+   "eval_index": 98,
+   "commit": "7d5cf7549fe7",
+   "score": 0.751309,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:01:14,425",
+   "eval_index": 99,
+   "commit": "1bf8e4dfb85b",
+   "score": 0.932518,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 14:01:32,664",
+   "eval_index": 100,
+   "commit": "ee1de20ac4c9",
+   "score": 0.838531,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:02:45,537",
+   "eval_index": 101,
+   "commit": "ecea30cb9779",
+   "score": 0.843998,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:05:33,066",
+   "eval_index": 102,
+   "commit": "293f7e442ab7",
+   "score": 0.794958,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:06:08,310",
+   "eval_index": 103,
+   "commit": "00821d5d4960",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:06:37,031",
+   "eval_index": 104,
+   "commit": "7fdf24f4c238",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 14:07:29,564",
+   "eval_index": 105,
+   "commit": "1dbf6e3995b1",
+   "score": 0.161738,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:08:46,198",
+   "eval_index": 106,
+   "commit": "40588269b6ea",
+   "score": 0.852145,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:09:52,081",
+   "eval_index": 107,
+   "commit": "efd84a244ee6",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:13:44,902",
+   "eval_index": 108,
+   "commit": "2b4ac255eeec",
+   "score": 0.932518,
+   "status": "improved"
+  },
+  {
+   "time": "2026-09-13 14:13:54,849",
+   "eval_index": 109,
+   "commit": "841ff9528c9f",
+   "score": 6e-06,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:20:23,712",
+   "eval_index": 110,
+   "commit": "52280a416921",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:23:03,005",
+   "eval_index": 111,
+   "commit": "6ab71273e3b7",
+   "score": 0.877833,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:24:23,793",
+   "eval_index": 112,
+   "commit": "43dc9fae43c4",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:24:34,045",
+   "eval_index": 113,
+   "commit": "03db92b0f9ba",
+   "score": null,
+   "status": "crashed"
+  },
+  {
+   "time": "2026-09-13 14:26:04,089",
+   "eval_index": 114,
+   "commit": "9f982b560594",
+   "score": 0.852145,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:26:48,977",
+   "eval_index": 115,
+   "commit": "a770c0897088",
+   "score": 1.1e-05,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:28:29,021",
+   "eval_index": 116,
+   "commit": "933150b73ce8",
+   "score": 0.852145,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:30:11,373",
+   "eval_index": 117,
+   "commit": "8adcba7e5b66",
+   "score": 0.852145,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:36:41,629",
+   "eval_index": 118,
+   "commit": "ca330fd9c9d3",
+   "score": 0.932518,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 14:42:39,642",
+   "eval_index": 119,
+   "commit": "dc7fdd2a69f8",
+   "score": 0.90928,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:44:11,380",
+   "eval_index": 120,
+   "commit": "64705906139b",
+   "score": 0.487196,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:48:13,220",
+   "eval_index": 121,
+   "commit": "84de7011571e",
+   "score": 0.9178,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 14:58:08,921",
+   "eval_index": 122,
+   "commit": "feaca97608b1",
+   "score": 0.932518,
+   "status": "baseline"
+  },
+  {
+   "time": "2026-09-13 14:59:44,266",
+   "eval_index": 123,
+   "commit": "ffffc2968f32",
+   "score": 0.489834,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 15:00:32,463",
+   "eval_index": 124,
+   "commit": "779806b4b6ff",
+   "score": 0.727825,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 15:01:43,523",
+   "eval_index": 125,
+   "commit": "191ccd0da031",
+   "score": 0.224786,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 15:03:34,750",
+   "eval_index": 126,
+   "commit": "bff69d043871",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 15:15:27,915",
+   "eval_index": 127,
+   "commit": "9d34b7bd1fd2",
+   "score": null,
+   "status": "timeout"
+  },
+  {
+   "time": "2026-09-13 15:15:56,131",
+   "eval_index": 128,
+   "commit": "a9f61044481b",
+   "score": 0.836904,
+   "status": "regressed"
+  },
+  {
+   "time": "2026-09-13 15:21:18,852",
+   "eval_index": 129,
+   "commit": "49dbe0944fdc",
+   "score": 0.932518,
+   "status": "baseline"
+  }
+ ],
+ "reports": [
+  {
+   "time": "2026-09-13 10:42:03,903",
+   "commit": "aad271de5f37",
+   "agent": "captain-nemo",
+   "score": 0.7278213976872704,
+   "refs": 14
+  },
+  {
+   "time": "2026-09-13 10:42:09,503",
+   "commit": "4d6bb5bbfcde",
+   "agent": "jack-sparrow",
+   "score": 0.5277093989551468,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 10:42:09,866",
+   "commit": "55f1bf5e9f39",
+   "agent": "captain-nemo",
+   "score": 0.7278213976878716,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 10:42:10,212",
+   "commit": "40ac653f18c8",
+   "agent": "davy-jones",
+   "score": 0.5277093989551468,
+   "refs": 12
+  },
+  {
+   "time": "2026-09-13 10:42:20,495",
+   "commit": "534aa2cf6cc5",
+   "agent": "davy-jones",
+   "score": 0.7278213976872703,
+   "refs": 8
+  },
+  {
+   "time": "2026-09-13 10:43:06,037",
+   "commit": "b190b5f77bdd",
+   "agent": "davy-jones",
+   "score": 0.7278213976872704,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 10:43:26,166",
+   "commit": "205d0b0e6f45",
+   "agent": "captain-nemo",
+   "score": 0.7278213976878716,
+   "refs": 11
+  },
+  {
+   "time": "2026-09-13 10:44:26,472",
+   "commit": "373087fb331e",
+   "agent": "davy-jones",
+   "score": 0.7278213976872703,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 10:45:21,777",
+   "commit": "a5af08d373bf",
+   "agent": "captain-ahab",
+   "score": 0.7278213976878716,
+   "refs": 29
+  },
+  {
+   "time": "2026-09-13 10:46:42,363",
+   "commit": "160572c43621",
+   "agent": "jack-sparrow",
+   "score": 0.727317979751949,
+   "refs": 26
+  },
+  {
+   "time": "2026-09-13 10:57:21,301",
+   "commit": "8e83abf75e4d",
+   "agent": "captain-nemo",
+   "score": 0.7278213976869189,
+   "refs": 70
+  },
+  {
+   "time": "2026-09-13 11:08:19,547",
+   "commit": "aff0ecd13f8b",
+   "agent": "captain-nemo",
+   "score": null,
+   "refs": 12
+  },
+  {
+   "time": "2026-09-13 11:13:07,050",
+   "commit": "21fdbce41728",
+   "agent": "captain-ahab",
+   "score": 0.7278213976872703,
+   "refs": 87
+  },
+  {
+   "time": "2026-09-13 11:15:17,994",
+   "commit": "25b24d77f6d1",
+   "agent": "jack-sparrow",
+   "score": 0.7294032541208344,
+   "refs": 43
+  },
+  {
+   "time": "2026-09-13 11:15:33,392",
+   "commit": "3124a52b23d8",
+   "agent": "captain-nemo",
+   "score": null,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:16:54,202",
+   "commit": "2e0d9df1dbc5",
+   "agent": "davy-jones",
+   "score": 0.02481268591078771,
+   "refs": 117
+  },
+  {
+   "time": "2026-09-13 11:19:45,917",
+   "commit": "88b6abba2478",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 6
+  },
+  {
+   "time": "2026-09-13 11:20:11,504",
+   "commit": "acf513c5bf1e",
+   "agent": "captain-ahab",
+   "score": 0.0020926978527534656,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 11:21:12,243",
+   "commit": "ad79ac6d540c",
+   "agent": "jack-sparrow",
+   "score": 0.13808151781663364,
+   "refs": 88
+  },
+  {
+   "time": "2026-09-13 11:22:18,106",
+   "commit": "6cbc1f04a521",
+   "agent": "captain-ahab",
+   "score": 0.0020926978527534656,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:23:18,636",
+   "commit": "cdacf99e9f77",
+   "agent": "davy-jones",
+   "score": null,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 11:24:39,498",
+   "commit": "bcbb8b4ce031",
+   "agent": "captain-ahab",
+   "score": 0.0020926978527534656,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:25:09,984",
+   "commit": "aa28f8f04012",
+   "agent": "jack-sparrow",
+   "score": 0.002092697852753466,
+   "refs": 17
+  },
+  {
+   "time": "2026-09-13 11:26:20,472",
+   "commit": "a398301370ed",
+   "agent": "captain-nemo",
+   "score": 0.7278213976878716,
+   "refs": 72
+  },
+  {
+   "time": "2026-09-13 11:27:21,507",
+   "commit": "9a875d17fb5a",
+   "agent": "captain-ahab",
+   "score": 0.7278213976878716,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 11:27:37,365",
+   "commit": "71766c49615c",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872704,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:29:54,028",
+   "commit": "683ee32842b8",
+   "agent": "captain-ahab",
+   "score": 0.6447630616768985,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 11:32:10,243",
+   "commit": "329d7c06f3c1",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872704,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 11:33:51,426",
+   "commit": "98e10532ad02",
+   "agent": "captain-ahab",
+   "score": 0.0020926978527534656,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 11:34:57,471",
+   "commit": "b7679b1ec9f6",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872704,
+   "refs": 8
+  },
+  {
+   "time": "2026-09-13 11:36:48,709",
+   "commit": "862759e96291",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 44
+  },
+  {
+   "time": "2026-09-13 11:40:19,398",
+   "commit": "e5aa82cc45e0",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 22
+  },
+  {
+   "time": "2026-09-13 11:41:29,829",
+   "commit": "49b9f256862f",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:46:56,064",
+   "commit": "1e032dea45aa",
+   "agent": "davy-jones",
+   "score": null,
+   "refs": 26
+  },
+  {
+   "time": "2026-09-13 11:47:46,385",
+   "commit": "474f2302de19",
+   "agent": "davy-jones",
+   "score": null,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 11:48:36,600",
+   "commit": "dbb4905d069e",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 11:49:16,808",
+   "commit": "8c68a89cf445",
+   "agent": "davy-jones",
+   "score": 0.25736067658828204,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 11:49:52,014",
+   "commit": "569b42efa5e3",
+   "agent": "davy-jones",
+   "score": 0.7278213976878716,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 12:00:54,443",
+   "commit": "7e463875a709",
+   "agent": "captain-ahab",
+   "score": 0.7278213976878716,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 12:01:09,576",
+   "commit": "86c3ca499723",
+   "agent": "captain-nemo",
+   "score": null,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 12:01:24,807",
+   "commit": "59436bfefef5",
+   "agent": "jack-sparrow",
+   "score": 0.46220208995446516,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 12:03:45,520",
+   "commit": "7a0b2354864c",
+   "agent": "davy-jones",
+   "score": null,
+   "refs": 24
+  },
+  {
+   "time": "2026-09-13 12:05:16,296",
+   "commit": "fb4fc2e2ba20",
+   "agent": "captain-nemo",
+   "score": 0.7278213976878716,
+   "refs": 1
+  },
+  {
+   "time": "2026-09-13 12:06:47,519",
+   "commit": "c1335ccb10d8",
+   "agent": "davy-jones",
+   "score": 1.1343849714577158e-06,
+   "refs": 11
+  },
+  {
+   "time": "2026-09-13 12:09:03,528",
+   "commit": "6a4067f634ea",
+   "agent": "captain-ahab",
+   "score": 0.7294032541208344,
+   "refs": 24
+  },
+  {
+   "time": "2026-09-13 12:10:04,376",
+   "commit": "bf4778febda1",
+   "agent": "davy-jones",
+   "score": 0.7278213976872703,
+   "refs": 26
+  },
+  {
+   "time": "2026-09-13 12:10:34,709",
+   "commit": "3a6bf20e68f7",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872704,
+   "refs": 34
+  },
+  {
+   "time": "2026-09-13 12:10:44,930",
+   "commit": "f58fe100dc82",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 12:11:00,275",
+   "commit": "0b44acb3a7b0",
+   "agent": "davy-jones",
+   "score": 0.3249202668246742,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 12:12:00,989",
+   "commit": "87b61fd24342",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 12:16:17,887",
+   "commit": "c26d5a70cf8c",
+   "agent": "davy-jones",
+   "score": 0.7286937646648155,
+   "refs": 12
+  },
+  {
+   "time": "2026-09-13 12:16:28,217",
+   "commit": "a333bde36cb6",
+   "agent": "captain-ahab",
+   "score": 0.11509913038347111,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 12:16:48,608",
+   "commit": "6affc0bfd3ac",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872703,
+   "refs": 55
+  },
+  {
+   "time": "2026-09-13 12:19:09,321",
+   "commit": "6034458528b9",
+   "agent": "captain-nemo",
+   "score": 0.7294032541208344,
+   "refs": 124
+  },
+  {
+   "time": "2026-09-13 12:19:19,785",
+   "commit": "149be02b80d0",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 12:19:50,418",
+   "commit": "3471166c73a6",
+   "agent": "davy-jones",
+   "score": 0.7278213976872703,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 12:20:05,943",
+   "commit": "1e54b031153c",
+   "agent": "jack-sparrow",
+   "score": 0.7278213976872703,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 12:20:16,457",
+   "commit": "5f7764b87225",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 12:22:37,630",
+   "commit": "06e98c95e43d",
+   "agent": "captain-nemo",
+   "score": 0.7294032542003347,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 12:22:47,885",
+   "commit": "b8dffa8f5e6c",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 12:26:34,522",
+   "commit": "c1bc032d1e63",
+   "agent": "jack-sparrow",
+   "score": null,
+   "refs": 18
+  },
+  {
+   "time": "2026-09-13 12:28:30,629",
+   "commit": "193b900b487f",
+   "agent": "captain-ahab",
+   "score": 0.11513885201583181,
+   "refs": 24
+  },
+  {
+   "time": "2026-09-13 12:29:56,229",
+   "commit": "5ef3d43b6ed1",
+   "agent": "jack-sparrow",
+   "score": 0.030325891570302882,
+   "refs": 2
+  },
+  {
+   "time": "2026-09-13 12:38:29,365",
+   "commit": "561e2ce23fab",
+   "agent": "jack-sparrow",
+   "score": 0.030325891570302882,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 12:43:47,121",
+   "commit": "f395d475f7af",
+   "agent": "jack-sparrow",
+   "score": 0.09097767471090878,
+   "refs": 12
+  },
+  {
+   "time": "2026-09-13 12:45:43,352",
+   "commit": "eae780e85905",
+   "agent": "jack-sparrow",
+   "score": 0.727317979751949,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 12:51:26,073",
+   "commit": "45d9406d912e",
+   "agent": "captain-ahab",
+   "score": 0.7278213976872705,
+   "refs": 29
+  },
+  {
+   "time": "2026-09-13 12:52:21,783",
+   "commit": "226af8e9b679",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 2
+  },
+  {
+   "time": "2026-09-13 12:53:17,535",
+   "commit": "dc45db245dd8",
+   "agent": "captain-ahab",
+   "score": 0.7278213976872703,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 12:55:59,160",
+   "commit": "669daccd6af3",
+   "agent": "jack-sparrow",
+   "score": 0.9070097677922182,
+   "refs": 39
+  },
+  {
+   "time": "2026-09-13 13:04:52,312",
+   "commit": "948daf5f9765",
+   "agent": "jack-sparrow",
+   "score": 0.9216568252934455,
+   "refs": 6
+  },
+  {
+   "time": "2026-09-13 13:06:53,328",
+   "commit": "1decd2eef720",
+   "agent": "captain-ahab",
+   "score": 0.7278213976872703,
+   "refs": 38
+  },
+  {
+   "time": "2026-09-13 13:09:24,847",
+   "commit": "2481bf117dd6",
+   "agent": "captain-nemo",
+   "score": 0.9070097677922182,
+   "refs": 81
+  },
+  {
+   "time": "2026-09-13 13:09:35,496",
+   "commit": "96dd71ebc9dc",
+   "agent": "captain-ahab",
+   "score": 0.803642556130675,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 13:17:40,016",
+   "commit": "e1b05248c235",
+   "agent": "jack-sparrow",
+   "score": 0.7707215436158558,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 13:17:45,192",
+   "commit": "c7c632e626a7",
+   "agent": "captain-ahab",
+   "score": 0.37540261564922395,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 13:19:51,829",
+   "commit": "b59fa88f60c0",
+   "agent": "captain-nemo",
+   "score": 0.9070097677922182,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 13:22:50,271",
+   "commit": "2bdfba28e4ed",
+   "agent": "captain-nemo",
+   "score": 0.8784849631591414,
+   "refs": 38
+  },
+  {
+   "time": "2026-09-13 13:23:21,175",
+   "commit": "18c0343eacdd",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 13:24:52,672",
+   "commit": "92fe8a5406c6",
+   "agent": "captain-ahab",
+   "score": 0.12939047069995913,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 13:28:04,931",
+   "commit": "d35e90e89c9b",
+   "agent": "captain-nemo",
+   "score": 0.9321867877894647,
+   "refs": 23
+  },
+  {
+   "time": "2026-09-13 13:32:08,975",
+   "commit": "78cca5c692eb",
+   "agent": "jack-sparrow",
+   "score": 0.9325175070749813,
+   "refs": 41
+  },
+  {
+   "time": "2026-09-13 13:32:14,263",
+   "commit": "17bcca12f7d2",
+   "agent": "captain-ahab",
+   "score": 0.030325891570302882,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 13:37:02,013",
+   "commit": "c902bf40cafa",
+   "agent": "captain-nemo",
+   "score": 0.8996058062905077,
+   "refs": 73
+  },
+  {
+   "time": "2026-09-13 13:39:08,082",
+   "commit": "bb5d87a4fd1b",
+   "agent": "captain-ahab",
+   "score": 0.9070097677922182,
+   "refs": 46
+  },
+  {
+   "time": "2026-09-13 13:43:24,946",
+   "commit": "7bc2a0c5cbf9",
+   "agent": "captain-nemo",
+   "score": 0.8996058062905077,
+   "refs": 17
+  },
+  {
+   "time": "2026-09-13 13:45:45,912",
+   "commit": "c5cbcd5ba7c6",
+   "agent": "jack-sparrow",
+   "score": 0.915529042240153,
+   "refs": 45
+  },
+  {
+   "time": "2026-09-13 13:46:01,373",
+   "commit": "ec9be8f3d0e8",
+   "agent": "captain-ahab",
+   "score": 0.8063514353494088,
+   "refs": 53
+  },
+  {
+   "time": "2026-09-13 13:48:32,269",
+   "commit": "244635c14939",
+   "agent": "captain-nemo",
+   "score": 0.9032710723918618,
+   "refs": 32
+  },
+  {
+   "time": "2026-09-13 13:48:57,814",
+   "commit": "28188c7e0d65",
+   "agent": "captain-ahab",
+   "score": 0.7278214106615901,
+   "refs": 10
+  },
+  {
+   "time": "2026-09-13 13:57:16,089",
+   "commit": "7d5cf7549fe7",
+   "agent": "captain-ahab",
+   "score": 0.7513086634537915,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 14:01:19,034",
+   "commit": "1bf8e4dfb85b",
+   "agent": "jack-sparrow",
+   "score": 0.9325175070749813,
+   "refs": 25
+  },
+  {
+   "time": "2026-09-13 14:01:34,885",
+   "commit": "ee1de20ac4c9",
+   "agent": "captain-ahab",
+   "score": 0.8385307658857601,
+   "refs": 47
+  },
+  {
+   "time": "2026-09-13 14:02:51,592",
+   "commit": "ecea30cb9779",
+   "agent": "captain-ahab",
+   "score": 0.8439975995024002,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 14:05:38,930",
+   "commit": "293f7e442ab7",
+   "agent": "captain-ahab",
+   "score": 0.79495801154909,
+   "refs": 30
+  },
+  {
+   "time": "2026-09-13 14:06:21,620",
+   "commit": "00821d5d4960",
+   "agent": "captain-nemo",
+   "score": 0.8369036846794479,
+   "refs": 26
+  },
+  {
+   "time": "2026-09-13 14:06:43,203",
+   "commit": "7fdf24f4c238",
+   "agent": "captain-ahab",
+   "score": null,
+   "refs": 6
+  },
+  {
+   "time": "2026-09-13 14:07:33,844",
+   "commit": "1dbf6e3995b1",
+   "agent": "captain-ahab",
+   "score": 0.16173808837494888,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 14:08:49,816",
+   "commit": "40588269b6ea",
+   "agent": "captain-ahab",
+   "score": 0.852145318653971,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 14:09:56,491",
+   "commit": "efd84a244ee6",
+   "agent": "captain-nemo",
+   "score": 0.8369036846794479,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 14:13:50,494",
+   "commit": "2b4ac255eeec",
+   "agent": "captain-ahab",
+   "score": 0.9325175070749813,
+   "refs": 7
+  },
+  {
+   "time": "2026-09-13 14:13:56,413",
+   "commit": "841ff9528c9f",
+   "agent": "captain-nemo",
+   "score": 5.72186633401942e-06,
+   "refs": 8
+  },
+  {
+   "time": "2026-09-13 14:20:32,497",
+   "commit": "52280a416921",
+   "agent": "captain-nemo",
+   "score": 0.8369036846794479,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 14:23:09,742",
+   "commit": "6ab71273e3b7",
+   "agent": "captain-ahab",
+   "score": 0.8778327442180228,
+   "refs": 84
+  },
+  {
+   "time": "2026-09-13 14:24:42,709",
+   "commit": "43dc9fae43c4",
+   "agent": "captain-ahab",
+   "score": 0.8369036846794479,
+   "refs": 2
+  },
+  {
+   "time": "2026-09-13 14:24:48,327",
+   "commit": "03db92b0f9ba",
+   "agent": "captain-nemo",
+   "score": null,
+   "refs": 4
+  },
+  {
+   "time": "2026-09-13 14:26:09,699",
+   "commit": "9f982b560594",
+   "agent": "captain-ahab",
+   "score": 0.852145318653971,
+   "refs": 5
+  },
+  {
+   "time": "2026-09-13 14:26:51,022",
+   "commit": "a770c0897088",
+   "agent": "captain-nemo",
+   "score": 1.1372209338863598e-05,
+   "refs": 2
+  },
+  {
+   "time": "2026-09-13 14:28:33,157",
+   "commit": "933150b73ce8",
+   "agent": "captain-ahab",
+   "score": 0.852145318653971,
+   "refs": 8
+  },
+  {
+   "time": "2026-09-13 14:30:15,183",
+   "commit": "8adcba7e5b66",
+   "agent": "captain-ahab",
+   "score": 0.852145318653971,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 14:36:50,765",
+   "commit": "ca330fd9c9d3",
+   "agent": "captain-ahab",
+   "score": 0.9325175070749813,
+   "refs": 8
+  },
+  {
+   "time": "2026-09-13 14:42:45,525",
+   "commit": "dc7fdd2a69f8",
+   "agent": "captain-ahab",
+   "score": 0.9092801610259056,
+   "refs": 27
+  },
+  {
+   "time": "2026-09-13 14:48:20,055",
+   "commit": "84de7011571e",
+   "agent": "captain-ahab",
+   "score": 0.9177996673967378,
+   "refs": 3
+  },
+  {
+   "time": "2026-09-13 14:58:18,356",
+   "commit": "feaca97608b1",
+   "agent": "captain-ahab",
+   "score": 0.9325175070749813,
+   "refs": 62
+  },
+  {
+   "time": "2026-09-13 14:59:49,569",
+   "commit": "ffffc2968f32",
+   "agent": "captain-ahab",
+   "score": 0.48983433664848947,
+   "refs": 13
+  },
+  {
+   "time": "2026-09-13 15:00:36,286",
+   "commit": "779806b4b6ff",
+   "agent": "captain-nemo",
+   "score": 0.7278246312144139,
+   "refs": 45
+  },
+  {
+   "time": "2026-09-13 15:01:47,829",
+   "commit": "191ccd0da031",
+   "agent": "captain-ahab",
+   "score": 0.22478603325092786,
+   "refs": 9
+  },
+  {
+   "time": "2026-09-13 15:03:39,625",
+   "commit": "bff69d043871",
+   "agent": "captain-ahab",
+   "score": 0.8369036846794479,
+   "refs": 6
+  },
+  {
+   "time": "2026-09-13 15:16:08,784",
+   "commit": "a9f61044481b",
+   "agent": "captain-ahab",
+   "score": 0.8369036846794479,
+   "refs": 12
+  },
+  {
+   "time": "2026-09-13 15:21:23,390",
+   "commit": "49dbe0944fdc",
+   "agent": "captain-ahab",
+   "score": 0.9325175070749813,
+   "refs": 7
+  }
+ ],
+ "reef_status": {
+  "error": null,
+  "last_drain_at": 1789312887.5750458,
+  "preload_errors": {},
+  "scenarios": {
+   "third_autocorr": {
+    "scenario_step": 0,
+    "artifact_head_sync": {
+     "state": "synchronized",
+     "release_id": "4df58ed7d65a1670e0c17e7337fadac1072a6ce9",
+     "error": null
+    },
+    "last_committed_step": null,
+    "current_runtime_load_id": "eec7dd46d1d04ec9b90719246a3fb696:0",
+    "checkpoint_storage": null,
+    "batch_ready": false,
+    "training_mode": "auto",
+    "processor": {
+     "discarded_groups": [],
+     "never_reasons": {},
+     "terminal_call_fallbacks": 100
+    },
+    "inference_admission": {
+     "open": true,
+     "active": 0
+    },
+    "adapter_runtime_load_id": null
+   }
+  },
+  "serving": {
+   "coral": {
+    "adapters": {
+     "capacity": 1,
+     "resident": 0,
+     "leaked": 0,
+     "protected": 0,
+     "in_flight": 0,
+     "counters": {
+      "loads": 0,
+      "load_failures": 0,
+      "load_cleanups": 0,
+      "cleanup_failures": 0,
+      "unloads": 0,
+      "unload_failures": 0,
+      "evictions": 0,
+      "capacity_rejections": 0,
+      "strays_unloaded": 0,
+      "lost_dropped": 0
+     },
+     "recent_actions": [],
+     "scenarios": {}
+    }
+   }
+  }
+ },
+ "summary": {
+  "graded": 129,
+  "scored": 108,
+  "best_score": 0.932518,
+  "first_score": 0.727821,
+  "last_score": 0.932518,
+  "improvements": 22,
+  "reported": 120,
+  "reports_with_refs": 120
+ }
+}

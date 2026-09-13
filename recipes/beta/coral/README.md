@@ -146,6 +146,12 @@ change. `task/litellm_config.yaml` is the one reef-specific piece: the
 gateway's only upstream is the Reef service, so the served policy is the
 agents' only model.
 
+## Results
+
+[Qwen3-Coder-30B-A3B on the CORAL paper's 11 tasks](examples/coral_demo/results/2026-09-13-paper-tasks-qwen3-coder-30b/README.md):
+frozen-policy and test-time-trained arms, 1 and 4 agents, with every graded
+attempt retained. First learning results for this recipe; single seed per arm.
+
 ## Known limitations
 
 - `attach_reef_adapter_to_agent_manager` splices under the middleware CORAL's
