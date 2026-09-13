@@ -556,6 +556,50 @@ def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
 
 
 @pytest.mark.unit
+def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
+    """A LoRA actor's critic trains adapters on the same frozen base.
+
+    The critic is the policy's size; without adapters it would train every
+    parameter and could not sit beside a LoRA actor of the same model.
+    """
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+
+    # The state finalize_reef_slime_args leaves for a LoRA actor: alpha
+    # defaulted, Reef's provider installed, the user's provider chained.
+    args = _critic_prep_args(
+        megatron_lora_rank=32,
+        megatron_lora_alpha=32,
+        megatron_lora_dropout=0.0,
+        megatron_lora_target_modules=["linear_qkv", "linear_fc1"],
+        custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
+        reef_chained_model_provider_path=None,
+    )
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.megatron_lora_rank == 32
+    assert critic_args.megatron_lora_alpha == 32
+    assert critic_args.megatron_lora_target_modules == ["linear_qkv", "linear_fc1"]
+    assert critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = _critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.megatron_lora_rank == 0
+    assert critic_args.megatron_lora_alpha is None
+    assert critic_args.custom_model_provider_path == getattr(args, "reef_chained_model_provider_path", None)
+
+
+@pytest.mark.unit
 def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path) -> None:
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 

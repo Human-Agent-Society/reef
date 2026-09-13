@@ -304,12 +304,15 @@ def prepare_critic_args(args: Any) -> Any:
     critic_lr = getattr(critic_args, "critic_lr", None)
     if critic_lr is not None:
         critic_args.lr = float(critic_lr)
-    # LoRA is an actor-only serving adapter. Restore a user's provider for the
-    # critic instead of sending the critic through Reef's actor LoRA wrapper.
-    critic_args.megatron_lora_rank = 0
-    critic_args.megatron_lora_alpha = None
-    critic_args.megatron_lora_target_modules = None
-    critic_args.custom_model_provider_path = getattr(critic_args, "reef_chained_model_provider_path", None)
+    # A LoRA actor gets a LoRA critic: the value model keeps the same frozen
+    # base with its own adapters and a trainable value head (Slime swaps the
+    # head in after Reef's provider wraps the model), so a critic the size of
+    # the policy fits beside it. Without LoRA the critic trains every
+    # parameter through the user's own provider, as before.
+    if not int(getattr(critic_args, "megatron_lora_rank", 0) or 0):
+        critic_args.megatron_lora_alpha = None
+        critic_args.megatron_lora_target_modules = None
+        critic_args.custom_model_provider_path = getattr(critic_args, "reef_chained_model_provider_path", None)
     _apply_critic_checkpoint_roots(critic_args)
     return critic_args
 
