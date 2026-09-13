@@ -24,8 +24,49 @@ index d36de40..62a4dc2 100644
                      'temperature': 1.0,
                  }
                  _is_together = 'api.together.xyz' in (str(getattr(self.client, 'base_url', '') or ''))
+diff --git a/src/saas_bench/agents/bash_agent/run_test.py b/src/saas_bench/agents/bash_agent/run_test.py
+index 3241bd2..e8c1adb 100644
+--- a/src/saas_bench/agents/bash_agent/run_test.py
++++ b/src/saas_bench/agents/bash_agent/run_test.py
+@@ -924,6 +924,14 @@ __pycache__/
+         # ── Step 1: Copy public/ and create session via CLI ──
+         if not self.continue_from:
+             session_info = self._initialize_from_public_repo()
++            tool_user = os.environ.get('SAAS_BENCH_TOOL_USER')
++            if tool_user:
++                # The agent's shell runs as this user (see tools.py): hand it
++                # the workspace it plays in.
++                for root, _dirs, files in os.walk(self.agent_workspace):
++                    shutil.chown(root, tool_user, tool_user)
++                    for name in files:
++                        shutil.chown(os.path.join(root, name), tool_user, tool_user)
+         else:
+             # Resuming — session already exists, find it
+             checkpoint = self._load_checkpoint()
+diff --git a/src/saas_bench/agents/bash_agent/tools.py b/src/saas_bench/agents/bash_agent/tools.py
+index 9c0174e..7cfb64f 100644
+--- a/src/saas_bench/agents/bash_agent/tools.py
++++ b/src/saas_bench/agents/bash_agent/tools.py
+@@ -419,8 +419,16 @@ class BashAgentToolExecutor:
+                 start_new_session=True,
+             )
+         else:
++            launcher = ['bash', '-c', command]
++            tool_user = os.environ.get('SAAS_BENCH_TOOL_USER')
++            if tool_user:
++                # Without bwrap, run the agent's shell as an unprivileged user
++                # so it cannot signal the engine process or read the
++                # host-side bundle; run_test.py hands it the workspace.
++                launcher = ['setpriv', '--reuid', tool_user, '--regid', tool_user, '--clear-groups', '--'] + launcher
++                env = {**env, 'HOME': ws}
+             proc = subprocess.Popen(
+-                ['bash', '-c', command],
++                launcher,
+                 stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE,
+                 text=True,
 diff --git a/src/saas_bench/customer_llm.py b/src/saas_bench/customer_llm.py
-index e5dff0a..9ccbf2b 100644
+index e5dff0a..4a8e720 100644
 --- a/src/saas_bench/customer_llm.py
 +++ b/src/saas_bench/customer_llm.py
 @@ -521,8 +521,8 @@ Output ONLY the post text, nothing else."""
@@ -94,17 +135,76 @@ index e5dff0a..9ccbf2b 100644
  
              self._log_cost(day, 'customer_initial_outreach', input_tokens, output_tokens, model=enterprise_model)
  
-@@ -1139,8 +1139,8 @@ REASON: <one sentence why>"""
-     )
+@@ -1131,16 +1131,25 @@ SCORE: <number between -1.0 and 1.0>
+ REASON: <one sentence why>"""
  
-     text = response.content[0].text.strip()
+     social_model = config.social_post_llm_model
+-    response = bedrock_client.messages.create(
+-        model=social_model,
+-        max_tokens=100,
+-        temperature=0.3,
+-        messages=[{"role": "user", "content": prompt}],
+-    )
+-
+-    text = response.content[0].text.strip()
 -    input_tokens = response.usage.input_tokens
 -    output_tokens = response.usage.output_tokens
++    if config.social_post_llm_provider == "openai":
++        # OpenAI-compatible fallback, as generate_customer_post does it.
++        response = bedrock_client.responses.create(
++            model=social_model,
++            reasoning={"effort": "low"},
++            input=[{"role": "user", "content": prompt}],
++            max_output_tokens=100,
++        )
++        text = response.output_text.strip()
++    else:
++        response = bedrock_client.messages.create(
++            model=social_model,
++            max_tokens=100,
++            temperature=0.3,
++            messages=[{"role": "user", "content": prompt}],
++        )
++        text = response.content[0].text.strip()
 +    input_tokens = response.usage.input_tokens or 0
 +    output_tokens = response.usage.output_tokens or 0
  
      # Parse structured response: "SCORE: <number>\nREASON: <text>"
      effect = 0.0
+@@ -1209,15 +1218,24 @@ The NovaMind CEO posted:
+ Your reaction is {sentiment_desc} (score: {effect_score:.2f}). Write ONLY the reply tweet. Nothing else. Keep it SHORT — real people don't write essays in tweet replies. Do not include any meta-commentary or explanation."""
+ 
+     social_model = config.social_post_llm_model
+-    response = bedrock_client.messages.create(
+-        model=social_model,
+-        max_tokens=150,
+-        temperature=0.9,
+-        messages=[{"role": "user", "content": prompt}],
+-    )
+-
+-    text = response.content[0].text.strip()
++    if config.social_post_llm_provider == "openai":
++        # OpenAI-compatible fallback, as generate_customer_post does it.
++        response = bedrock_client.responses.create(
++            model=social_model,
++            reasoning={"effort": "low"},
++            input=[{"role": "user", "content": prompt}],
++            max_output_tokens=150,
++        )
++        text = response.output_text.strip()
++    else:
++        response = bedrock_client.messages.create(
++            model=social_model,
++            max_tokens=150,
++            temperature=0.9,
++            messages=[{"role": "user", "content": prompt}],
++        )
++        text = response.content[0].text.strip()
+     # Clean up any quotes/formatting artifacts
+     text = text.strip('"').strip("'").strip()
+ 
+-    return text, response.usage.input_tokens, response.usage.output_tokens
++    return text, response.usage.input_tokens or 0, response.usage.output_tokens or 0
 diff --git a/src/saas_bench/server_entry.py b/src/saas_bench/server_entry.py
 index fa76401..d8b5f1d 100644
 --- a/src/saas_bench/server_entry.py
@@ -179,3 +279,21 @@ index fa76401..d8b5f1d 100644
      simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
      simulator.initialize(resume=True)  # resume=True: skip DB writes, just set up _group_rngs
      current_day = meta.get("current_day", 0)
+diff --git a/src/saas_bench/simulation.py b/src/saas_bench/simulation.py
+index aefe17e..bac9819 100644
+--- a/src/saas_bench/simulation.py
++++ b/src/saas_bench/simulation.py
+@@ -4638,7 +4638,12 @@ class Simulator:
+         """).fetchone()[0]
+ 
+         # Use social_post_client (bedrock or direct anthropic) — both expose the same .messages.create() API
+-        bedrock_client = self.customer_simulator.social_post_client
++        # The OpenAI provider judges and replies through the simulator's
++        # OpenAI client (see customer_llm.judge_agent_social_post).
++        if self.config.social_post_llm_provider == "openai":
++            bedrock_client = self.customer_simulator.client
++        else:
++            bedrock_client = self.customer_simulator.social_post_client
+         social_model = self.config.social_post_llm_model
+         viral_threshold = 0.6
+ 

@@ -1,0 +1,32 @@
+# The untrained baseline for recipes/sao/examples/ceobench: the same policy
+# served by SGLang through Reef with no training stack. The record-only
+# recipe accepts the harness's weekly reports but trains nothing, so an
+# episode on this stack is the number a trained episode on serve.yaml is
+# compared against: same model, same seed, same simulator roles.
+#
+# Four GPUs (TP4) and the model's full 262k window; run.sh does not start
+# this stack, see the README's "Untrained baseline" section.
+
+schema-version: 2
+reef:
+  ready-timeout: 3600
+  host: 0.0.0.0                        # the task container reaches Reef by LAN address
+  port: 28900
+  token: ${REEF_TOKEN}
+inference:
+  model-path: /root/models/Qwen3.6-27B
+  backend: sglang
+  tensor-parallel-size: 4
+  timeout-s: 7200
+  options:
+    context-length: "262144"
+    reasoning-parser: "qwen3"
+    tool-call-parser: "qwen3_coder"
+    mem-fraction-static: "0.85"
+recipe:
+  implementation: recipe
+storage:
+  artifact-repository: /var/lib/reef/artifacts.git
+  artifact-work-dir: /var/lib/reef/artifact-work
+  artifact-cache-dir: /var/lib/reef/artifact-cache
+  agent-record-dir: /var/lib/reef/agent-record

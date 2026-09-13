@@ -19,4 +19,13 @@ RUN git apply /opt/ceobench-reef.patch \
     && uv sync --frozen \
     && uv run --no-sync python scripts/build_public.py
 
+# The agent's shell runs as this user (SAAS_BENCH_TOOL_USER, see reef.patch):
+# it can run the CLI and the interpreter but neither read the engine's source
+# and host-side bundle nor signal the engine, which the runner starts as root.
+# Root still commits the agent's workspace weekly, so git must accept a
+# repository owned by that user.
+RUN useradd --create-home --uid 1001 agent \
+    && chmod 750 /opt/ceobench/src /opt/ceobench/public \
+    && git config --global --add safe.directory '*'
+
 WORKDIR /workspace

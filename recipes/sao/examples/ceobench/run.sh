@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The SAO training stack for CEO-Bench, then one episode per seed through
-# reef-eval. Setup (once): see README. State goes to $RUN_DIR.
+# The SAO training stack for CEO-Bench, then one episode through reef-eval,
+# trained while it is played. Setup (once): see README. State goes to $RUN_DIR.
 #
 # The stack is left running and a healthy one is reused; `docker compose down`
 # stops it. A trained stack is bound to its scenario, so switching
@@ -18,6 +18,8 @@ export REEF_SCENARIO="${REEF_SCENARIO:-ceobench-sao}"
 # The trainer's window (serve.yaml's seq-length): turns longer than this are
 # served and recorded but not reported for training.
 export CEOBENCH_TRAIN_MAX_TOKENS="${CEOBENCH_TRAIN_MAX_TOKENS:-49152}"
+# The agent's shell runs as this unprivileged user inside the task container.
+export SAAS_BENCH_TOOL_USER="${SAAS_BENCH_TOOL_USER:-agent}"
 
 # Prerequisites
 command -v uv >/dev/null || { echo "run.sh: uv not found (pip install uv)" >&2; exit 1; }
@@ -38,7 +40,7 @@ echo "==> [1/2] the reef stack at $REEF_SERVICE_URL"
 ) || { echo "run.sh: the stack never became healthy; docker compose logs" >&2; exit 1; }
 
 # 2. The episodes, through reef-eval in an ephemeral uv environment.
-echo "==> [2/2] seeds ${CEOBENCH_SEEDS:-42}, ${CEOBENCH_DAYS:-500} days each (agent: harness:HarborAgent)"
+echo "==> [2/2] seed ${CEOBENCH_SEED:-42}, ${CEOBENCH_DAYS:-500} days (agent: harness:HarborAgent)"
 uv run --no-project --python 3.12 \
     --with "reef-eval[harbor]" --with reef-client --with-editable "$PWD" \
     run.py "$@"

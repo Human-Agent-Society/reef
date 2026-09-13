@@ -1,19 +1,21 @@
-"""The loop, written out: one CEO-Bench episode per seed, trained between seeds.
-
-For each seed, in order:
+"""One CEO-Bench episode, trained while it is played.
 
     solve  — reef-eval runs the harbor/ task under our agent; the benchmark's
              bash agent plays the configured number of days with every model
              call served by Reef
-    verify — Harbor's verifier scores the run from its world.nmdb
-    learn  — the agent reports the episode score against every turn's receipt;
-             Reef's SAO recipe trains one step per accepted turn, and the next
-             seed is served by the updated weights
+    learn  — when a week ends, the agent reports that week's turns with the
+             week's cash change; Reef's SAO recipe trains one step per
+             accepted turn while the agent is already playing the next week,
+             and the engine serves the updated adapter
+    verify — Harbor's verifier scores the finished run from its world.nmdb
 
-``CEOBENCH_SEEDS`` (comma separated, default ``42``) and ``CEOBENCH_DAYS``
-(default ``500``) pick the episodes. After each episode the loop waits for
-the scenario's version chain to stop growing, so the next seed measures what
-this one taught; stale turns the recipe declines are not waited for.
+This is test-time training: the policy adapts inside the episode it is
+scored on. ``CEOBENCH_SEED`` (default ``42``) and ``CEOBENCH_DAYS`` (default
+``500``) pick the episode. Replicates are independent runs from the base
+model, one stack each: a Reef process trains one scenario for its lifetime,
+so a second seed on the same stack would start from the first seed's adapter.
+After the episode the loop waits for the scenario's version chain to stop
+growing, so the adapter on disk is the one the episode ended with.
 """
 
 import asyncio
@@ -32,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 SERVICE_URL = os.environ["REEF_SERVICE_URL"].rstrip("/")
 SCENARIO = os.environ.get("REEF_SCENARIO", "ceobench-sao")
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")
-SEEDS = [int(seed) for seed in os.environ.get("CEOBENCH_SEEDS", "42").split(",") if seed.strip()]
+SEED = int(os.environ.get("CEOBENCH_SEED", "42"))
 DAYS = int(os.environ.get("CEOBENCH_DAYS", "500"))
 #: Training is quiescent once the release count holds for this long.
 TRAIN_QUIET_S = 120.0
@@ -89,13 +91,12 @@ def wait_for_training() -> int:
 
 async def main():
     lab = Lab(HERE / "work" / "lab")
-    for position, seed in enumerate(SEEDS):
-        agent = {"name": "harness:HarborAgent", "model_name": MODEL, "kwargs": {"seed": seed, "days": DAYS}}
-        row = await lab.run(str(HERE / "harbor"), agent, tags={"position": position, "seed": seed, "days": DAYS})
-        print(f"[{position}] seed {seed}: reward {row.rewards}")
-        if row.tags.get("error"):
-            raise RuntimeError(f"Harbor trial failed: {row.tags['error']}")
-        print(f"    trained: {wait_for_training()} releases committed so far")
+    agent = {"name": "harness:HarborAgent", "model_name": MODEL, "kwargs": {"seed": SEED, "days": DAYS}}
+    row = await lab.run(str(HERE / "harbor"), agent, tags={"seed": SEED, "days": DAYS})
+    print(f"seed {SEED}: reward {row.rewards}")
+    if row.tags.get("error"):
+        raise RuntimeError(f"Harbor trial failed: {row.tags['error']}")
+    print(f"    trained: {wait_for_training()} releases committed")
 
 
 asyncio.run(main())

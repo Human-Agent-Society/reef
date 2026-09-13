@@ -32,7 +32,7 @@ harness/               agent harness (imports reef_client, not reef)
   report.py              posts the verifier's score against every turn's receipt
 serve.yaml             Reef + Ray + Slime/Megatron + SGLang, Qwen3.6-27B through LoRA, critic colocated
 docker-compose.yaml    the stack in the reef image, host networking, six GPUs
-run.py                 the loop: one episode per seed, trained between seeds
+run.py                 one episode, trained while it is played
 run.sh                 brings the stack up, then runs run.py through reef-eval
 pyproject.toml         makes the harness importable
 results/               the smoke run's manifest
@@ -62,7 +62,8 @@ then does three things.
 3. **The run directory and the receipts.** When the runner exits, the run
    directory (`world.nmdb`, `config.json`, `checkpoint.json`, `logs/`,
    `agent_workspace/`) is downloaded next to the trial's agent logs, the
-   receipts go into the agent context in call order, and the sidecar stops.
+   receipts go into the agent context in call order with their week and
+   token count, and the sidecar stops.
 
 Harbor then runs `tests/test.sh` in the same container. `score.py` opens the
 run's `world.nmdb` with the checkout's own `load_session_db` and writes
@@ -70,7 +71,8 @@ run's `world.nmdb` with the checkout's own `load_session_db` and writes
 survival days as the last day any daily table reached, `bankrupt` as final
 cash below zero, and `reward` as final cash over the starting balance
 (1.0 is break-even). A watcher thread in the harness reads Harbor's
-`result.json` and posts the score to Reef (`harness/report.py`).
+`result.json` for the final cash that closes the episode's last week
+(`harness/report.py`).
 
 ### The patch to CEO-Bench
 
@@ -98,6 +100,16 @@ public bundle is rebuilt so the engine carries it. Five hunks:
   agent's completion request (default 16384, the benchmark's value; `run.sh`
   leaves it unset). It exists for engines whose window cannot hold the
   default plus the prompt.
+- `customer_llm.py`, `simulation.py`: the two social-media functions that
+  only had Bedrock and Anthropic paths (judging the agent's own post from
+  each customer group's view, and a customer's reply to it) get the same
+  OpenAI Responses fallback as the other simulator calls. Without it the
+  engine's `next-week` failed the first time the agent posted.
+- `agents/bash_agent/tools.py`, `run_test.py`: with `SAAS_BENCH_TOOL_USER`
+  set and no `bwrap`, the agent's shell runs as that user through `setpriv`
+  and the runner hands it the workspace. The image creates the user
+  (`agent`), keeps the engine's source and host-side bundle root-only, and
+  `run.sh` sets the variable.
 
 Everything else is the benchmark as published: default `config.py`
 difficulty (competitor feedback range 0.2 to 0.5), the bash agent's prompt
@@ -133,35 +145,32 @@ use the benchmark's defaults.
 
 ## Reward shaping
 
-One episode is one terminal score over hundreds of turns, and the `sao`
-recipe trains one single-reference report per step. The choice made here is
-**episode-level, applied to every turn**: after the verifier scores the run,
-the harness posts one report per model call, each carrying the episode's
-`reward` (final cash over the starting balance) and referencing that call's
-receipt. Each turn's prompt is the conversation the benchmark agent actually
-sent (system prompt, the week's tool calls and outputs), so the sample is the
-turn in its real context, and the critic's skip-observation GAE runs over the
-turn's own tokens. Reports arrive together, so `max_staleness` in
-`serve.yaml` is raised to 64: SAO's DIS calibration is what admits a rollout
-whose weights have moved on, and a turn admitted past that window trains
-against a policy 64 steps newer than the one that produced it.
+The reward is online and weekly. CEO-Bench advances in weeks: the agent works
+in one conversation until it calls `next-week`, the engine steps seven days
+and returns the next dashboard, and the runner rebuilds the conversation from
+it. Every request therefore carries the dashboard of the week it belongs to
+(`=== Week N Dashboard (Day D) ===`, opening cash on the next line), and the
+sidecar's captures let the harness group turns by week without touching the
+benchmark. A reporter thread polls those captures while the episode runs;
+when week N+1's dashboard appears, week N is over and each of its turns is
+reported with
 
-Alternatives considered, and left to issue #428's step 2:
+    score = (cash at the start of week N+1 - cash at the start of week N) / $1,000,000
 
-- **Per-period cash delta.** The simulator exposes cash daily, and the bash
-  agent's context resets at every `next-week`, so a week is a natural
-  conversation to score by its own cash change. It is denser but myopic: R&D
-  and advertising cost cash this week and pay later, which is the delayed
-  structure the benchmark is built around. The sidecar's captures carry the
-  full request, so grouping turns into weeks needs no benchmark change.
-- **A judged turn-level signal.** What single-stream PPO wants
-  (`recipes/openclawrl/`); the simulator's own feedback (database state,
-  cash) can inform the judge. Not an SAO shape.
-- **One multi-reference report per week.** Reef assembles an ordered
-  multi-reference report into one multi-turn sample when the recipe sets
-  `accept_multi_turn_policy_samples`; SAO does not, and a thinking model's
-  re-rendered history drops its earlier reasoning, which the assembly treats
-  as a fork.
+as a single-reference report, so the `sao` recipe trains on the week's turns
+while the agent is already playing week N+1 and the engine serves the
+updated adapter from then on. The last week closes with the
+verifier's final cash, posted by a watcher thread once Harbor writes
+`result.json`. The Harbor reward itself stays the benchmark's terminal metric
+(final cash over the starting balance); it is evaluation only.
+
+Turns of one week share the week's score; the critic's skip-observation GAE
+does the credit assignment inside each turn. A weekly delta is dense enough
+for SAO's one-rollout-per-step cadence and lines up with the benchmark's own
+decision period, at the cost of being myopic: R&D and advertising cost cash
+this week and pay later. Two extensions are left open: a lag of `k` weeks
+(report week N once week N+k's cash is known) and a judged turn-level signal
+of the kind single-stream PPO wants (`recipes/openclawrl/`).
 
 ## Run
 
@@ -173,7 +182,7 @@ the policy model, and credentials for the simulator roles.
 cd recipes/sao/examples/ceobench
 hf download Qwen/Qwen3.6-27B --local-dir ~/models/Qwen3.6-27B
 export ANTHROPIC_API_KEY=...
-CEOBENCH_SEEDS=42,43,44 CEOBENCH_DAYS=500 ./run.sh
+CEOBENCH_SEED=42 CEOBENCH_DAYS=500 ./run.sh
 ```
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (`~/models`),
@@ -185,13 +194,17 @@ the critic's value head train, and the rollout engine serves the published
 adapter. The models tried before it are recorded below. It mints a token
 into `$RUN_DIR/token`, brings the stack up with `docker compose up --wait`,
 and runs `run.py` in an ephemeral `uv` environment with `reef-eval[harbor]`
-and this harness. The stack stays up between runs; `docker compose down`
-stops it. Per-seed rows land in `work/lab`, each trial's run directory under
-the trial's `agent/ceobench/`.
+and this harness. The episode row lands in `work/lab`, the trial's run
+directory under the trial's `agent/ceobench/`.
 
-`run.py` runs the seeds in order and, after each, waits for the scenario's
-training releases to stop growing before the next seed, so seed N+1 is served
-by what seed N taught:
+This is test-time training: the policy adapts inside the episode it is
+scored on, and the number to compare is that episode's final cash against the
+same seed played by the untrained model. Replicates are independent runs from
+the base model, one stack each (`docker compose down` between them, or a
+fresh `RUN_DIR`): a Reef process trains one scenario for its lifetime, so a
+second seed on the same stack would start from the first seed's adapter.
+After the episode `run.py` waits for the scenario's training releases to
+stop growing, so the adapter on disk is the one the episode ended with:
 
 ```bash
 curl -sS -H "Authorization: Bearer $(cat work/token)" \
@@ -269,6 +282,22 @@ Earlier attempts, same harness:
   benchmark's docs sits at 40k tokens after four calls, so early-week turns
   train and late-week ones are recorded only.
 
+### Untrained baseline
+
+`serve-baseline.yaml` serves the same model through Reef with no training
+stack (SGLang TP4, the model's 262k window, the record-only recipe). An
+episode on it is the untrained number a trained episode on `serve.yaml` is
+compared against, same seed and simulator roles. Start it in the reef image
+on four GPUs and run the episode with `CEOBENCH_TRAIN_MAX_TOKENS=0`:
+
+```bash
+docker run -d --name reef-ceobench-baseline --network host --ipc host --shm-size 32gb \
+  --gpus '"device=0,1,2,3"' -v ~/models:/root/models -v "$PWD/work/baseline:/var/lib/reef" \
+  -v "$(cd ../../../.. && pwd):/workspace/Reef" -e REEF_TOKEN="$(cat work/token)" \
+  -e PYTHONPATH=/workspace/Reef reef \
+  reef serve -c /workspace/Reef/recipes/sao/examples/ceobench/serve-baseline.yaml
+```
+
 ### Not yet run
 
 - The untrained 500-day baseline with the benchmark's Anthropic simulator
@@ -285,7 +314,11 @@ Earlier attempts, same harness:
   result page cites it.
 - **Sandboxing.** The benchmark sandboxes the agent's shell with `bwrap` when
   present and falls back to plain execution otherwise. Here the Harbor
-  container is the sandbox; the agent's shell runs unsandboxed inside it, and
-  the `novamind-operation` zipapp with the database key sits at
-  `/opt/ceobench/public/` inside the same container, readable by the agent.
-  The benchmark's docs recommend hiding it behind a wrapper.
+  container is the outer sandbox and the agent's shell runs as an
+  unprivileged user inside it (`SAAS_BENCH_TOOL_USER`), so it cannot signal
+  the root-owned engine or read the engine's source and host-side bundle.
+  An earlier run without this, after an engine error, saw the agent read
+  the engine's source, stop the server, and start a new session. The copy of
+  the `novamind-operation` zipapp in the agent's workspace still embeds the
+  database key, as it does upstream; the benchmark's docs recommend hiding
+  it behind a wrapper.

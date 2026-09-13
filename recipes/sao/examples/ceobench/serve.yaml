@@ -8,9 +8,9 @@
 # objective settings are the SAO example's, with the learning rates raised
 # for adapters. SAO trains one rollout at a time: batch_size 1 means one train
 # step the moment a report is accepted. Here a rollout is one agent turn of
-# the benchmark's bash agent, and the episode's score reaches every turn of
-# the episode at once when the verifier finishes (harness/report.py), so
-# max_staleness admits turns that the steps before them have already aged.
+# the benchmark's bash agent; a finished week's turns are reported together
+# with that week's cash change (harness/report.py), so max_staleness admits
+# the turns of a week that the steps before them have already aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
