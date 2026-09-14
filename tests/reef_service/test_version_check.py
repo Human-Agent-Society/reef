@@ -248,9 +248,11 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
     events, stderr = _notice(
         tmp_path, releases, {"release_id": "v1", "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}]}
     )
-    assert [event["kind"] for event in events] == ["notify"] and stderr == ""
-    assert events[0]["type"] == "warning"
-    assert events[0]["message"] == (
+    # The pending tail waits for a review: one info line first, then the setup list.
+    assert [event["kind"] for event in events] == ["notify", "notify"] and stderr == ""
+    assert events[0]["type"] == "info" and events[0]["message"].startswith("Reef: release v3 waits for your review")
+    assert events[1]["type"] == "warning"
+    assert events[1]["message"] == (
         "Reef harness update available (v2), but it requires setup first:\n"
         "  notify (permission)\n"
         "Run reef-pi setup, then start reef-pi again."
@@ -265,11 +267,11 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
         releases,
         {"release_id": "v1", "setup": [{"name": "TWILIO_SID", "checked_at": 1}, {"name": "notify"}]},
     )
-    assert [event["kind"] for event in events] == ["select"]
-    assert "Latest:  v2" in events[0]["title"]
-    # Already on the head: silence, whatever the check offs say.
+    assert [event["kind"] for event in events] == ["notify", "select"]
+    assert "Latest:  v2" in events[1]["title"]
+    # Already on the head: only the review line, whatever the check offs say.
     events, _ = _notice(tmp_path, releases, {"release_id": "v2"})
-    assert events == []
+    assert [event["kind"] for event in events] == ["notify"] and "waits for your review" in events[0]["message"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
@@ -327,25 +329,37 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
 def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
     """A release held for review is served to no session, so the head the notice
     offers is the newest row that is not pending: a pending tail behind the
-    pinned head is silence, a newer row that is not pending is still offered,
-    and a trial install of the pending release gets no offer until its promote."""
+    pinned head gets one review line and no offer, a newer row that is not
+    pending is still offered, and a trial install of the pending release gets
+    no offer until its promote."""
     release_info = {"release_id": "v1"}
     pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
-    assert _notice(tmp_path, pending_tail, release_info) == ([], "")
-    assert _notice(tmp_path, pending_tail, release_info, headless=True) == ([], "")
-    # A catalog whose every row is pending has no head to offer.
-    assert _notice(tmp_path, [{"release_id": "v2", "pending": True}], release_info) == ([], "")
+    # No offer, but the person hears that a release waits for their review, with its step page.
+    review = "Reef: release v2 waits for your review: http://reef:8900/reef/harness/releases/1/page"
+    assert _notice(tmp_path, pending_tail, release_info) == (
+        [{"kind": "notify", "message": review, "type": "info"}],
+        "",
+    )
+    events, stderr = _notice(tmp_path, pending_tail, release_info, headless=True)
+    assert events == [] and stderr.strip() == review
+    # A catalog whose every row is pending has no head to offer; the pending row still gets its review line.
+    events, _ = _notice(tmp_path, [{"release_id": "v2", "pending": True}], release_info)
+    assert [event["kind"] for event in events] == ["notify"] and "releases/0/page" in events[0]["message"]
     promoted_then_pending = [{"release_id": "v1"}, {"release_id": "v2"}, {"release_id": "v3", "pending": True}]
     events, stderr = _notice(tmp_path, promoted_then_pending, release_info)
-    assert [event["kind"] for event in events] == ["select"] and stderr == ""
-    assert "Current: v1" in events[0]["title"] and "Latest:  v2" in events[0]["title"]
-    assert "v3" not in events[0]["title"]
+    assert [event["kind"] for event in events] == ["notify", "select"] and stderr == ""
+    assert "v3 waits for your review" in events[0]["message"]
+    assert "Current: v1" in events[1]["title"] and "Latest:  v2" in events[1]["title"]
+    assert "v3" not in events[1]["title"]
     events, stderr = _notice(tmp_path, promoted_then_pending, release_info, headless=True)
-    assert events == [] and "Latest:  v2" in stderr and "v3" not in stderr
-    # A trial install of the pending release by id (?release_id=v3) is the person's choice: no offer to move back.
+    assert events == [] and "Latest:  v2" in stderr and "Latest:  v3" not in stderr
+    # A trial install of the pending release by id (?release_id=v3) is the person's choice: no offer to move back,
+    # and the review line still stands until a promote.
     trial = {"release_id": "v3"}
-    assert _notice(tmp_path, promoted_then_pending, trial) == ([], "")
-    assert _notice(tmp_path, promoted_then_pending, trial, headless=True) == ([], "")
+    events, stderr = _notice(tmp_path, promoted_then_pending, trial)
+    assert [event["kind"] for event in events] == ["notify"] and stderr == ""
+    events, stderr = _notice(tmp_path, promoted_then_pending, trial, headless=True)
+    assert events == [] and "v3 waits for your review" in stderr
     # Once a promote republishes the trial tree, the promoted head is offered to it.
     promoted = [*promoted_then_pending, {"release_id": "v4", "rollback_target_release_id": "v3"}]
     events, _ = _notice(tmp_path, promoted, trial)
