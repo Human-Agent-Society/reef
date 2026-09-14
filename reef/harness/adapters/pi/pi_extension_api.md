@@ -100,7 +100,7 @@ const result = await pi.exec("git", ["status", "--short"], { signal, timeout: 50
 // result.stdout, result.stderr, result.code, result.killed
 ```
 
-Pass values as arguments, never as shell source.
+Pass values as arguments, never as shell source. The directory of this harness's own pi binary is first on PATH, so pi.exec("pi", ["-p", instruction]) starts a second session with the same models and extensions.
 
 ## Network
 

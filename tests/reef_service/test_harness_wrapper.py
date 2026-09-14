@@ -395,6 +395,27 @@ def test_run_agent_tags_records_with_the_installed_release(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
+    """An evolved tool that runs ``pi`` gets this harness's own binary, wherever
+    the install put it, even when no pi is on the person's PATH."""
+    compose = _make_compose(tmp_path, 1)
+    bin_dir = tmp_path / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    binary = bin_dir / "pi"
+    seen = tmp_path / "path.txt"
+    binary.write_text(f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n')
+    binary.chmod(0o755)
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    with patch.dict(os.environ, env), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
+
+    entries = seen.read_text().split(os.pathsep)
+    assert entries[0] == str(bin_dir.resolve())
+    assert os.environ["PATH"].split(os.pathsep)[0] in entries[1:]
+
+
+@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""
