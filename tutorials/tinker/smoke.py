@@ -1,4 +1,4 @@
-"""Run two short rollouts and one TTTD update against tutorials/tinker/serve.yaml.
+"""Run four short rollouts and one TTTD update against tutorials/tinker/serve.yaml.
 
 Rewards are synthetic so the update has a nonzero signal. This verifies the
 mechanism; it is not a quality evaluation. Running it consumes Tinker credits.
@@ -19,7 +19,7 @@ def main() -> None:
     args = parser.parse_args()
     client = ReefClient(args.url, token=os.environ["REEF_TOKEN"], timeout_s=args.timeout)
     scenario = f"tinker-smoke-{uuid.uuid4().hex[:8]}"
-    for rollout in range(2):
+    for rollout in range(4):
         response, record = client.inference_with_record(
             scenario,
             "/v1/chat/completions",
@@ -42,7 +42,7 @@ def main() -> None:
                     "group": 0,
                     "rollout": rollout,
                     "groups_per_step": 1,
-                    "rollouts_per_group": 2,
+                    "rollouts_per_group": 4,
                     "comparison_set": "tttd-step-0-group-0",
                 },
             },

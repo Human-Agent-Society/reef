@@ -479,7 +479,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     remote = RemoteClient()
     runtime = TinkerRuntime("Qwen/Qwen3-8B", TinkerConfig(state_dir=str(tmp_path / "runtime")), remote)
     dispatcher = Dispatcher(
-        TTTDRecipe(runtime, groups_per_step=1, rollouts_per_group=2),
+        TTTDRecipe(runtime, groups_per_step=1, rollouts_per_group=4),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -492,7 +492,8 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
             monkeypatch.setattr(sys, "argv", [str(script), "--url", str(client.make_url("")), "--timeout", "10"])
             await asyncio.to_thread(runpy.run_path, str(script), run_name="__main__")
         assert len(remote.calls) == 1
-        assert len(remote.calls[0][1][0]) == 2
+        assert len(remote.calls[0][1][0]) == 4
+        assert max(abs(row.advantage) for row in remote.calls[0][1][0]) < 100
         assert isinstance(remote.calls[0][2], TttdTinkerLoss)
 
     try:

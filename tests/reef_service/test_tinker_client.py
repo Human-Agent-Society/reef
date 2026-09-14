@@ -84,8 +84,8 @@ class Service:
         self.events.append(("sampler", model_path))
         return self.sampler
 
-    def close(self):
-        self.events.append(("close",))
+    def close(self, status):
+        self.events.append(("close", status))
         return Future(None)
 
 
@@ -148,6 +148,7 @@ def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     assert events[6][2] is None and events[7][2] is None
     assert checkpoint.state_path == "tinker://next/state"
     assert metrics["optimizer_steps"] == 2
+    assert events[-1] == ("close", "success")
 
 
 def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client):
@@ -156,16 +157,28 @@ def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client)
     client._sdk.fail = True
     with pytest.raises(TimeoutError):
         client.train(base, [[row]], ImportanceSamplingLoss())
-    assert client._sdk.events[-1] == ("close",)
+    assert client._sdk.events[-1] == ("close", "errored")
     assert not any(event[0] == "save_state" for event in client._sdk.events)
     client._sdk.fail = False
     client.train(base, [[row]], ImportanceSamplingLoss())
+    assert client._sdk.events[-1] == ("close", "success")
     assert [event[1] for event in client._sdk.events if event[0] == "restore_with_optimizer"] == [base.state_path] * 2
+
+
+def test_initial_checkpoint_failure_closes_session_as_errored(client, monkeypatch):
+    def fail_save(self, name, ttl_seconds):
+        raise TimeoutError("checkpoint export timed out")
+
+    monkeypatch.setattr(Trainer, "save_state", fail_save)
+    with pytest.raises(TimeoutError, match="checkpoint export timed out"):
+        client.initialize()
+    assert client._sdk.events[-1] == ("close", "errored")
 
 
 def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client):
     checkpoint = client.initialize()
     assert client._sdk.events[1] == ("initialize", client._model, 32, 0)
+    assert client._sdk.events[-1] == ("close", "success")
     result = client.sample(checkpoint, [10, 11], {"max_tokens": 2})
     assert result.tokens == (20, 21)
     assert result.logprobs == (-0.25, -0.5)
@@ -173,6 +186,8 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client):
     client._service.sampler.logprobs = None
     with pytest.raises(ValueError, match="exact log probabilities"):
         client.sample(checkpoint, [10, 11], {"max_tokens": 2})
+    client.close()
+    assert client._sdk.events[-1] == ("close", "success")
 
 
 def test_frozen_base_logprobs_align_to_response_and_reject_missing_values(client):
@@ -199,6 +214,26 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, monkeyp
     assert not any(event[0] == "sample" for event in client._sdk.events)
 
 
+def test_real_chat_template_returns_token_ids_without_model_download(client):
+    transformers = pytest.importorskip("transformers")
+    from tokenizers import Tokenizer, models, pre_tokenizers
+
+    tokenizer = Tokenizer(models.WordLevel({"[UNK]": 0, "hello": 1, "world": 2, "assistant": 3}, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    client._tokenizer = transformers.PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="[UNK]",
+        chat_template=(
+            "{% for message in messages %}{{ message['content'] }} {% endfor %}"
+            "{% if add_generation_prompt %}assistant{% endif %}"
+        ),
+    )
+    assert client.render([{"role": "user", "content": "hello"}], template_kwargs={"enable_thinking": False}) == [1, 3]
+    assert client.render(
+        [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "world"}], template_kwargs={}
+    ) == [1, 2]
+
+
 def test_installed_sdk_call_signatures_and_datum_without_network():
     import inspect
 
@@ -206,6 +241,9 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
     from tinker.lib.public_interfaces.rest_client import RestClient
 
     calls = [
+        (tinker.ServiceClient.close, ("success",), {}),
+        (tinker.ServiceClient.close, ("errored",), {}),
+        (tinker.ServiceClient.create_rest_client, (), {}),
         (tinker.ServiceClient.create_lora_training_client, (), {"base_model": "Qwen/Qwen3-8B", "rank": 32, "seed": 0}),
         (tinker.ServiceClient.create_training_client_from_state_with_optimizer, ("tinker://base/state",), {}),
         (tinker.ServiceClient.create_sampling_client, (), {"model_path": "tinker://base/sampler"}),
@@ -215,6 +253,8 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
         (tinker.TrainingClient.save_state, ("checkpoint",), {"ttl_seconds": None}),
         (tinker.TrainingClient.save_weights_for_sampler, ("checkpoint",), {"ttl_seconds": None}),
         (tinker.SamplingClient.get_base_model, (), {}),
+        (tinker.SamplingClient.get_tokenizer, (), {}),
+        (tinker.SamplingClient.compute_logprobs, (tinker.ModelInput.from_ints([10, 11]),), {}),
         (
             tinker.SamplingClient.sample,
             (),

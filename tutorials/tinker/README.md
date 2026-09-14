@@ -1,6 +1,8 @@
 # Tinker training smoke
 
-This runs two text completions (at most 32 new tokens each), assigns **synthetic** rewards 0 and 1, and waits for one TTTD training commit. It checks the inference → feedback → training → publication mechanism, not model quality. Both serving startup and the smoke use the paid Tinker API; no live result is included with this example.
+This runs four text completions (at most 32 new tokens each), assigns **synthetic** rewards 0, 1, 2, and 3, and waits for one TTTD training commit. It checks the inference → feedback → training → publication mechanism, not model quality. Both serving startup and the smoke use the paid Tinker API.
+
+Four rollouts keep TTTD's adaptive-entropic advantages moderate for these rewards. With only two distinct rewards, its fixed `log(2)` KL target reaches the maximum possible concentration, and the leave-one-out normalization can produce advantages near `1e12`.
 
 Use Python 3.11+ on Linux or macOS, Git LFS, and a Tinker account with access to the configured model. From the Reef checkout:
 

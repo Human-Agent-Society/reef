@@ -71,7 +71,7 @@ class TinkerSDKClient(TinkerClient):
             self._base_sampler = self._service.create_sampling_client(base_model=base_model)
             self._tokenizer = self._base_sampler.get_tokenizer()
         except BaseException:
-            self._service.close().result(timeout=self._config.train_timeout_s)
+            self._service.close("errored").result(timeout=self._config.train_timeout_s)
             raise
 
     def _new_service(self) -> Any:
@@ -90,18 +90,22 @@ class TinkerSDKClient(TinkerClient):
 
     def initialize(self) -> TinkerCheckpoint:
         service = self._new_service()
+        status = "errored"
         try:
             trainer = service.create_lora_training_client(
                 base_model=self._model, rank=self._config.lora_rank, seed=self._config.seed
             )
-            return self._save(trainer)
+            checkpoint = self._save(trainer)
+            status = "success"
+            return checkpoint
         finally:
-            service.close().result(timeout=self._config.train_timeout_s)
+            service.close(status).result(timeout=self._config.train_timeout_s)
 
     def train(
         self, checkpoint: TinkerCheckpoint, batches: Sequence[Sequence[TokenRow]], loss: TinkerLoss
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
         service = self._new_service()
+        status = "errored"
         try:
             # Every attempt owns a new model, restored WITH optimizer state.
             # An uncertain remote result can never mutate the incumbent model.
@@ -133,9 +137,11 @@ class TinkerSDKClient(TinkerClient):
                     timeout=self._config.train_timeout_s
                 )
             metrics["optimizer_steps"] = len(batches)
-            return self._save(trainer), metrics
+            result_checkpoint = self._save(trainer)
+            status = "success"
+            return result_checkpoint, metrics
         finally:
-            service.close().result(timeout=self._config.train_timeout_s)
+            service.close(status).result(timeout=self._config.train_timeout_s)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
         result = []
@@ -157,6 +163,7 @@ class TinkerSDKClient(TinkerClient):
             self._tokenizer.apply_chat_template(
                 messages,
                 tokenize=True,
+                return_dict=False,
                 add_generation_prompt=not prefill,
                 continue_final_message=prefill,
                 **template_kwargs,
@@ -186,4 +193,4 @@ class TinkerSDKClient(TinkerClient):
         return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
 
     def close(self) -> None:
-        self._service.close().result(timeout=self._config.train_timeout_s)
+        self._service.close("success").result(timeout=self._config.train_timeout_s)

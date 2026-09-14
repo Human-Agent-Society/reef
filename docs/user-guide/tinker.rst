@@ -23,8 +23,8 @@ when the selected runtime starts; neither resolved configuration nor checkpoint
 manifests contain the key. ``training.options.api-key-env`` selects a different
 environment variable. An optional ``project-id`` selects the Tinker project.
 
-The `two-rollout smoke <../../tutorials/tinker/README.md>`__ includes a complete
-config and runner. It creates one adapter, generates two short responses, and
+The `four-rollout smoke <../../tutorials/tinker/README.md>`__ includes a complete
+config and runner. It creates one adapter, generates four short responses, and
 performs one optimizer step with synthetic rewards. Running it uses Tinker
 credits; it is a mechanism check, not a benchmark or a model-quality claim.
 
