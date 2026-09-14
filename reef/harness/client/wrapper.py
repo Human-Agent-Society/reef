@@ -648,6 +648,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     env["REEF_HARNESS_DEST"] = str(Path(compose_dir).resolve().parent)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
+    # An evolved tool that starts a second agent session finds this harness's own binary first.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
