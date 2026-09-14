@@ -15,6 +15,7 @@ reef_types = pytest.importorskip("reef.train.types", reason="requires a reef che
 
 from recipes.beta.coral.processor import ROOT_GROUP, CoralProcessor
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import ArtifactRef
 from reef.train.types import ProcessorContext, TrainingBatch
 
 SCENARIO = "coral-demo"
@@ -24,7 +25,7 @@ def _processor(group_size=2, **config):
     return CoralProcessor(ProcessorContext(SCENARIO, {"group_size": group_size, **config}))
 
 
-def _inference(record_id, tokens, loss_mask, log_probs):
+def _inference(record_id, tokens, loss_mask, log_probs, release="wv-1"):
     return AgentRecord.create(
         scenario=SCENARIO,
         request_type=RequestType.INFERENCE,
@@ -35,10 +36,11 @@ def _inference(record_id, tokens, loss_mask, log_probs):
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": log_probs,
-                    "runtime_load_id": "wv-1",
+                    "runtime_load_id": release,
                 }
             }
         },
+        artifact_ref=ArtifactRef(content_id="c", release_id=release, parent_release_id=None),
     )
 
 
@@ -161,6 +163,7 @@ def test_status_is_a_mapping_even_before_any_discard():
         "terminal_call_fallbacks": 0,
         "fallback_calls_kept": 0,
         "fallback_calls_total": 0,
+        "release_truncations": 0,
     }
 
 
@@ -228,3 +231,17 @@ def test_group_by_agent_keeps_agents_apart():
     assert processor.ready()
     (group,) = trajectory_groups(processor.build_batch())
     assert sorted(trajectory_reward(sample) for sample in group) == [0.3, 0.5]
+
+
+def test_attempt_spanning_a_weight_update_trains_on_the_new_release_suffix():
+    processor = _processor(group_size=2)
+    processor.ingest(_inference("i1", [1, 2], [1], [-0.1], release="wv-1"))
+    processor.ingest(_inference("i2", [1, 2, 3, 4], [1], [-0.2], release="wv-2"))  # after the update
+    processor.ingest(_inference("i3", [5, 6], [1], [-0.3], release="wv-2"))
+    processor.ingest(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
+    processor.ingest(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
+    assert processor.ready()
+    (group,) = trajectory_groups(processor.build_batch())
+    cut = next(s for s in group if trajectory_reward(s) == 0.5)
+    assert list(cut.training["tokens"]) == [1, 2, 3, 4]
+    assert processor.status()["release_truncations"] == 1

@@ -76,6 +76,7 @@ class CoralProcessor(ReportedFeedbackProcessor):
         self._terminal_call_fallbacks = 0
         self._fallback_calls_kept = 0
         self._fallback_calls_total = 0
+        self._release_truncations = 0
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
     @staticmethod
@@ -98,7 +99,21 @@ class CoralProcessor(ReportedFeedbackProcessor):
             inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
         }
         if len(release_ids) > 1:
-            raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
+            # The policy was updated while this attempt was running. Its
+            # calls under the earlier release cannot share an importance
+            # ratio with the later ones, and a data error here would stop the
+            # scenario's training, so keep the calls made under the release
+            # that produced the graded submission (a suffix: calls are
+            # time-ordered) and train on those.
+            latest = context.inferences[-1].artifact_ref.release_id if context.inferences[-1].artifact_ref else None
+            kept = tuple(
+                inference
+                for inference in context.inferences
+                if inference.artifact_ref is not None and inference.artifact_ref.release_id == latest
+            )
+            context = replace(context, inferences=kept)
+            release_ids = {latest}
+            self._release_truncations += 1
         score = context.require_score()
         try:
             sample = self._assembly.build(context, score)
@@ -189,6 +204,9 @@ class CoralProcessor(ReportedFeedbackProcessor):
             "terminal_call_fallbacks": self._terminal_call_fallbacks,
             "fallback_calls_kept": self._fallback_calls_kept,
             "fallback_calls_total": self._fallback_calls_total,
+            # Attempts that spanned a weight update and were cut to the calls
+            # made under the release that produced the graded submission.
+            "release_truncations": self._release_truncations,
         }
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
