@@ -1563,9 +1563,11 @@ def test_main_passes_release_to_setup_only_when_named(tmp_path) -> None:
 class _DoctorReef:
     """A reef that serves only the harness routes, checks the bearer on them, and names one served head."""
 
-    def __init__(self, token: str, head: str) -> None:
+    def __init__(self, token: str, head: str, rows: list[dict] | None = None) -> None:
         import http.server
         import threading
+
+        catalog = rows if rows is not None else [{"release_id": head, "pending": False}]
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
@@ -1573,7 +1575,7 @@ class _DoctorReef:
                 if self.headers.get("Authorization") != f"Bearer {token}":
                     code, payload = 401, {"error": "invalid service token"}
                 elif self.path == "/reef/harness/releases":
-                    code, payload = 200, {"releases": [{"release_id": head, "pending": False}]}
+                    code, payload = 200, {"releases": catalog}
                 else:
                     code, payload = 404, {}
                 raw = json.dumps(payload).encode()
@@ -1592,6 +1594,39 @@ class _DoctorReef:
 
     def close(self) -> None:
         self._server.shutdown()
+
+
+@pytest.mark.unit
+def test_doctor_names_a_release_that_waits_for_review(tmp_path, capsys, monkeypatch) -> None:
+    """A pending release is served to nobody until a person promotes it; doctor says so
+    with the step page, and stops saying so once a promote row names it."""
+    from reef.harness.client.wrapper import doctor
+
+    held = [{"release_id": "rel-3", "pending": False}, {"release_id": "rel-4", "pending": True}]
+    reef = _DoctorReef(token="dummy", head="rel-3", rows=held)
+    compose, _ = _ask_tree(tmp_path, reef.port)
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("ok  release") and "rel-3 installed, the served head" in line for line in out)
+    (review,) = [line for line in out if line.startswith("ok  review")]
+    assert f"rel-4 waits for your review: http://127.0.0.1:{reef.port}/reef/harness/releases/1/page" in review
+    reef.close()
+
+    promoted = [
+        *held,
+        {"release_id": "rel-5", "pending": False, "operation": "promote", "rollback_target_release_id": "rel-4"},
+    ]
+    reef = _DoctorReef(token="dummy", head="rel-3", rows=promoted)
+    (tmp_path / "promoted").mkdir()
+    compose, _ = _ask_tree(tmp_path / "promoted", reef.port)
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    assert not [line for line in capsys.readouterr().out.splitlines() if line.startswith("ok  review")]
+    reef.close()
 
 
 @pytest.mark.unit

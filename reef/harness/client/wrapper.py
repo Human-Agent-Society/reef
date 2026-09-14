@@ -32,8 +32,9 @@ When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
   Prints one line per thing an install needs and exits 0 when they all hold:
   the interpreter behind the wrapper and whether it imports reef and
   reef-client, the service address and whether the token is accepted, the
-  agent binary and its version, the tools the adapter wants on PATH, and the
-  installed release against the served head.
+  agent binary and its version, the tools the adapter wants on PATH, the
+  installed release against the served head, and any release that waits for
+  a person's review with its step page.
 
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``):
@@ -1005,9 +1006,21 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             )
     else:
         rows.append((True, "release", f"{installed[:8]} installed"))
+    if catalog is not None:
+        for step, waiting in _waiting_for_review(catalog):
+            page = f"{upstream}/reef/harness/releases/{step}/page"
+            rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
     return 0 if all(ok for ok, _, _ in rows) else 1
+
+
+def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Mapping[str, Any]]]:
+    """The pending rows no later promote row names, each with its step: held for a person, served to nobody."""
+    promoted = {row.get("rollback_target_release_id") for row in rows if row.get("operation") == "promote"}
+    return [
+        (step, row) for step, row in enumerate(rows) if row.get("pending") and row.get("release_id") not in promoted
+    ]
 
 
 def main() -> None:
