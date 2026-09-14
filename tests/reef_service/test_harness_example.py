@@ -152,7 +152,7 @@ def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     model = canned(proposal("answer-style"))
     (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert (mutation.op, mutation.id) == ("update", "answer-style")
-    assert model.calls == 1
+    assert model.calls == 2  # the plan call, then the entries
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
@@ -215,7 +215,7 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     mutations = evolution.propose(
         (*NODES, ("rules", {"text": "Be brief."}), API_SKILL), (), model, requests=(REQUEST,)
     )
-    assert model.calls == 1
+    assert model.calls == 2  # the plan call, then the entries
     prompt = model.prompt
     assert REQUEST["text"] in prompt and "[BEGIN user request" in prompt
     assert '"id": "answer-style"' in prompt and '"body": "# answer-style' in prompt
@@ -225,6 +225,9 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
         assert reserved in prompt
     for kind in ("skill", "rules", "agent_command", "code_extension"):
         assert f"- {kind}:" in prompt
+    # The tool must run on every platform; a canned reply names no tool step, so the write prompt carries no plan.
+    assert "macOS, Linux or Windows under WSL 2" in prompt and "process.platform" in prompt
+    assert "need a tool the harness does not have" not in prompt
     assert [(m.op, m.id, m.options) for m in mutations] == [
         ("create", "test-first", {"name": "skill", "config": skill})
     ]
@@ -232,6 +235,54 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert "pi.registerTool" not in model.prompt and "code_extension" in model.prompt
+
+
+class Sequenced(Model):
+    """A ModelBindings stand-in whose ``served`` answers one canned reply per call, in order."""
+
+    def __init__(self, *replies: str) -> None:
+        super().__init__(replies[-1])
+        self.replies = list(replies)
+        self.prompts: list[str] = []
+
+    def chat(self, messages, **params):
+        self.prompts.append(messages[-1]["content"])
+        reply = self.replies[len(self.prompts) - 1] if len(self.prompts) <= len(self.replies) else self.replies[-1]
+        self.reply = reply
+        return super().chat(messages, **params)
+
+
+def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness_cannot_perform(evolution) -> None:
+    """The first call lists the request's steps; the ones the harness cannot perform go into the second
+    call's prompt with the demand for a code_extension beside the rule. A plan the model does not give
+    in that shape, or a step it can perform, adds nothing."""
+    plan = json.dumps(
+        [
+            {"step": "reproduce the bug with a failing test", "needs_tool": False},
+            {"step": "have a second agent review the diff", "needs_tool": True},
+        ]
+    )
+    entries = request_reply({"id": "bug-fix-workflow", "name": "rules", "config": {"text": "# Bug fix\n"}})
+    model = Sequenced(plan, entries)
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert model.calls == 2 and [m.id for m in mutations] == ["bug-fix-workflow"]
+    plan_prompt, write_prompt = model.prompts
+    assert REQUEST["text"] in plan_prompt and '"needs_tool": true or false' in plan_prompt
+    assert "need a tool the harness does not have" in write_prompt
+    assert "- have a second agent review the diff" in write_prompt
+    assert (
+        "reproduce the bug with a failing test"
+        not in write_prompt.split("need a tool the harness does not have")[1].split("\n\n")[0]
+    )
+    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}
+    # No step needs a tool: the write prompt carries no plan section.
+    model = Sequenced(json.dumps([{"step": "run the tests", "needs_tool": False}]), entries)
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "need a tool the harness does not have" not in model.prompts[1]
+    # A plan call that fails, or answers prose, leaves the request answered as before.
+    model = Sequenced("I cannot list steps.", entries)
+    assert [m.id for m in evolution.propose(NODES, (), model, requests=(REQUEST,))] == ["bug-fix-workflow"]
+    assert "need a tool the harness does not have" not in model.prompts[1]
 
 
 def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
@@ -312,14 +363,14 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 120 s and 4096 tokens, the failure path with 60 s and 2048, unless
-    REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say otherwise; a value that is not a number is
-    ignored rather than turning the step into an error."""
+    """The request path asks with 600 s and 65536 tokens (its plan call before that with 60 s and 4096), the
+    failure path with 60 s and 2048, unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say
+    otherwise; a value that is not a number is ignored rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 120.0, "max_tokens": 4096}
+    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}  # the entries call, after the plan
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
     assert model.params == {"timeout_s": 60.0, "max_tokens": 2048}
@@ -331,7 +382,7 @@ def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evoluti
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 900.0, "max_tokens": 4096}
+    assert model.params == {"timeout_s": 900.0, "max_tokens": 65536}
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:

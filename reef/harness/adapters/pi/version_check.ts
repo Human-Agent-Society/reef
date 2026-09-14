@@ -72,6 +72,14 @@ export default function versionCheck(pi) {
     if (!response.ok) return;
     const { releases } = await response.json();
     if (!Array.isArray(releases)) return;
+    // A release held for review is served to nobody until a person promotes it; say so, once per session.
+    releases.forEach((row, step) => {
+      if (!row || !row.pending) return;
+      if (releases.some((other) => other && other.rollback_target_release_id === row.release_id)) return;
+      const notice = `Reef: release ${row.release_id} waits for your review: ${serviceUrl}/reef/harness/releases/${step}/page`;
+      if (ctx.hasUI) ctx.ui.notify(notice, "info");
+      else console.error(notice);
+    });
     // A release held for review is served to no session, so it is never the head this offers.
     const head = [...releases].reverse().find((row) => row && !row.pending);
     if (!head || head.release_id === pinned) return;
