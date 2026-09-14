@@ -836,7 +836,8 @@ def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
     wait_for_step(dispatcher, 1)
 
     backend = dispatcher.get_or_create_scenario("math").repository.backend
-    metadata = backend.metadata()["scenario_commit_record"]
+    # The manifest key is the on-disk contract deployments registered under; it does not follow code renames.
+    metadata = backend.metadata()["scenario_snapshot"]
     assert metadata["scenario_step"] == 1
     assert metadata["algorithm_state"] == {"steps": 1}
     assert metadata["record_progress"] == {

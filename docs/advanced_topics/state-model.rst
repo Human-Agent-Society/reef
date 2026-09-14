@@ -124,7 +124,8 @@ rejects the step before its records are compacted. In-memory commit history
 supports retries only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record``. Recovery decodes it into a ``CommitRecord`` and
+under ``scenario_snapshot``, the key every registered deployment already holds
+in its manifests. Recovery decodes it into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the local log can

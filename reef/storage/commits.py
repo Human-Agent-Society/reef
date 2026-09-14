@@ -225,7 +225,9 @@ class CommitRecord:
         return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.artifact_ref.release_id!r})"
 
 
-SCENARIO_METADATA_KEY = "scenario_commit_record"
+# The key under which every artifact manifest on disk carries the registration; a deployment's
+# scenarios stop loading if it changes, so it stays as first written even as the code around it is renamed.
+SCENARIO_METADATA_KEY = "scenario_snapshot"
 SCENARIO_METADATA_KIND = "reef-scenario/4"
 
 
