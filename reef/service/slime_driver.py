@@ -45,7 +45,7 @@ from reef.recipe import RecipeConfigError, WeightTrainingRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.arguments import native_arguments
 from reef.runtime.names import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE
-from reef.service.deploy.config_utils import config_value, load_config
+from reef.service.deploy.config_utils import config_value, interpolate_config_values, load_config
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
@@ -296,6 +296,17 @@ def _job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]
     return {"env_vars": {"PYTHONPATH": pythonpath}}
 
 
+def _native_option_arguments(config: Mapping[str, Any]) -> list[str]:
+    """Slime flags from ``reef.training_backend_options``, with config references resolved.
+
+    The launcher records references such as ``${reef.model_path}`` in the
+    native options and the runtime config is written un-interpolated, so the
+    driver resolves them against the config it was handed.
+    """
+    options = config.get("reef", {}).get("training_backend_options", {})
+    return native_arguments(interpolate_config_values(config, options))
+
+
 def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     # Remove a stale marker before parsing or connecting. This also makes a
     # configuration error fail closed instead of advertising the previous job.
@@ -307,7 +318,7 @@ def _serve(direct_args: Sequence[str], ready_file: Path) -> int:
     config = load_config(_required_environment("REEF_CONFIG"))
     loss_family, recipe, spec = _resolve_training_recipe(config)
     combined_args = [
-        *native_arguments(config.get("reef", {}).get("training_backend_options", {})),
+        *_native_option_arguments(config),
         *(load_args_file(args_file) if args_file else []),
         *direct_args,
     ]

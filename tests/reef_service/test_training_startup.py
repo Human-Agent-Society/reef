@@ -305,3 +305,17 @@ HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
         for pid in json.loads(path.read_text())["pids"].values():
             with pytest.raises(ProcessLookupError):
                 os.kill(pid, 0)
+
+
+def test_driver_resolves_config_references_in_native_options():
+    """The launcher stores ``${reef.model_path}`` as the hf-checkpoint; the
+    driver must resolve it against the runtime config, not hand it to Slime."""
+    from reef.service.slime_driver import _native_option_arguments
+
+    config = {
+        "reef": {
+            "model_path": "/models/qwen",
+            "training_backend_options": {"hf-checkpoint": "${reef.model_path}", "lr": "4e-5"},
+        }
+    }
+    assert _native_option_arguments(config) == ["--hf-checkpoint=/models/qwen", "--lr=4e-5"]
