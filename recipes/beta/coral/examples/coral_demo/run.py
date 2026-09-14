@@ -38,6 +38,7 @@ from pathlib import Path
 
 from coral.agent.manager import AgentManager  # CORAL: pinned commit, see README
 from coral.config import CoralConfig
+from coral.workspace.project import ProjectPaths
 from recipes.beta.coral.bundle import build_result_bundle
 from recipes.beta.coral.gateway_launcher import attach_reef_adapter_to_agent_manager
 from recipes.beta.coral.watcher import AttemptWatcher
@@ -46,6 +47,36 @@ DEFAULT_REEF_URL = "http://127.0.0.1:8900"
 DEMO_TASK_DIR = Path(__file__).resolve().parent / "task"
 REEF_LITELLM_CONFIG = DEMO_TASK_DIR / "litellm_config.yaml"
 REEF_MODEL = "openai/reef-policy"
+
+
+RESUME_INSTRUCTION = (
+    "The run is not finished: the task is open-ended and the goal is to keep raising the score. "
+    "Read your notes and the attempt history, pick the next concrete change most likely to improve "
+    "the best score, implement it, and submit it with `coral eval -m ...`."
+)
+
+
+def latest_run_paths(config: CoralConfig, state: Path) -> ProjectPaths:
+    """The ProjectPaths of the most recent CORAL run under this launch's results dir."""
+    results_dir = Path(config.workspace.results_dir)
+    task_dirs = [d for d in results_dir.iterdir() if d.is_dir()] if results_dir.is_dir() else []
+    if not task_dirs:
+        raise SystemExit(f"--resume: no CORAL run under {results_dir}")
+    task_dir = max(task_dirs, key=lambda d: d.stat().st_mtime)
+    latest = task_dir / "latest"
+    run_dir = (
+        latest.resolve()
+        if latest.exists()
+        else max((d for d in task_dir.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+    )
+    return ProjectPaths(
+        results_dir=results_dir,
+        task_dir=task_dir,
+        run_dir=run_dir,
+        coral_dir=run_dir / ".coral",
+        agents_dir=run_dir / "agents",
+        repo_dir=run_dir / "repo",
+    )
 
 
 def _probe(url: str) -> bool:
@@ -120,6 +151,16 @@ def main() -> int:
     parser.add_argument("--gateway-port", type=int, default=0, help="override the gateway port")
     parser.add_argument("--reef-token", default=os.environ.get("REEF_TOKEN", "reef-local"))
     parser.add_argument("--reef-url", default=os.environ.get("REEF_URL", DEFAULT_REEF_URL))
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="resume the latest CORAL run under --work (worktrees, notes and attempt history kept) instead of starting one",
+    )
+    parser.add_argument(
+        "--fresh-sessions",
+        action="store_true",
+        help="with --resume: start new agent sessions instead of continuing the saved ones",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -134,7 +175,13 @@ def main() -> int:
     if not (task_dir / "task.yaml").is_file():
         raise SystemExit(f"--task {task_dir} does not contain a task.yaml")
     config = load_config(args, state, task_dir)
-    run_id = f"coral-ttt-{time.strftime('%Y%m%d-%H%M%S')}"
+    run_id_path = state / "reef" / "run_id"
+    if args.resume and run_id_path.is_file():
+        run_id = run_id_path.read_text().strip()
+    else:
+        run_id = f"coral-ttt-{time.strftime('%Y%m%d-%H%M%S')}"
+        run_id_path.parent.mkdir(parents=True, exist_ok=True)
+        run_id_path.write_text(run_id)
     manager = AgentManager(config, verbose=True, config_dir=task_dir)
     journal = attach_reef_adapter_to_agent_manager(
         manager,
@@ -143,7 +190,16 @@ def main() -> int:
         extra_tags={"coral-run": run_id},
     )
 
-    manager.start_all()
+    if args.resume:
+        paths = latest_run_paths(config, state)
+        if args.fresh_sessions:
+            # The saved opencode session ends with the agent's own "task
+            # complete" summary; resuming it reproduces that. A fresh session
+            # in the same worktree keeps the code, notes and attempt history.
+            (paths.coral_dir / "public" / "sessions.json").unlink(missing_ok=True)
+        manager.resume_all(paths, instruction=RESUME_INSTRUCTION)
+    else:
+        manager.start_all()
     if manager.paths is None:
         raise RuntimeError("CORAL manager did not initialize run paths")
     print(f"CORAL run dir: {manager.paths.run_dir}  (reef run id: {run_id})")
