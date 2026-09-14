@@ -30,7 +30,8 @@ class CoralRecipe(WeightTrainingRecipe):
     name: str = "coral"
     #: Scored siblings of one parent commit required before their group trains.
     group_size: int = config_field(4, env="REEF_CORAL_GROUP_SIZE")
-    #: ``parent`` (siblings of one parent commit) or ``release`` (attempts under one policy release).
+    #: ``parent`` (siblings of one parent commit), ``release`` (attempts under one policy
+    #: release) or ``agent`` (one agent's attempts under one policy release).
     group_by: str = config_field("parent", env="REEF_CORAL_GROUP_BY")
 
     @classmethod
@@ -42,6 +43,6 @@ class CoralRecipe(WeightTrainingRecipe):
         # without a fully constructed training runtime.
         if self.group_size < 2:
             raise ValueError("group_size must be at least two (relative rewards need contrast)")
-        if self.group_by not in ("parent", "release"):
-            raise ValueError("group_by must be 'parent' or 'release'")
+        if self.group_by not in ("parent", "release", "agent"):
+            raise ValueError("group_by must be 'parent', 'release' or 'agent'")
         super().__post_init__()

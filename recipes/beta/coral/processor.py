@@ -48,7 +48,9 @@ class CoralProcessor(ReportedFeedbackProcessor):
     - ``group_by`` (default ``parent``): ``parent`` groups scored siblings of
       one parent commit; ``release`` groups scored attempts produced under one
       policy release, which is what a single-agent linear evolution needs to
-      ever form a group.
+      ever form a group; ``agent`` groups one agent's attempts under one
+      policy release, so multi-agent runs compare each agent's own lineage
+      instead of mixing agents that started from different commits.
     """
 
     output_schema = TrainingBatch
@@ -61,13 +63,19 @@ class CoralProcessor(ReportedFeedbackProcessor):
         if self.group_size < 2:
             raise ValueError("group_size must be at least two (relative rewards need contrast)")
         self.group_by = str(config.get("group_by", "parent"))
-        if self.group_by not in ("parent", "release"):
-            raise ValueError("group_by must be 'parent' or 'release'")
+        if self.group_by not in ("parent", "release", "agent"):
+            raise ValueError("group_by must be 'parent', 'release' or 'agent'")
         config.setdefault("accept_multi_turn_policy_samples", True)
+        # Qwen3-style templates re-render the previous assistant turn a few
+        # tokens differently (empty think block); that is masked scaffold,
+        # not a fork.
+        config.setdefault("scaffold_tolerance", 8)
         assembly_config = context.with_config(config)
         self._assembly = SampleAssembly.from_config(assembly_config)
         self._mixed_release_groups: dict[str, tuple[str, ...]] = {}
         self._terminal_call_fallbacks = 0
+        self._fallback_calls_kept = 0
+        self._fallback_calls_total = 0
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
     @staticmethod
@@ -97,17 +105,35 @@ class CoralProcessor(ReportedFeedbackProcessor):
         except ValueError:
             if len(context.inferences) < 2:
                 raise
-            # A coding-agent episode is not always one linear prompt
-            # extension: the runtime compacts or re-renders history between
-            # calls, and the shared assembler treats that as a fork. The last
-            # call is the one that produced the graded submission, so train on
-            # it alone rather than dropping the attempt.
-            sample = self._assembly.build(replace(context, inferences=context.inferences[-1:]), score)
-            self._terminal_call_fallbacks += 1
+            sample = self._longest_linear_suffix(context, score)
         release_id = next(iter(release_ids), None)
         return sample.with_metadata(
             coral={**coral, "group": self._group_key(coral, release_id), "release_id": release_id}
         )
+
+    def _longest_linear_suffix(self, context: ReportContext, score: float) -> TrajectoryItem:
+        """Assemble the longest run of calls, ending at the graded one, that is one linear episode.
+
+        A coding agent's call sequence is not always one prompt extension: the
+        runtime compacts history, re-renders the system prompt, and interleaves
+        small helper calls, and the shared assembler treats each of those as a
+        fork. Whether a suffix assembles is monotone in its length, so binary
+        search the longest one. The final call always assembles alone.
+        """
+        inferences = context.inferences
+        low, high = 1, len(inferences)  # low assembles (single call); high does not (just failed)
+        while high - low > 1:
+            mid = (low + high) // 2
+            try:
+                self._assembly.build(replace(context, inferences=inferences[-mid:]), score)
+                low = mid
+            except ValueError:
+                high = mid
+        sample = self._assembly.build(replace(context, inferences=inferences[-low:]), score)
+        self._terminal_call_fallbacks += 1
+        self._fallback_calls_kept += low
+        self._fallback_calls_total += len(inferences)
+        return sample
 
     def _group_key(self, coral: Mapping[str, Any], release_id: str | None) -> str:
         if self.group_by == "release":
@@ -117,6 +143,8 @@ class CoralProcessor(ReportedFeedbackProcessor):
             # produced the attempts gives the TTT-Discover comparison set
             # instead: scored attempts at the same problem under one policy.
             return f"release:{release_id or 'none'}"
+        if self.group_by == "agent":
+            return f"agent:{coral.get('agent_id', 'unknown')}:{release_id or 'none'}"
         parent = coral.get("parent_hash")
         return parent if isinstance(parent, str) and parent else ROOT_GROUP
 
@@ -155,9 +183,12 @@ class CoralProcessor(ReportedFeedbackProcessor):
                 {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
                 for parent, versions in sorted(self._mixed_release_groups.items())
             ],
-            # Attempts whose call sequence could not be linearized and were
-            # trained on their terminal call instead.
+            # Attempts whose call sequence could not be linearized as a whole
+            # and were trained on their longest linear suffix instead, and
+            # how many of those attempts' calls that suffix kept.
             "terminal_call_fallbacks": self._terminal_call_fallbacks,
+            "fallback_calls_kept": self._fallback_calls_kept,
+            "fallback_calls_total": self._fallback_calls_total,
         }
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:

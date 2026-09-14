@@ -156,23 +156,48 @@ def test_status_is_a_mapping_even_before_any_discard():
     status() call .items() on the base's discard set."""
     processor = _processor()
     status = processor.status()
-    assert status == {"discarded_groups": [], "terminal_call_fallbacks": 0}
+    assert status == {
+        "discarded_groups": [],
+        "terminal_call_fallbacks": 0,
+        "fallback_calls_kept": 0,
+        "fallback_calls_total": 0,
+    }
 
 
-def test_forked_multi_call_attempt_falls_back_to_terminal_call():
-    """A call sequence the assembler cannot linearize trains on its last call."""
+def test_forked_attempt_trains_on_its_longest_linear_suffix():
+    """A fork early in the call sequence drops only the calls before it."""
     processor = _processor(group_size=2)
-    processor.ingest(_inference("i1", [1, 2, 3], [1], [-0.1]))
-    processor.ingest(_inference("i2", [9, 9, 4], [1], [-0.2]))  # diverges from i1's prompt: a fork
+    # A fork is a divergence larger than the realign window (1024 tokens), the
+    # way a compacted history or a re-rendered system prompt shows up.
+    a, b = [1] * 1100, [9] * 1100
+    processor.ingest(_inference("i1", a + [3], [1], [-0.1]))
+    processor.ingest(_inference("i2", b + [4], [1], [-0.2]))  # diverges from i1: a fork
+    processor.ingest(_inference("i3", b + [4, 7, 5], [1], [-0.3]))  # extends i2
+    processor.ingest(_inference("i4", b + [4, 7, 5, 8, 6], [1], [-0.4]))  # extends i3
+    processor.ingest(_inference("i5", [5, 6], [1], [-0.5]))
+    processor.ingest(_attempt_report("r1", ("i1", "i2", "i3", "i4"), 0.5, commit="c-a", parent="p0"))
+    processor.ingest(_attempt_report("r2", "i5", 0.8, commit="c-b", parent="p0"))
+    assert processor.ready()
+    (group,) = trajectory_groups(processor.build_batch())
+    kept = next(s for s in group if trajectory_reward(s) == 0.5)
+    assert kept.training["turn_count"] == 3  # i2, i3, i4; i1 dropped
+    status = processor.status()
+    assert status["terminal_call_fallbacks"] == 1
+    assert (status["fallback_calls_kept"], status["fallback_calls_total"]) == (3, 4)
+
+
+def test_fork_at_the_last_call_keeps_only_that_call():
+    processor = _processor(group_size=2)
+    a, b = [1] * 1100, [9] * 1100
+    processor.ingest(_inference("i1", a + [3], [1], [-0.1]))
+    processor.ingest(_inference("i2", b + [4], [1], [-0.2]))  # fork right before the graded call
     processor.ingest(_inference("i3", [5, 6], [1], [-0.3]))
     processor.ingest(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
     processor.ingest(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
-    assert processor.ready()
     (group,) = trajectory_groups(processor.build_batch())
-    fallback = next(s for s in group if trajectory_reward(s) == 0.5)
-    assert fallback.training.get("turn_count", 1) == 1
-    assert list(fallback.training["tokens"]) == [9, 9, 4]
-    assert processor.status()["terminal_call_fallbacks"] == 1
+    kept = next(s for s in group if trajectory_reward(s) == 0.5)
+    assert list(kept.training["tokens"]) == b + [4]
+    assert processor.status()["fallback_calls_kept"] == 1
 
 
 def test_group_by_release_groups_a_linear_lineage():
@@ -190,3 +215,16 @@ def test_group_by_release_groups_a_linear_lineage():
 def test_group_by_rejects_unknown_mode():
     with pytest.raises(ValueError):
         _processor(group_by="commit")
+
+
+def test_group_by_agent_keeps_agents_apart():
+    processor = _processor(group_size=2, group_by="agent")
+    for i in range(1, 5):
+        processor.ingest(_inference(f"i{i}", [i, i + 1], [1], [-0.1]))
+    processor.ingest(_attempt_report("r1", "i1", 0.3, commit="c-a", parent="p0", agent="alpha"))
+    processor.ingest(_attempt_report("r2", "i2", 0.9, commit="c-b", parent="p1", agent="beta"))
+    assert not processor.ready()  # different agents never share a group
+    processor.ingest(_attempt_report("r3", "i3", 0.5, commit="c-c", parent="c-a", agent="alpha"))
+    assert processor.ready()
+    (group,) = trajectory_groups(processor.build_batch())
+    assert sorted(trajectory_reward(sample) for sample in group) == [0.3, 0.5]
