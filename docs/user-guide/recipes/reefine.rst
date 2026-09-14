@@ -43,9 +43,11 @@ All ``CordisRecipe`` evolution settings remain available, including custom
 proposers, seeds, execution settings, and publication policies.
 
 ``REEF_PROPOSER_TIMEOUT_S`` and ``REEF_PROPOSER_MAX_TOKENS`` override the model
-call budgets. Defaults are 120 seconds and 4096 reply tokens for instructions,
-60 seconds and 2048 tokens for failure-driven proposals. The tutorial's
-``run.sh`` raises these to 900 seconds and 16384 tokens for its local model.
+call budgets. Defaults are 600 seconds and 65536 reply tokens for the call that
+answers an instruction (a thinking model reasons for tens of thousands of tokens
+before it writes an extension), 60 seconds and 4096 tokens for the short plan
+call before it, and 60 seconds and 2048 tokens for failure-driven proposals.
+The tutorial's ``run.sh`` sets 900 seconds and 16384 tokens for its local model.
 
 Migration
 ---------
