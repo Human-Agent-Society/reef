@@ -261,7 +261,7 @@ def build_serve_parser(
         "--model",
         default=None,
         metavar="[PROVIDER/]MODEL",
-        help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
+        help="The upstream model; a known provider prefix (ollama, openai, aimlapi) fills the URL and the key.",
     )
     parser.add_argument(
         "--print-config",

@@ -118,6 +118,17 @@ omits `model.path` and uses the resolved runtime's model; recipe YAML loading
 does not read environment variables or expand `${...}` references.
 
 Use your provider's API key, or omit it for a local endpoint without authentication.
+
+To run the same deployment on [AI/ML API](https://aimlapi.com) — one OpenAI-compatible endpoint for 1,000+ models, so the served model can be swapped without touching the harness — point the upstream at it and give a model ID as listed at [aimlapi.com/models](https://aimlapi.com/models):
+
+```bash
+export REEF_UPSTREAM_URL="https://api.aimlapi.com"     # no /v1 suffix
+export REEF_UPSTREAM_MODEL="openai/gpt-5"              # vendor/model, as the gateway names it
+export REEF_UPSTREAM_API_KEY="your-aimlapi-key"        # https://aimlapi.com/app/keys
+reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
+```
+
+The same thing as one flag: `reef serve --recipe harness-evolve --model aimlapi/openai/gpt-5` (only the first slash names the provider; the rest is the model ID).
 `deployment.yaml` keeps Reef running until interrupted. It contains both the
 deployment and its named recipe preset; no recipe generation or extra Python
 launcher is needed. A YAML anchor shares the model name between the recipe

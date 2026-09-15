@@ -539,6 +539,9 @@ def _run_orchestrator(
 _PROVIDERS: dict[str, tuple[str, str | None]] = {
     "ollama": ("http://127.0.0.1:11434", "ollama"),
     "openai": ("https://api.openai.com", None),
+    # AI/ML API: one OpenAI-compatible endpoint for 1,000+ models, whose own ids carry a
+    # vendor prefix (``aimlapi/openai/gpt-5`` -> model ``openai/gpt-5``). No /v1 suffix here either.
+    "aimlapi": ("https://api.aimlapi.com", None),
 }
 
 #: The tutorial method the harness-evolve profile points at; the profile runs from the checkout that holds it.

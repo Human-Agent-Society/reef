@@ -44,8 +44,11 @@ provider credentials or model availability.
 ``REEF_UPSTREAM_URL``, ``REEF_UPSTREAM_MODEL``, ``REEF_UPSTREAM_API_KEY`` and
 ``REEF_TOKEN`` supply optional environment fallbacks for this mode. Explicit
 CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
-model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
-with any other prefix still needs an upstream URL.
+model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``;
+``--model aimlapi/<vendor>/<model>`` (for example ``aimlapi/openai/gpt-5``)
+fills the `AI/ML API <https://aimlapi.com>`_ endpoint and keeps the vendor
+prefix as part of the model ID, with the key from ``REEF_UPSTREAM_API_KEY``.
+A model ID with any other prefix still needs an upstream URL.
 
 Versioned configuration layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

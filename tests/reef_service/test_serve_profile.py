@@ -108,6 +108,14 @@ def test_the_model_flag_fills_the_provider_preset_and_leaves_other_spellings_alo
     assert _model_overrides("Qwen/Qwen3-8B", {}) == {"upstream_model": "Qwen/Qwen3-8B"}
     assert _model_overrides("qwen3-8b", {}) == {"upstream_model": "qwen3-8b"}
     assert _model_overrides("ollama/openai/gpt-oss-20b", {})["upstream_model"] == "openai/gpt-oss-20b"
+    # AI/ML API ids carry their vendor: only the first slash names the provider.
+    assert _model_overrides("aimlapi/openai/gpt-5", {"REEF_UPSTREAM_API_KEY": "sk-aiml"}) == {
+        "upstream_url": "https://api.aimlapi.com",
+        "upstream_model": "openai/gpt-5",
+        "upstream_api_key": "sk-aiml",
+    }
+    with pytest.raises(DeployConfigError, match="REEF_UPSTREAM_API_KEY"):
+        _model_overrides("aimlapi/openai/gpt-5", {})
 
 
 @pytest.mark.unit
