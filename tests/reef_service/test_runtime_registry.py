@@ -25,10 +25,14 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
     )
 
     assert isinstance(proxy, InferenceProxyRuntime)
+    # Every bundled kind, sorted. Each one's module must import without its
+    # execution dependency (Ray, MLX, Tinker), or importing Reef would require
+    # them.
     assert repository.names == (
         "coordinator_training",
         "executor_training",
         "inference_proxy",
+        "mlx",
         "ray_training",
         "sglang",
         "slime_training",

@@ -1,0 +1,69 @@
+# The OpenClaw-RL GSM8K stream, with everything but the policy hosted.
+#
+# The reference stack needs seven GPUs: Megatron on four, the rollout engine,
+# the PRM, and a 32B playing the student. Here the policy both serves and
+# trains in this process on MLX, and the two roles that only ever need text —
+# the PRM's votes and the student's reactions — go to GLM-5.3 over OpenRouter.
+#
+# The run used the configuration schema of its date; the settings below are
+# the same values in the schema the repository loads today, so this file
+# still parses. Nothing but the spelling and the sections changed.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8904
+  token: reef-local
+  run-dir: work/stack
+  ready-timeout: 1800
+inference:
+  model-path: mlx-community/Qwen3.5-9B-MLX-4bit
+training:
+  backend: mlx
+  options:
+    checkpoint_dir: work/checkpoints
+    lora_layers: 32
+    lora_rank: 64
+    checkpoint_layers: true
+    lora_keys:
+    - mlp.gate_proj
+    - mlp.up_proj
+    - mlp.down_proj
+    - self_attn.q_proj
+    - self_attn.k_proj
+    - self_attn.v_proj
+    - self_attn.o_proj
+    - linear_attn.in_proj_qkv
+    learning_rate: 3.0e-05
+    max_tokens: 2048
+    log_probs_chunk_size: 512
+    temperature: 0.6
+    micro_batch_size: 1
+    capture_topk: 20
+    cache_limit_gib: 0
+    seed: 0
+    chat_template_kwargs:
+      enable_thinking: false
+    weight_decay: 0.1
+    openclawrl:
+      w_rl: 1.0
+      w_opd: 1.0
+      kl_coef: 0.05
+recipe:
+  implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
+  config:
+    batch-size: 8
+    session-ttl-s: 45
+    checkpoint-every-n-versions: 1
+    prm-url: https://openrouter.ai/api/v1/chat/completions
+    prm-api: openai
+    prm-model: z-ai/glm-5.3
+    prm-api-key-env: OPENROUTER_API_KEY
+    prm-m: 3
+    prm-max-tokens: 16384
+    prm-tokenizer-path: mlx-community/Qwen3.5-9B-MLX-4bit
+storage:
+  agent-record-dir: work/agent-record
+  artifact-repository: work/artifacts.git
+  artifact-work-dir: work/artifact-work
+  artifact-cache-dir: work/artifact-cache

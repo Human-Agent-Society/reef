@@ -43,8 +43,18 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     # cannot match, so a client it never matches would otherwise grow the
     # table with the request rate for a whole TTL.
     max_open_sessions: int = config_field(DEFAULT_MAX_SESSIONS)
-    prm_url: str = config_field("")  # the PRM's sglang server; empty = correlate-only
+    prm_url: str = config_field("")  # the judge endpoint; empty = correlate-only
     prm_tokenizer_path: str = config_field("")
+    # How the judge is reached. "sglang" (default) posts upstream's verbatim
+    # payload to a served PRM's native /generate. "openai" posts chat messages
+    # to any OpenAI-compatible /chat/completions, so the judge can be a hosted
+    # provider instead of a second model this deployment has to serve — the
+    # judge only ever needs generated text, never log-probs.
+    prm_api: str = config_field("sglang")
+    prm_model: str = config_field("")  # provider model name, "openai" only
+    # Names the environment variable holding the provider credential. The
+    # config records which variable to read, never the secret itself.
+    prm_api_key_env: str = config_field("")
     prm_m: int = config_field(3)  # judge votes per turn
     prm_temperature: float = config_field(0.6)
     prm_max_tokens: int = config_field(8192)
@@ -78,6 +88,10 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
             raise ValueError("max_open_sessions must be positive")
         if self.prm_url and not self.prm_tokenizer_path:
             raise ValueError("OpenClaw-RL judging requires prm_tokenizer_path next to prm_url")
+        if self.prm_api not in ("sglang", "openai"):
+            raise ValueError(f"prm_api must be 'sglang' or 'openai', got {self.prm_api!r}")
+        if self.prm_api == "openai" and self.prm_url and not self.prm_model:
+            raise ValueError("an openai-dialect judge requires prm_model next to prm_url")
         for name, default in _RETIRED_FIELDS.items():
             if getattr(self, name) != default:
                 _logger.warning("openclawrl: %s is deprecated and ignored; remove it from the config", name)
