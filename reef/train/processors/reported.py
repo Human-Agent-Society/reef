@@ -326,6 +326,17 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     # A unit is one accepted singleton report or one ready group; the
     # engine's half of the shared cycle in base.py is the three methods below.
 
+    def ready_group_keys(self) -> tuple[Hashable, ...]:
+        """The keys of the groups whose decision is READY, for a processor that batches some of them alone."""
+        return tuple(self._ready_groups)
+
+    def group_status(self) -> dict[str, object]:
+        """The groups still buffered and how many reports each holds, for a caller that waits on a batch."""
+        return {
+            "ready_groups": len(self._ready_groups),
+            "groups": {str(key): len(slots) for key, slots in self._groups.items()},
+        }
+
     def _ready_count(self) -> int:
         return len(self.singletons) + len(self._ready_groups)
 

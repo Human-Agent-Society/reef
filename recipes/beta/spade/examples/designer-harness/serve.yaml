@@ -1,0 +1,29 @@
+# The SPADE Designer on harness evolution: its prompt is the harness tree, rewritten once per generation from
+# the regret reports and published without a gate; the next generation's regret is the rewrite's measure.
+# batch-size must equal the generation's count (rounds.py sends one generation of reports per round).
+# The Designer model is a proxied provider: REEF_UPSTREAM_URL, REEF_UPSTREAM_MODEL and REEF_UPSTREAM_API_KEY
+# come from the shell, never from this file; REEF_SPADE_DESIGNER_STATE_DIR is where the deployment keeps state.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8901
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/stack
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+  # A Designer call writes a whole environment; a proxied provider needs minutes.
+  timeout-s: 1800
+recipe:
+  implementation: recipes.beta.spade.harness:SpadeDesignerHarnessRecipe
+  config:
+    evolution:
+      step-record-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/steps
+    batch-size: 8
+    training-mode: auto
+storage:
+  agent-record-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/agent-record
+  artifact-repository: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifact-cache

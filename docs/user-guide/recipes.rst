@@ -162,5 +162,4 @@ a container, a verifier and a reference solution, a task any Harbor agent can
 play. The package holds the Designer call with its reply parser, the team's
 structural gate and Harbor's oracle check on what it writes, and one
 generation end to end, from the Designer's proposals to the split manifest the
-two consumers read, with the Designer's regret reported back. The training
-side follows.
+two consumers read, with the Designer's regret reported back; the Reasoning Agent trains on its episodes, the Designer on its regret, by weights or by its prompt as a harness tree, and rounds alternate the two.

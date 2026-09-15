@@ -1,0 +1,34 @@
+# The SPADE Environment Designer on Tinker: the served model writes the tasks and trains on their regret, one step per generation.
+# Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_DESIGNER_STATE_DIR is where this deployment keeps its state.
+# A Tinker deployment refuses unknown chat fields, so --designer-json (reasoning_effort) is for proxied providers only.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8901
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/stack
+  # The Tinker runtime downloads tokenizer files and saves the initial checkpoint before /healthz answers.
+  ready-timeout: 600
+inference:
+  model-path: Qwen/Qwen3-8B
+  # A Designer call is one long reply: an instruction, a container, a verifier and a reference solution.
+  timeout-s: 1800
+recipe:
+  implementation: recipes.beta.spade.recipe:SpadeDesignerRecipe
+  config:
+    # A batch is generations-per-step complete generations, each metadata.proposals reports of one generation.
+    generations-per-step: 1
+    checkpoint-every-n-versions: 1
+training:
+  backend: tinker
+  ready-timeout: 1800
+  timeout-s: 1800
+  options:
+    state-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/tinker
+    lora-rank: 32
+    learning-rate: 0.00004
+storage:
+  artifact-repository: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_SPADE_DESIGNER_STATE_DIR}/agent-record

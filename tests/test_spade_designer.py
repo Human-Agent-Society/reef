@@ -15,6 +15,7 @@ from recipes.beta.spade import (
     designer_prompt,
     parse_harbor_reply,
 )
+from recipes.beta.spade.designer import HARBOR_RULES_TEXT, SYSTEM_PROMPT, DesignerPrompt
 
 HARBOR_DOCUMENT = {
     "instruction": (
@@ -231,3 +232,55 @@ def test_a_harbor_reply_without_json_is_refused() -> None:
         parse_harbor_reply("```python\nprint(1)\n```")
     with pytest.raises(DesignerReplyError, match="not valid JSON"):
         parse_harbor_reply("```json\n{not json}\n```")
+
+
+def test_the_designer_prompt_is_two_harness_entries_that_round_trip() -> None:
+    prompt = DesignerPrompt()
+    entries = prompt.entries()
+    assert [entry["id"] for entry in entries] == ["designer-system", "designer-rules"]
+    assert all(entry["name"] == "skill" and entry["config"]["name"] == entry["id"] for entry in entries)
+    assert entries[0]["config"]["text"] == SYSTEM_PROMPT and entries[1]["config"]["text"] == HARBOR_RULES_TEXT
+    assert DesignerPrompt().with_entries(entries) == prompt
+    evolved = prompt.with_entries(
+        [
+            {
+                "id": "designer-rules",
+                "name": "skill",
+                "config": {"name": "designer-rules", "text": "RULES:\n- {turn_limit} commands, no {braces} lost"},
+            },
+            {"id": "reef-version-check", "name": "version_check", "config": {}},
+        ]
+    )
+    assert evolved.system == SYSTEM_PROMPT, "an entry the tree does not carry keeps its text"
+    assert (
+        evolved.rules.startswith("RULES:") and evolved.request_options == {} and evolved.timeout_s == prompt.timeout_s
+    )
+    with pytest.raises(ValueError, match="designer-system must carry non-empty text"):
+        prompt.with_entries(
+            [{"id": "designer-system", "name": "skill", "config": {"name": "designer-system", "text": 3}}]
+        )
+
+
+def test_an_evolved_prompt_reaches_the_messages_and_keeps_its_own_braces() -> None:
+    prompt = DesignerPrompt(
+        system="You write shell tasks.", rules="RULES:\n- at most {turn_limit} commands; keep {this}."
+    )
+    messages = designer_messages(request(turn_limit=5), prompt)
+    assert messages[0]["content"] == "You write shell tasks."
+    assert "- at most 5 commands; keep {this}." in messages[1]["content"]
+    assert designer_prompt(request(turn_limit=5), prompt) == messages[1]["content"]
+    assert designer_prompt(request()) == designer_prompt(request(), DesignerPrompt())
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"system": " "}, "system must be non-empty text"),
+        ({"rules": ""}, "rules must be non-empty text"),
+        ({"request_options": "none"}, "request_options must be a mapping"),
+        ({"timeout_s": 0}, "timeout_s must be a positive number"),
+    ],
+)
+def test_a_bad_designer_prompt_is_refused(fields: dict[str, object], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        DesignerPrompt(**fields)  # type: ignore[arg-type]

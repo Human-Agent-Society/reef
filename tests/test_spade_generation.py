@@ -3,123 +3,28 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from spade_stand_ins import REPLY, StandInChecks, StandInDesigner, StandInReasoningAgent, reply_for
 
-from recipes.beta.spade import OracleResult, PlayRecord
+from recipes.beta.spade import PlayRecord
+from recipes.beta.spade.designer import DesignerPrompt
 from recipes.beta.spade.generation import (
-    Checks,
-    Designer,
     DesignerAnswer,
     Generation,
     GenerationError,
     GenerationRequest,
-    ReasoningAgent,
     experience_for,
     load_experience,
     main,
     mean_reward,
+    reef_designer,
+    reef_reasoning_agent,
 )
+from recipes.beta.spade.roles import REFUSAL_SCORE, HarborAgent, Role, RoleVersion, verifier_reward
 from reef.core.tasks import read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
-
-DOCUMENT = {
-    "instruction": (
-        "A service on this machine writes the port it listens on under /var/run. Find that file and write the "
-        "port number, and nothing else, to /workspace/port.txt."
-    ),
-    "environment": {
-        "Dockerfile": "FROM python:3.12-slim\nRUN apt-get update && apt-get install -y tmux && echo 8471 > /var/run/app.port\nWORKDIR /workspace\n"
-    },
-    "tests": {
-        "test.sh": '#!/bin/sh\nmkdir -p /logs/verifier\ntest "$(cat /workspace/port.txt)" = 8471 && echo 1 > /logs/verifier/reward.txt || echo 0 > /logs/verifier/reward.txt\n'
-    },
-    "solution": {"solve.sh": "#!/bin/sh\ncat /var/run/app.port > /workspace/port.txt\n"},
-    "hint": "Look under /var/run for what the service left behind.",
-}
-REPLY = "```json\n" + json.dumps(DOCUMENT) + "\n```\n"
-
-
-def reply_for(index: int) -> str:
-    """A distinct task per proposal: the port differs, so the content hash differs."""
-    document = json.loads(json.dumps(DOCUMENT))
-    port = 8471 + index
-    document["environment"]["Dockerfile"] = document["environment"]["Dockerfile"].replace("8471", str(port))
-    document["tests"]["test.sh"] = document["tests"]["test.sh"].replace("8471", str(port))
-    return "```json\n" + json.dumps(document) + "\n```\n"
-
-
-class StandInDesigner(Designer):
-    """Answers with a distinct task per call (or a scripted reply) and keeps the reports it gets."""
-
-    def __init__(self, scripted: Sequence[str] = ()) -> None:
-        self.scripted = list(scripted)
-        self.calls: list[dict[str, object]] = []
-        self.reports: list[dict[str, object]] = []
-
-    def answer(self, messages, *, tags) -> DesignerAnswer:
-        self.calls.append({"messages": list(messages), "tags": dict(tags)})
-        text = self.scripted.pop(0) if self.scripted else reply_for(len(self.calls))
-        return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
-
-    def report(self, record_id, *, score, metadata) -> str:
-        self.reports.append({"record_id": record_id, "score": score, "metadata": dict(metadata)})
-        return f"report-{len(self.reports)}"
-
-
-class StandInChecks(Checks):
-    def __init__(self, *, is_solvable: bool = True) -> None:
-        self.is_solvable = is_solvable
-        self.calls: list[Path] = []
-
-    def oracle(self, task_path) -> OracleResult:
-        self.calls.append(task_path)
-        if not self.is_solvable:
-            return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0, nop_reward=0.0)
-        return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
-
-
-class StandInReasoningAgent(ReasoningAgent):
-    """Scripted rewards per arm; records how each arm was asked for."""
-
-    def __init__(self, *, plain: float = 0.25, hint: float = 0.75, error: str = "") -> None:
-        self.rewards = {"plain": plain, "hint": hint}
-        self.error = error
-        self.calls: list[dict[str, object]] = []
-        self.episodes = 0
-
-    def play(self, task_path, *, arm, plays, is_reporting, extra_instruction_paths, tags) -> tuple[TaskPlay, ...]:
-        self.calls.append(
-            {
-                "task": task_path.name,
-                "arm": arm,
-                "plays": plays,
-                "is_reporting": is_reporting,
-                "extra": [Path(path) for path in extra_instruction_paths],
-                "tags": dict(tags),
-            }
-        )
-        reward = None if self.error else self.rewards[arm]
-        played = []
-        for _ in range(plays):
-            self.episodes += 1
-            played.append(
-                TaskPlay(
-                    task_path=task_path,
-                    name=task_path.name,
-                    episode_id=f"episode-{self.episodes}",
-                    reward=reward,
-                    rewards={} if reward is None else {"reward": reward},
-                    error=self.error,
-                    receipts=() if self.error else (f"rec-{self.episodes}",),
-                    failed_calls=0,
-                    report_agent_record_ids=(f"rep-{self.episodes}",) if is_reporting and not self.error else (),
-                    trial_uri=None,
-                )
-            )
-        return tuple(played)
 
 
 def request(**overrides: object) -> GenerationRequest:
@@ -143,7 +48,8 @@ def generation(
     designer = parts.get("designer") or StandInDesigner()
     reasoning_agent = parts.get("reasoning_agent") or StandInReasoningAgent()
     checks = parts.get("checks") or StandInChecks()
-    run = Generation(designer=designer, reasoning_agent=reasoning_agent, checks=checks, tasks_root=tmp_path / "tasks")  # type: ignore[arg-type]
+    options = {name: value for name, value in parts.items() if name not in ("designer", "reasoning_agent", "checks")}
+    run = Generation(designer=designer, reasoning_agent=reasoning_agent, checks=checks, tasks_root=tmp_path / "tasks", **options)  # type: ignore[arg-type]
     return run, designer, reasoning_agent, checks  # type: ignore[return-value]
 
 
@@ -174,7 +80,13 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
         (call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"])
         for call in reasoning_agent.calls
     ]
-    assert arms[0] == ("harbor-00004-000-inspection", "plain", 2, True, [])
+    assert arms[0] == (
+        "harbor-00004-000-inspection",
+        "plain",
+        2,
+        False,
+        [],
+    ), "the plain arm is reported after the play"
     assert arms[1] == (
         "harbor-00004-000-inspection",
         "hint",
@@ -190,6 +102,13 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
     assert first.plain_rewards == (0.25, 0.25) and first.hint_rewards == (0.75,)
     assert first.regret == 0.5 and first.outcome == "frontier"
     assert first.record.instruction_excerpt.startswith("A service on this machine")
+    reports = reasoning_agent.reports
+    assert [report["plays"] for report in reports] == [plays for name in names for plays in ([name] * 2, [name])]
+    assert reports[0]["scores"] == [0.25, 0.25], "the verifier reward is the Reasoning Agent's score"
+    assert reports[0]["metadata"] == {"arm": "plain", "generation": 4, "designer_version": None}
+    assert reports[1]["metadata"] == {"arm": "hint", "generation": 4, "designer_version": None}
+    assert [play.report_agent_record_ids for play in first.plain_plays] == [("rep-1",), ("rep-2",)]
+    assert [play.report_agent_record_ids for play in first.hint_plays] == [("rep-3",)], "the hint arm is reported too"
 
     assert result.manifest_path == tmp_path / "tasks" / "manifest-00004.json"
     manifest = read_split_manifest(result.manifest_path)
@@ -200,12 +119,26 @@ def test_one_generation_proposes_writes_checks_plays_splits_and_reports(tmp_path
     metadata = designer.reports[0]["metadata"]
     assert metadata["task"] == {"name": first.name, "path": str(first.task_path), "digest": first.digest}
     assert metadata["outcome"] == "frontier" and metadata["regret"] == 0.5 and metadata["skill"] == "inspection"
+    assert metadata["proposals"] == 3, "the Designer's group is the whole generation"
+    assert designer.reports[1]["metadata"]["proposals"] == 3 and metadata["designer_version"] is None
+    assert metadata["opponent"] == {"role": "reasoning_agent", "version": None}
+    assert designer.reports[0]["feedback"] == {
+        "task": first.name,
+        "refusal": "",
+        "round": {"generation": 4, "mean_regret": 0.5, "measured": 3, "refused": 0, "previous": None},
+        "outcome": "frontier",
+        "regret": 0.5,
+        "return_without_hint": 0.25,
+        "return_with_hint": 0.75,
+    }
     assert [proposal.designer_report_id for proposal in result.proposals] == ["report-1", "report-2", "report-3"]
 
     document = json.loads(result.report_path.read_text())
     assert result.report_path == tmp_path / "tasks" / ".spade" / "generation-00004.json"
     assert document["manifest"] == str(result.manifest_path) and len(document["tasks"]) == 3
     assert document["request"]["count"] == 3 and "experience" not in document["request"]
+    assert document["request"]["prompt_entries"] == ["designer-system", "designer-rules"]
+    assert document["request"]["designer_version"] is None and "prompt" not in document["request"]
     assert [record["name"] for record in document["experience"]] == names
     assert load_experience(result.report_path) == result.experience
 
@@ -230,7 +163,16 @@ def test_a_reply_the_parser_refuses_is_reported_as_zero_and_the_generation_goes_
     first, second = result.proposals
     assert not first.is_written and first.refusal.startswith("reply refused:") and first.task_name is None
     assert second.is_written and second.task_name == "harbor-00004-001-inspection"
-    assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == first.refusal
+    assert (
+        designer.reports[0]["score"] == REFUSAL_SCORE and designer.reports[0]["metadata"]["refusal"] == first.refusal
+    )
+    assert designer.reports[0]["feedback"]["round"] == {
+        "generation": 4,
+        "mean_regret": 0.5,
+        "measured": 1,
+        "refused": 1,
+        "previous": None,
+    }
     assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
     assert [call["task"] for call in reasoning_agent.calls] == ["harbor-00004-001-inspection"] * 2
 
@@ -242,7 +184,8 @@ def test_a_task_the_oracle_check_refuses_never_stays_under_the_root(tmp_path: Pa
     assert not proposal.is_written and proposal.refusal == "oracle check refused: the oracle scored 0"
     assert result.measures == () and result.manifest_path is None and reasoning_agent.calls == []
     assert written(tmp_path / "tasks") == [".spade"]
-    assert designer.reports[0]["score"] == 0.0
+    assert designer.reports[0]["score"] == REFUSAL_SCORE
+    assert designer.reports[0]["feedback"]["round"]["mean_regret"] is None
 
 
 def test_a_task_the_reasoning_agent_could_not_play_is_refused_not_scored(tmp_path: Path) -> None:
@@ -257,7 +200,8 @@ def test_a_task_the_reasoning_agent_could_not_play_is_refused_not_scored(tmp_pat
         "plain"
     ], "the hint arm is not played for a task that cannot run"
     assert not (tmp_path / "tasks" / "harbor-00004-000-inspection").exists()
-    assert designer.reports[0]["score"] == 0.0 and designer.reports[0]["metadata"]["refusal"] == proposal.refusal
+    assert designer.reports[0]["score"] == REFUSAL_SCORE
+    assert designer.reports[0]["metadata"]["refusal"] == proposal.refusal
 
 
 def test_a_task_already_under_the_root_is_not_written_twice(tmp_path: Path) -> None:
@@ -521,3 +465,150 @@ def test_main_points_the_designer_at_its_own_service_and_model(tmp_path: Path, m
         ("http://127.0.0.1:8900", "spade", "m", "t"),
         ("http://127.0.0.1:8901", "designer", "strong", "t2"),
     ]
+
+
+def test_the_designer_score_is_the_raw_regret_so_a_hint_that_hurt_scores_below_zero(tmp_path: Path) -> None:
+    run, designer, _, _ = generation(tmp_path, reasoning_agent=StandInReasoningAgent(plain=0.75, hint=0.25))
+    result = run.run(request(count=1))
+    assert result.measures[0].regret == -0.5 and result.measures[0].outcome == "frontier"
+    assert designer.reports[0]["score"] == -0.5 and designer.reports[0]["feedback"]["regret"] == -0.5
+
+
+def test_a_generation_takes_its_prompt_and_the_versions_it_is_measured_against(tmp_path: Path) -> None:
+    run, designer, reasoning_agent, _ = generation(tmp_path)
+    prompt = DesignerPrompt(
+        system="You design Harbor tasks about /var.", rules="RULES:\n- at most {turn_limit} commands, {braces} kept"
+    )
+    result = run.run(
+        request(
+            count=1,
+            prompt=prompt,
+            designer_version=RoleVersion("release", "abc123"),
+            agent_version=RoleVersion("runtime", "load-7"),
+        )
+    )
+    messages = designer.calls[0]["messages"]
+    assert messages[0]["content"] == "You design Harbor tasks about /var."
+    assert "- at most 12 commands, {braces} kept" in messages[1]["content"]
+    metadata = designer.reports[0]["metadata"]
+    assert metadata["designer_version"] == {"kind": "release", "id": "abc123"}
+    assert metadata["opponent"] == {"role": "reasoning_agent", "version": {"kind": "runtime", "id": "load-7"}}
+    assert reasoning_agent.reports[0]["metadata"] == {
+        "arm": "plain",
+        "generation": 4,
+        "designer_version": {"kind": "release", "id": "abc123"},
+    }
+    document = json.loads(result.report_path.read_text())
+    assert document["request"]["designer_version"] == {"kind": "release", "id": "abc123"}
+    assert document["request"]["agent_version"] == {"kind": "runtime", "id": "load-7"}
+
+
+def test_a_generation_that_does_not_report_the_agent_holds_the_plain_plays(tmp_path: Path) -> None:
+    run, _, reasoning_agent, _ = generation(tmp_path, is_reporting_agent=False)
+    result = run.run(request(count=1))
+    assert reasoning_agent.reports == []
+    plays = result.measures[0].plain_plays
+    assert [play.receipts for play in plays] == [("rec-1",), ("rec-2",)] and not any(
+        play.is_reported for play in plays
+    )
+    reported = reasoning_agent.report_plays(plays, reward=verifier_reward, metadata={"arm": "plain", "generation": 4})
+    assert [play.report_agent_record_ids for play in reported] == [("rep-1",), ("rep-2",)]
+
+
+def test_every_designer_report_waits_for_the_end_of_the_generation_and_carries_the_last_round(tmp_path: Path) -> None:
+    class CountingDesigner(StandInDesigner):
+        def answer(self, messages, *, tags) -> DesignerAnswer:
+            assert self.reports == [], "no report goes out while proposals are still being made"
+            return super().answer(messages, tags=tags)
+
+    designer = CountingDesigner()
+    run, _, _, _ = generation(tmp_path, designer=designer)
+    previous = {"generation": 3, "mean_regret": 0.1, "designer_version": None, "agent_version": None}
+    result = run.run(request(count=2, previous=previous))
+    assert len(designer.reports) == 2
+    assert designer.reports[1]["feedback"]["round"]["previous"] == previous
+    assert json.loads(result.report_path.read_text())["request"]["previous"] == previous
+
+
+def test_a_request_refuses_a_prompt_or_a_version_of_the_wrong_kind() -> None:
+    with pytest.raises(GenerationError, match="prompt must be a DesignerPrompt"):
+        request(prompt="be creative")
+    with pytest.raises(GenerationError, match="designer_version must be a RoleVersion"):
+        request(designer_version="abc")
+    with pytest.raises(GenerationError, match="previous must be the last round's record"):
+        request(previous="round 3")
+
+
+def test_the_reef_roles_build_the_designer_and_the_reasoning_agent(tmp_path: Path) -> None:
+    prompt = DesignerPrompt(request_options={"reasoning_effort": "none"}, timeout_s=7.0)
+    designer = reef_designer(Role.designer("http://127.0.0.1:1", "designer", "strong", prompt=prompt, token="t"))
+    assert (designer.scenario, designer.model, designer.request_options) == (
+        "designer",
+        "strong",
+        {"reasoning_effort": "none"},
+    )
+    assert designer.client.timeout_s == 7.0
+    harness = HarborAgent(
+        spec={"name": "codex", "kwargs": {"api_base": "{base_url}"}}, host="host.docker.internal", concurrency=3
+    )
+    agent = reef_reasoning_agent(
+        Role.reasoning_agent("http://127.0.0.1:1", "spade", "m", agent=harness, token="t"), work_dir=tmp_path / "work"
+    )
+    assert (agent.scenario, agent.model, agent.agent_host, agent.concurrency) == (
+        "spade",
+        "m",
+        "host.docker.internal",
+        3,
+    )
+    assert (
+        agent.agent == {"name": "codex", "kwargs": {"api_base": "{base_url}"}} and agent.work_dir == tmp_path / "work"
+    )
+    with pytest.raises(GenerationError, match="must be a DesignerPrompt"):
+        reef_designer(Role.reasoning_agent("http://127.0.0.1:1", "spade", "m"))
+    with pytest.raises(GenerationError, match="must be a HarborAgent"):
+        reef_reasoning_agent(Role.designer("http://127.0.0.1:1", "designer", "m"), work_dir=tmp_path)
+
+
+def test_main_hands_the_reasoning_agent_its_harbor_agent(tmp_path: Path, monkeypatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    class RecordingAgent(StandInReasoningAgent):
+        def __init__(self, **options: object) -> None:
+            seen.append(options)
+            super().__init__()
+
+    monkeypatch.setattr("recipes.beta.spade.generation.ReefReasoningAgent", RecordingAgent)
+    spec = json.dumps({"name": "codex", "kwargs": {"api_base": "{base_url}"}})
+    status = main(
+        [
+            "--reef-url",
+            "http://127.0.0.1:8900",
+            "--scenario",
+            "spade",
+            "--model",
+            "m",
+            "--tasks-root",
+            str(tmp_path / "t"),
+            "--work-dir",
+            str(tmp_path / "w"),
+            "--description",
+            "shell tasks",
+            "--count",
+            "1",
+            "--plays",
+            "1",
+            "--agent-json",
+            spec,
+            "--agent-host",
+            "h",
+            "--concurrency",
+            "3",
+        ],
+        designer=StandInDesigner(),
+        checks=StandInChecks(),
+    )
+    assert status == 0 and len(seen) == 1
+    options = seen[0]
+    assert (options["reef_url"], options["scenario"], options["model"]) == ("http://127.0.0.1:8900", "spade", "m")
+    assert options["agent"] == {"name": "codex", "kwargs": {"api_base": "{base_url}"}}
+    assert (options["agent_host"], options["concurrency"], options["work_dir"]) == ("h", 3, tmp_path / "w")

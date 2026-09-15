@@ -1,9 +1,10 @@
-"""The SPADE Reasoning Agent recipe: the served model trains on the tasks the Designer wrote, one task group at a time."""
+"""The SPADE recipes: the Reasoning Agent trains on the tasks the Designer wrote; the Designer trains on their regret."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from recipes.beta.spade.designer_processor import DEFAULT_GENERATIONS_PER_STEP, SpadeDesignerProcessor
 from recipes.beta.spade.preparer import LOSS_FAMILY, SpadePreparer
 from recipes.beta.spade.processor import (
     DEFAULT_ROLLOUTS_PER_TASK,
@@ -44,3 +45,27 @@ class SpadeRecipe(WeightTrainingRecipe):
             raise ValueError("rollouts_per_task must be at least two")
         if self.scaffold_tolerance < 0:
             raise ValueError("scaffold_tolerance must be non-negative")
+
+
+@dataclass(frozen=True, kw_only=True)
+class SpadeDesignerRecipe(WeightTrainingRecipe):
+    """The generation's reports against Designer receipts, grouped by generation; regret as the reward on the same loss."""
+
+    name: str = "spade_designer"
+    generations_per_step: int = config_field(DEFAULT_GENERATIONS_PER_STEP, env="REEF_SPADE_GENERATIONS_PER_STEP")
+
+    @property
+    def report_type(self) -> type[ReportBase]:
+        # One report per proposal: the regret as the score, the generation and its size under metadata.
+        return ScoredRolloutReport
+
+    @classmethod
+    def training_spec(cls) -> WeightTrainingSpec:
+        return WeightTrainingSpec(
+            step_preparer=SpadePreparer.name, loss_family=LOSS_FAMILY, processor=SpadeDesignerProcessor
+        )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.generations_per_step <= 0:
+            raise ValueError("generations_per_step must be positive")

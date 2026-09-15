@@ -13,8 +13,14 @@ Harbor agent can play.
   report are written, and each proposal is reported against the Designer's receipt.
 - ``recipe``, ``processor``, ``preparer``: the Reasoning Agent's training: the task player's reports grouped by task,
   group relative advantages, Tinker's importance sampling loss.
-
-The Designer's own training follows.
+- ``roles``: a role names its service, scenario, model, harness and reward; the deployment behind the
+  scenario decides whether it evolves weights or a harness.
+- ``designer_processor``, ``recipe``: the Designer's weight training: its proposals grouped by generation,
+  regret as the reward, the same preparer and loss.
+- ``harness``: the Designer's harness evolution: its prompt as a harness tree, rewritten from the regret
+  reports once per generation, published without a gate.
+- ``rounds``: Designer rounds then a Reasoning Agent round, the other side fixed, every report naming its
+  opponent's version.
 """
 
 from recipes.beta.spade.designer import (
@@ -26,6 +32,7 @@ from recipes.beta.spade.designer import (
     designer_prompt,
     parse_harbor_reply,
 )
+from recipes.beta.spade.designer_processor import SpadeDesignerProcessor
 from recipes.beta.spade.generation import (
     Checks,
     Designer,
@@ -48,12 +55,16 @@ from recipes.beta.spade.harbor import (
     reply_errors,
     split_generation,
 )
+from recipes.beta.spade.harness import SpadeDesignerHarnessRecipe
 from recipes.beta.spade.preparer import SpadePreparer
 from recipes.beta.spade.processor import SpadeProcessor
-from recipes.beta.spade.recipe import SpadeRecipe
+from recipes.beta.spade.recipe import SpadeDesignerRecipe, SpadeRecipe
+from recipes.beta.spade.roles import HarborAgent, Role, RoleVersion
+from recipes.beta.spade.rounds import Deployment, RoundResult, SpadeRun
 
 __all__ = [
     "Checks",
+    "Deployment",
     "Designer",
     "DesignerReplyError",
     "DesignerRequest",
@@ -62,6 +73,7 @@ __all__ = [
     "GenerationError",
     "GenerationRequest",
     "GenerationResult",
+    "HarborAgent",
     "HarborReply",
     "OracleResult",
     "PlayRecord",
@@ -69,9 +81,16 @@ __all__ = [
     "ReasoningAgent",
     "ReefDesigner",
     "ReefReasoningAgent",
+    "Role",
+    "RoleVersion",
+    "RoundResult",
+    "SpadeDesignerHarnessRecipe",
+    "SpadeDesignerProcessor",
+    "SpadeDesignerRecipe",
     "SpadePreparer",
     "SpadeProcessor",
     "SpadeRecipe",
+    "SpadeRun",
     "content_hash",
     "designer_messages",
     "designer_prompt",
