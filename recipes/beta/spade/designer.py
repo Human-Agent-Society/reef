@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 
 from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, checked_files
 from reef.train.cordis_backend.strategies import untrusted_text
@@ -22,6 +22,11 @@ from reef.train.cordis_backend.strategies import untrusted_text
 DIFFICULTIES = ("easy", "medium", "hard")
 DEFAULT_TURN_LIMIT = 12
 MAX_EXPERIENCE_RECORDS = 12
+DESIGNER_TIMEOUT_S = 1800.0
+#: The harness tree entries a Designer prompt is made of, by entry id: the text each one carries.
+DESIGNER_SYSTEM_ENTRY = "designer-system"
+DESIGNER_RULES_ENTRY = "designer-rules"
+PROMPT_ENTRY_FIELDS = {DESIGNER_SYSTEM_ENTRY: "system", DESIGNER_RULES_ENTRY: "rules"}
 INSTRUCTION_EXCERPT_CHARS = 1200
 GROUNDING_CHARS = 6000
 MASTERED_RETURN = 0.9
@@ -118,13 +123,18 @@ class HarborReply:
     hint: str
 
 
-def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
+def designer_messages(request: DesignerRequest, prompt: DesignerPrompt | None = None) -> list[dict[str, str]]:
     """The chat messages for one Designer call, in the shape ``ModelBinding.chat`` takes."""
-    return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": designer_prompt(request)}]
+    prompt = prompt if prompt is not None else DesignerPrompt()
+    return [
+        {"role": "system", "content": prompt.system},
+        {"role": "user", "content": designer_prompt(request, prompt)},
+    ]
 
 
-def designer_prompt(request: DesignerRequest) -> str:
+def designer_prompt(request: DesignerRequest, prompt: DesignerPrompt | None = None) -> str:
     """The user turn of a Designer call: target, what the agent did last time, grounding, the rules, output."""
+    prompt = prompt if prompt is not None else DesignerPrompt()
     target = request.skill_description.strip()
     if request.skill is not None:
         target = f"{request.skill} ({target})"
@@ -142,7 +152,8 @@ def designer_prompt(request: DesignerRequest) -> str:
             "document. Never mention the document in the environment's text.\n"
             + untrusted_text(request.grounding.strip()[:GROUNDING_CHARS], "reference document")
         )
-    parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
+    # A replace, not str.format: an evolved rules text may carry braces of its own.
+    parts.extend([prompt.rules.replace("{turn_limit}", str(request.turn_limit)), HARBOR_OUTPUT_TEXT])
     return "\n\n".join(parts)
 
 
@@ -216,6 +227,48 @@ HARBOR_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, w
   "hint": "<one to three sentences for the agent: the key strategy, without the answer itself>"
 }
 ```"""
+
+
+@dataclass(frozen=True)
+class DesignerPrompt:
+    """The Designer's harness: the system turn and the rules block, the two texts a harness release may evolve."""
+
+    system: str = SYSTEM_PROMPT
+    rules: str = HARBOR_RULES_TEXT
+    request_options: Mapping[str, object] = field(default_factory=dict)
+    timeout_s: float = DESIGNER_TIMEOUT_S
+
+    def __post_init__(self) -> None:
+        for label, value in (("system", self.system), ("rules", self.rules)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must be non-empty text")
+        if not isinstance(self.request_options, Mapping):
+            raise ValueError("request_options must be a mapping of chat request fields")
+        if isinstance(self.timeout_s, bool) or not isinstance(self.timeout_s, (int, float)) or self.timeout_s <= 0:
+            raise ValueError("timeout_s must be a positive number of seconds")
+
+    def entries(self) -> tuple[dict[str, object], ...]:
+        """The prompt as harness tree entries: one skill per text, its config name the entry id."""
+        return tuple(
+            {"id": entry_id, "name": "skill", "config": {"name": entry_id, "text": text}}
+            for entry_id, text in ((DESIGNER_SYSTEM_ENTRY, self.system), (DESIGNER_RULES_ENTRY, self.rules))
+        )
+
+    def with_entries(self, entries: Sequence[Mapping[str, object]]) -> DesignerPrompt:
+        """The prompt with the texts a served tree carries under the two entry ids; other entries are ignored."""
+        texts = {"system": self.system, "rules": self.rules}
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise ValueError("a harness entry must be an object with an id and a config")
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str) or entry_id not in PROMPT_ENTRY_FIELDS:
+                continue
+            config = entry.get("config")
+            text = config.get("text") if isinstance(config, Mapping) else None
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"harness entry {entry_id} must carry non-empty text")
+            texts[PROMPT_ENTRY_FIELDS[entry_id]] = text
+        return replace(self, system=texts["system"], rules=texts["rules"])
 
 
 def parse_harbor_reply(text: str) -> HarborReply:

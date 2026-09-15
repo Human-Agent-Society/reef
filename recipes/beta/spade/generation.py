@@ -22,14 +22,16 @@ import statistics
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from reef_client.client import ReefClient, ReefClientError
 
 from recipes.beta.spade.designer import (
     DEFAULT_TURN_LIMIT,
+    DESIGNER_TIMEOUT_S,
     MAX_EXPERIENCE_RECORDS,
+    DesignerPrompt,
     DesignerReplyError,
     DesignerRequest,
     PlayRecord,
@@ -44,6 +46,17 @@ from recipes.beta.spade.harbor import (
     oracle_check,
     split_generation,
 )
+from recipes.beta.spade.roles import (
+    REFUSAL_SCORE,
+    AgentReward,
+    DesignerReward,
+    HarborAgent,
+    Role,
+    RoleVersion,
+    TaskMeasure,
+    regret,
+    verifier_reward,
+)
 from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
@@ -55,7 +68,6 @@ from reef.core.tasks import (
 from reef.harness.client.tasks import TaskPlay, TaskPlayer
 
 REPORT_DIRECTORY = ".spade"
-DESIGNER_TIMEOUT_S = 1800.0
 INSTRUCTION_EXCERPT_CHARS = 600
 CHAT_PATH = "/v1/chat/completions"
 
@@ -79,7 +91,14 @@ class Designer(ABC):
     def answer(self, messages: Sequence[Mapping[str, str]], *, tags: Mapping[str, str]) -> DesignerAnswer: ...
 
     @abstractmethod
-    def report(self, record_id: str, *, score: float, metadata: Mapping[str, object]) -> str: ...
+    def report(
+        self,
+        record_id: str,
+        *,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] = "SPADE Designer regret",
+    ) -> str: ...
 
 
 class ReefDesigner(Designer):
@@ -123,8 +142,19 @@ class ReefDesigner(Designer):
         text = message.get("content") if isinstance(message, Mapping) else None
         return DesignerAnswer(text=text if isinstance(text, str) else "", record_id=record_id)
 
-    def report(self, record_id: str, *, score: float, metadata: Mapping[str, object]) -> str:
-        payload = {"score": score, "feedback": "SPADE Designer regret", "metadata": dict(metadata)}
+    def report(
+        self,
+        record_id: str,
+        *,
+        score: float,
+        metadata: Mapping[str, object],
+        feedback: str | Mapping[str, object] = "SPADE Designer regret",
+    ) -> str:
+        payload = {
+            "score": score,
+            "feedback": dict(feedback) if isinstance(feedback, Mapping) else feedback,
+            "metadata": dict(metadata),
+        }
         try:
             answer = self.client.report(self.scenario, payload, references=[record_id])
         except ReefClientError as exc:
@@ -164,9 +194,15 @@ class ReasoningAgent(ABC):
         tags: Mapping[str, str],
     ) -> tuple[TaskPlay, ...]: ...
 
+    @abstractmethod
+    def report_plays(
+        self, plays: Sequence[TaskPlay], *, reward: AgentReward, metadata: Mapping[str, object]
+    ) -> tuple[TaskPlay, ...]:
+        """Report played episodes after the fact, each with the score ``reward`` gives it; the plays with their report ids."""
+
 
 class ReefReasoningAgent(ReasoningAgent):
-    """A task player per arm: the plain arm reports its episodes, the hint arm only measures."""
+    """A task player per arm: the plain arm is reported when the generation says so, the hint arm only measures."""
 
     def __init__(
         self,
@@ -201,7 +237,29 @@ class ReefReasoningAgent(ReasoningAgent):
     ) -> tuple[TaskPlay, ...]:
         if plays < 1:
             return ()
-        player = TaskPlayer(
+        player = self.player(labels={**tags, "arm": arm}, extra_instruction_paths=extra_instruction_paths)
+        player.is_reporting = is_reporting
+        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
+
+    def report_plays(
+        self, plays: Sequence[TaskPlay], *, reward: AgentReward, metadata: Mapping[str, object]
+    ) -> tuple[TaskPlay, ...]:
+        players: dict[tuple[tuple[str, str], ...], TaskPlayer] = {}
+        reported = []
+        for play in plays:
+            score = reward.score(play)
+            if score is None or not play.receipts:
+                reported.append(play)
+                continue
+            key = tuple(sorted(play.labels.items()))
+            if key not in players:
+                players[key] = self.player(labels=play.labels, extra_instruction_paths=())
+            report_ids = players[key].report_play(play, score=score, metadata=metadata)
+            reported.append(replace(play, report_agent_record_ids=report_ids))
+        return tuple(reported)
+
+    def player(self, *, labels: Mapping[str, str], extra_instruction_paths: Sequence[Path]) -> TaskPlayer:
+        return TaskPlayer(
             reef_url=self.reef_url,
             scenario=self.scenario,
             model=self.model,
@@ -209,11 +267,39 @@ class ReefReasoningAgent(ReasoningAgent):
             token=self.token,
             agent=self.agent,
             agent_host=self.agent_host,
-            labels={**tags, "arm": arm},
+            labels=labels,
             extra_instruction_paths=extra_instruction_paths,
-            is_reporting=is_reporting,
         )
-        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
+
+
+def reef_designer(role: Role) -> Designer:
+    """The Designer a role names: the served model behind its scenario, with its prompt's request options and timeout."""
+    if not isinstance(role.harness, DesignerPrompt):
+        raise GenerationError("the Designer role's harness must be a DesignerPrompt")
+    return ReefDesigner(
+        reef_url=role.reef_url,
+        scenario=role.scenario,
+        model=role.model,
+        token=role.token,
+        request_options=role.harness.request_options,
+        timeout_s=role.harness.timeout_s,
+    )
+
+
+def reef_reasoning_agent(role: Role, *, work_dir: Path) -> ReasoningAgent:
+    """The Reasoning Agent a role names: a task player for its scenario and model with its Harbor agent."""
+    if not isinstance(role.harness, HarborAgent):
+        raise GenerationError("the Reasoning Agent role's harness must be a HarborAgent")
+    return ReefReasoningAgent(
+        reef_url=role.reef_url,
+        scenario=role.scenario,
+        model=role.model,
+        work_dir=work_dir,
+        token=role.token,
+        agent=role.harness.bound_spec(),
+        agent_host=role.harness.host,
+        concurrency=role.harness.concurrency,
+    )
 
 
 @dataclass(frozen=True)
@@ -232,10 +318,21 @@ class GenerationRequest:
     hint_plays: int = 2
     eval_fraction: float = 0.25
     seed: int = 0
+    prompt: DesignerPrompt = field(default_factory=DesignerPrompt)
+    designer_version: RoleVersion | None = None
+    agent_version: RoleVersion | None = None
+    previous: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.description, str) or not self.description.strip():
             raise GenerationError("description must be non-empty text")
+        if not isinstance(self.prompt, DesignerPrompt):
+            raise GenerationError("prompt must be a DesignerPrompt")
+        for label, value in (("designer_version", self.designer_version), ("agent_version", self.agent_version)):
+            if value is not None and not isinstance(value, RoleVersion):
+                raise GenerationError(f"{label} must be a RoleVersion when set")
+        if self.previous is not None and not isinstance(self.previous, Mapping):
+            raise GenerationError("previous must be the last round's record, a mapping, when set")
         if not isinstance(self.skills, tuple) or not all(isinstance(skill, str) and skill for skill in self.skills):
             raise GenerationError(
                 "skills must be a tuple of skill names; empty when the description alone is the target"
@@ -271,27 +368,6 @@ class Proposal:
 
 
 @dataclass(frozen=True)
-class TaskMeasure:
-    """A written task after both arms played: the rewards, the regret and the band."""
-
-    name: str
-    skill: str | None
-    task_path: Path
-    digest: str
-    plain_rewards: tuple[float, ...]
-    hint_rewards: tuple[float, ...]
-    record: PlayRecord
-
-    @property
-    def regret(self) -> float:
-        return self.record.regret
-
-    @property
-    def outcome(self) -> str:
-        return self.record.outcome
-
-
-@dataclass(frozen=True)
 class GenerationResult:
     """What one generation produced: the tasks, their measures, the manifest and the report on disk."""
 
@@ -305,6 +381,22 @@ class GenerationResult:
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
         return tuple(measure.record for measure in self.measures)
+
+
+def round_document(request: GenerationRequest, measures: Sequence[TaskMeasure], *, refused: int) -> dict[str, object]:
+    """What a generation looked like as a whole, carried by every Designer report of it beside the last round's record."""
+    return {
+        "generation": request.generation,
+        "mean_regret": statistics.fmean(measure.regret for measure in measures) if measures else None,
+        "measured": len(measures),
+        "refused": refused,
+        "previous": dict(request.previous) if request.previous is not None else None,
+    }
+
+
+def version_document(version: RoleVersion | None) -> dict[str, str] | None:
+    """A role version as it travels in report metadata and on disk: its kind and id, or None for an unknown one."""
+    return None if version is None else {"kind": version.kind, "id": version.id}
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -363,17 +455,25 @@ class Generation:
         checks: Checks,
         tasks_root: Path,
         is_reporting_designer: bool = True,
+        is_reporting_agent: bool = True,
+        designer_reward: DesignerReward = regret,
+        agent_reward: AgentReward = verifier_reward,
     ) -> None:
         self.designer = designer
         self.reasoning_agent = reasoning_agent
         self.checks = checks
         self.tasks_root = Path(tasks_root)
         self.is_reporting_designer = is_reporting_designer
+        # A rounds driver holds the plain arm's episodes and reports them once the Designer's side has stepped.
+        self.is_reporting_agent = is_reporting_agent
+        self.designer_reward = designer_reward
+        self.agent_reward = agent_reward
 
     def run(self, request: GenerationRequest) -> GenerationResult:
         self.tasks_root.mkdir(parents=True, exist_ok=True)
         known_hashes = self.known_hashes()
-        proposals: list[Proposal] = []
+        # Every Designer report waits for the end: an aborted generation reports nothing, and a step never mixes two.
+        pending: list[tuple[Proposal, TaskMeasure | None]] = []
         measures: list[TaskMeasure] = []
         for index in range(request.count):
             skill = request.skills[index % len(request.skills)] if request.skills else None
@@ -386,22 +486,21 @@ class Generation:
                 grounding=request.grounding,
                 experience=experience_for(request.experience, skill),
             )
-            answer = self.designer.answer(designer_messages(designer_request), tags=tags)
+            answer = self.designer.answer(designer_messages(designer_request, request.prompt), tags=tags)
             written, refusal = self.written_task(answer, skill, index, request, known_hashes)
             if written is None:
-                proposal = Proposal(index, skill, answer.record_id, None, refusal)
-                proposals.append(self.reported(proposal, request, None))
+                pending.append((Proposal(index, skill, answer.record_id, None, refusal), None))
                 continue
             measure, refusal = self.measured(written, skill, request)
             if measure is None:
                 shutil.rmtree(self.tasks_root / written.name, ignore_errors=True)
                 known_hashes.discard(content_hash(written))
-                proposal = Proposal(index, skill, answer.record_id, None, refusal)
-                proposals.append(self.reported(proposal, request, None))
+                pending.append((Proposal(index, skill, answer.record_id, None, refusal), None))
                 continue
             measures.append(measure)
-            proposal = Proposal(index, skill, answer.record_id, measure.name, "")
-            proposals.append(self.reported(proposal, request, measure))
+            pending.append((Proposal(index, skill, answer.record_id, measure.name, ""), measure))
+        round_record = round_document(request, measures, refused=sum(1 for _, measure in pending if measure is None))
+        proposals = [self.reported(proposal, request, measure, round_record) for proposal, measure in pending]
         manifest_path = self.written_manifest(measures, request)
         report_path = self.written_report(request, proposals, measures, manifest_path)
         return GenerationResult(
@@ -463,7 +562,7 @@ class Generation:
     def measured(
         self, task: HarborTask, skill: str | None, request: GenerationRequest
     ) -> tuple[TaskMeasure | None, str]:
-        """Both arms played: the plain arm reported as training data, the hint arm measured only.
+        """Both arms played: the plain arm is the training data, reported with the agent's reward; the hint arm only measures.
 
         A task the Reasoning Agent could not play at all (every plain episode ended before the agent ran) is no
         measure of the Reasoning Agent; it comes back as None with the first episode's error.
@@ -471,7 +570,7 @@ class Generation:
         task_path = self.tasks_root / task.name
         tags = {"generation": str(request.generation), **skill_tag(skill)}
         plain = self.reasoning_agent.play(
-            task_path, arm="plain", plays=request.plays, is_reporting=True, extra_instruction_paths=(), tags=tags
+            task_path, arm="plain", plays=request.plays, is_reporting=False, extra_instruction_paths=(), tags=tags
         )
         if plain and all(is_unplayed(play) for play in plain):
             return None, f"the Reasoning Agent could not play the task: {plain[0].error[:300]}"
@@ -484,6 +583,14 @@ class Generation:
             extra_instruction_paths=(hint_path,),
             tags=tags,
         )
+        if self.is_reporting_agent:
+            # The hint arm is reported too, so its records are released; the agent's processor discards that arm.
+            plain = self.reasoning_agent.report_plays(
+                plain, reward=self.agent_reward, metadata=self.agent_report_metadata(request, "plain")
+            )
+            hint = self.reasoning_agent.report_plays(
+                hint, reward=self.agent_reward, metadata=self.agent_report_metadata(request, "hint")
+            )
         record = PlayRecord(
             name=task.name,
             skill=skill,
@@ -503,25 +610,60 @@ class Generation:
                 play.reward if play.reward is not None else 0.0 for play in hint if not is_unplayed(play)
             ),
             record=record,
+            plain_plays=tuple(plain),
+            hint_plays=tuple(hint),
         )
         return measure, ""
 
-    def reported(self, proposal: Proposal, request: GenerationRequest, measure: TaskMeasure | None) -> Proposal:
-        """The Designer's report for one proposal: its regret as the score, 0 for a refused one."""
+    def agent_report_metadata(self, request: GenerationRequest, arm: str) -> dict[str, object]:
+        """What every Reasoning Agent report carries beside the task: the arm, the generation and the Designer version."""
+        return {
+            "arm": arm,
+            "generation": request.generation,
+            "designer_version": version_document(request.designer_version),
+        }
+
+    def reported(
+        self,
+        proposal: Proposal,
+        request: GenerationRequest,
+        measure: TaskMeasure | None,
+        round_record: Mapping[str, object],
+    ) -> Proposal:
+        """The Designer's report for one proposal: the Designer reward of its measure as the score, below any measure for a refusal."""
         if not self.is_reporting_designer:
             return proposal
-        metadata: dict[str, object] = {"generation": request.generation, **skill_tag(proposal.skill)}
+        metadata: dict[str, object] = {
+            "generation": request.generation,
+            **skill_tag(proposal.skill),
+            "proposals": request.count,
+            "designer_version": version_document(request.designer_version),
+            "opponent": {"role": "reasoning_agent", "version": version_document(request.agent_version)},
+        }
+        feedback: dict[str, object] = {
+            "task": measure.name if measure is not None else None,
+            "refusal": proposal.refusal,
+            "round": dict(round_record),
+        }
         if measure is None:
-            score = 0.0
+            score = REFUSAL_SCORE
             metadata["refusal"] = proposal.refusal
         else:
-            score = max(measure.regret, 0.0)
+            score = self.designer_reward.score(measure)
             metadata["task"] = {"name": measure.name, "path": str(measure.task_path), "digest": measure.digest}
             metadata["outcome"] = measure.outcome
             metadata["regret"] = measure.regret
             metadata["return_without_hint"] = measure.record.return_without_hint
             metadata["return_with_hint"] = measure.record.return_with_hint
-        report_id = self.designer.report(proposal.designer_record_id, score=score, metadata=metadata)
+            feedback.update(
+                outcome=measure.outcome,
+                regret=measure.regret,
+                return_without_hint=measure.record.return_without_hint,
+                return_with_hint=measure.record.return_with_hint,
+            )
+        report_id = self.designer.report(
+            proposal.designer_record_id, score=score, metadata=metadata, feedback=feedback
+        )
         return Proposal(
             proposal.index,
             proposal.skill,
@@ -550,12 +692,21 @@ class Generation:
         directory = self.tasks_root / REPORT_DIRECTORY
         directory.mkdir(parents=True, exist_ok=True)
         report_path = directory / f"generation-{request.generation:05d}.json"
+        request_fields = {
+            name: value
+            for name, value in asdict(request).items()
+            if name not in ("experience", "grounding", "prompt", "designer_version", "agent_version", "previous")
+        }
         document = {
             "generation": request.generation,
             "request": {
-                **{name: value for name, value in asdict(request).items() if name not in ("experience", "grounding")},
+                **request_fields,
                 "experience_records": len(request.experience),
                 "grounding_chars": len(request.grounding or ""),
+                "prompt_entries": [str(entry["id"]) for entry in request.prompt.entries()],
+                "designer_version": version_document(request.designer_version),
+                "agent_version": version_document(request.agent_version),
+                "previous": dict(request.previous) if request.previous is not None else None,
             },
             "manifest": str(manifest_path) if manifest_path is not None else None,
             "proposals": [asdict(proposal) for proposal in proposals],
@@ -578,23 +729,13 @@ class Generation:
         return report_path
 
 
-def main(
-    argv: Sequence[str] | None = None,
-    *,
-    designer: Designer | None = None,
-    reasoning_agent: ReasoningAgent | None = None,
-    checks: Checks | None = None,
-) -> int:
-    """Run one generation from the command line and print one line per proposal."""
-    parser = argparse.ArgumentParser(
-        prog="python -m recipes.beta.spade.generation",
-        description="One SPADE generation: propose, check, write, play both arms, split, report.",
-    )
+def add_generation_arguments(parser: argparse.ArgumentParser) -> None:
+    """The flags one generation takes: the two roles, the request, and how the plays and checks run."""
     parser.add_argument("--reef-url", required=True)
     parser.add_argument(
         "--scenario", required=True, help="the scenario the Designer's and the Reasoning Agent's records belong to"
     )
-    parser.add_argument("--model", required=True, help="the served model, Designer and reasoning_agent alike")
+    parser.add_argument("--model", required=True, help="the served model, Designer and Reasoning Agent alike")
     parser.add_argument("--token", default=os.environ.get("REEF_TOKEN") or None)
     parser.add_argument("--designer-reef-url", default=None, help="the Designer's Reef service; --reef-url by default")
     parser.add_argument("--designer-scenario", default=None, help="the Designer's scenario; --scenario by default")
@@ -634,58 +775,83 @@ def main(
     parser.add_argument(
         "--no-designer-report", action="store_true", help="do not report regret against the Designer's calls"
     )
+
+
+def request_from_arguments(arguments: argparse.Namespace) -> GenerationRequest:
+    """The generation request the flags describe; GenerationError, ValueError or OSError when they cannot be read."""
+    return GenerationRequest(
+        description=arguments.description,
+        skills=tuple(part.strip() for part in arguments.skills.split(",") if part.strip()),
+        count=arguments.count,
+        generation=arguments.generation,
+        difficulty=arguments.difficulty,
+        turn_limit=arguments.turn_limit,
+        grounding=arguments.grounding.read_text(encoding="utf-8") if arguments.grounding else None,
+        experience=load_experience(arguments.experience) if arguments.experience else (),
+        plays=arguments.plays,
+        hint_plays=arguments.hint_plays,
+        eval_fraction=arguments.eval_fraction,
+        seed=arguments.seed,
+    )
+
+
+def roles_from_arguments(arguments: argparse.Namespace) -> tuple[Role, Role]:
+    """The Designer and the Reasoning Agent the flags name; the Designer falls back to the shared service and model."""
+    agent = json.loads(arguments.agent_json) if arguments.agent_json else None
+    if agent is not None and not isinstance(agent, dict):
+        raise GenerationError("--agent-json must hold an object")
+    designer_options = json.loads(arguments.designer_json) if arguments.designer_json else {}
+    if not isinstance(designer_options, dict):
+        raise GenerationError("--designer-json must hold an object")
+    designer = Role.designer(
+        arguments.designer_reef_url or arguments.reef_url,
+        arguments.designer_scenario or arguments.scenario,
+        arguments.designer_model or arguments.model,
+        prompt=DesignerPrompt(request_options=designer_options, timeout_s=arguments.designer_timeout_s),
+        token=arguments.designer_token or arguments.token,
+    )
+    agent_name = str(agent.get("name") or agent.get("import_path") or "terminus-2") if agent else "terminus-2"
+    reasoning_agent = Role.reasoning_agent(
+        arguments.reef_url,
+        arguments.scenario,
+        arguments.model,
+        agent=HarborAgent(name=agent_name, spec=agent, host=arguments.agent_host, concurrency=arguments.concurrency),
+        token=arguments.token,
+    )
+    return designer, reasoning_agent
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    designer: Designer | None = None,
+    reasoning_agent: ReasoningAgent | None = None,
+    checks: Checks | None = None,
+) -> int:
+    """Run one generation from the command line and print one line per proposal."""
+    parser = argparse.ArgumentParser(
+        prog="python -m recipes.beta.spade.generation",
+        description="One SPADE generation: propose, check, write, play both arms, split, report.",
+    )
+    add_generation_arguments(parser)
     arguments = parser.parse_args(argv)
     try:
-        request = GenerationRequest(
-            description=arguments.description,
-            skills=tuple(part.strip() for part in arguments.skills.split(",") if part.strip()),
-            count=arguments.count,
-            generation=arguments.generation,
-            difficulty=arguments.difficulty,
-            turn_limit=arguments.turn_limit,
-            grounding=arguments.grounding.read_text(encoding="utf-8") if arguments.grounding else None,
-            experience=load_experience(arguments.experience) if arguments.experience else (),
-            plays=arguments.plays,
-            hint_plays=arguments.hint_plays,
-            eval_fraction=arguments.eval_fraction,
-            seed=arguments.seed,
-        )
-        agent = json.loads(arguments.agent_json) if arguments.agent_json else None
-        designer_options = json.loads(arguments.designer_json) if arguments.designer_json else {}
-        if not isinstance(designer_options, dict):
-            raise GenerationError("--designer-json must hold an object")
+        request = request_from_arguments(arguments)
+        designer_role, agent_role = roles_from_arguments(arguments)
     except (GenerationError, ValueError, OSError) as exc:
         parser.error(str(exc))
     generation = Generation(
-        designer=(
-            designer
-            if designer is not None
-            else ReefDesigner(
-                reef_url=arguments.designer_reef_url or arguments.reef_url,
-                scenario=arguments.designer_scenario or arguments.scenario,
-                model=arguments.designer_model or arguments.model,
-                token=arguments.designer_token or arguments.token,
-                request_options=designer_options,
-                timeout_s=arguments.designer_timeout_s,
-            )
-        ),
+        designer=designer if designer is not None else reef_designer(designer_role),
         reasoning_agent=(
             reasoning_agent
             if reasoning_agent is not None
-            else ReefReasoningAgent(
-                reef_url=arguments.reef_url,
-                scenario=arguments.scenario,
-                model=arguments.model,
-                work_dir=arguments.work_dir,
-                token=arguments.token,
-                agent=agent,
-                agent_host=arguments.agent_host,
-                concurrency=arguments.concurrency,
-            )
+            else reef_reasoning_agent(agent_role, work_dir=arguments.work_dir)
         ),
         checks=checks if checks is not None else RealChecks(harbor=arguments.harbor),
         tasks_root=arguments.tasks_root,
         is_reporting_designer=not arguments.no_designer_report,
+        designer_reward=designer_role.reward,
+        agent_reward=agent_role.reward,
     )
     try:
         result = generation.run(request)
