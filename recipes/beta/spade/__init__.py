@@ -15,8 +15,11 @@ every kind becomes a Harbor task any Harbor agent can play.
 - ``harbor``: the harbor kind: a Harbor task written directly, the team's structural gate, and Harbor's oracle check.
 - ``openenv``: the openenv kind: an OpenEnv environment package served inside the container behind ``serve``,
   and the check that it serves a reset and a step.
+- ``generation``: one generation end to end: the Designer proposes through Reef, the kind's check refuses, the
+  task is written, the solver plays both arms through the task player, regret splits, the manifest and the
+  report are written, and each proposal is reported against the Designer's receipt.
 
-The regeneration step and the training side follow.
+The training side follows.
 """
 
 from recipes.beta.spade.designer import (
@@ -34,12 +37,27 @@ from recipes.beta.spade.designer import (
     parse_openenv_reply,
     smoke_test,
 )
+from recipes.beta.spade.generation import (
+    Checks,
+    Designer,
+    Generation,
+    GenerationError,
+    GenerationRequest,
+    GenerationResult,
+    RealChecks,
+    ReefDesigner,
+    ReefSolver,
+    Solver,
+    load_experience,
+)
 from recipes.beta.spade.harbor import GeneratedHarborTask, OracleResult, harbor_task, oracle_check
 from recipes.beta.spade.openenv import GeneratedOpenEnvTask, OpenEnvCheck, openenv_check, openenv_task
 from recipes.beta.spade.process import EnvironmentProcess, EnvironmentProcessError
 from recipes.beta.spade.tasks import GeneratedEnvironment, environment_task, split_generation
 
 __all__ = [
+    "Checks",
+    "Designer",
     "DesignerReplyError",
     "DesignerRequest",
     "EnvironmentProcess",
@@ -47,17 +65,26 @@ __all__ = [
     "GeneratedEnvironment",
     "GeneratedHarborTask",
     "GeneratedOpenEnvTask",
+    "Generation",
+    "GenerationError",
+    "GenerationRequest",
+    "GenerationResult",
     "GymReply",
     "HarborReply",
     "OpenEnvCheck",
     "OpenEnvReply",
     "OracleResult",
     "PlayRecord",
+    "RealChecks",
+    "ReefDesigner",
+    "ReefSolver",
     "SmokeResult",
+    "Solver",
     "designer_messages",
     "designer_prompt",
     "environment_task",
     "harbor_task",
+    "load_experience",
     "openenv_check",
     "openenv_task",
     "oracle_check",

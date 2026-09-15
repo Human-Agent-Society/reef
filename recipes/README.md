@@ -198,4 +198,6 @@ community writes environments in (a Harbor task written directly; a Gym style
 class behind observe and act commands inside the container; an OpenEnv package
 served inside the container), every kind a Harbor task any Harbor agent can
 play; the Designer call with its reply parsers; and the checks on what it
-writes. The regeneration step and the training side follow.
+writes; and one generation end to end, from the Designer's proposals to the
+split manifest the two consumers read, with the Designer's regret reported
+back. The training side follows.
