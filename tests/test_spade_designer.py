@@ -84,7 +84,7 @@ def test_the_gym_prompt_names_the_target_the_limit_the_rules_and_the_output_shap
 
 def test_the_harbor_prompt_names_the_container_the_verifier_and_the_reference_solution() -> None:
     text = designer_prompt(request(kind="harbor", turn_limit=30))
-    assert "harbor task, a container with files and a verifier, that tests: deduction" in text
+    assert "Harbor task, a container with files, an instruction and a verifier, that tests: deduction" in text
     assert "at most 30 commands" in text and "environment/Dockerfile" in text
     assert "/logs/verifier/reward.txt" in text and "solution/solve.sh" in text
     assert "It never sees tests/ or solution/" in text and "The image creates every directory" in text

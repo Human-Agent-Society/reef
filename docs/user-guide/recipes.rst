@@ -158,8 +158,9 @@ synthetic executable environments, `arXiv:2608.19197
 ``recipes/beta/spade/``: one policy plays an Environment Designer that writes
 executable environments with the Gym interface and a Reasoning Agent that
 learns in them. Reef knows one task format, Harbor; the package holds what
-SPADE needs beyond it: the task form of a generated environment (a Gym style
-class behind observe and act commands inside the container, or a harbor task written
-directly), both Harbor tasks any Harbor agent can play; the Designer call with
-its reply parsers; the smoke test of a class and Harbor's oracle check of a
-harbor task. The regeneration step and the training side follow.
+SPADE needs beyond it: the Designer's three kinds, one per interface the
+community writes environments in (a Harbor task written directly; a Gym style
+class behind observe and act commands inside the container; an OpenEnv package
+served inside the container), every kind a Harbor task any Harbor agent can
+play; the Designer call with its reply parsers; and the checks on what it
+writes. The regeneration step and the training side follow.

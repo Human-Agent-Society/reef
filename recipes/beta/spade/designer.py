@@ -5,10 +5,12 @@ of one kind at the edge of what the agent can do today: the request carries what
 last generation's environments, sorted by the hint based regret of Sec. 4.2 into the frontier (the hint
 turns losses into wins), the mastered (won without it) and the out of reach (lost even with it), so the
 next environment lands where the agent fails without a hint and passes with one. Two kinds so far, one
-Harbor task each, both playable by any Harbor agent: ``gym``, a Python class with the Gym interface (a game, a simulated
+Harbor task each, all playable by any Harbor agent: ``gym``, a Python class with the Gym interface (a game, a simulated
 tool use setting) served inside the container behind the ``observe`` and ``act`` commands and validated by running it in
 child interpreters on the host; ``harbor``, a Harbor task written directly (an instruction, a container, a
-verifier, a reference solution) validated by Harbor running the reference solution.
+verifier, a reference solution) validated by Harbor running the reference solution; ``openenv``, an
+OpenEnv environment package served inside the container behind ``serve`` and validated by a reset and one
+step against that server.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from recipes.beta.spade.tasks import DEFAULT_MAX_TURNS, SKILL_PATTERN
 from reef.core.tasks.harbor import TASK_NAME_PATTERN, HarborTaskError, checked_files
 from reef.train.cordis_backend.strategies import untrusted_text
 
-KINDS = ("harbor", "gym")
+KINDS = ("harbor", "gym", "openenv")
 DIFFICULTIES = ("easy", "medium", "hard")
 MAX_EXPERIENCE_RECORDS = 12
 CODE_EXCERPT_CHARS = 1200
@@ -186,6 +188,17 @@ class HarborReply:
 
 
 @dataclass(frozen=True)
+class OpenEnvReply:
+    """A usable reply of the ``openenv`` kind: the goal, the models and environment modules, an example action, the hint."""
+
+    instruction: str
+    models: str
+    environment: str
+    action_example: dict[str, object]
+    hint: str
+
+
+@dataclass(frozen=True)
 class SmokeResult:
     """Whether a ``gym`` class runs as an environment; ``reason`` names the first contract break."""
 
@@ -208,9 +221,16 @@ def designer_prompt(request: DesignerRequest) -> str:
         )
         rules = GYM_RULES_TEXT.format(turn_limit=request.turn_limit)
         output = GYM_OUTPUT_TEXT
+    elif request.kind == "openenv":
+        opening = (
+            "Create ONE interactive, multi turn environment as an OpenEnv environment package that tests: "
+            f"{request.skill} ({request.skill_description.strip()})."
+        )
+        rules = OPENENV_RULES_TEXT.format(turn_limit=request.turn_limit)
+        output = OPENENV_OUTPUT_TEXT
     else:
         opening = (
-            "Create ONE harbor task, a container with files and a verifier, that tests: "
+            "Create ONE Harbor task, a container with files, an instruction and a verifier, that tests: "
             f"{request.skill} ({request.skill_description.strip()})."
         )
         rules = HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit)
@@ -337,6 +357,59 @@ def checked_code(code: str) -> str:
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
             raise ValueError(f"environment code calls {node.func.id}(), which the rules forbid")
     return name
+
+
+OPENENV_RULES_TEXT = """RULES:
+- Two Python modules of the OpenEnv framework (huggingface/OpenEnv). models.py defines exactly one class inheriting Action and exactly one inheriting Observation, imported with `from openenv.core.env_server.types import Action, Observation`, with pydantic fields; the observation carries reward: float and done: bool. environment.py defines exactly one class inheriting Environment, imported with `from openenv.core.env_server import Environment`, and imports the models with `from openenv_task.models import ...`; it has reset(self, seed=None, **kwargs) -> the observation, step(self, action) -> the observation, and a state property returning State(episode_id, step_count) from openenv.core.env_server.types.
+- Standard library, openenv and pydantic only; no files, no processes, no network, no printing. All randomness comes from the seed: the same seed gives the same episode. reset() generates ONE task for the episode; step() never generates a new one.
+- HIDDEN STATE: the goal cannot be reached in one action; the agent must probe, remember and plan. The observation never states the answer or the rule behind it, and every observation shows the state, the result of the last action and what actions are possible.
+- REWARD: success sets reward 1.0 and done True; failure sets reward 0.0 and done True; every other step sets reward 0.0 and done False. The server ends the episode after {turn_limit} steps on its own.
+- Give one valid example action as a JSON object with the action's fields, so the agent and the check can take a first step."""
+
+OPENENV_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, with these keys:
+```json
+{
+  "instruction": "<the goal the agent reads, at least 80 characters, without the answer>",
+  "models": "<the complete models.py>",
+  "environment": "<the complete environment.py>",
+  "action_example": {"<field>": "<value>"},
+  "hint": "<one to three sentences for the agent: the key strategy, without the answer itself>"
+}
+```"""
+
+
+def parse_openenv_reply(text: str) -> OpenEnvReply:
+    """The ``json`` block of an openenv reply: the goal, both modules, the example action and the hint, all checked."""
+    if not isinstance(text, str) or not text.strip():
+        raise DesignerReplyError("the reply is empty")
+    match = JSON_BLOCK.search(text)
+    if match is None:
+        raise DesignerReplyError("the reply holds no ```json block with an object")
+    try:
+        document = json.loads(textwrap.dedent(match.group(1)))
+    except json.JSONDecodeError as exc:
+        raise DesignerReplyError(f"the ```json block is not valid JSON: {exc}") from exc
+    if not isinstance(document, dict):
+        raise DesignerReplyError("the ```json block must hold an object")
+    unknown = sorted(
+        key for key in document if key not in ("instruction", "models", "environment", "action_example", "hint")
+    )
+    if unknown:
+        raise DesignerReplyError(f"the reply carries keys the task has no place for: {', '.join(unknown)}")
+    instruction = checked_text(document.get("instruction"), "instruction")
+    models = checked_text(document.get("models"), "models")
+    environment = checked_text(document.get("environment"), "environment")
+    hint = checked_text(document.get("hint"), "hint")
+    action_example = document.get("action_example")
+    if not isinstance(action_example, dict) or not action_example:
+        raise DesignerReplyError("the reply's action_example must be a non-empty object")
+    return OpenEnvReply(
+        instruction=instruction.strip() + "\n",
+        models=models.strip("\n") + "\n",
+        environment=environment.strip("\n") + "\n",
+        action_example=action_example,
+        hint=" ".join(hint.split()),
+    )
 
 
 def parse_gym_reply(text: str) -> GymReply:
