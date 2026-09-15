@@ -222,6 +222,7 @@ class TaskPlayer:
         labels: Mapping[str, str] | None = None,
         extra_instruction_paths: Sequence[Path] = (),
         per_receipt: bool = False,
+        is_reporting: bool = True,
         lab: TaskLab | None = None,
     ) -> None:
         for label, value in (
@@ -250,6 +251,8 @@ class TaskPlayer:
                 raise TaskPlayError(f"extra instruction file {path} does not exist")
         self.extra_instruction_paths = tuple(Path(path) for path in extra_instruction_paths)
         self.per_receipt = per_receipt
+        # A measurement run (an arm played for its reward alone) keeps its episodes out of the training data.
+        self.is_reporting = is_reporting
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -265,6 +268,23 @@ class TaskPlayer:
     def play_all(self, task_paths: Iterable[Path]) -> tuple[TaskPlay, ...]:
         """Play task directories one after another; every episode reported before the next starts."""
         return tuple(self.play(path) for path in task_paths)
+
+    def play_concurrently(self, task_paths: Iterable[Path], *, concurrency: int) -> tuple[TaskPlay, ...]:
+        """Play task directories with up to ``concurrency`` episodes in flight; results in the given order."""
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise TaskPlayError("concurrency must be a positive integer")
+        paths = [Path(path) for path in task_paths]
+
+        async def play_many() -> tuple[TaskPlay, ...]:
+            slots = asyncio.Semaphore(concurrency)
+
+            async def one(path: Path) -> TaskPlay:
+                async with slots:
+                    return await self.play_async(path)
+
+            return tuple(await asyncio.gather(*(one(path) for path in paths)))
+
+        return asyncio.run(play_many())
 
     async def play_async(self, task_path: Path) -> TaskPlay:
         task_path = Path(task_path)
@@ -290,7 +310,7 @@ class TaskPlayer:
         error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
         report_ids: tuple[str, ...] = ()
-        if reward is not None and receipts:
+        if self.is_reporting and reward is not None and receipts:
             report_ids = self.report(task_path, episode_id, reward, row, receipts)
         return TaskPlay(
             task_path=task_path,

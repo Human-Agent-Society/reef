@@ -275,6 +275,26 @@ def test_the_agents_own_authorization_passes_through_without_a_token(reef: Stand
     assert "authorization" not in reef.reports[0]["headers"]
 
 
+def test_a_measurement_run_keeps_its_episodes_out_of_the_training_data(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), is_reporting=False).play(task_path)
+    assert played.reward == 1.0 and played.receipts == ("rec-1", "rec-2")
+    assert not played.is_reported and reef.reports == []
+
+
+def test_concurrent_plays_each_get_their_own_proxy_and_report(reef: StandInReef, tmp_path: Path) -> None:
+    paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2", "t3")]
+    lab = StandInLab({"reward": 1.0})
+    plays = player(reef, tmp_path, lab).play_concurrently(paths, concurrency=2)
+    assert [play.name for play in plays] == ["t1", "t2", "t3"] and all(play.is_reported for play in plays)
+    assert len({play.episode_id for play in plays}) == 3 and len(reef.reports) == 3
+    ports = {call["agent"]["kwargs"]["api_base"] for call in lab.calls}
+    assert len(ports) == 3, "every episode talks to its own proxy, so its receipts are its own"
+    assert sorted(receipt for play in plays for receipt in play.receipts) == [f"rec-{n}" for n in range(1, 7)]
+    with pytest.raises(TaskPlayError, match="concurrency must be a positive integer"):
+        player(reef, tmp_path, lab).play_concurrently(paths, concurrency=0)
+
+
 def test_two_plays_are_two_episodes(reef: StandInReef, tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
