@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,6 +73,7 @@ jobs:
       - run: python -m mypy
 
   test:
+    # Keep the sandbox network-isolation tests on their known-working runner.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -192,7 +193,7 @@ jobs:
           path: coverage.xml
 
   package:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false

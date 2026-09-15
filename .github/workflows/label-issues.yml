@@ -11,7 +11,7 @@ permissions:
 jobs:
   primary-area:
     if: github.repository == 'Human-Agent-Society/reef'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     steps:
       - name: Apply the selected primary area

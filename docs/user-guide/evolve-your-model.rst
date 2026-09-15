@@ -242,3 +242,27 @@ Use the `HTTP API reference <../reference/http-api.rst>`__ for inference,
 feedback reports, and release queries. To compare learning signals before
 choosing a training config, see `Choose a recipe for agent learning
 <recipes.rst>`__.
+
+Play Harbor tasks and report
+----------------------------
+
+.. code-block:: bash
+
+   python -m reef.harness.client.tasks \
+     --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
+     --manifest tasks/manifest.json --tasks-root tasks --side train
+
+Each task directory is played by a Harbor agent (``terminus-2`` unless
+``--agent-json`` names another) whose model calls go through Reef, so every
+inference is a record. When the verifier scores the episode, one report reaches
+``/reef/report``: the reward as the score, the receipts as the references, and
+the task's name, path and digest under ``metadata.task``. The recipe's reported
+processor turns those records into training samples like any other report.
+``--instructions FILE`` appends a file to every task's instruction and
+``--label name=value`` tags the calls and the report, so two arms of one task
+stay apart. The proxy the agent talks to listens on this host's loopback; an
+agent that runs inside the task container (``claude-code``, ``codex`` and the
+other installed agents) needs ``--agent-host host.docker.internal`` (on Linux,
+give the container that name with Docker's ``host-gateway``), and the proxy then
+listens on every interface. Needs ``reef-infra[terminus]`` on Python 3.12 or
+later, and Docker.

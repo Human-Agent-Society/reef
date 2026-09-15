@@ -16,7 +16,7 @@ jobs:
       github.event.issue.state == 'open' &&
       github.event.comment.user.login == github.event.issue.user.login &&
       contains(github.event.issue.labels.*.name, 'status: waiting-author')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     steps:
       - name: Return the issue to triage

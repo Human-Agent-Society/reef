@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     outputs:
       pull-requests: ${{ steps.open-pull-requests.outputs.result }}
@@ -92,7 +92,7 @@ jobs:
   relabel:
     needs: sync
     if: needs.sync.outputs.pull-requests != '[]'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:
       contents: read
