@@ -187,3 +187,11 @@ sibling attempts of one parent commit train as one grouped relative-reward
 step (reusing the TTT-Discover preparer and loss family). Its example is a
 real CORAL task driven by CORAL's own runtime, plus a no-GPU smoke lane that
 runs the whole loop against the production Reef service with a canned model.
+
+[SPADE](beta/spade/README.md) (self play in adaptive synthetic executable
+environments, [arXiv:2608.19197](https://arxiv.org/abs/2608.19197)) is beta
+under `recipes/beta/spade/`: one policy plays an Environment Designer that
+writes executable environments with the Gym interface and a Reasoning Agent
+that learns in them. Reef owns the environment formats; the package holds what
+SPADE adds on top, starting with the task form of a generated environment. The
+Designer call, the regeneration step and the training side follow.
