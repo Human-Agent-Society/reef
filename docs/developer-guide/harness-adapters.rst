@@ -8,8 +8,9 @@ adapter does. Reef bundles six, one per third-party coding-agent CLI;
 ``native``, its own agent, whose loop lives in this tree, whose tools are
 ``native_tool`` nodes, and whose loop events listen to ``native_hook`` nodes,
 so a mutation can add, rewrite, or remove a tool, or change what the loop
-does at an event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
-agent class rather than a CLI, driven by a runner Reef owns.
+does at an event; ``terminus``, Terminal-Bench's Terminus 2, a Harbor
+agent class rather than a CLI, driven by a runner Reef owns; and ``gym``, a
+Gym style environment class played turn by turn by a runner Reef owns.
 
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | Adapter      | Config targets                                            | Install pin                               |
@@ -28,6 +29,9 @@ agent class rather than a CLI, driven by a runner Reef owns.
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
 |              |                                                           | at ``v2026.8.31`` (0.21.0)                |
++--------------+-----------------------------------------------------------+-------------------------------------------+
+| ``gym``      | ``primary`` → ``gym/config.json``,                        | none: ``reef-gym`` ships with reef        |
+|              | ``models`` → ``gym/models.json``                          |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |
@@ -66,18 +70,18 @@ use the local executor and Docker. Docker inside bubblewrap and extensions in
 an unisolated runner are rejected before process launch.
 
 The ``gym`` adapter plays a Gym style environment rather than driving a CLI.
-The prompt is a gym task directory (``reef.core.tasks.gym``): the game's
+The prompt is a gym task directory (``reef.core.tasks.gym``): the environment's
 class lives under ``tests/``, where only the verifier and the ``reef-gym``
 runner read it, so the agent sees observations and nothing else. The runner
 reads the tree from ``REEF_GYM_DIR`` (``rules`` and every ``skill`` become
 the system prompt, ``models.json`` the endpoint, and ``config`` may set
-``temperature``, ``max_tokens`` and ``timeout_s``), serves the game one
+``temperature``, ``max_tokens`` and ``timeout_s``), serves the environment one
 observation at a time from a child interpreter for at most the task's turn
 limit, writes the action log into the workspace, and writes every turn plus
 the episode return under ``REEF_GYM_SESSION_DIR`` for the ``gym-jsonl``
 reader. ``reef.harness.runners.gym:evaluate`` is the matching
 ``evolution.evaluate``: the return the runner recorded, in [-1, 1]; an episode
-that failed before the game ended scores 0. The class runs on the service
+that failed before the environment ended scores 0. The class runs on the service
 host, so a hosted service runs ``evolution.executor: sandbox`` and keeps the
 task directories under a bound base path.
 
