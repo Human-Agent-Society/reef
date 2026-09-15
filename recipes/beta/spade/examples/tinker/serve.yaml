@@ -1,0 +1,36 @@
+# The SPADE Reasoning Agent on Tinker: the served model plays the generated tasks and trains on them, one task group at a time.
+# Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_SPADE_STATE_DIR}/stack
+  # The Tinker runtime downloads tokenizer files and saves the initial checkpoint before /healthz answers.
+  ready-timeout: 600
+inference:
+  model-path: Qwen/Qwen3-8B
+  # An agent's episode is many turns; a Designer call is one long reply.
+  timeout-s: 1800
+recipe:
+  implementation: recipes.beta.spade.recipe:SpadeRecipe
+  config:
+    # A batch is tasks-per-step complete groups of rollouts-per-task episodes of one task.
+    tasks-per-step: 2
+    rollouts-per-task: 4
+    # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+    scaffold-tolerance: 8
+    checkpoint-every-n-versions: 1
+training:
+  backend: tinker
+  ready-timeout: 1800
+  timeout-s: 1800
+  options:
+    state-dir: ${REEF_SPADE_STATE_DIR}/tinker
+    lora-rank: 32
+    learning-rate: 0.00004
+storage:
+  artifact-repository: ${REEF_SPADE_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_SPADE_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_SPADE_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_SPADE_STATE_DIR}/agent-record
