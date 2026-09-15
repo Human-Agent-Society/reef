@@ -452,6 +452,66 @@ def test_main_runs_a_generation_from_the_command_line_and_prints_a_line_per_prop
     assert second == 0
 
 
+def test_the_reef_designer_posts_its_request_options_and_keeps_the_receipt() -> None:
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from recipes.beta.spade.generation import ReefDesigner
+
+    seen: list[dict[str, object]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            seen.append({"path": self.path, "body": body, "headers": {k.lower(): v for k, v in self.headers.items()}})
+            if self.path == "/v1/chat/completions":
+                answer = {
+                    "choices": [{"message": {"role": "assistant", "content": "```python\nclass AEnv: pass\n```"}}]
+                }
+                receipt = "designer-rec-1"
+            else:
+                answer = {"agent_record_id": "designer-rep-1"}
+                receipt = None
+            payload = json.dumps(answer).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            if receipt:
+                self.send_header("x-reef-agent-record-id", receipt)
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        designer = ReefDesigner(
+            reef_url=f"http://127.0.0.1:{server.server_address[1]}",
+            scenario="spade",
+            model="m",
+            token="tok",
+            request_options={"reasoning_effort": "none"},
+        )
+        answer = designer.answer([{"role": "user", "content": "hi"}], tags={"role": "designer", "kind": "gym"})
+        report_id = designer.report(answer.record_id, score=0.5, metadata={"kind": "gym"})
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert (
+        answer.text.startswith("```python") and answer.record_id == "designer-rec-1" and report_id == "designer-rep-1"
+    )
+    call, report = seen
+    assert call["path"] == "/v1/chat/completions" and call["body"]["reasoning_effort"] == "none"
+    assert call["body"]["model"] == "m" and call["body"]["messages"] == [{"role": "user", "content": "hi"}]
+    assert call["headers"]["x-reef-scenario"] == "spade" and call["headers"]["x-reef-tag-kind"] == "gym"
+    assert call["headers"]["authorization"] == "Bearer tok"
+    assert report["path"] == "/reef/report" and report["body"]["references"] == ["designer-rec-1"]
+    assert report["body"]["score"] == 0.5 and report["body"]["metadata"] == {"kind": "gym"}
+
+
 def test_main_refuses_an_unknown_kind(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         main(

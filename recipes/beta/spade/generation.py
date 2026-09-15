@@ -84,14 +84,25 @@ class Designer(ABC):
 class ReefDesigner(Designer):
     """The served model behind a Reef scenario; each proposal is an inference record, each outcome a report."""
 
-    def __init__(self, *, reef_url: str, scenario: str, model: str, token: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reef_url: str,
+        scenario: str,
+        model: str,
+        token: str | None = None,
+        request_options: Mapping[str, object] | None = None,
+    ) -> None:
         self.scenario = scenario
         self.model = model
+        # Extra fields of the chat request, e.g. {"reasoning_effort": "none"} for a model that would think for
+        # thousands of tokens before writing an environment and run past the service's inference deadline.
+        self.request_options = dict(request_options or {})
         self.client = ReefClient(reef_url, token=token, timeout_s=600.0)
 
     def answer(self, messages: Sequence[Mapping[str, str]], *, tags: Mapping[str, str]) -> DesignerAnswer:
         headers = {f"x-reef-tag-{name}": value for name, value in tags.items()}
-        payload = {"model": self.model, "messages": [dict(message) for message in messages]}
+        payload = {**self.request_options, "model": self.model, "messages": [dict(message) for message in messages]}
         try:
             body, record_id = self.client.inference_with_record(
                 self.scenario, CHAT_PATH, payload, extra_headers=headers
@@ -637,6 +648,11 @@ def main(
     parser.add_argument("--hint-plays", type=int, default=2)
     parser.add_argument("--eval-fraction", type=float, default=0.25)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--designer-json",
+        default=None,
+        help='extra fields of the Designer\'s chat request as JSON, e.g. {"reasoning_effort": "none"}',
+    )
     parser.add_argument("--agent-json", default=None, help="the solver's Harbor agent; terminus-2 by default")
     parser.add_argument("--agent-host", default=None)
     parser.add_argument("--concurrency", type=int, default=2, help="episodes in flight per arm")
@@ -662,6 +678,9 @@ def main(
             seed=arguments.seed,
         )
         agent = json.loads(arguments.agent_json) if arguments.agent_json else None
+        designer_options = json.loads(arguments.designer_json) if arguments.designer_json else {}
+        if not isinstance(designer_options, dict):
+            raise GenerationError("--designer-json must hold an object")
     except (GenerationError, ValueError, OSError) as exc:
         parser.error(str(exc))
     generation = Generation(
@@ -669,7 +688,11 @@ def main(
             designer
             if designer is not None
             else ReefDesigner(
-                reef_url=arguments.reef_url, scenario=arguments.scenario, model=arguments.model, token=arguments.token
+                reef_url=arguments.reef_url,
+                scenario=arguments.scenario,
+                model=arguments.model,
+                token=arguments.token,
+                request_options=designer_options,
             )
         ),
         solver=(
