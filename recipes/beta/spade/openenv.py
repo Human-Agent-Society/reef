@@ -346,10 +346,11 @@ if __name__ == "__main__":
 
 def app_text(models: OpenEnvModels, *, max_turns: int, seed: int) -> str:
     """The server module: the Designer's class wrapped with the log, the fixed seed and the turn limit."""
-    return f'''"""The environment served: every reset and step logged, the seed fixed, the turn limit enforced."""
+    return f'''"""The environment served: one instance for the whole run, every reset and step logged, the seed fixed, the turn limit enforced."""
 
 import inspect
 import json
+import threading
 import time
 
 from openenv.core.env_server import create_app
@@ -369,42 +370,62 @@ def log(event):
 
 
 class LoggedEnvironment({models.environment}):
-    """The Designer's environment with what the verifier needs around it."""
+    """The Designer's environment with what the verifier needs around it.
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    The request body reaches the Designer's code only as the action: the seed is the task's, and the
+    other reset and step parameters of the OpenEnv server are dropped.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.lock = threading.Lock()
         self.turns = 0
         self.is_over = False
         self.last = None
 
     def reset(self, *args, **kwargs):
-        if "seed" in inspect.signature(super().reset).parameters:
-            kwargs["seed"] = SEED
-        observation = super().reset(*args, **kwargs)
-        self.turns = 0
-        self.is_over = False
-        self.last = observation
-        log({{"event": "reset", "seed": SEED}})
-        return observation
+        with self.lock:
+            if "seed" in inspect.signature(super().reset).parameters:
+                observation = super().reset(seed=SEED)
+            else:
+                observation = super().reset()
+            self.turns = 0
+            self.is_over = False
+            self.last = observation
+            log({{"event": "reset", "seed": SEED}})
+            return observation
 
     def step(self, action, *args, **kwargs):
-        if self.is_over:
-            log({{"event": "step_after_end"}})
-            return self.last
-        observation = super().step(action, *args, **kwargs)
-        self.turns += 1
-        reward = float(observation.reward or 0.0)
-        done = bool(observation.done)
-        truncated = not done and self.turns >= MAX_TURNS
-        if truncated:
-            observation.done = True
-        self.is_over = done or truncated
-        self.last = observation
-        log({{"event": "step", "turn": self.turns, "reward": reward, "done": done, "truncated": truncated}})
-        return observation
+        with self.lock:
+            if self.is_over:
+                log({{"event": "step_after_end"}})
+                return self.last
+            observation = super().step(action)
+            self.turns += 1
+            reward = float(observation.reward or 0.0)
+            done = bool(observation.done)
+            truncated = not done and self.turns >= MAX_TURNS
+            if truncated:
+                observation.done = True
+            self.is_over = done or truncated
+            self.last = observation
+            log({{"event": "step", "turn": self.turns, "reward": reward, "done": done, "truncated": truncated}})
+            return observation
+
+    def close(self):
+        return None
 
 
-app = create_app(LoggedEnvironment, {models.action}, {models.observation}, env_name="{PACKAGE}")
+# The OpenEnv HTTP server builds an environment from its factory for every request and closes it after;
+# the episode outlives requests, so the factory returns the one instance and close() above does nothing.
+ENVIRONMENT = LoggedEnvironment()
+
+
+def environment():
+    return ENVIRONMENT
+
+
+app = create_app(environment, {models.action}, {models.observation}, env_name="{PACKAGE}")
 '''
 
 

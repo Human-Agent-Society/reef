@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 import pytest
@@ -207,7 +208,7 @@ def test_the_task_serves_the_package_behind_a_root_only_command(tmp_path: Path) 
     app = (root / "environment" / "app.py").read_text()
     assert "from openenv_task.models import GuessAction, GuessObservation" in app
     assert "class LoggedEnvironment(GuessEnvironment):" in app and "MAX_TURNS = 30" in app and "SEED = 7" in app
-    assert 'create_app(LoggedEnvironment, GuessAction, GuessObservation, env_name="openenv_task")' in app
+    assert 'create_app(environment, GuessAction, GuessObservation, env_name="openenv_task")' in app
     instruction = (root / "instruction.md").read_text()
     assert instruction.startswith(DOCUMENT["instruction"])
     assert (
@@ -241,6 +242,121 @@ def test_the_app_text_is_valid_python_for_any_class_names() -> None:
     text = app_text(openenv_models(reply()), max_turns=5, seed=3)
     ast.parse(text)
     assert "MAX_TURNS = 5" in text and "SEED = 3" in text
+
+
+class StandInModel:
+    """A field holder standing in for the pydantic models of openenv."""
+
+    defaults: dict[str, object] = {}
+
+    def __init__(self, **fields: object) -> None:
+        for name, value in {**self.defaults, **fields}.items():
+            setattr(self, name, value)
+
+
+class StandInObservation(StandInModel):
+    defaults = {"reward": None, "done": False, "metadata": {}}
+
+
+class StandInState(StandInModel):
+    defaults = {"episode_id": None, "step_count": 0}
+
+
+class StandInEnvironment(ABC):
+    """Stands in for openenv's Environment: an ABC with reset, step and close."""
+
+    def __init__(self, transform: object = None, rubric: object = None) -> None:
+        self.transform = transform
+        self.rubric = rubric
+
+    @abstractmethod
+    def reset(self, *args: object, **kwargs: object) -> StandInObservation: ...
+
+    @abstractmethod
+    def step(self, action: object, *args: object, **kwargs: object) -> StandInObservation: ...
+
+    def close(self) -> None:
+        return None
+
+
+def served_environment(monkeypatch, log_path: Path, *, max_turns: int, seed: int) -> dict[str, object]:
+    """The generated server module run against a stand in for openenv; returns what the server got."""
+    import types
+
+    recorded: dict[str, object] = {}
+
+    def create_app(factory, action_cls, observation_cls, env_name=None):
+        recorded.update(factory=factory, action=action_cls, observation=observation_cls, env_name=env_name)
+        return object()
+
+    def module(name: str, **attributes: object) -> types.ModuleType:
+        created = types.ModuleType(name)
+        created.__dict__.update(attributes)
+        monkeypatch.setitem(sys.modules, name, created)
+        return created
+
+    module("pydantic", Field=lambda default=None, **_: default)
+    module("openenv")
+    module("openenv.core")
+    module("openenv.core.env_server", Environment=StandInEnvironment, create_app=create_app)
+    module("openenv.core.env_server.types", Action=StandInModel, Observation=StandInObservation, State=StandInState)
+    module("openenv_task")
+    models = module("openenv_task.models")
+    exec(compile(MODELS, "models.py", "exec"), models.__dict__)
+    module("openenv_task.server")
+    environment = module("openenv_task.server.environment")
+    exec(compile(ENVIRONMENT, "environment.py", "exec"), environment.__dict__)
+    app = module("openenv_task.server.app")
+    text = app_text(openenv_models(reply()), max_turns=max_turns, seed=seed)
+    app.__dict__["LOG_PATH"] = str(log_path)
+    exec(compile(text.replace('LOG_PATH = "/var/env/steps.jsonl"\n', ""), "app.py", "exec"), app.__dict__)
+    return recorded
+
+
+def test_the_served_environment_is_one_instance_with_the_task_seed_and_the_turn_limit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import random
+
+    log_path = tmp_path / "steps.jsonl"
+    recorded = served_environment(monkeypatch, log_path, max_turns=2, seed=7)
+    factory = recorded["factory"]
+    assert callable(factory)
+    served = factory()
+    assert isinstance(served, StandInEnvironment)
+    assert served is factory(), "the OpenEnv server builds an environment per request; the episode must outlive them"
+    assert recorded["env_name"] == "openenv_task"
+    action = sys.modules["openenv_task.models"].GuessAction
+    target = random.Random(7).randint(1, 3)
+    wrong = next(value for value in (1, 2, 3) if value != target)
+    foreign_seed = next(seed for seed in range(100) if random.Random(seed).randint(1, 3) != target)
+
+    served.reset(seed=foreign_seed, episode_id="mine")
+    served.close()
+    first = served.step(action(guess=wrong), timeout_s=3.0)
+    assert (first.reward, first.done) == (0.0, False)
+    second = served.step(action(guess=target))
+    assert (second.reward, second.done) == (1.0, True), "the seed in the request must not replace the task's seed"
+    assert served.step(action(guess=wrong)) is second, "a step after the end changes nothing"
+    served.reset()
+    served.step(action(guess=wrong))
+    last = served.step(action(guess=wrong))
+    assert (last.reward, last.done) == (0.0, True), "the turn limit ends the episode"
+
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert [event["event"] for event in events] == ["reset", "step", "step", "step_after_end", "reset", "step", "step"]
+    assert [event["seed"] for event in events if event["event"] == "reset"] == [7, 7]
+    assert [(e["turn"], e["reward"], e["done"], e["truncated"]) for e in events if e["event"] == "step"] == [
+        (1, 0.0, False, False),
+        (2, 1.0, True, False),
+        (1, 0.0, False, False),
+        (2, 0.0, False, True),
+    ]
+    script = tmp_path / "replay.py"
+    script.write_text(REPLAY_SCRIPT)
+    reward_path = tmp_path / "reward.txt"
+    subprocess.run([sys.executable, "-S", str(script), str(log_path), str(reward_path)], check=True, timeout=30)
+    assert float(reward_path.read_text()) == 1.0, "the first episode was won; the truncated second one does not count"
 
 
 # ----------------------------------------------------------------------------------------------- the verifier
