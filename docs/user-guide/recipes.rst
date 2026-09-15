@@ -151,3 +151,15 @@ Beta recipes
 **beta** until complete, reproducible learning results are published. Both
 live under ``recipes/beta/coral/``. Integration and smoke tests validate the
 wiring but do not establish learning performance.
+
+`SPADE <../../recipes/beta/spade/README.md>`__ (self play in adaptive
+synthetic executable environments, `arXiv:2608.19197
+<https://arxiv.org/abs/2608.19197>`__) is **beta** under
+``recipes/beta/spade/``: one policy plays an Environment Designer that writes
+executable environments with the Gym interface and a Reasoning Agent that
+learns in them. Reef knows one task format, Harbor; the package holds what
+SPADE needs beyond it: the task form of a generated environment (a Gym style
+class behind observe and act commands inside the container, or a harbor task written
+directly), both Harbor tasks any Harbor agent can play; the Designer call with
+its reply parsers; the smoke test of a class and Harbor's oracle check of a
+harbor task. The regeneration step and the training side follow.
